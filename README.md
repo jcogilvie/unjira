@@ -47,6 +47,7 @@ accuracy before the agent is granted any write access.
 ```sh
 uv venv && uv pip install -e ".[dev]"     # or: pip install -e ".[dev]"
 cp config/unjira.example.json unjira.config.json
+cp .env.example .env                      # Jira credentials (gitignored; not needed in phase 0)
 unjira collect        # ingest new events from enabled collectors
 unjira digest         # print today's drift digest
 unjira status         # event counts and collector cursors

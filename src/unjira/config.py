@@ -1,4 +1,10 @@
-"""Configuration loading. Copy config/unjira.example.json to ./unjira.config.json."""
+"""Configuration loading. Copy config/unjira.example.json to ./unjira.config.json.
+
+Credentials never live in config files. They come from the environment:
+UNJIRA_JIRA_EMAIL / UNJIRA_JIRA_TOKEN, loadable from a gitignored .env
+(see .env.example). Real env vars win over .env. In CI, UNJIRA_JIRA_TOKEN
+is mapped from the UNJIRA_CI_TOKEN repository secret.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 DEFAULT_CONFIG_PATH = Path("unjira.config.json")
@@ -14,7 +21,6 @@ DEFAULT_CONFIG_PATH = Path("unjira.config.json")
 class JiraConfig(BaseModel):
     site: str = ""
     project_keys: list[str] = Field(default_factory=list)
-    # Credentials come from env (JIRA_BOT_EMAIL / JIRA_BOT_API_TOKEN), never from this file.
 
 
 class Config(BaseModel):
@@ -29,6 +35,7 @@ class Config(BaseModel):
 
 
 def load_config(path: Path | None = None) -> Config:
+    load_dotenv()
     path = path or DEFAULT_CONFIG_PATH
     if path.exists():
         return Config.model_validate(json.loads(path.read_text(encoding="utf-8")))
