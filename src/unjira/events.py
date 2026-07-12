@@ -13,8 +13,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-# Matches PROJ-123 style keys. Sentinels like XYZ-0 / XYZ-1 are matched too —
-# downstream treats them as an explicit "unlinked work" flag, not a real link.
+# Matches PROJ-123 style keys for any project prefix. Sentinel keys —
+# $PROJECT-0 / $PROJECT-1, subbed in by devs to placate commit checkers — are
+# matched too; downstream treats them as an explicit "unlinked work" flag,
+# not a real link.
 TICKET_KEY_RE = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 
 SENTINEL_ISSUE_NUMBERS = {"0", "1"}
@@ -41,5 +43,11 @@ def extract_ticket_keys(text: str) -> list[str]:
 
 
 def is_sentinel_key(key: str) -> bool:
-    """XYZ-0 / XYZ-1 style keys devs use to placate commit checkers."""
+    """$PROJECT-0 / $PROJECT-1 keys devs use to placate commit checkers.
+
+    Any project prefix counts. Caveat: -0 is never a valid Jira issue, but
+    $PROJECT-1 is a real issue (the project's first), so a -1 match is only
+    probably a sentinel — the correlator should break the tie with a Jira
+    existence check once the Jira client lands (phase 1).
+    """
     return key.rsplit("-", 1)[-1] in SENTINEL_ISSUE_NUMBERS

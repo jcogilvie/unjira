@@ -6,8 +6,9 @@ def test_extracts_and_dedupes_in_order():
     assert extract_ticket_keys(text) == ["PROJ-123", "AUTH-9"]
 
 
-def test_sentinel_detection():
+def test_sentinel_detection_is_prefix_agnostic():
     assert is_sentinel_key("XYZ-0")
-    assert is_sentinel_key("XYZ-1")
+    assert is_sentinel_key("PROJ-0")
+    assert is_sentinel_key("LONGERKEY-1")
     assert not is_sentinel_key("XYZ-10")
-    assert not is_sentinel_key("XYZ-123")
+    assert not is_sentinel_key("PROJ-123")

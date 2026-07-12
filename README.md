@@ -90,7 +90,8 @@ data/                  SQLite database lives here (gitignored)
   never cause an illegal call.
 - **Untracked-work detection is the default path, not a special case.** Any narrative that
   fails to match an open issue with sufficient confidence lands in the unlinked bucket,
-  whatever stream it came from. Sentinel keys (XYZ-0) are one weak signal among several.
+  whatever stream it came from. Sentinel keys ($PROJECT-0/-1, any prefix) are one weak
+  signal among several.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.
