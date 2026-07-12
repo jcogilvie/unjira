@@ -1,0 +1,30 @@
+[project]
+name = "unjira"
+version = "0.1.0"
+description = "A reconciliation agent that keeps Jira in sync with what you actually did, so you never have to."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+unjira = "unjira.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/unjira"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]

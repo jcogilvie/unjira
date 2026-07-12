@@ -1,0 +1,24 @@
+{
+  "jira": {
+    "site": "https://yourorg.atlassian.net",
+    "project_keys": ["PROJ"]
+  },
+  "collectors": {
+    "claude_code": {
+      "enabled": true,
+      "backfill_days": 14
+    },
+    "github": {
+      "enabled": false,
+      "repos": ["yourorg/yourrepo"]
+    },
+    "slack": {
+      "enabled": false,
+      "channels": ["#my-team"]
+    },
+    "jira": {
+      "enabled": false
+    }
+  },
+  "db_path": "data/unjira.db"
+}

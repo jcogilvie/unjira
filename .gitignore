@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+data/
+.env
+unjira.config.json

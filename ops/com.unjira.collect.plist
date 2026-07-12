@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for the hourly collect pass (macOS).
+
+  Install:
+    1. Replace /PATH/TO/unjira below with the absolute repo path.
+    2. cp ops/com.unjira.collect.plist ~/Library/LaunchAgents/
+    3. launchctl load ~/Library/LaunchAgents/com.unjira.collect.plist
+
+  Logs land in the repo's data/ directory (gitignored).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.unjira.collect</string>
+    <key>WorkingDirectory</key>
+    <string>/PATH/TO/unjira</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/PATH/TO/unjira/.venv/bin/unjira</string>
+        <string>collect</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>StandardOutPath</key>
+    <string>/PATH/TO/unjira/data/collect.log</string>
+    <key>StandardErrorPath</key>
+    <string>/PATH/TO/unjira/data/collect.err.log</string>
+</dict>
+</plist>
