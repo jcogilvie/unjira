@@ -56,7 +56,7 @@ def test_issue_lifecycle_roundtrip(client):
         refreshed = client.get_issue(key, expand=None)
         assert refreshed["fields"]["status"]["name"] == target["to"]["name"]
 
-        client.add_comment(key, "Live-test comment.\n\nSecond paragraph survives ADF.")
+        client.add_comment(key, "Live-test comment.\n\nSecond paragraph survives the trip.")
 
         changes = client.status_changes(key)
         assert any(to == target["to"]["name"] for _, to in changes)

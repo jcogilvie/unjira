@@ -1,121 +1,120 @@
-import base64
-import json
+"""Facade tests with a stubbed upstream library.
 
-import httpx
+These cover the logic that is *ours* — pagination loops, shape extraction,
+error translation, payload construction. The library's HTTP behavior is
+covered by its own test suite; the live tier covers the real contract.
+"""
+
 import pytest
+from requests import HTTPError
 
-from unjira.jira.adf import adf_to_text, text_to_adf
 from unjira.jira.client import JiraClient, JiraError
 
 
-def make_client(handler) -> JiraClient:
-    return JiraClient(
-        "https://test.atlassian.net",
-        "bot@example.com",
-        "token123",
-        transport=httpx.MockTransport(handler),
-    )
+class FakeResponse:
+    def __init__(self, status_code: int, body: dict | None = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._body = body
+        self.text = text or str(body)
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("no json")
+        return self._body
 
 
-def test_sends_basic_auth():
-    seen = {}
+class StubUpstream:
+    """Only the methods the facade delegates to, returning canned pages."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["auth"] = request.headers.get("Authorization")
-        return httpx.Response(200, json={"accountId": "abc"})
+    def __init__(self) -> None:
+        self.jql_pages: list[dict] = []
+        self.changelog_pages: list[dict] = []
+        self.posted: list[tuple[str, dict]] = []
+        self.jql_calls: list[dict] = []
 
-    make_client(handler).myself()
-    expected = base64.b64encode(b"bot@example.com:token123").decode()
-    assert seen["auth"] == f"Basic {expected}"
+    def enhanced_jql(self, jql, fields=None, nextPageToken=None, limit=None, expand=None):
+        self.jql_calls.append({"token": nextPageToken, "limit": limit})
+        return self.jql_pages.pop(0)
+
+    def get_issue_changelog(self, key, start=0, limit=100):
+        return self.changelog_pages.pop(0)
+
+    def get_status_for_project(self, key):
+        return [
+            {"statuses": [{"name": "To Do", "statusCategory": {"key": "new"}}]},
+            {"statuses": [{"name": "Done", "statusCategory": {"key": "done"}},
+                          {"name": "To Do", "statusCategory": {"key": "new"}}]},
+        ]
+
+    def get_issue_transitions_full(self, key):
+        return {"transitions": [{"id": "31", "name": "Start", "to": {"name": "In Progress"}}]}
+
+    def resource_url(self, resource):
+        return f"rest/api/2/{resource}"
+
+    def post(self, url, data=None):
+        self.posted.append((url, data))
+
+    def myself(self):
+        raise HTTPError(response=FakeResponse(401, {"errorMessages": ["nope"]}))
 
 
-def test_retries_429_then_succeeds():
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return httpx.Response(429, headers={"Retry-After": "0"})
-        return httpx.Response(200, json={"accountId": "abc"})
-
-    assert make_client(handler).myself() == {"accountId": "abc"}
-    assert calls["n"] == 2
+def make_client(stub: StubUpstream) -> JiraClient:
+    return JiraClient("https://stub", "e", "t", upstream=stub)
 
 
-def test_raises_jira_error_with_message():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, json={"errorMessages": ["Field 'foo' is required"]})
-
+def test_error_translated_to_jira_error():
     with pytest.raises(JiraError) as excinfo:
-        make_client(handler).get_issue("PROJ-1")
-    assert excinfo.value.status == 400
-    assert "Field 'foo' is required" in excinfo.value.message
+        make_client(StubUpstream()).myself()
+    assert excinfo.value.status == 401
+    assert "nope" in excinfo.value.message
 
 
 def test_search_issues_pages_with_next_page_token():
-    def handler(request: httpx.Request) -> httpx.Response:
-        token = request.url.params.get("nextPageToken")
-        if token is None:
-            return httpx.Response(
-                200, json={"issues": [{"key": "P-1"}, {"key": "P-2"}], "nextPageToken": "t2"}
-            )
-        assert token == "t2"
-        return httpx.Response(200, json={"issues": [{"key": "P-3"}]})
-
-    keys = [i["key"] for i in make_client(handler).search_issues("project = P")]
+    stub = StubUpstream()
+    stub.jql_pages = [
+        {"issues": [{"key": "P-1"}, {"key": "P-2"}], "nextPageToken": "t2"},
+        {"issues": [{"key": "P-3"}]},
+    ]
+    keys = [i["key"] for i in make_client(stub).search_issues("project = P")]
     assert keys == ["P-1", "P-2", "P-3"]
+    assert stub.jql_calls[1]["token"] == "t2"
 
 
 def test_search_issues_respects_limit():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"issues": [{"key": "P-1"}, {"key": "P-2"}], "nextPageToken": "more"}
-        )
-
-    keys = [i["key"] for i in make_client(handler).search_issues("project = P", limit=2)]
+    stub = StubUpstream()
+    stub.jql_pages = [{"issues": [{"key": "P-1"}, {"key": "P-2"}], "nextPageToken": "more"}]
+    keys = [i["key"] for i in make_client(stub).search_issues("project = P", limit=2)]
     assert keys == ["P-1", "P-2"]
 
 
-def test_transition_payload_shape():
-    seen = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["path"] = request.url.path
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(204)
-
-    make_client(handler).transition_issue("P-1", "31", fields={"resolution": {"name": "Done"}})
-    assert seen["path"] == "/rest/api/3/issue/P-1/transitions"
-    assert seen["body"] == {
-        "transition": {"id": "31"},
-        "fields": {"resolution": {"name": "Done"}},
-    }
+def test_changelog_paginates_until_is_last():
+    stub = StubUpstream()
+    stub.changelog_pages = [
+        {"values": [{"items": [{"field": "status", "fromString": "To Do", "toString": "Doing"}]}],
+         "isLast": False, "maxResults": 100},
+        {"values": [{"items": [
+            {"field": "assignee", "fromString": None, "toString": "jon"},
+            {"field": "status", "fromString": "Doing", "toString": "Done"},
+        ]}], "isLast": True},
+    ]
+    changes = make_client(stub).status_changes("P-1")
+    assert changes == [("To Do", "Doing"), ("Doing", "Done")]
 
 
-def test_status_changes_extracts_only_status_items():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "values": [
-                    {
-                        "items": [
-                            {"field": "status", "fromString": "To Do", "toString": "In Progress"},
-                            {"field": "assignee", "fromString": None, "toString": "jon"},
-                        ]
-                    },
-                    {"items": [{"field": "status", "fromString": "In Progress", "toString": "Done"}]},
-                ],
-                "isLast": True,
-            },
-        )
-
-    changes = make_client(handler).status_changes("P-1")
-    assert changes == [("To Do", "In Progress"), ("In Progress", "Done")]
+def test_project_statuses_merges_issue_types():
+    statuses = make_client(StubUpstream()).project_statuses("P")
+    assert statuses == {"To Do": "new", "Done": "done"}
 
 
-def test_adf_roundtrip():
-    doc = text_to_adf("First paragraph.\n\nSecond paragraph.")
-    assert doc["version"] == 1
-    assert len(doc["content"]) == 2
-    assert adf_to_text(doc) == "First paragraph.\nSecond paragraph."
+def test_transitions_return_raw_api_shape():
+    transitions = make_client(StubUpstream()).get_transitions("P-1")
+    assert transitions[0]["to"]["name"] == "In Progress"
+
+
+def test_transition_with_fields_posts_full_payload():
+    stub = StubUpstream()
+    make_client(stub).transition_issue("P-1", 31, fields={"resolution": {"name": "Done"}})
+    url, payload = stub.posted[0]
+    assert url == "rest/api/2/issue/P-1/transitions"
+    assert payload == {"transition": {"id": "31"}, "fields": {"resolution": {"name": "Done"}}}

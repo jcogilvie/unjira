@@ -78,9 +78,8 @@ src/unjira/
     __init__.py        Collector protocol and registry — the plugin surface
     claude_code.py     Claude Code session transcripts (~/.claude/projects/**/*.jsonl)
   jira/
-    client.py          typed Jira Cloud REST client (reads + gated writes, 429 retry)
+    client.py          Jira facade over atlassian-python-api (reads + gated writes)
     workflow.py        observed workflow graphs mined from changelogs; BFS path planning
-    adf.py             minimal Atlassian Document Format helpers
   devtools.py          seed/reset labeled test data on the dev instance
   pipeline/
     collect.py         run enabled collectors, persist events
@@ -114,6 +113,10 @@ data/                  SQLite database lives here (gitignored)
   (spec + similar completed tickets, observed effort, narrative); median is the estimate,
   spread is the confidence. Discovered work is tagged `emergent` so the team can plan with
   `velocity - avg_emergent_points`.
+- **Buy over build, behind our seam.** JiraClient is a facade over atlassian-python-api so
+  the community absorbs Jira API churn; the facade keeps divergence trivial if upstream ever
+  lags. Slack via slack_sdk; GitHub collector via `gh api`. Hand-rolled only where no wheel
+  exists (Claude transcript parser).
 - **Corrections become rules.** Review-queue edits and rejections are distilled into markdown
   rules under `rules/`, fed forward into correlator and reconciler prompts. Approval history
   drives per-action-type autonomy graduation.
