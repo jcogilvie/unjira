@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -20,20 +21,22 @@ jobs:
       - run: ruff check .
       - run: pytest
 
-  # Live integration against the Atlassian dev instance. Enabled once the Jira
-  # client and seed scripts land (phase 1). Manual trigger + nightly, never
-  # per-commit: dev-instance rate limits, and unit/contract tiers cover commits.
-  #
-  # integration:
-  #   if: github.event_name == 'workflow_dispatch'
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-python@v5
-  #       with:
-  #         python-version: "3.12"
-  #     - run: pip install -e ".[dev]"
-  #     - run: pytest tests/integration --jira-live
-  #       env:
-  #         UNJIRA_JIRA_EMAIL: ${{ vars.UNJIRA_CI_EMAIL }}
-  #         UNJIRA_JIRA_TOKEN: ${{ secrets.UNJIRA_CI_TOKEN }}
+  # Live integration against the Atlassian dev instance: manual trigger only,
+  # never per-commit — dev-instance rate limits, and the mock-transport tier
+  # covers commits. These tests write to the instance and clean up after
+  # themselves.
+  integration:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -m live -v
+        env:
+          UNJIRA_LIVE: "1"
+          UNJIRA_JIRA_SITE: https://unjira.atlassian.net
+          UNJIRA_JIRA_EMAIL: ${{ vars.UNJIRA_CI_EMAIL }}
+          UNJIRA_JIRA_TOKEN: ${{ secrets.UNJIRA_CI_TOKEN }}

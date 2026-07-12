@@ -56,6 +56,15 @@ unjira status         # event counts and collector cursors
 Schedule the batch pass on macOS with the launchd template in `ops/` (see comments in the
 plist for install steps).
 
+Dev-instance tools (need credentials in `.env`): `unjira dev seed` creates labeled test
+issues and walks them through transitions to generate changelog history; `unjira dev reset`
+deletes exactly what seed created; `unjira dev workflow` prints the mined workflow graph.
+
+Testing: `pytest` runs the offline tiers (unit + mock-transport contract tests) and is what
+CI runs per-push. `UNJIRA_LIVE=1 pytest -m live` runs the live suite, which writes to the
+dev Jira instance and cleans up after itself; in CI that's the manually-triggered
+integration job.
+
 ## Layout
 
 ```
@@ -68,6 +77,11 @@ src/unjira/
   collectors/
     __init__.py        Collector protocol and registry — the plugin surface
     claude_code.py     Claude Code session transcripts (~/.claude/projects/**/*.jsonl)
+  jira/
+    client.py          typed Jira Cloud REST client (reads + gated writes, 429 retry)
+    workflow.py        observed workflow graphs mined from changelogs; BFS path planning
+    adf.py             minimal Atlassian Document Format helpers
+  devtools.py          seed/reset labeled test data on the dev instance
   pipeline/
     collect.py         run enabled collectors, persist events
     digest.py          phase-0 daily digest (deterministic; LLM narrative pass is phase 1)

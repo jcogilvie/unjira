@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.7",
     "click>=8.1",
     "python-dotenv>=1.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -29,3 +30,9 @@ packages = ["src/unjira"]
 [tool.ruff]
 line-length = 100
 src = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: writes to the real dev Jira instance (requires UNJIRA_LIVE=1 and credentials)",
+]
+addopts = "-m 'not live'"
