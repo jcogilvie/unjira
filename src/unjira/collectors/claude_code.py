@@ -33,6 +33,7 @@ class ClaudeCodeCollector:
             return
         backfill_days = int(options.get("backfill_days", DEFAULT_BACKFILL_DAYS))
         horizon = datetime.now(timezone.utc) - timedelta(days=backfill_days)
+        exclude_cwds = [_normalize_dir(p) for p in options.get("exclude_cwds", [])]
 
         for path in sorted(root.glob("*/*.jsonl")):
             stat = path.stat()
@@ -45,12 +46,14 @@ class ClaudeCodeCollector:
                 store.set_cursor(self.name, resource, position)
                 continue
 
-            event = self._session_event(path, mtime)
+            event = self._session_event(path, mtime, exclude_cwds)
             store.set_cursor(self.name, resource, position)
             if event is not None:
                 yield event
 
-    def _session_event(self, path: Path, mtime: datetime) -> Event | None:
+    def _session_event(
+        self, path: Path, mtime: datetime, exclude_cwds: list[str] | None = None
+    ) -> Event | None:
         session_id = path.stem
         cwd = git_branch = None
         first_ts = last_ts = None
@@ -73,6 +76,8 @@ class ClaudeCodeCollector:
 
         if not user_texts:
             return None
+        if cwd and _is_excluded(cwd, exclude_cwds or []):
+            return None  # unjira's own repo etc. — skip to avoid self-reference loops
         if git_branch:
             for key in extract_ticket_keys(git_branch):
                 keys.setdefault(key)
@@ -102,6 +107,27 @@ class ClaudeCodeCollector:
             },
             raw_ref=str(path),
         )
+
+
+def _normalize_dir(path: str) -> str:
+    """Absolute, symlink-resolved directory string without a trailing separator."""
+    return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _is_excluded(cwd: str, exclude_cwds: list[str]) -> bool:
+    """True if cwd equals or is nested under any excluded prefix (path-boundary aware).
+
+    Uses os.path.commonpath rather than str.startswith so that a sibling sharing a string
+    prefix (e.g. ``/w/unjira-docs`` vs excluded ``/w/unjira``) is NOT excluded.
+    """
+    target = _normalize_dir(cwd)
+    for prefix in exclude_cwds:
+        try:
+            if os.path.commonpath([target, prefix]) == prefix:
+                return True
+        except ValueError:
+            continue  # different drives / mixed abs+rel — not comparable, so not excluded
+    return False
 
 
 def _jsonl_lines(path: Path) -> Iterator[dict[str, Any]]:
