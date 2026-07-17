@@ -9,7 +9,3 @@ dist/
 data/
 .env
 unjira.config.json
-
-# Local tooling / scratch (not part of the project)
-.serena/
-.requirements/
