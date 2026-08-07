@@ -3,6 +3,7 @@ module github.com/jcogilvie/unjira
 go 1.26.0
 
 require (
+	github.com/alecthomas/kong v1.16.0
 	github.com/andygrunwald/go-jira/v2 v2.0.0-20260614144923-204ada8a4252
 	github.com/stretchr/testify v1.11.1
 	modernc.org/sqlite v1.56.0

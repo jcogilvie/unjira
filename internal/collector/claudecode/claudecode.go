@@ -40,6 +40,11 @@ func New() *Collector {
 	return &Collector{}
 }
 
+// Name returns this collector's registration name.
+func (c *Collector) Name() string {
+	return Name
+}
+
 // Collect scans every session transcript under options["transcript_root"]
 // (default ~/.claude/projects), calling visit for each new event and
 // advancing the store's cursor for every file scanned, whether or not it
