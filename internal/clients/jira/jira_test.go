@@ -239,6 +239,22 @@ func TestDeleteIssue_CallsDeleteEndpoint(t *testing.T) {
 	assert.Contains(t, gotPath, "/issue/P-1")
 }
 
+func TestSearchProjects_ReturnsProjectList(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{"key": "PROJ", "name": "Project One"},
+			{"key": "SCRUM", "name": "Scrum Project"},
+		})
+	})
+
+	projects, err := client.SearchProjects()
+
+	require.NoError(t, err)
+	require.Len(t, projects, 2)
+	assert.Equal(t, "PROJ", projects[0]["key"])
+	assert.Equal(t, "SCRUM", projects[1]["key"])
+}
+
 func TestNew_RequiresSite(t *testing.T) {
 	_, err := jira.New("", "e", "t")
 

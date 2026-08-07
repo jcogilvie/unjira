@@ -66,6 +66,16 @@ func (c *Client) Myself() (map[string]any, error) {
 	return result, nil
 }
 
+// SearchProjects returns every project visible to the authenticated user.
+func (c *Client) SearchProjects() ([]map[string]any, error) {
+	var result []map[string]any
+	if err := c.do(http.MethodGet, "rest/api/2/project", nil, &result); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // ProjectStatuses returns status name -> status category key, across all
 // issue types in the project.
 func (c *Client) ProjectStatuses(projectKey string) (map[string]string, error) {
