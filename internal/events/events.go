@@ -6,8 +6,8 @@
 package events
 
 import (
+	"fmt"
 	"regexp"
-	"strings"
 	"time"
 )
 
@@ -38,9 +38,10 @@ func NewEvent(source, externalID string, occurredAt time.Time, summary string) E
 }
 
 // TicketKeyRegexp matches PROJ-123 style keys for any project prefix.
-// Sentinel keys — $PROJECT-0 / $PROJECT-1, subbed in by devs to placate
-// commit checkers — are matched too; downstream treats them as an explicit
-// "unlinked work" flag, not a real link.
+// Placeholder keys some workflows substitute for a real ticket (to satisfy a
+// commit-message linter, for example) are matched too — see
+// CompileLinkExclusionPatterns/PartitionExcludedKeys for how those are told
+// apart from a real link downstream.
 var TicketKeyRegexp = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}-\d+\b`)
 
 // ExtractTicketKeys returns all candidate Jira keys in text, order-preserving
@@ -59,20 +60,48 @@ func ExtractTicketKeys(text string) []string {
 	return keys
 }
 
-// sentinelIssueNumbers are the numeric suffixes devs use to placate commit
-// checkers without a real ticket. Any project prefix counts.
-//
-// Caveat: -0 is never a valid Jira issue, but $PROJECT-1 is a real issue (the
-// project's first), so a -1 match is only probably a sentinel — the
-// correlator should break the tie with a Jira existence check.
-var sentinelIssueNumbers = map[string]bool{"0": true, "1": true}
-
-// IsSentinelKey reports whether key is a $PROJECT-0 / $PROJECT-1 sentinel key.
-func IsSentinelKey(key string) bool {
-	suffix := key
-	if idx := strings.LastIndex(key, "-"); idx >= 0 {
-		suffix = key[idx+1:]
+// CompileLinkExclusionPatterns compiles the configured exclude_from_linking
+// regex patterns once, up front, so a bad pattern fails loudly at config-load
+// time rather than being silently skipped (or panicking) during
+// classification. An empty/nil patterns list is a no-op, not an error.
+func CompileLinkExclusionPatterns(patterns []string) ([]*regexp.Regexp, error) {
+	if len(patterns) == 0 {
+		return nil, nil
 	}
 
-	return sentinelIssueNumbers[suffix]
+	compiled := make([]*regexp.Regexp, len(patterns))
+	for i, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compiling exclude_from_linking pattern %q: %w", pattern, err)
+		}
+		compiled[i] = re
+	}
+
+	return compiled, nil
+}
+
+// PartitionExcludedKeys splits keys into kept (no configured pattern
+// matched) and excluded (at least one did), preserving order within each.
+// A nil/empty compiled list keeps every key.
+func PartitionExcludedKeys(keys []string, compiled []*regexp.Regexp) (kept, excluded []string) {
+	for _, key := range keys {
+		if matchesAny(key, compiled) {
+			excluded = append(excluded, key)
+		} else {
+			kept = append(kept, key)
+		}
+	}
+
+	return kept, excluded
+}
+
+func matchesAny(key string, compiled []*regexp.Regexp) bool {
+	for _, re := range compiled {
+		if re.MatchString(key) {
+			return true
+		}
+	}
+
+	return false
 }

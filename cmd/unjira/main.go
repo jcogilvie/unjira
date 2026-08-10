@@ -66,7 +66,12 @@ func (a *appContext) projectKey(flag string) (string, error) {
 type collectCmd struct{}
 
 func (c *collectCmd) Run(app *appContext) error {
-	results, err := pipeline.RunCollect(app.config, app.store, registry)
+	linkExclusions, err := app.config.CompiledLinkExclusions()
+	if err != nil {
+		return err
+	}
+
+	results, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions)
 	if err != nil {
 		return err
 	}

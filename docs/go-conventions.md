@@ -107,8 +107,8 @@ general:
   threading can be added incrementally where it matters instead of being enforced everywhere.
 - `forbidigo` — bans `fmt.Print*`/`println`; fights the entire purpose of `cmd/unjira`, a CLI
   whose job is printing to stdout.
-- `gochecknoglobals` — package-level const/var lookup tables (region lists, sentinel numbers,
-  the collector registry, the Kong `cli` struct) are idiomatic Go at package scope, not a smell.
+- `gochecknoglobals` — package-level const/var lookup tables (region lists, the collector
+  registry, the Kong `cli` struct) are idiomatic Go at package scope, not a smell.
 - `wrapcheck` — wants every returned error wrapped, even ones that already carry full context or
   come from a well-understood stdlib/interface boundary (`bufio.Scanner.Err`, `sql.Rows.Err`).
   Our own convention is to wrap at meaningful boundaries with "what were we trying to do" context

@@ -70,9 +70,9 @@ linters:
     - forbidigo
 
     # Flags package-level const/var declarations. Small, fixed lookup
-    # tables and registries (region lists, sentinel numbers, the collector
-    # registry, the Kong cli struct) are idiomatic Go at package scope, not
-    # a smell to eliminate.
+    # tables and registries (region lists, the collector registry, the Kong
+    # cli struct) are idiomatic Go at package scope, not a smell to
+    # eliminate.
     - gochecknoglobals
 
     # Wants every returned error wrapped, even ones that already carry full

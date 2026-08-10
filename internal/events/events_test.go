@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
@@ -30,22 +31,54 @@ func TestNewEvent_ArtifactsDefaultsToEmptyMap(t *testing.T) {
 	assert.Equal(t, "value", e.Artifacts["key"])
 }
 
-func TestIsSentinelKey_PrefixAgnostic(t *testing.T) {
-	tests := []struct {
-		name string
-		key  string
-		want bool
-	}{
-		{"zero suffix, short prefix", "XYZ-0", true},
-		{"zero suffix, common prefix", "PROJ-0", true},
-		{"one suffix, long prefix", "LONGERKEY-1", true},
-		{"non-sentinel numeric suffix", "XYZ-10", false},
-		{"ordinary issue key", "PROJ-123", false},
-	}
+func TestCompileLinkExclusionPatterns_CompilesEachPattern(t *testing.T) {
+	compiled, err := events.CompileLinkExclusionPatterns([]string{"-0$", "-1$"})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, events.IsSentinelKey(tt.key))
-		})
-	}
+	require.NoError(t, err)
+	require.Len(t, compiled, 2)
+	assert.True(t, compiled[0].MatchString("PROJ-0"))
+	assert.True(t, compiled[1].MatchString("PROJ-1"))
+}
+
+func TestCompileLinkExclusionPatterns_InvalidPatternNamesItInError(t *testing.T) {
+	_, err := events.CompileLinkExclusionPatterns([]string{"("})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "(")
+}
+
+func TestCompileLinkExclusionPatterns_EmptyIsANoOp(t *testing.T) {
+	compiled, err := events.CompileLinkExclusionPatterns(nil)
+
+	require.NoError(t, err)
+	assert.Nil(t, compiled)
+}
+
+func TestPartitionExcludedKeys_SplitsOnMatch(t *testing.T) {
+	compiled, err := events.CompileLinkExclusionPatterns([]string{"-0$"})
+	require.NoError(t, err)
+
+	kept, excluded := events.PartitionExcludedKeys([]string{"PROJ-42", "PROJ-0"}, compiled)
+
+	assert.Equal(t, []string{"PROJ-42"}, kept)
+	assert.Equal(t, []string{"PROJ-0"}, excluded)
+}
+
+func TestPartitionExcludedKeys_NoMatchKeepsOrderAndReportsNoExclusions(t *testing.T) {
+	compiled, err := events.CompileLinkExclusionPatterns([]string{"-0$"})
+	require.NoError(t, err)
+
+	kept, excluded := events.PartitionExcludedKeys([]string{"PROJ-42"}, compiled)
+
+	assert.Equal(t, []string{"PROJ-42"}, kept)
+	assert.Nil(t, excluded)
+}
+
+func TestPartitionExcludedKeys_NoPatternsKeepsEverything(t *testing.T) {
+	keys := []string{"PROJ-42", "PROJ-0"}
+
+	kept, excluded := events.PartitionExcludedKeys(keys, nil)
+
+	assert.Equal(t, keys, kept)
+	assert.Nil(t, excluded)
 }

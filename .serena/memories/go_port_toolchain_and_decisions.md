@@ -22,14 +22,23 @@
 - `Artifacts map[string]any` needs a constructor (`NewEvent`) to default to a non-nil empty map —
   Go's zero-value nil map is unsafe to write to, unlike Pydantic's `default_factory=dict`. This is
   a real behavioral gap Python didn't have; guarded by TestNewEvent_ArtifactsDefaultsToEmptyMap.
-- `IsSentinelKey`/`ExtractTicketKeys` ported as direct 1:1 translations of the Python regex/logic.
-  Go's RE2 `\b` is ASCII-only (unlike PCRE's Unicode-aware `\b`), but the ticket-key pattern
+- `ExtractTicketKeys` ported as a direct 1:1 translation of the Python regex/logic. Go's RE2 `\b`
+  is ASCII-only (unlike PCRE's Unicode-aware `\b`), but the ticket-key pattern
   (`[A-Z][A-Z0-9]{1,9}-\d+`) is itself ASCII-only, so this is not a behavioral gap for unjira.
+- **Resolved (post-port, per Task #10):** the hardcoded `-0`/`-1` sentinel-issue-key convention
+  (`IsSentinelKey`) was replaced by a configurable `exclude_from_linking` (regex patterns, empty
+  by default) in `unjira.config.json`. `events.CompileLinkExclusionPatterns` +
+  `events.PartitionExcludedKeys` do the matching; `pipeline.RunCollect` persists an
+  `excluded_ticket_keys` artifact alongside the untouched `ticket_keys` (never drops data);
+  `RenderDigest` annotates untracked events that had an excluded-only match instead of making them
+  indistinguishable from a plain no-match event. See
+  `.requirements/20260810T210148Z_configurable_link_exclusion_patterns/REQUIREMENTS.md`.
 
-## Deferred (do not start until the whole port is complete)
-- Task #10: the `-0`/`-1` sentinel-issue-key convention (`IsSentinelKey`) is a hardcoded
-  workplace-specific commit-linter convention leaking into public OSS code. Needs to become
-  configurable (e.g. via config) rather than hardcoded, post-port.
+## Deferred (post-port; do not start without user confirmation)
+- Task #26: datastore choice (SQLite/RDBMS vs. document store, ACID necessity, stored procedures
+  vs. app-crafted queries) — open architecture question raised by the user, unstarted.
+- Task #27: pluggable task-tracking backends (Jira/Trello/none) + running clustering against an
+  arbitrary subset of enabled event streams — phase-1+ design, unstarted.
 
 See `docs/superpowers/specs/2026-08-07-go-port-design.md` and `docs/go-conventions.md` for the
 full port plan and Go conventions. `.requirements/20260807T185557Z_go_module_bootstrap_and_events/`

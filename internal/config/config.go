@@ -11,6 +11,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+
+	"github.com/jcogilvie/unjira/internal/events"
 )
 
 // DefaultConfigPath is where Load looks when no path is given.
@@ -26,7 +29,13 @@ type JiraConfig struct {
 type Config struct {
 	Jira       JiraConfig                `json:"jira"`
 	Collectors map[string]map[string]any `json:"collectors"`
-	DBPath     string                    `json:"db_path"`
+	// ExcludeFromLinking is a list of regex patterns; a ticket-key-shaped
+	// match against any of them is excluded from consideration as a real
+	// Jira link (see internal/events.CompileLinkExclusionPatterns). Empty by
+	// default — unjira makes no assumption about any workflow's own
+	// placeholder-ticket conventions.
+	ExcludeFromLinking []string `json:"exclude_from_linking"`
+	DBPath             string   `json:"db_path"`
 }
 
 // Default returns the configuration used when no config file is present:
@@ -38,6 +47,12 @@ func Default() Config {
 		},
 		DBPath: "data/unjira.db",
 	}
+}
+
+// CompiledLinkExclusions compiles ExcludeFromLinking, failing loudly (naming
+// the offending pattern) rather than silently ignoring a bad one.
+func (c Config) CompiledLinkExclusions() ([]*regexp.Regexp, error) {
+	return events.CompileLinkExclusionPatterns(c.ExcludeFromLinking)
 }
 
 // EnabledCollectors returns only the collector options with "enabled": true.

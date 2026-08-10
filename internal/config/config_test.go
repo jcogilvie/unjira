@@ -19,6 +19,7 @@ func TestLoad_MissingFileReturnsDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, config.JiraConfig{}, cfg.Jira)
 	assert.Equal(t, "data/unjira.db", cfg.DBPath)
+	assert.Empty(t, cfg.ExcludeFromLinking)
 
 	enabled := cfg.EnabledCollectors()
 	require.Contains(t, enabled, "claude_code")
@@ -36,6 +37,7 @@ func TestLoad_ParsesExampleShapedConfig(t *testing.T) {
 			"slack": {"enabled": false, "channels": ["#my-team"]},
 			"jira": {"enabled": false}
 		},
+		"exclude_from_linking": ["-0$", "-1$"],
 		"db_path": "data/unjira.db"
 	}`
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
@@ -46,6 +48,7 @@ func TestLoad_ParsesExampleShapedConfig(t *testing.T) {
 	assert.Equal(t, "https://yourorg.atlassian.net", cfg.Jira.Site)
 	assert.Equal(t, []string{"PROJ"}, cfg.Jira.ProjectKeys)
 	assert.Equal(t, "data/unjira.db", cfg.DBPath)
+	assert.Equal(t, []string{"-0$", "-1$"}, cfg.ExcludeFromLinking)
 }
 
 func TestEnabledCollectors_FiltersToOnlyEnabled(t *testing.T) {
@@ -62,6 +65,25 @@ func TestEnabledCollectors_FiltersToOnlyEnabled(t *testing.T) {
 	assert.Equal(t, map[string]map[string]any{
 		"claude_code": {"enabled": true, "backfill_days": float64(14)},
 	}, enabled)
+}
+
+func TestCompiledLinkExclusions_CompilesConfiguredPatterns(t *testing.T) {
+	cfg := config.Config{ExcludeFromLinking: []string{"-0$"}}
+
+	compiled, err := cfg.CompiledLinkExclusions()
+
+	require.NoError(t, err)
+	require.Len(t, compiled, 1)
+	assert.True(t, compiled[0].MatchString("PROJ-0"))
+}
+
+func TestCompiledLinkExclusions_BadPatternErrorsWithPatternNamed(t *testing.T) {
+	cfg := config.Config{ExcludeFromLinking: []string{"("}}
+
+	_, err := cfg.CompiledLinkExclusions()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "(")
 }
 
 func TestDefaultConfig_HasClaudeCodeEnabledByDefault(t *testing.T) {

@@ -106,8 +106,12 @@ data/                   SQLite database lives here (gitignored)
   never cause an illegal call.
 - **Untracked-work detection is the default path, not a special case.** Any narrative that
   fails to match an open issue with sufficient confidence lands in the unlinked bucket,
-  whatever stream it came from. Sentinel keys ($PROJECT-0/-1, any prefix) are one weak
-  signal among several.
+  whatever stream it came from. Some workflows substitute a placeholder ticket key to satisfy a
+  commit-message linter when no real ticket applies; `exclude_from_linking` (a list of regex
+  patterns in config, empty by default) tells unjira which ticket-shaped matches are placeholders
+  rather than real links, without discarding the fact that one was seen — an event whose only
+  candidate keys are all excluded still shows up as untracked, annotated with which key was
+  excluded, so it stays visible for later triage instead of vanishing.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.
