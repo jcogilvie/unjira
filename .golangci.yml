@@ -1,0 +1,197 @@
+version: "2"
+output:
+  formats:
+    text:
+      path: stderr
+      colors: true
+linters:
+  default: all
+  disable:
+    # Add whitespace in the name of readability. Not something we've found
+    # worth enforcing mechanically. wsl was renamed wsl_v5 in newer
+    # golangci-lint releases; disable both spellings so an upgrade doesn't
+    # silently re-enable it.
+    - wsl
+    - wsl_v5
+    - nlreturn
+
+    # Line-length limits aren't idiomatic Go; prefer linting for the causes
+    # of long lines (too many params, redundant type names) over the symptom.
+    - lll
+
+    # Requires errors.Is/errors.As-only equality checks and package-level
+    # errors.New. Stricter than we need for a project this size.
+    - err113
+
+    # Duplicates what gocognit already covers, calculated differently.
+    - gocyclo
+    - cyclop
+    - nestif
+    - funlen
+    - maintidx
+
+    # Warns about duplicated code blocks. Useful in theory, but we're fine
+    # with a little copying over a premature shared abstraction.
+    - dupl
+
+    # Warns about returning interfaces rather than concrete types, and about
+    # named returns. Both are useful idioms we use deliberately in places
+    # (e.g. pipeline.Collector, named returns to document meaning).
+    - ireturn
+    - nonamedreturns
+
+    # Warns about magic numbers. We do think it's best to avoid them, but
+    # we're not strict about it.
+    - mnd
+
+    # Requires reordering methods, which adds churn without much benefit.
+    - funcorder
+
+    # Inline error handling is idiomatic and readable.
+    - noinlineerr
+
+    # Context requirements can be added incrementally where they matter,
+    # not enforced everywhere up front.
+    - noctx
+
+    # Warns about TODO comments; we're fine using TODO to track minor
+    # cleanups for next time we touch a file, rather than filing an issue
+    # for everything.
+    - godox
+
+    # Warns about struct instantiations that don't specify every field.
+    # Would have far more false positives (partial option structs, table
+    # tests) than useful catches here.
+    - exhaustruct
+
+    # Bans fmt.Print*/println. unjira's cmd/unjira package is a CLI whose
+    # entire job is printing to stdout — this linter fights the package's
+    # purpose rather than catching a real mistake.
+    - forbidigo
+
+    # Flags package-level const/var declarations. Small, fixed lookup
+    # tables and registries (region lists, the collector registry, the Kong
+    # cli struct) are idiomatic Go at package scope, not a smell to
+    # eliminate.
+    - gochecknoglobals
+
+    # Wants every returned error wrapped, even ones that already carry full
+    # context or come from a well-known stdlib/interface boundary (e.g.
+    # bufio.Scanner.Err, sql.Rows.Err). Our own convention (see
+    # docs/go-conventions.md) is to wrap at meaningful boundaries with
+    # "what were we trying to do" context, not to wrap universally.
+    - wrapcheck
+
+    # G404 (weak RNG): internal/devtools deliberately uses a seedable
+    # math/rand/v2 generator for reproducible test data, not
+    # security-sensitive randomness — crypto/rand would be the wrong tool.
+    # G304 (file inclusion via variable): every flagged path is a
+    # user-supplied config/transcript/graph-cache path, which is the whole
+    # point of those functions (config.Load, the collector, workflow
+    # Save/Load) — there's no untrusted-input boundary being crossed here.
+    - gosec
+
+    # Reports errors returned as nil despite an outer error existing
+    # earlier in the same function (nilerr), or a function returning both a
+    # nil error and a nil value (nilnil). Both patterns are used
+    # deliberately in internal/collector/claudecode: "no event this
+    # session" (a missing transcript dir, no user messages, an excluded
+    # cwd) is a valid, non-error outcome, matching the direct precedent in
+    # the ported Python (`return` / `return None`) - not a bug to paper
+    # over with an artificial sentinel error.
+    - nilerr
+    - nilnil
+
+    # Wants short-lived loop/handler variables (w, r, e, i, ok, err) given
+    # longer names. Fighting Go's own idiom of short names for
+    # small-scope variables would reduce readability, not improve it.
+    - varnamelen
+
+    # Wants every _test.go file in its own separate `_test` package.
+    # unjira's tests already use *_test packages consistently; this adds no
+    # signal on top of that convention while forcing an extra rule to keep
+    # satisfied file-by-file.
+    - testpackage
+
+    # Wants every parallelizable test call t.Parallel(). Our test suite is
+    # fast (sub-second) and mostly exercises shared SQLite/httptest state
+    # per test; the marginal wall-clock win isn't worth auditing every test
+    # for safe parallelism.
+    - paralleltest
+
+    # Warns fmt.Sprintf is less performant than string concatenation or
+    # strconv. We value readability over a performance difference that
+    # hasn't been measured to matter anywhere in this codebase.
+    - perfsprint
+
+    # Enforces JSON tag naming/alignment conventions (tagliatelle,
+    # tagalign) tuned for camelCase-first APIs. unjira's few JSON-tagged
+    # structs mirror the original Python/Jira field names (snake_case, e.g.
+    # "status_categories") for continuity with the ported schema and the
+    # live Jira API shape, not a Go-idiomatic camelCase API of our own.
+    - tagliatelle
+    - tagalign
+  settings:
+    depguard:
+      rules:
+        no_alternative_assert_libraries:
+          list-mode: lax
+          files:
+            - $test
+          deny:
+            - pkg: github.com/onsi/ginkgo
+              desc: "we use testify (see docs/go-conventions.md); no reason to mix assertion libraries"
+            - pkg: github.com/onsi/gomega
+              desc: "we use testify (see docs/go-conventions.md); no reason to mix assertion libraries"
+    govet:
+      disable:
+        - shadow
+    interfacebloat:
+      max: 5
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - containedctx
+          - errcheck
+          - forcetypeassert
+          - goconst
+          - gochecknoglobals
+          - gochecknoinits
+          - gocognit
+          - gosec
+          - unparam
+        path: _test(ing)?\.go
+    paths:
+      - zz_generated\..+\.go$
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gci:
+      custom-order: true
+      sections:
+        - standard
+        - default
+        - prefix(github.com/jcogilvie/unjira)
+    gofmt:
+      simplify: true
+  exclusions:
+    generated: lax
+    paths:
+      - zz_generated\..+\.go$
+      - third_party$
+      - builtin$
+      - examples$

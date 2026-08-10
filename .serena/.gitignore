@@ -1,0 +1,4 @@
+/cache
+/project.local.yml
+# Private: maps genericized placeholders back to real internal repos/issues/users.
+/memories/predecessor_learnings_provenance.md

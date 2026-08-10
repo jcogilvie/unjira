@@ -20,5 +20,6 @@
       "enabled": false
     }
   },
+  "exclude_from_linking": ["-0$", "-1$"],
   "db_path": "data/unjira.db"
 }

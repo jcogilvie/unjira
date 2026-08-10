@@ -45,12 +45,12 @@ accuracy before the agent is granted any write access.
 ## Quickstart
 
 ```sh
-uv venv && uv pip install -e ".[dev]"     # or: pip install -e ".[dev]"
+go build -o unjira ./cmd/unjira      # or: earthly +build
 cp config/unjira.example.json unjira.config.json
-cp .env.example .env                      # Jira credentials (gitignored; not needed in phase 0)
-unjira collect        # ingest new events from enabled collectors
-unjira digest         # print today's drift digest
-unjira status         # event counts and collector cursors
+cp .env.example .env                 # Jira credentials (gitignored; not needed in phase 0)
+./unjira collect        # ingest new events from enabled collectors
+./unjira digest         # print today's drift digest
+./unjira status         # event counts and collector cursors
 ```
 
 Schedule the batch pass on macOS with the launchd template in `ops/` (see comments in the
@@ -60,34 +60,36 @@ Dev-instance tools (need credentials in `.env`): `unjira dev seed` creates label
 issues and walks them through transitions to generate changelog history; `unjira dev reset`
 deletes exactly what seed created; `unjira dev workflow` prints the mined workflow graph.
 
-Testing: `pytest` runs the offline tiers (unit + mock-transport contract tests) and is what
-CI runs per-push. `UNJIRA_LIVE=1 pytest -m live` runs the live suite, which writes to the
-dev Jira instance and cleans up after itself; in CI that's the manually-triggered
-integration job.
+Testing: `go test ./...` runs the offline tiers and is what CI runs per-push (the `live`
+build tag excludes `internal/live` entirely — it won't even compile without it).
+`UNJIRA_LIVE=1 go test -tags=live ./internal/live/...` runs the live suite, which writes to
+the dev Jira instance and cleans up after itself; in CI that's the `integration` job, gated
+behind the `live-jira` environment.
 
 ## Layout
 
 ```
-src/unjira/
-  events.py            normalized Event model — the contract every collector emits
-  store.py             SQLite schema and access: events, cursors, narratives, actions,
-                       estimates, ledger
-  config.py            config loading (unjira.config.json)
-  cli.py               unjira collect | digest | status
-  collectors/
-    __init__.py        Collector protocol and registry — the plugin surface
-    claude_code.py     Claude Code session transcripts (~/.claude/projects/**/*.jsonl)
-  jira/
-    client.py          Jira facade over atlassian-python-api (reads + gated writes)
-    workflow.py        observed workflow graphs mined from changelogs; BFS path planning
-  devtools.py          seed/reset labeled test data on the dev instance
-  pipeline/
-    collect.py         run enabled collectors, persist events
-    digest.py          phase-0 daily digest (deterministic; LLM narrative pass is phase 1)
-rules/                 learned rules as human-auditable markdown (see rules/README.md)
-config/                example configuration
-ops/                   launchd template for the scheduled batch pass
-data/                  SQLite database lives here (gitignored)
+cmd/unjira/             CLI entrypoint (Kong): collect | digest | status | dev
+internal/
+  events/               normalized Event model — the contract every collector emits
+  store/                SQLite schema and access: events, cursors, narratives, actions,
+                        estimates, ledger
+  config/               config loading (unjira.config.json)
+  clients/
+    jira/               Jira facade over go-jira/v2/cloud (reads + gated writes)
+  collector/
+    claudecode/         Claude Code session transcripts (~/.claude/projects/**/*.jsonl)
+  correlator/
+    refs/               fully-qualified, range-aware PR/issue reference extraction
+    fanout/             env-mirror fan-out clustering
+  workflow/             observed workflow graphs mined from changelogs; BFS path planning
+  pipeline/             run enabled collectors, persist events; render the phase-0 digest
+  devtools/             seed/reset labeled test data on the dev instance
+  live/                 live-Jira integration tests (build tag "live")
+rules/                  learned rules as human-auditable markdown (see rules/README.md)
+config/                 example configuration
+ops/                    launchd template for the scheduled batch pass
+data/                   SQLite database lives here (gitignored)
 ```
 
 ## Design decisions (locked)
@@ -104,8 +106,12 @@ data/                  SQLite database lives here (gitignored)
   never cause an illegal call.
 - **Untracked-work detection is the default path, not a special case.** Any narrative that
   fails to match an open issue with sufficient confidence lands in the unlinked bucket,
-  whatever stream it came from. Sentinel keys ($PROJECT-0/-1, any prefix) are one weak
-  signal among several.
+  whatever stream it came from. Some workflows substitute a placeholder ticket key to satisfy a
+  commit-message linter when no real ticket applies; `exclude_from_linking` (a list of regex
+  patterns in config, empty by default) tells unjira which ticket-shaped matches are placeholders
+  rather than real links, without discarding the fact that one was seen — an event whose only
+  candidate keys are all excluded still shows up as untracked, annotated with which key was
+  excluded, so it stays visible for later triage instead of vanishing.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.
@@ -113,16 +119,20 @@ data/                  SQLite database lives here (gitignored)
   (spec + similar completed tickets, observed effort, narrative); median is the estimate,
   spread is the confidence. Discovered work is tagged `emergent` so the team can plan with
   `velocity - avg_emergent_points`.
-- **Buy over build, behind our seam.** JiraClient is a facade over atlassian-python-api so
-  the community absorbs Jira API churn; the facade keeps divergence trivial if upstream ever
-  lags. Slack via slack_sdk; GitHub collector via `gh api`. Hand-rolled only where no wheel
-  exists (Claude transcript parser).
+- **Buy over build, behind our seam.** Every remote-system client lives under
+  `internal/clients/<system>` as a thin facade over its upstream SDK — `clients/jira` over
+  go-jira/v2/cloud today, `clients/litellm`/`clients/github`/`clients/slack` as later
+  integrations land — so the community absorbs that API's churn and divergence stays
+  trivial to reconcile. Hand-rolled only where no wheel exists (the Claude transcript
+  parser).
 - **Corrections become rules.** Review-queue edits and rejections are distilled into markdown
   rules under `rules/`, fed forward into correlator and reconciler prompts. Approval history
   drives per-action-type autonomy graduation.
 
 ## Writing a collector
 
-Implement the `Collector` protocol in `src/unjira/collectors/__init__.py`: read your source
-since the last cursor, emit normalized `Event`s, update the cursor. Register it in
-`REGISTRY` and enable it in config. `claude_code.py` is the reference implementation.
+Implement the `Collector` interface in `internal/pipeline/collect.go` (`Name() string`,
+`Collect(s *store.Store, options map[string]any, visit func(events.Event) error) error`):
+read your source since the last cursor, emit normalized `Event`s, update the cursor. Register
+it in `cmd/unjira/main.go`'s `registry` map and enable it in config.
+`internal/collector/claudecode` is the reference implementation.
