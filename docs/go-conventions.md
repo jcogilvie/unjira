@@ -105,6 +105,40 @@ general:
   for a lot of false positives or friction that doesn't match how this codebase is meant to read.
 - `noinlineerr`, `noctx` — inline error handling is idiomatic and readable; explicit context
   threading can be added incrementally where it matters instead of being enforced everywhere.
+- `forbidigo` — bans `fmt.Print*`/`println`; fights the entire purpose of `cmd/unjira`, a CLI
+  whose job is printing to stdout.
+- `gochecknoglobals` — package-level const/var lookup tables (region lists, sentinel numbers,
+  the collector registry, the Kong `cli` struct) are idiomatic Go at package scope, not a smell.
+- `wrapcheck` — wants every returned error wrapped, even ones that already carry full context or
+  come from a well-understood stdlib/interface boundary (`bufio.Scanner.Err`, `sql.Rows.Err`).
+  Our own convention is to wrap at meaningful boundaries with "what were we trying to do" context
+  (see Error handling above), not universally.
+- `gosec` — G404 (weak RNG) fires on `internal/devtools`'s deliberately seedable
+  `math/rand/v2` generator (reproducible test data, not security-sensitive); G304 (file inclusion
+  via variable) fires on every function that reads a user-supplied config/transcript/graph-cache
+  path, which is the entire point of those functions.
+- `nilerr`, `nilnil` — `internal/collector/claudecode` deliberately returns `(nil, nil)` for "no
+  event this session" (missing transcript dir, no user messages, excluded cwd) — a valid,
+  non-error outcome matching the ported Python's `return` / `return None`, not a bug to paper
+  over with an artificial sentinel error.
+- `varnamelen` — wants short-lived loop/handler variables (`w`, `r`, `i`, `ok`, `err`) given
+  longer names; fights Go's own idiom of short names for small-scope variables.
+- `testpackage` — our tests already consistently use `*_test` packages; this adds no signal on
+  top of a convention we already follow.
+- `paralleltest` — the suite is fast (sub-second); the wall-clock win from auditing every test
+  for safe `t.Parallel()` use isn't worth it at this size.
+- `perfsprint` — warns `fmt.Sprintf` is less performant than concatenation/`strconv`; we value
+  readability over an unmeasured performance difference.
+- `tagliatelle`, `tagalign` — enforce camelCase-first JSON tag conventions. unjira's few
+  JSON-tagged structs mirror the original Python/Jira field names (e.g. `status_categories`) for
+  continuity with the ported schema and the live Jira API shape, not a Go-idiomatic API of our
+  own.
+- `wsl`/`wsl_v5` (the same rule, renamed in newer golangci-lint releases; both disabled so an
+  upgrade doesn't silently re-enable it) — see above.
+
+`dupword` stays enabled (it catches real typos); the one legitimate false positive — a test
+string that repeats a token on purpose to exercise dedup logic — is suppressed inline with an
+explained `//nolint:dupword`, not globally disabled.
 
 Formatters: `gofmt` (simplify), `gofumpt`, `goimports`, `gci` with custom import ordering:
 standard library, then third-party, then a blank-line-separated group for unjira's own

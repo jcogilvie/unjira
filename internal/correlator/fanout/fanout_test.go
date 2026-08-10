@@ -43,7 +43,7 @@ func TestNormalizeTitle_RegionSubstringInRealWordIsUntouched(t *testing.T) {
 func TestClusterFanout_TwelveRegionMirrorsCollapseToOneCluster(t *testing.T) {
 	regions := []string{"zrh", "us2", "tky", "syd", "mon", "kor", "fra", "fed", "dub", "corp", "long", "prod"}
 
-	var items []fanout.Item
+	items := make([]fanout.Item, 0, len(regions))
 	for i, region := range regions {
 		number := 678 + i
 		items = append(items, item(number, fmt.Sprintf("Switch shared-infra to managed mode (%s)", region)))

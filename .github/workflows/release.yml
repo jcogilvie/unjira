@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install earthbuild
+        run: curl -fsSL https://www.earthbuild.dev/install.sh | sh
+
+      - name: Build release artifacts
+        run: earthbuild +multiplatform-build --RELEASE_ARTIFACTS=true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: _output/release/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}

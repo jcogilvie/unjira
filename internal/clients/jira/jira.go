@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	jiracloud "github.com/andygrunwald/go-jira/v2/cloud"
 )
@@ -125,10 +126,7 @@ func (c *Client) SearchIssues(jql string, fields []string, limit int, visit func
 	yielded := 0
 
 	for {
-		pageSize := limit - yielded
-		if pageSize > 100 {
-			pageSize = 100
-		}
+		pageSize := min(limit-yielded, 100)
 
 		path := fmt.Sprintf(
 			"rest/api/3/search/jql?jql=%s&fields=%s&maxResults=%d",
@@ -361,12 +359,7 @@ func stringOr(v any, fallback string) string {
 }
 
 func joinComma(ss []string) string {
-	out := ss[0]
-	for _, s := range ss[1:] {
-		out += "," + s
-	}
-
-	return out
+	return strings.Join(ss, ",")
 }
 
 func urlQueryEscape(s string) string {

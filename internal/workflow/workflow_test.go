@@ -15,7 +15,7 @@ import (
 
 func buildGraph() *workflow.Graph {
 	g := workflow.NewGraph()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		g.Observe("To Do", "In Progress")
 		g.Observe("In Progress", "In Review")
 		g.Observe("In Review", "Done")
@@ -65,29 +65,31 @@ func TestMineProject_ObservesStatusesAndTransitions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		switch {
-		case r.URL.Path == "/rest/api/2/project/PROJ/statuses":
-			json.NewEncoder(w).Encode([]map[string]any{
+		// assert, not require/t.Fatalf: this is a handler goroutine, where
+		// FailNow (runtime.Goexit) wouldn't fail the test itself.
+		switch r.URL.Path {
+		case "/rest/api/2/project/PROJ/statuses":
+			assert.NoError(t, json.NewEncoder(w).Encode([]map[string]any{
 				{"statuses": []map[string]any{
 					{"name": "To Do", "statusCategory": map[string]any{"key": "new"}},
 					{"name": "Done", "statusCategory": map[string]any{"key": "done"}},
 				}},
-			})
-		case r.URL.Path == "/rest/api/3/search/jql":
-			json.NewEncoder(w).Encode(map[string]any{
+			}))
+		case "/rest/api/3/search/jql":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 				"issues": []map[string]any{{"key": "PROJ-1"}},
-			})
-		case r.URL.Path == "/rest/api/2/issue/PROJ-1/changelog":
-			json.NewEncoder(w).Encode(map[string]any{
+			}))
+		case "/rest/api/2/issue/PROJ-1/changelog":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 				"isLast": true,
 				"values": []map[string]any{
 					{"items": []map[string]any{
 						{"field": "status", "fromString": "To Do", "toString": "Done"},
 					}},
 				},
-			})
+			}))
 		default:
-			t.Fatalf("unexpected request: %s", r.URL.Path)
+			assert.Fail(t, "unexpected request", r.URL.Path)
 		}
 	}))
 	defer server.Close()

@@ -2,6 +2,7 @@ package claudecode_test
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,9 +47,7 @@ func collect(t *testing.T, root string, options map[string]any) (*store.Store, [
 	t.Cleanup(func() { _ = s.Close() })
 
 	opts := map[string]any{"transcript_root": root}
-	for k, v := range options {
-		opts[k] = v
-	}
+	maps.Copy(opts, options)
 
 	var out []events.Event
 	err = claudecode.New().Collect(s, opts, func(e events.Event) { out = append(out, e) })

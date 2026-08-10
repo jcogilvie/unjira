@@ -15,7 +15,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
@@ -104,7 +104,7 @@ type Store struct {
 // parent directory exists, and applies the schema.
 func Open(dbPath string) (*Store, error) {
 	if dir := filepath.Dir(dbPath); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("creating directory for %s: %w", dbPath, err)
 		}
 	}
@@ -167,7 +167,7 @@ func (s *Store) EventsOn(day time.Time) ([]events.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying events on %s: %w", day.Format("2006-01-02"), err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []events.Event
 	for rows.Next() {
@@ -197,7 +197,7 @@ func (s *Store) EventCountsBySource() ([]SourceCount, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying event counts by source: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []SourceCount
 	for rows.Next() {
@@ -264,7 +264,7 @@ func (s *Store) CursorCounts() ([]CollectorCount, error) {
 	if err != nil {
 		return nil, fmt.Errorf("querying cursor counts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []CollectorCount
 	for rows.Next() {

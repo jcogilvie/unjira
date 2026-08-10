@@ -53,7 +53,7 @@ func Seed(client *jira.Client, projectKey string, count int, opts ...SeedOption)
 
 	keys := make([]string, 0, count)
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		summary := seedSummaries[i%len(seedSummaries)]
 
 		key, err := client.CreateIssue(
@@ -69,7 +69,7 @@ func Seed(client *jira.Client, projectKey string, count int, opts ...SeedOption)
 		keys = append(keys, key)
 
 		transitionCount := o.rng.IntN(4) // 0-3 inclusive
-		for j := 0; j < transitionCount; j++ {
+		for range transitionCount {
 			transitions, err := client.GetTransitions(key)
 			if err != nil {
 				return nil, fmt.Errorf("fetching transitions for %s: %w", key, err)

@@ -13,6 +13,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -140,9 +141,7 @@ func (g *Graph) RareEdges(maxCount int) []Edge {
 // StatusCategories returns a copy of the known status -> category map.
 func (g *Graph) StatusCategories() map[string]string {
 	out := make(map[string]string, len(g.statusCategories))
-	for k, v := range g.statusCategories {
-		out[k] = v
-	}
+	maps.Copy(out, g.statusCategories)
 
 	return out
 }
@@ -206,9 +205,7 @@ func GraphFromMap(data map[string]any) (*Graph, error) {
 	}
 
 	g := NewGraph()
-	for name, category := range parsed.StatusCategories {
-		g.statusCategories[name] = category
-	}
+	maps.Copy(g.statusCategories, parsed.StatusCategories)
 	for _, edge := range parsed.Edges {
 		g.edges[edgeKey{edge.From, edge.To}] = edge.Count
 	}
@@ -220,7 +217,7 @@ func GraphFromMap(data map[string]any) (*Graph, error) {
 // needed.
 func (g *Graph) Save(path string) error {
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("creating directory for %s: %w", path, err)
 		}
 	}
@@ -230,7 +227,7 @@ func (g *Graph) Save(path string) error {
 		return fmt.Errorf("marshaling graph: %w", err)
 	}
 
-	if err := os.WriteFile(path, body, 0o644); err != nil {
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return fmt.Errorf("writing graph to %s: %w", path, err)
 	}
 

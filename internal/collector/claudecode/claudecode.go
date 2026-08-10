@@ -119,84 +119,103 @@ func (c *Collector) Collect(s *store.Store, options map[string]any, visit func(e
 	return nil
 }
 
-func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.Event, error) {
-	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+// sessionMeta is what scanLines accumulates from a transcript's JSONL lines.
+type sessionMeta struct {
+	cwd, gitBranch, firstTS, lastTS string
+	userTexts                       []string
+	orderedKeys                     []string
+}
 
-	var cwd, gitBranch, firstTS, lastTS string
-	var userTexts []string
+// scanLines walks a transcript's lines once, tracking cwd/branch/timestamps,
+// every candidate ticket key (from message text and, later, the branch
+// name), and every user-authored message.
+func scanLines(lines []map[string]any) sessionMeta {
+	var meta sessionMeta
+
 	keys := make(map[string]bool)
-	var orderedKeys []string
-
 	addKey := func(key string) {
 		if !keys[key] {
 			keys[key] = true
-			orderedKeys = append(orderedKeys, key)
+			meta.orderedKeys = append(meta.orderedKeys, key)
 		}
 	}
+
+	for _, line := range lines {
+		if v, _ := line["cwd"].(string); v != "" {
+			meta.cwd = v
+		}
+		if v, _ := line["gitBranch"].(string); v != "" {
+			meta.gitBranch = v
+		}
+		if ts, _ := line["timestamp"].(string); ts != "" {
+			if meta.firstTS == "" {
+				meta.firstTS = ts
+			}
+			meta.lastTS = ts
+		}
+
+		text := messageText(line)
+		if text == "" {
+			continue
+		}
+
+		for _, key := range events.ExtractTicketKeys(text) {
+			addKey(key)
+		}
+		if line["type"] == "user" {
+			meta.userTexts = append(meta.userTexts, text)
+		}
+	}
+
+	if meta.gitBranch != "" {
+		for _, key := range events.ExtractTicketKeys(meta.gitBranch) {
+			addKey(key)
+		}
+	}
+
+	return meta
+}
+
+// sessionSummary renders the one-line human-readable summary for a session.
+func sessionSummary(project string, meta sessionMeta) string {
+	opening := strings.TrimSpace(strings.ReplaceAll(meta.userTexts[0], "\n", " "))
+	if len(opening) > 160 {
+		opening = opening[:157] + "..."
+	}
+
+	branchNote := ""
+	if meta.gitBranch != "" {
+		branchNote = " on branch " + meta.gitBranch
+	}
+
+	return fmt.Sprintf(
+		`Claude Code session in %s%s: %d user messages. Opened with: "%s"`,
+		project, branchNote, len(meta.userTexts), opening,
+	)
+}
+
+func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.Event, error) {
+	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 
 	lines, err := jsonlLines(path)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, line := range lines {
-		if v, _ := line["cwd"].(string); v != "" {
-			cwd = v
-		}
-		if v, _ := line["gitBranch"].(string); v != "" {
-			gitBranch = v
-		}
-		if ts, _ := line["timestamp"].(string); ts != "" {
-			if firstTS == "" {
-				firstTS = ts
-			}
-			lastTS = ts
-		}
+	meta := scanLines(lines)
 
-		text := messageText(line)
-		if text != "" {
-			for _, key := range events.ExtractTicketKeys(text) {
-				addKey(key)
-			}
-			if line["type"] == "user" {
-				userTexts = append(userTexts, text)
-			}
-		}
-	}
-
-	if len(userTexts) == 0 {
+	if len(meta.userTexts) == 0 {
 		return nil, nil
 	}
 
-	if cwd != "" && isExcluded(cwd, excludeCwds) {
+	if meta.cwd != "" && isExcluded(meta.cwd, excludeCwds) {
 		return nil, nil // unjira's own repo etc. — skip to avoid self-reference loops
 	}
 
-	if gitBranch != "" {
-		for _, key := range events.ExtractTicketKeys(gitBranch) {
-			addKey(key)
-		}
-	}
-
 	project := filepath.Base(filepath.Dir(path))
-	if cwd != "" {
-		project = filepath.Base(cwd)
+	if meta.cwd != "" {
+		project = filepath.Base(meta.cwd)
 	}
-
-	opening := strings.TrimSpace(strings.ReplaceAll(userTexts[0], "\n", " "))
-	if len(opening) > 160 {
-		opening = opening[:157] + "..."
-	}
-
-	branchNote := ""
-	if gitBranch != "" {
-		branchNote = " on branch " + gitBranch
-	}
-
-	summary := fmt.Sprintf(
-		`Claude Code session in %s%s: %d user messages. Opened with: "%s"`,
-		project, branchNote, len(userTexts), opening,
-	)
 
 	stat, err := os.Stat(path)
 	if err != nil {
@@ -204,7 +223,7 @@ func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.E
 	}
 
 	occurredAt := mtime
-	if parsed, err := time.Parse(time.RFC3339, strings.Replace(lastTS, "Z", "+00:00", 1)); err == nil {
+	if parsed, err := time.Parse(time.RFC3339, strings.Replace(meta.lastTS, "Z", "+00:00", 1)); err == nil {
 		occurredAt = parsed
 	}
 
@@ -212,14 +231,14 @@ func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.E
 		Name,
 		fmt.Sprintf("%s:%d", sessionID, stat.Size()),
 		occurredAt,
-		summary,
+		sessionSummary(project, meta),
 	)
 	event.Artifacts["session_id"] = sessionID
-	event.Artifacts["cwd"] = cwd
-	event.Artifacts["git_branch"] = gitBranch
-	event.Artifacts["ticket_keys"] = toAnySlice(orderedKeys)
-	event.Artifacts["user_message_count"] = len(userTexts)
-	event.Artifacts["started_at"] = firstTS
+	event.Artifacts["cwd"] = meta.cwd
+	event.Artifacts["git_branch"] = meta.gitBranch
+	event.Artifacts["ticket_keys"] = toAnySlice(meta.orderedKeys)
+	event.Artifacts["user_message_count"] = len(meta.userTexts)
+	event.Artifacts["started_at"] = meta.firstTS
 	event.RawRef = path
 
 	return &event, nil
@@ -230,7 +249,7 @@ func jsonlLines(path string) ([]map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var lines []map[string]any
 	scanner := bufio.NewScanner(f)
@@ -296,9 +315,9 @@ func messageText(line map[string]any) string {
 // trailing separator.
 func normalizeDir(path string) string {
 	expanded := path
-	if strings.HasPrefix(path, "~") {
+	if rest, ok := strings.CutPrefix(path, "~"); ok {
 		if home, err := os.UserHomeDir(); err == nil {
-			expanded = filepath.Join(home, strings.TrimPrefix(path, "~"))
+			expanded = filepath.Join(home, rest)
 		}
 	}
 

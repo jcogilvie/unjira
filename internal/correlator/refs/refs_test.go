@@ -58,7 +58,7 @@ func TestParsePRRefs_OversizedRangeErrorsLoudly(t *testing.T) {
 }
 
 func TestParsePRRefs_OrderPreservingAndDeduplicated(t *testing.T) {
-	ks := keys(t, "repo#5 repo#5 repo#3-4 repo#4")
+	ks := keys(t, "repo#5 repo#5 repo#3-4 repo#4") //nolint:dupword // duplicate ref is the point of this test
 
 	assert.Equal(t, []string{"repo#5", "repo#3", "repo#4"}, ks)
 }

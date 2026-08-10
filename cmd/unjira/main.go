@@ -241,6 +241,15 @@ var cli struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+}
+
+// run holds everything that must close (the store) before main exits, so
+// os.Exit never bypasses a deferred close.
+func run() error {
 	ctx := kong.Parse(&cli,
 		kong.Name("unjira"),
 		kong.Description("A reconciliation agent that keeps Jira in sync with what you actually did."),
@@ -248,23 +257,16 @@ func main() {
 
 	cfg, err := config.Load(cli.Config)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		return err
 	}
 
 	s, err := store.Open(cfg.DBPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		return err
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
-	app := &appContext{config: cfg, store: s}
-
-	if err := ctx.Run(app); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
-	}
+	return ctx.Run(&appContext{config: cfg, store: s})
 }
 
 func joinComma(ss []string) string {

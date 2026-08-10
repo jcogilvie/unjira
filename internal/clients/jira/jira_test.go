@@ -34,11 +34,13 @@ func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	require.NoError(t, json.NewEncoder(w).Encode(body))
+	// assert, not require: this runs inside an httptest handler goroutine,
+	// where require's FailNow (runtime.Goexit) wouldn't fail the test itself.
+	assert.NoError(t, json.NewEncoder(w).Encode(body))
 }
 
 func TestErrorTranslatedToJiraError(t *testing.T) {
-	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusUnauthorized, map[string]any{"errorMessages": []string{"nope"}})
 	})
 
@@ -80,7 +82,7 @@ func TestSearchIssues_PagesWithNextPageToken(t *testing.T) {
 }
 
 func TestSearchIssues_RespectsLimit(t *testing.T) {
-	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, map[string]any{
 			"issues":        []map[string]any{{"key": "P-1"}, {"key": "P-2"}},
 			"nextPageToken": "more",
@@ -99,7 +101,7 @@ func TestSearchIssues_RespectsLimit(t *testing.T) {
 func TestChangelog_PaginatesUntilIsLast(t *testing.T) {
 	var calls int
 
-	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		if calls == 1 {
 			writeJSON(t, w, http.StatusOK, map[string]any{
@@ -134,7 +136,7 @@ func TestChangelog_PaginatesUntilIsLast(t *testing.T) {
 }
 
 func TestProjectStatuses_MergesIssueTypes(t *testing.T) {
-	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, []map[string]any{
 			{"statuses": []map[string]any{
 				{"name": "To Do", "statusCategory": map[string]any{"key": "new"}},
@@ -153,7 +155,7 @@ func TestProjectStatuses_MergesIssueTypes(t *testing.T) {
 }
 
 func TestGetTransitions_ReturnsRawAPIShape(t *testing.T) {
-	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, map[string]any{
 			"transitions": []map[string]any{
 				{"id": "31", "name": "Start", "to": map[string]any{"name": "In Progress"}},
@@ -176,7 +178,9 @@ func TestTransitionIssue_WithFieldsPostsFullPayload(t *testing.T) {
 
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		// assert, not require: require's FailNow only unwinds this handler
+		// goroutine (runtime.Goexit), not the test itself.
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -208,7 +212,7 @@ func TestCreateIssue_PostsProjectSummaryAndType(t *testing.T) {
 	var gotBody map[string]any
 
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody)) // handler goroutine: assert, not require (see writeJSON)
 		writeJSON(t, w, http.StatusCreated, map[string]any{"key": "P-1", "id": "10000"})
 	})
 
@@ -240,7 +244,7 @@ func TestDeleteIssue_CallsDeleteEndpoint(t *testing.T) {
 }
 
 func TestSearchProjects_ReturnsProjectList(t *testing.T) {
-	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, []map[string]any{
 			{"key": "PROJ", "name": "Project One"},
 			{"key": "SCRUM", "name": "Scrum Project"},

@@ -4,39 +4,77 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
-      - run: pytest
+      - name: Install earthbuild
+        run: curl -fsSL https://www.earthbuild.dev/install.sh | sh
+      - run: earthbuild +lint
 
-  # Live integration against the Atlassian dev instance: manual trigger only,
-  # never per-commit — dev-instance rate limits, and the mock-transport tier
-  # covers commits. These tests write to the instance and clean up after
-  # themselves.
-  integration:
-    if: github.event_name == 'workflow_dispatch'
+  unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Install earthbuild
+        run: curl -fsSL https://www.earthbuild.dev/install.sh | sh
+      - run: earthbuild +test
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
         with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-      - run: pytest -m live -v
+          languages: go
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+
+  trivy-scan-fs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          ignore-unfixed: true
+          scan-ref: "."
+          severity: "CRITICAL,HIGH"
+          format: sarif
+          output: trivy-results.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  # Live integration against unjira.atlassian.net, using the repo's existing
+  # UNJIRA_CI_EMAIL/UNJIRA_CI_TOKEN secrets. Required on every PR (unlike the
+  # Python-era job, which was manual-dispatch-only) — GitHub Actions minutes
+  # are free on public repos, so there's no cost reason to gate this behind
+  # a manual trigger on a codebase this new.
+  #
+  # Gated by the "live-jira" environment (Settings > Environments), which
+  # should have required reviewers configured: same-repo PRs run
+  # immediately (the environment auto-approves for the repo owner), fork
+  # PRs pause for a maintainer's approval before secrets are exposed to
+  # them, since fork PRs don't get repo secrets by default on a public repo.
+  integration:
+    runs-on: ubuntu-latest
+    environment: live-jira
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: UNJIRA_LIVE=1 go test -tags=live ./internal/live/...
         env:
-          UNJIRA_LIVE: "1"
           UNJIRA_JIRA_SITE: https://unjira.atlassian.net
           UNJIRA_JIRA_EMAIL: ${{ vars.UNJIRA_CI_EMAIL }}
           UNJIRA_JIRA_TOKEN: ${{ secrets.UNJIRA_CI_TOKEN }}
