@@ -4,9 +4,10 @@
   launchd template for the hourly collect pass (macOS).
 
   Install:
-    1. Replace /PATH/TO/unjira below with the absolute repo path.
-    2. cp ops/com.unjira.collect.plist ~/Library/LaunchAgents/
-    3. launchctl load ~/Library/LaunchAgents/com.unjira.collect.plist
+    1. Build the binary: go build -o unjira ./cmd/unjira
+    2. Replace /PATH/TO/unjira below with the absolute repo path.
+    3. cp ops/com.unjira.collect.plist ~/Library/LaunchAgents/
+    4. launchctl load ~/Library/LaunchAgents/com.unjira.collect.plist
 
   Logs land in the repo's data/ directory (gitignored).
 -->
@@ -18,7 +19,7 @@
     <string>/PATH/TO/unjira</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/PATH/TO/unjira/.venv/bin/unjira</string>
+        <string>/PATH/TO/unjira/unjira</string>
         <string>collect</string>
     </array>
     <key>StartInterval</key>
