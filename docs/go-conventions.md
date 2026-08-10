@@ -169,6 +169,11 @@ run it before opening a PR, the same way the Python phase-0 code expected `pytes
 Earthfiles give reproducible, cacheable builds across contributors' machines and CI without a
 separate Dockerfile-plus-Makefile pairing to keep in sync.
 
+The CLI binary installed by earthbuild's install script (and used in CI) is named `earth`, not
+`earthbuild` — the project name and the executable name differ. Locally, `earthly` (the upstream
+project earthbuild forked from) is also fine as-is since the two are Earthfile-syntax-compatible;
+just be consistent with whichever binary is actually on `PATH`.
+
 ## Module path
 
 New Go module path: `github.com/jcogilvie/unjira` (matches the existing GitHub remote). This

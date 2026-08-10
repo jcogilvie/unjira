@@ -19,7 +19,7 @@ jobs:
         run: curl -fsSL https://www.earthbuild.dev/install.sh | sh
 
       - name: Build release artifacts
-        run: earthbuild +multiplatform-build --RELEASE_ARTIFACTS=true
+        run: earth +multiplatform-build --RELEASE_ARTIFACTS=true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
