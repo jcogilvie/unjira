@@ -142,6 +142,20 @@ data/                   SQLite database lives here (gitignored)
 - **Corrections become rules.** Review-queue edits and rejections are distilled into markdown
   rules under `rules/`, fed forward into correlator and reconciler prompts. Approval history
   drives per-action-type autonomy graduation.
+- **Pluggable apply-target backend, decided before phase 1 needs it.** `internal/tasktracker`
+  defines a backend-agnostic `TaskTracker` interface (`GetIssue`, `SearchIssues`, `AddComment`,
+  `SetStatus`, `CreateIssue`); `clients/jira.Tracker` and `clients/local.Tracker` both implement
+  it today, config-selected via `tracker.backend`. The local backend lets unjira run with no real
+  tracker reachable (e.g. a hosted control plane with no Jira auth) while still deriving value
+  from event clustering, persisting its own issue state locally. `SetStatus` is deliberately
+  categorical (todo/in_progress/done), not Jira's named-transition model, since GitHub Issues —
+  a real future backend — has only open/closed. Workflow-graph mining is a separate
+  `workflow.GraphProvider` capability (type-asserted, not part of `TaskTracker`), since only
+  backends with an admin-configurable workflow to mine (Jira) need it. `Config.Jira` is a list of
+  named connections, not a single global site, so one project set can span more than one Jira
+  instance (a migration, an acquisition); credentials come from one JSON-blob env var
+  (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
+  connection count.
 
 ## Writing a collector
 

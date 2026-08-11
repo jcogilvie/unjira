@@ -46,9 +46,34 @@
   the event log — not a replacement for it, and not a phase-0 concern. See the "SQLite for the
   event log; no stored procedures" bullet in README.md's Design decisions, and Task #29.
 
+- **Resolved: Task #27 (pluggable task-tracking backends).** New
+  `internal/tasktracker.TaskTracker` interface (`GetIssue`, `SearchIssues`, `AddComment`,
+  `SetStatus`, `CreateIssue` — no `estimate` method, since estimates are unjira's own derived
+  data, never a native tracker field). Two implementations exist from day one, not just Jira: a
+  Jira adapter (`internal/clients/jira.Tracker`, wrapping the existing `Client` with API-shape
+  normalization) and a fully local backend (`internal/clients/local.Tracker`, backed by new
+  `local_issues`/`local_issue_comments` tables in `internal/store`) for running with no real
+  tracker reachable — e.g. a hosted control plane with no Jira auth. A second, non-Jira
+  implementation existing before any phase-1 caller is what proves the interface abstraction
+  generalizes rather than being Jira-shaped in disguise. `SetStatus` is deliberately categorical
+  (`StatusTodo`/`InProgress`/`Done`), not Jira's named-transition model, since GitHub Issues (a
+  real future backend, already used elsewhere) has only open/closed. Workflow-graph mining stays
+  a separate `workflow.GraphProvider` capability (type-asserted, not part of `TaskTracker`) since
+  GitHub/local have no changelog to mine — Jira's implementation wraps the existing
+  `workflow.MineProject`; local's is a hardcoded static 3-node graph.
+  `config.Jira` also became `[]JiraConnection` (was a single global site) so one project set can
+  span multiple Jira instances (migration/acquisition scenario) — collector and tracker resolve a
+  connection by project key via `JiraConnectionForProject`. Credentials moved from two bare env
+  vars to one JSON-blob env var (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) — verified
+  empirically that this requires a named struct wrapping the map with an explicit `UnmarshalJSON`,
+  not a bare `map[string]T`, since Kong's env decoding falls back to its own `key=value;...`
+  map decoder for anything not satisfying `json.Unmarshaler` by type. New `TrackerConfig.
+  DefaultProject` + `Config.DefaultProjectConnection()` answer "where does a brand-new issue land
+  with no other routing signal" — smart routing is deferred reconciler work, this is just the
+  configured floor. See the design doc this was implemented from: plan file referenced in this
+  session's TDD steps (15 total, each red-green committed independently across 4 commits).
+
 ## Deferred (post-port; do not start without user confirmation)
-- Task #27: pluggable task-tracking backends (Jira/Trello/none) + running clustering against an
-  arbitrary subset of enabled event streams — phase-1+ design, unstarted.
 - Task #29: evaluate a vector index (e.g. sqlite-vec) for the phase-1 correlator's narrative-to-
   issue semantic matching — surface during phase-1 design, not before.
 
