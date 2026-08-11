@@ -99,6 +99,16 @@ small `tidwall` JSON packages, no AWS/Azure weight — confirmed with a throwawa
 against a minimal program, same verification method used for the earlier (superseded) Anthropic
 SDK check.
 
+Config also carries `Model string` and `ContextWindowTokens int` — **required**, not defaulted or
+looked up. Not every OpenAI-compatible endpoint's model has the same context-window size, and
+there's no reliable way to query it generically across gateways; a maintained
+model-name→context-window lookup table would need constant upkeep and would fail *silently
+wrong* for any model we hadn't added yet (the exact "erroring loudly" invariant this design
+already leans on elsewhere). Requiring it explicitly means an unrecognized/misconfigured model is
+a loud config error at startup, not a silent overflow risk at run time. `config/unjira.example.json`
+gets a populated, working value for a known model so day-one setup isn't "go look this number
+up" — see Data flow below for how it's consumed.
+
 *Why OpenAI-shaped Chat Completions, not Anthropic's Messages API, despite this environment's own
 `ANTHROPIC_BASE_URL`:* that env var is Claude Code's own interactive-session config, pointing at
 this org's specific litellm deployment — coupling unjira (a separate, unattended background
@@ -125,11 +135,36 @@ narrative-clustering unit, split into compute and persist:
   would starve the model of exactly what makes clustering correct). Prompts the model to cluster
   this combined set, each resulting cluster tagged `new` or `extends <narrative_id>` based on
   whether it contains any already-narrated events. Returns in-memory results — no store access.
+  **Context-budget overflow (input side):** before calling the LLM, estimate the assembled
+  context's token count against `config.LLM.ContextWindowTokens` (a fixed characters-per-token
+  approximation is enough for a pre-flight check; exactness isn't needed, only a conservative
+  margin). If it doesn't fit, split `window` by time (matching design-notes #9's already-locked
+  "page by time, never silently drop" rule for exactly this failure shape — the same mechanism,
+  applied here for the first time to narrative context rather than collector scan windows) and
+  recurse on each half, merging the resulting narratives afterward. If a single, minimal
+  irreducible unit — one event plus one existing narrative's summary — still doesn't fit even at
+  the smallest possible split, that's the same "error loudly rather than silently truncate" floor:
+  return an error naming the offending narrative/event rather than dropping content to force a
+  fit. **Context-budget overflow (cumulative side):** see `Persist`'s tail-summarization step
+  below — a long-running narrative's own accreted history is a distinct overflow source from a
+  too-wide *window*, and needs a different fix (compaction, not splitting).
 - `Persist(store, results []ClusterResult) ([]Narrative, error)` — writes: for `extends`, updates
   the existing row (extends `window_end`, adds new `narrative_events` rows, rewrites `summary` to
   the now-larger cumulative story); for `new`, inserts a fresh row. Returns the narratives
   touched this run (both extended and new) — not the whole table. Skipped entirely under
-  `--dry-run`.
+  `--dry-run`. **Cumulative overflow (tail summarization):** after extending a narrative, if its
+  full linked-event history (as `Cluster` would assemble it next run) crosses
+  `config.Correlator.TailSummarizeThresholdTokens`, compact everything older than a configured
+  recent cutoff (`config.Correlator.RecentEventsKept`, a count, not a duration — a fixed number of
+  the most recent events, so this is well-defined regardless of event density) into a shorter
+  recap via one LLM call, storing that recap as `narratives.summary`'s older-history prefix.
+  Full event rows in `narrative_events` are **never deleted** — only what's fed into future
+  `Cluster` context calls is compacted; the actual event log stays intact, so nothing is
+  irrecoverably lost even though a future clustering pass sees a summarized version of the old
+  tail rather than every raw event. This is a real, scrutinized lossy step (a recap could omit
+  something a future correction needs), not a default to take lightly — first-slice
+  implementation should log every compaction it performs (which events, into what recap) so it's
+  auditable, not silent.
 
 **`internal/reconciler`** (new package) — turns each touched narrative into a proposed action,
 same compute/persist split:
@@ -174,6 +209,11 @@ session — not deferred to the next `watch` tick. This is separate from `learn`
 
 ## Data flow: schema additions
 
+- **Config**: `config.LLM.{Model, ContextWindowTokens}` (both required — see the
+  `internal/clients/openai` component above for why these aren't looked up or defaulted) plus
+  `config.Correlator.{TailSummarizeThresholdTokens, RecentEventsKept}` (see the `Cluster`/`Persist`
+  overflow handling above). `config/unjira.example.json` ships populated, working values for a
+  known model so setup doesn't require looking these numbers up cold.
 - **`actions.feedback TEXT`** (new column) — the reviewer's free-text correction on
   reject/edit, persisted regardless of whether it later becomes a rule. Read by both the
   in-`triage` rework loop (immediately) and `rules.Distill` (later, batched).
@@ -210,6 +250,11 @@ session — not deferred to the next `watch` tick. This is separate from `learn`
   `Cluster`/`Reconcile`/`Distill`: wrapped and surfaced loudly, never silently truncated —
   `watch` aborts the current pass and retries on the next scheduled invocation rather than
   persisting a partial/corrupt clustering.
+- **Context-budget overflow**: see `Cluster`'s split-by-time-and-merge (window too wide) and
+  `Persist`'s tail-summarization (one narrative's own history too large) above. Both are bounded
+  operations with an explicit floor: if a minimal irreducible unit still doesn't fit, that's a
+  loud error, never a silent drop — the same invariant as every other overflow case in this
+  design.
 - **`TaskTracker` write failures during auto-commit**: `status` flips to `failed` (already in
   the documented status enum), surfaced by `triage` alongside `proposed` actions — a human sees
   write failures, not just pending decisions.
@@ -229,6 +274,14 @@ live-network in the offline suite):
   interface (consumer-owned, mirroring the `projectMiner` pattern in `internal/workflow`) — tests
   supply canned model responses and assert on returned structs, no store needed. Separate tests
   cover the extend-vs-new decision and the overlap/adjacency window-selection logic in isolation.
+  Overflow-specific tests: a table-driven case asserting the split point given a configured
+  `ContextWindowTokens` and an oversized synthetic input (assert the fake `llmClient` is called
+  once per split, not once for the whole window); a case asserting a single irreducible
+  over-budget unit returns a loud error, not a truncated call. `Persist`'s tail-summarization gets
+  its own tests: crossing `TailSummarizeThresholdTokens` triggers exactly one compaction call
+  keeping `RecentEventsKept` events verbatim; `narrative_events` rows are asserted to remain
+  present in the store after compaction (never deleted), only the *context assembled for the next
+  `Cluster` call* is shorter.
 - `internal/reconciler`: fake `tasktracker.TaskTracker` (interface already exists) supplies
   canned `GetIssue` responses; tests assert delta computation and action drafting independent of
   whether the LLM call is faked or real.
@@ -252,12 +305,16 @@ live-network in the offline suite):
 Each slice is implemented, then real usage feeds back into design revisions before the next
 slice starts — this is not a fixed waterfall plan.
 
-1. **`internal/clients/openai`** — facade + tests, no callers yet.
+1. **`internal/clients/openai`** — facade + tests, no callers yet. Includes `config.LLM.
+   {Model, ContextWindowTokens}` and the populated `config/unjira.example.json` values.
 2. **`internal/correlator`** (compute only) — `Cluster` against `claude_code` events, unit-tested
-   with a fake LLM client. No persistence, no CLI command yet.
+   with a fake LLM client, including the split-by-time-and-merge overflow path (needed from this
+   slice on — it's part of `Cluster`'s own contract, not an add-on). No persistence, no CLI
+   command yet.
 3. **Persistence + `narrate` groundwork** — `Persist`, the extend-vs-new logic against real
-   `narratives`/`narrative_events` rows, the lease lock (needed even for a single-command first
-   cut, since crash-recovery correctness shouldn't be deferred).
+   `narratives`/`narrative_events` rows, tail-summarization overflow handling (`config.Correlator.
+   {TailSummarizeThresholdTokens, RecentEventsKept}`), the lease lock (needed even for a
+   single-command first cut, since crash-recovery correctness shouldn't be deferred).
 4. **`internal/reconciler`** (compute + persist) — delta computation, verification via
    `TaskTracker`, action drafting. Unit-tested with fake trackers.
 5. **Auto-commit gate + `watch`** — wires collect → correlator → reconciler → gate into one
