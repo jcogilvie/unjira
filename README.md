@@ -119,6 +119,20 @@ data/                   SQLite database lives here (gitignored)
   (spec + similar completed tickets, observed effort, narrative); median is the estimate,
   spread is the confidence. Discovered work is tagged `emergent` so the team can plan with
   `velocity - avg_emergent_points`.
+- **SQLite for the event log; no stored procedures.** unjira is a single Go binary against a
+  local, single-writer SQLite file — never a networked multi-client RDBMS. The two usual reasons
+  to reach for stored procedures (blocking SQL injection from ad-hoc queries; giving many
+  consumers one enforced, network-round-trip-saving interface) don't transfer here:
+  parameterized queries already close the injection angle, and `internal/store` is already the
+  single mandatory door every write goes through — enforced in Go, not SQL, which keeps it
+  testable and doesn't require SQLite's procedural-language support (there isn't much). The
+  schema is genuinely relational (narratives reference many events; actions reference a
+  narrative) — a document store would mean denormalizing the exact join-shaped queries phase 1
+  needs most. A dedicated graph DB isn't warranted either: `internal/workflow`'s status-transition
+  graph is small (dozens of nodes) and needs only BFS shortest-path, not complex multi-hop
+  traversal at scale. A vector store *is* a real future need — for the phase-1 correlator
+  matching narratives to open issues by meaning, not exact key — but that's an index alongside
+  the event log, not a replacement for it.
 - **Buy over build, behind our seam.** Every remote-system client lives under
   `internal/clients/<system>` as a thin facade over its upstream SDK — `clients/jira` over
   go-jira/v2/cloud today, `clients/litellm`/`clients/github`/`clients/slack` as later
@@ -128,6 +142,20 @@ data/                   SQLite database lives here (gitignored)
 - **Corrections become rules.** Review-queue edits and rejections are distilled into markdown
   rules under `rules/`, fed forward into correlator and reconciler prompts. Approval history
   drives per-action-type autonomy graduation.
+- **Pluggable apply-target backend, decided before phase 1 needs it.** `internal/tasktracker`
+  defines a backend-agnostic `TaskTracker` interface (`GetIssue`, `SearchIssues`, `AddComment`,
+  `SetStatus`, `CreateIssue`); `clients/jira.Tracker` and `clients/local.Tracker` both implement
+  it today, config-selected via `tracker.backend`. The local backend lets unjira run with no real
+  tracker reachable (e.g. a hosted control plane with no Jira auth) while still deriving value
+  from event clustering, persisting its own issue state locally. `SetStatus` is deliberately
+  categorical (todo/in_progress/done), not Jira's named-transition model, since GitHub Issues —
+  a real future backend — has only open/closed. Workflow-graph mining is a separate
+  `workflow.GraphProvider` capability (type-asserted, not part of `TaskTracker`), since only
+  backends with an admin-configurable workflow to mine (Jira) need it. `Config.Jira` is a list of
+  named connections, not a single global site, so one project set can span more than one Jira
+  instance (a migration, an acquisition); credentials come from one JSON-blob env var
+  (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
+  connection count.
 
 ## Writing a collector
 

@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	jiracloud "github.com/andygrunwald/go-jira/v2/cloud"
+
+	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
 // SeedLabel marks issues created by unjira's dev seed tooling.
@@ -204,22 +206,15 @@ func (c *Client) GetChangelog(key string) ([]map[string]any, error) {
 	}
 }
 
-// StatusChange is a single (from, to) status transition observed in an
-// issue's changelog.
-type StatusChange struct {
-	From string
-	To   string
-}
-
 // StatusChanges returns the (from, to) status pairs from an issue's
 // changelog, oldest first.
-func (c *Client) StatusChanges(key string) ([]StatusChange, error) {
+func (c *Client) StatusChanges(key string) ([]workflow.StatusChange, error) {
 	entries, err := c.GetChangelog(key)
 	if err != nil {
 		return nil, err
 	}
 
-	var changes []StatusChange
+	var changes []workflow.StatusChange
 	for _, entry := range entries {
 		items, _ := entry["items"].([]any)
 		for _, rawItem := range items {
@@ -227,7 +222,7 @@ func (c *Client) StatusChanges(key string) ([]StatusChange, error) {
 			if !ok || item["field"] != "status" {
 				continue
 			}
-			changes = append(changes, StatusChange{
+			changes = append(changes, workflow.StatusChange{
 				From: stringOr(item["fromString"], "?"),
 				To:   stringOr(item["toString"], "?"),
 			})
