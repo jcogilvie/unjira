@@ -13,6 +13,9 @@
 package openai
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
@@ -32,4 +35,25 @@ func New(baseURL, apiKey, model string) *Client {
 	)
 
 	return &Client{upstream: upstream, model: model}
+}
+
+// Complete sends one non-streaming, single-turn chat completion request and
+// returns the assistant's reply text.
+func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	resp, err := c.upstream.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: c.model,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.SystemMessage(systemPrompt),
+			openai.UserMessage(userPrompt),
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("completing chat prompt: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("completing chat prompt: response had no choices")
+	}
+
+	return resp.Choices[0].Message.Content, nil
 }
