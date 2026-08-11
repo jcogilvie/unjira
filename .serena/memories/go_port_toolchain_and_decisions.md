@@ -34,11 +34,23 @@
   indistinguishable from a plain no-match event. See
   `.requirements/20260810T210148Z_configurable_link_exclusion_patterns/REQUIREMENTS.md`.
 
+- **Resolved: Task #26 (datastore choice).** SQLite stays for the event log; no stored
+  procedures. Neither of stored procs' usual rationales transfers to unjira's shape (single Go
+  binary, single-writer, embedded, local file, no network hop): parameterized queries already
+  block injection, and `internal/store` is already the one enforced door every write goes
+  through — enforced in Go, not SQL. Document store rejected — the schema is genuinely
+  relational (narratives→events, actions→narratives are join-shaped queries phase 1 needs most).
+  Dedicated graph DB rejected for `internal/workflow`'s transition graph — small, BFS-only, no
+  complex multi-hop traversal need. Vector store flagged as a real *future* need, but for the
+  phase-1 correlator's narrative-to-issue semantic matching specifically, as an index alongside
+  the event log — not a replacement for it, and not a phase-0 concern. See the "SQLite for the
+  event log; no stored procedures" bullet in README.md's Design decisions, and Task #29.
+
 ## Deferred (post-port; do not start without user confirmation)
-- Task #26: datastore choice (SQLite/RDBMS vs. document store, ACID necessity, stored procedures
-  vs. app-crafted queries) — open architecture question raised by the user, unstarted.
 - Task #27: pluggable task-tracking backends (Jira/Trello/none) + running clustering against an
   arbitrary subset of enabled event streams — phase-1+ design, unstarted.
+- Task #29: evaluate a vector index (e.g. sqlite-vec) for the phase-1 correlator's narrative-to-
+  issue semantic matching — surface during phase-1 design, not before.
 
 See `docs/superpowers/specs/2026-08-07-go-port-design.md` and `docs/go-conventions.md` for the
 full port plan and Go conventions. `.requirements/20260807T185557Z_go_module_bootstrap_and_events/`

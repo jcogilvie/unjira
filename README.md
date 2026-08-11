@@ -119,6 +119,20 @@ data/                   SQLite database lives here (gitignored)
   (spec + similar completed tickets, observed effort, narrative); median is the estimate,
   spread is the confidence. Discovered work is tagged `emergent` so the team can plan with
   `velocity - avg_emergent_points`.
+- **SQLite for the event log; no stored procedures.** unjira is a single Go binary against a
+  local, single-writer SQLite file — never a networked multi-client RDBMS. The two usual reasons
+  to reach for stored procedures (blocking SQL injection from ad-hoc queries; giving many
+  consumers one enforced, network-round-trip-saving interface) don't transfer here:
+  parameterized queries already close the injection angle, and `internal/store` is already the
+  single mandatory door every write goes through — enforced in Go, not SQL, which keeps it
+  testable and doesn't require SQLite's procedural-language support (there isn't much). The
+  schema is genuinely relational (narratives reference many events; actions reference a
+  narrative) — a document store would mean denormalizing the exact join-shaped queries phase 1
+  needs most. A dedicated graph DB isn't warranted either: `internal/workflow`'s status-transition
+  graph is small (dozens of nodes) and needs only BFS shortest-path, not complex multi-hop
+  traversal at scale. A vector store *is* a real future need — for the phase-1 correlator
+  matching narratives to open issues by meaning, not exact key — but that's an index alongside
+  the event log, not a replacement for it.
 - **Buy over build, behind our seam.** Every remote-system client lives under
   `internal/clients/<system>` as a thin facade over its upstream SDK — `clients/jira` over
   go-jira/v2/cloud today, `clients/litellm`/`clients/github`/`clients/slack` as later
