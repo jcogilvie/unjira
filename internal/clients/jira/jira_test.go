@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/jcogilvie/unjira/internal/clients/jira"
+	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) *jira.Client {
@@ -129,7 +130,7 @@ func TestChangelog_PaginatesUntilIsLast(t *testing.T) {
 	changes, err := client.StatusChanges("P-1")
 
 	require.NoError(t, err)
-	assert.Equal(t, []jira.StatusChange{
+	assert.Equal(t, []workflow.StatusChange{
 		{From: "To Do", To: "Doing"},
 		{From: "Doing", To: "Done"},
 	}, changes)

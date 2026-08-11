@@ -17,13 +17,22 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-
-	"github.com/jcogilvie/unjira/internal/clients/jira"
 )
 
 // edgeKey identifies a directed transition between two statuses.
 type edgeKey struct {
 	From, To string
+}
+
+// StatusChange is a single (from, to) status transition observed in an
+// issue's changelog. Lives here (not in a backend-specific client package)
+// because it's a workflow-mining concept, not a Jira-specific one, and it
+// lets projectMiner below stay free of any clients/ import — keeping the
+// dependency direction strictly clients/jira -> workflow, never the
+// reverse (jira.Tracker.WorkflowGraph needs *workflow.Graph).
+type StatusChange struct {
+	From string
+	To   string
 }
 
 // Graph is an observed workflow graph: statuses with categories, and
@@ -249,12 +258,41 @@ func Load(path string) (*Graph, error) {
 	return GraphFromMap(data)
 }
 
+// GraphProvider is an optional TaskTracker capability: backends whose
+// workflow model has a real transition graph to give (Jira's is genuinely
+// mined from changelog history, since its workflows are admin-configurable
+// with no static answer) implement this so callers can get a *Graph however
+// that backend produces one — GitHub Issues would hardcode a static
+// open/closed graph, the local backend hardcodes a static three-category
+// graph (see internal/clients/local). Not part of tasktracker.TaskTracker
+// itself: it lives here, next to Graph, and callers type-assert for it
+// (`if p, ok := tracker.(workflow.GraphProvider); ok { ... }`) rather than
+// every TaskTracker implementation being forced to have an opinion on
+// workflow graphs.
+type GraphProvider interface {
+	WorkflowGraph(projectOrRepo string) (*Graph, error)
+}
+
+// projectMiner is the Jira-shaped mining capability MineProject needs — a
+// consumer-owned interface (Go idiom) rather than a concrete *jira.Client,
+// so a fake can exercise MineProject in tests without a real HTTP server.
+// *jira.Client already satisfies this. Not a candidate for
+// tasktracker.TaskTracker: no other backend (GitHub Issues, the local
+// tracker) has a changelog to mine into this shape — see
+// jira.Tracker.WorkflowGraph, which calls MineProject internally and is
+// itself the tasktracker-facing capability.
+type projectMiner interface {
+	ProjectStatuses(projectKey string) (map[string]string, error)
+	SearchIssues(jql string, fields []string, limit int, visit func(map[string]any)) error
+	StatusChanges(key string) ([]StatusChange, error)
+}
+
 // MineProject reconstructs the used workflow subgraph from recent issue
 // changelogs.
 //
 // The same changelog fetch later feeds estimation calibration — keep the two
 // consumers on one code path when that lands.
-func MineProject(client *jira.Client, projectKey string, maxIssues int) (*Graph, error) {
+func MineProject(client projectMiner, projectKey string, maxIssues int) (*Graph, error) {
 	g := NewGraph()
 
 	statuses, err := client.ProjectStatuses(projectKey)

@@ -122,3 +122,18 @@ func TestTracker_SearchIssues_SubstringMatchesSubset(t *testing.T) {
 	require.Len(t, issues, 1)
 	assert.Equal(t, "Fix the bug", issues[0].Summary)
 }
+
+func TestTracker_WorkflowGraph_ReturnsStaticThreeCategoryGraph(t *testing.T) {
+	tr := openTracker(t)
+
+	graph, err := tr.WorkflowGraph("PROJ")
+
+	require.NoError(t, err)
+	assert.True(t, graph.HasEdge("To Do", "In Progress"))
+	assert.True(t, graph.HasEdge("In Progress", "Done"))
+	assert.Equal(t, map[string]string{
+		"To Do":       "todo",
+		"In Progress": "in_progress",
+		"Done":        "done",
+	}, graph.StatusCategories())
+}

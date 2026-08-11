@@ -103,3 +103,43 @@ func TestMineProject_ObservesStatusesAndTransitions(t *testing.T) {
 	assert.Equal(t, map[string]string{"To Do": "new", "Done": "done"}, graph.StatusCategories())
 	assert.True(t, graph.HasEdge("To Do", "Done"))
 }
+
+// fakeMiner satisfies workflow's projectMiner interface without being a
+// *jira.Client, proving MineProject's signature actually decoupled from the
+// concrete type rather than just compiling against it by coincidence.
+type fakeMiner struct {
+	statuses map[string]string
+	issues   []map[string]any
+	changes  map[string][]workflow.StatusChange
+}
+
+func (f *fakeMiner) ProjectStatuses(_ string) (map[string]string, error) {
+	return f.statuses, nil
+}
+
+func (f *fakeMiner) SearchIssues(_ string, _ []string, _ int, visit func(map[string]any)) error {
+	for _, issue := range f.issues {
+		visit(issue)
+	}
+	return nil
+}
+
+func (f *fakeMiner) StatusChanges(key string) ([]workflow.StatusChange, error) {
+	return f.changes[key], nil
+}
+
+func TestMineProject_AcceptsNonJiraMiner(t *testing.T) {
+	miner := &fakeMiner{
+		statuses: map[string]string{"To Do": "new", "Done": "done"},
+		issues:   []map[string]any{{"key": "PROJ-1"}},
+		changes: map[string][]workflow.StatusChange{
+			"PROJ-1": {{From: "To Do", To: "Done"}},
+		},
+	}
+
+	graph, err := workflow.MineProject(miner, "PROJ", 50)
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"To Do": "new", "Done": "done"}, graph.StatusCategories())
+	assert.True(t, graph.HasEdge("To Do", "Done"))
+}

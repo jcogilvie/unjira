@@ -9,6 +9,7 @@ import (
 
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
+	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
 // Tracker implements tasktracker.TaskTracker against a *store.Store.
@@ -16,7 +17,10 @@ type Tracker struct {
 	store *store.Store
 }
 
-var _ tasktracker.TaskTracker = (*Tracker)(nil)
+var (
+	_ tasktracker.TaskTracker = (*Tracker)(nil)
+	_ workflow.GraphProvider  = (*Tracker)(nil)
+)
 
 // New returns a Tracker backed by s.
 func New(s *store.Store) *Tracker {
@@ -76,6 +80,21 @@ func (t *Tracker) SearchIssues(query string, limit int) ([]tasktracker.Issue, er
 	}
 
 	return out, nil
+}
+
+// WorkflowGraph returns a hardcoded, static todo -> in_progress -> done
+// graph — no store lookup, no mining. The local backend has no admin-
+// configurable workflow to mine; this is the same static-graph disposition
+// GitHub Issues' open/closed model would take.
+func (t *Tracker) WorkflowGraph(_ string) (*workflow.Graph, error) {
+	g := workflow.NewGraph()
+	g.AddStatus("To Do", string(tasktracker.StatusTodo))
+	g.AddStatus("In Progress", string(tasktracker.StatusInProgress))
+	g.AddStatus("Done", string(tasktracker.StatusDone))
+	g.Observe("To Do", "In Progress")
+	g.Observe("In Progress", "Done")
+
+	return g, nil
 }
 
 func toIssue(issue store.LocalIssue) tasktracker.Issue {

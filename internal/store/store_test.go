@@ -1,7 +1,6 @@
 package store_test
 
 import (
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -122,7 +121,7 @@ func TestGetLocalIssue_MissingReturnsErrLocalIssueNotFound(t *testing.T) {
 	_, err := s.GetLocalIssue("PROJ-1")
 
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, store.ErrLocalIssueNotFound))
+	assert.ErrorIs(t, err, store.ErrLocalIssueNotFound)
 }
 
 func TestInsertLocalIssue_AssignsSequentialKeyPerProject(t *testing.T) {
@@ -159,7 +158,7 @@ func TestSetLocalIssueStatus_MissingReturnsErrLocalIssueNotFound(t *testing.T) {
 	err := s.SetLocalIssueStatus("PROJ-1", "done")
 
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, store.ErrLocalIssueNotFound))
+	assert.ErrorIs(t, err, store.ErrLocalIssueNotFound)
 }
 
 func TestInsertLocalIssueComment_LocalIssueComments_RoundTrips(t *testing.T) {
@@ -181,7 +180,7 @@ func TestInsertLocalIssueComment_MissingReturnsErrLocalIssueNotFound(t *testing.
 	err := s.InsertLocalIssueComment("PROJ-1", "a comment")
 
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, store.ErrLocalIssueNotFound))
+	assert.ErrorIs(t, err, store.ErrLocalIssueNotFound)
 }
 
 func TestSearchLocalIssues_NoQueryReturnsAll(t *testing.T) {

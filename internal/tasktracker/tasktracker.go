@@ -12,6 +12,7 @@ package tasktracker
 // across backends.
 type StatusCategory string
 
+// The three normalized status categories every backend maps into.
 const (
 	StatusTodo       StatusCategory = "todo"
 	StatusInProgress StatusCategory = "in_progress"
