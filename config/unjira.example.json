@@ -24,5 +24,9 @@
     }
   },
   "exclude_from_linking": ["-0$", "-1$"],
+  "tracker": {
+    "backend": "jira",
+    "default_project": "PROJ"
+  },
   "db_path": "data/unjira.db"
 }

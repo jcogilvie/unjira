@@ -12,11 +12,13 @@ import (
 	"github.com/alecthomas/kong"
 
 	"github.com/jcogilvie/unjira/internal/clients/jira"
+	"github.com/jcogilvie/unjira/internal/clients/local"
 	"github.com/jcogilvie/unjira/internal/collector/claudecode"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/devtools"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
@@ -78,6 +80,25 @@ func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, erro
 	}
 
 	return jira.New(conn.Site, creds.Email, creds.Token)
+}
+
+// taskTracker resolves the configured tracker backend for projectKey. No
+// command calls this yet (no phase-1 commands exist) — it's the seam
+// phase-1's future commands hang off of.
+func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, error) {
+	switch a.config.TrackerBackend() {
+	case "jira":
+		client, err := a.jiraClientForProject(projectKey)
+		if err != nil {
+			return nil, err
+		}
+
+		return jira.NewTracker(client), nil
+	case "local":
+		return local.New(a.store), nil
+	default:
+		return nil, fmt.Errorf("unknown tracker backend %q", a.config.Tracker.Backend)
+	}
 }
 
 // projectKey resolves --project, falling back to the first configured

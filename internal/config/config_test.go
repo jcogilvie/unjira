@@ -131,6 +131,68 @@ func TestCompiledLinkExclusions_BadPatternErrorsWithPatternNamed(t *testing.T) {
 	assert.Contains(t, err.Error(), "(")
 }
 
+func TestTrackerBackend_DefaultsToJira(t *testing.T) {
+	cfg := config.Config{}
+
+	assert.Equal(t, "jira", cfg.TrackerBackend())
+}
+
+func TestTrackerBackend_ExplicitBackendWins(t *testing.T) {
+	cfg := config.Config{Tracker: config.TrackerConfig{Backend: "local"}}
+
+	assert.Equal(t, "local", cfg.TrackerBackend())
+}
+
+func TestLoad_ParsesTrackerBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"tracker": {"backend": "local", "default_project": "PROJ"}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, "local", cfg.TrackerBackend())
+	assert.Equal(t, "PROJ", cfg.Tracker.DefaultProject)
+}
+
+func TestDefaultProjectConnection_UnsetErrors(t *testing.T) {
+	cfg := config.Config{}
+
+	_, err := cfg.DefaultProjectConnection()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default_project")
+}
+
+func TestDefaultProjectConnection_SetButUncoveredErrors(t *testing.T) {
+	cfg := config.Config{
+		Tracker: config.TrackerConfig{DefaultProject: "GHOST"},
+		Jira: []config.JiraConnection{
+			{Name: "default", Site: "https://yourorg.atlassian.net", ProjectKeys: []string{"PROJ"}},
+		},
+	}
+
+	_, err := cfg.DefaultProjectConnection()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GHOST")
+}
+
+func TestDefaultProjectConnection_SetAndCoveredReturnsConnection(t *testing.T) {
+	cfg := config.Config{
+		Tracker: config.TrackerConfig{DefaultProject: "PROJ"},
+		Jira: []config.JiraConnection{
+			{Name: "default", Site: "https://yourorg.atlassian.net", ProjectKeys: []string{"PROJ"}},
+		},
+	}
+
+	conn, err := cfg.DefaultProjectConnection()
+
+	require.NoError(t, err)
+	assert.Equal(t, "default", conn.Name)
+}
+
 func TestDefaultConfig_HasClaudeCodeEnabledByDefault(t *testing.T) {
 	cfg := config.Default()
 
