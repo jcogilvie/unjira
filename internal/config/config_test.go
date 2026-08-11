@@ -17,7 +17,7 @@ func TestLoad_MissingFileReturnsDefaults(t *testing.T) {
 	cfg, err := config.Load(path)
 
 	require.NoError(t, err)
-	assert.Equal(t, config.JiraConfig{}, cfg.Jira)
+	assert.Empty(t, cfg.Jira)
 	assert.Equal(t, "data/unjira.db", cfg.DBPath)
 	assert.Empty(t, cfg.ExcludeFromLinking)
 
@@ -30,7 +30,7 @@ func TestLoad_ParsesExampleShapedConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "unjira.config.json")
 	body := `{
-		"jira": {"site": "https://yourorg.atlassian.net", "project_keys": ["PROJ"]},
+		"jira": [{"name": "default", "site": "https://yourorg.atlassian.net", "project_keys": ["PROJ"]}],
 		"collectors": {
 			"claude_code": {"enabled": true, "backfill_days": 14},
 			"github": {"enabled": false, "repos": ["yourorg/yourrepo"]},
@@ -45,10 +45,55 @@ func TestLoad_ParsesExampleShapedConfig(t *testing.T) {
 	cfg, err := config.Load(path)
 
 	require.NoError(t, err)
-	assert.Equal(t, "https://yourorg.atlassian.net", cfg.Jira.Site)
-	assert.Equal(t, []string{"PROJ"}, cfg.Jira.ProjectKeys)
+	require.Len(t, cfg.Jira, 1)
+	assert.Equal(t, "default", cfg.Jira[0].Name)
+	assert.Equal(t, "https://yourorg.atlassian.net", cfg.Jira[0].Site)
+	assert.Equal(t, []string{"PROJ"}, cfg.Jira[0].ProjectKeys)
 	assert.Equal(t, "data/unjira.db", cfg.DBPath)
 	assert.Equal(t, []string{"-0$", "-1$"}, cfg.ExcludeFromLinking)
+}
+
+func TestJiraConnectionForProject_FindsByProjectKey(t *testing.T) {
+	cfg := config.Config{
+		Jira: []config.JiraConnection{
+			{Name: "default", Site: "https://yourorg.atlassian.net", ProjectKeys: []string{"PROJ"}},
+		},
+	}
+
+	conn, ok := cfg.JiraConnectionForProject("PROJ")
+
+	require.True(t, ok)
+	assert.Equal(t, "default", conn.Name)
+	assert.Equal(t, "https://yourorg.atlassian.net", conn.Site)
+}
+
+func TestJiraConnectionForProject_UnknownProjectNotFound(t *testing.T) {
+	cfg := config.Config{
+		Jira: []config.JiraConnection{
+			{Name: "default", Site: "https://yourorg.atlassian.net", ProjectKeys: []string{"PROJ"}},
+		},
+	}
+
+	_, ok := cfg.JiraConnectionForProject("GHOST")
+
+	assert.False(t, ok)
+}
+
+func TestJiraConnectionForProject_MultipleConnectionsDisambiguateByProject(t *testing.T) {
+	cfg := config.Config{
+		Jira: []config.JiraConnection{
+			{Name: "corp", Site: "https://corp.atlassian.net", ProjectKeys: []string{"SUMO"}},
+			{Name: "paas", Site: "https://paas.atlassian.net", ProjectKeys: []string{"PAAS"}},
+		},
+	}
+
+	corp, ok := cfg.JiraConnectionForProject("SUMO")
+	require.True(t, ok)
+	assert.Equal(t, "corp", corp.Name)
+
+	paas, ok := cfg.JiraConnectionForProject("PAAS")
+	require.True(t, ok)
+	assert.Equal(t, "paas", paas.Name)
 }
 
 func TestEnabledCollectors_FiltersToOnlyEnabled(t *testing.T) {

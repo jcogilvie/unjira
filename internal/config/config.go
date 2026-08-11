@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
@@ -19,15 +20,20 @@ import (
 // DefaultConfigPath is where Load looks when no path is given.
 const DefaultConfigPath = "unjira.config.json"
 
-// JiraConfig holds the non-credential Jira settings.
-type JiraConfig struct {
+// JiraConnection describes one Jira Cloud site and the projects on it.
+// Multiple connections let a project set span more than one Jira instance —
+// e.g. after a migration or an acquisition merges two orgs' Jiras — without
+// unjira assuming a single global site. Name identifies the connection for
+// credential lookup (see cmd/unjira's UNJIRA_JIRA_CREDENTIALS).
+type JiraConnection struct {
+	Name        string   `json:"name"`
 	Site        string   `json:"site"`
 	ProjectKeys []string `json:"project_keys"`
 }
 
 // Config is unjira's top-level configuration.
 type Config struct {
-	Jira       JiraConfig                `json:"jira"`
+	Jira       []JiraConnection          `json:"jira"`
 	Collectors map[string]map[string]any `json:"collectors"`
 	// ExcludeFromLinking is a list of regex patterns; a ticket-key-shaped
 	// match against any of them is excluded from consideration as a real
@@ -36,6 +42,18 @@ type Config struct {
 	// placeholder-ticket conventions.
 	ExcludeFromLinking []string `json:"exclude_from_linking"`
 	DBPath             string   `json:"db_path"`
+}
+
+// JiraConnectionForProject finds the connection whose ProjectKeys contains
+// projectKey. Returns false if no configured connection covers it.
+func (c Config) JiraConnectionForProject(projectKey string) (JiraConnection, bool) {
+	for _, conn := range c.Jira {
+		if slices.Contains(conn.ProjectKeys, projectKey) {
+			return conn, true
+		}
+	}
+
+	return JiraConnection{}, false
 }
 
 // Default returns the configuration used when no config file is present:

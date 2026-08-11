@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -25,29 +26,58 @@ var registry = map[string]func() pipeline.Collector{
 	"claude_code": func() pipeline.Collector { return claudecode.New() },
 }
 
-// appContext carries the loaded config and open store to every command.
+// appContext carries the loaded config, open store, and Jira credentials to
+// every command.
 type appContext struct {
-	config config.Config
-	store  *store.Store
+	config          config.Config
+	store           *store.Store
+	jiraCredentials JiraCredentials
 }
 
-// jiraClient constructs a Jira client from environment credentials, per
-// JiraClient.from_config in the Python implementation: UNJIRA_JIRA_SITE
-// overrides config.jira.site, and UNJIRA_JIRA_EMAIL/UNJIRA_JIRA_TOKEN are
-// required.
-func (a *appContext) jiraClient() (*jira.Client, error) {
-	site := os.Getenv("UNJIRA_JIRA_SITE")
-	if site == "" {
-		site = a.config.Jira.Site
+// jiraCredential is one Jira connection's email/token pair.
+type jiraCredential struct {
+	Email string `json:"email"`
+	Token string `json:"token"`
+}
+
+// JiraCredentials maps a config.JiraConnection.Name to its credential,
+// decoded from a single JSON-object env var (UNJIRA_JIRA_CREDENTIALS), e.g.:
+//
+//	UNJIRA_JIRA_CREDENTIALS='{"corp":{"email":"a@x.com","token":"..."},"paas":{"email":"b@x.com","token":"..."}}'
+//
+// One var per credential kind, not one pair per connection — this scales to
+// any number of configured connections without a new env var per one. Must
+// be a named struct wrapping the map (not a bare map[string]T): Kong checks
+// for a json.Unmarshaler implementation by type before falling back to its
+// own built-in map decoder (which expects key=value;key2=value2 syntax, not
+// JSON), and a bare map type never satisfies json.Unmarshaler.
+type JiraCredentials struct {
+	byName map[string]jiraCredential
+}
+
+// UnmarshalJSON implements json.Unmarshaler so Kong decodes this type from
+// its env var automatically.
+func (c *JiraCredentials) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &c.byName)
+}
+
+// jiraClientForProject resolves the Jira connection covering projectKey and
+// constructs a client against it, using the credential registered under
+// that connection's Name in UNJIRA_JIRA_CREDENTIALS.
+func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, error) {
+	conn, ok := a.config.JiraConnectionForProject(projectKey)
+	if !ok {
+		return nil, fmt.Errorf("no configured jira connection covers project %q", projectKey)
 	}
 
-	email := os.Getenv("UNJIRA_JIRA_EMAIL")
-	token := os.Getenv("UNJIRA_JIRA_TOKEN")
-	if email == "" || token == "" {
-		return nil, fmt.Errorf("set UNJIRA_JIRA_EMAIL and UNJIRA_JIRA_TOKEN (see .env.example)")
+	creds, ok := a.jiraCredentials.byName[conn.Name]
+	if !ok {
+		return nil, fmt.Errorf(
+			"no credentials for jira connection %q in UNJIRA_JIRA_CREDENTIALS", conn.Name,
+		)
 	}
 
-	return jira.New(site, email, token)
+	return jira.New(conn.Site, creds.Email, creds.Token)
 }
 
 // projectKey resolves --project, falling back to the first configured
@@ -56,11 +86,11 @@ func (a *appContext) projectKey(flag string) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
-	if len(a.config.Jira.ProjectKeys) > 0 {
-		return a.config.Jira.ProjectKeys[0], nil
+	if len(a.config.Jira) > 0 && len(a.config.Jira[0].ProjectKeys) > 0 {
+		return a.config.Jira[0].ProjectKeys[0], nil
 	}
 
-	return "", fmt.Errorf("no project key: pass --project or set jira.project_keys in config")
+	return "", fmt.Errorf("no project key: pass --project or set jira[].project_keys in config")
 }
 
 type collectCmd struct{}
@@ -146,12 +176,12 @@ type devSeedCmd struct {
 }
 
 func (c *devSeedCmd) Run(app *appContext) error {
-	client, err := app.jiraClient()
+	projectKey, err := app.projectKey(c.Project)
 	if err != nil {
 		return err
 	}
 
-	projectKey, err := app.projectKey(c.Project)
+	client, err := app.jiraClientForProject(projectKey)
 	if err != nil {
 		return err
 	}
@@ -161,7 +191,7 @@ func (c *devSeedCmd) Run(app *appContext) error {
 		return err
 	}
 
-	fmt.Printf("Seeded %d issue(s): %s\n", len(keys), joinComma(keys))
+	fmt.Printf("Seeded %d issue(s): %s\n", len(keys), strings.Join(keys, ", "))
 	return nil
 }
 
@@ -170,12 +200,12 @@ type devResetCmd struct {
 }
 
 func (c *devResetCmd) Run(app *appContext) error {
-	client, err := app.jiraClient()
+	projectKey, err := app.projectKey(c.Project)
 	if err != nil {
 		return err
 	}
 
-	projectKey, err := app.projectKey(c.Project)
+	client, err := app.jiraClientForProject(projectKey)
 	if err != nil {
 		return err
 	}
@@ -186,7 +216,7 @@ func (c *devResetCmd) Run(app *appContext) error {
 	}
 
 	if len(keys) > 0 {
-		fmt.Printf("Deleted %d seeded issue(s): %s\n", len(keys), joinComma(keys))
+		fmt.Printf("Deleted %d seeded issue(s): %s\n", len(keys), strings.Join(keys, ", "))
 	} else {
 		fmt.Printf("Deleted %d seeded issue(s)\n", len(keys))
 	}
@@ -199,12 +229,12 @@ type devWorkflowCmd struct {
 }
 
 func (c *devWorkflowCmd) Run(app *appContext) error {
-	client, err := app.jiraClient()
+	projectKey, err := app.projectKey(c.Project)
 	if err != nil {
 		return err
 	}
 
-	projectKey, err := app.projectKey(c.Project)
+	client, err := app.jiraClientForProject(projectKey)
 	if err != nil {
 		return err
 	}
@@ -237,7 +267,8 @@ type devCmd struct {
 }
 
 var cli struct {
-	Config string `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
+	Config          string          `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
+	JiraCredentials JiraCredentials `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
 
 	Collect collectCmd `cmd:"" help:"Run every enabled collector and persist new events."`
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
@@ -271,11 +302,7 @@ func run() error {
 	}
 	defer func() { _ = s.Close() }()
 
-	return ctx.Run(&appContext{config: cfg, store: s})
-}
-
-func joinComma(ss []string) string {
-	return strings.Join(ss, ", ")
+	return ctx.Run(&appContext{config: cfg, store: s, jiraCredentials: cli.JiraCredentials})
 }
 
 func sortedKeys(m map[string]string) []string {

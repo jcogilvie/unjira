@@ -1,8 +1,11 @@
 {
-  "jira": {
-    "site": "https://yourorg.atlassian.net",
-    "project_keys": ["PROJ"]
-  },
+  "jira": [
+    {
+      "name": "default",
+      "site": "https://yourorg.atlassian.net",
+      "project_keys": ["PROJ"]
+    }
+  ],
   "collectors": {
     "claude_code": {
       "enabled": true,
