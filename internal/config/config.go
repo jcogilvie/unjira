@@ -44,6 +44,38 @@ type TrackerConfig struct {
 	DefaultProject string `json:"default_project"`
 }
 
+// LLMConfig configures the OpenAI-Chat-Completions-compatible endpoint the
+// phase-1 correlator/reconciler/rules packages call. Model and
+// ContextWindowTokens are both required, validated by Validate — not
+// defaulted or looked up. Different models have different context-window
+// sizes, and there's no reliable way to query that generically across every
+// possible OpenAI-compatible gateway (litellm, Azure OpenAI, OpenRouter,
+// Ollama, ...); a maintained model-name->context-window lookup table would
+// need constant upkeep and fail *silently wrong* for any model not yet
+// added. Requiring it explicitly makes a misconfigured model a loud
+// config-validation error, not a silent context-overflow risk at run time.
+// BaseURL and the API key (UNJIRA_LLM_API_KEY, read in cmd/unjira, not
+// here) are unjira's own explicit config, never read from ambient
+// OPENAI_*/ANTHROPIC_* env vars — same precedent as UNJIRA_JIRA_CREDENTIALS.
+type LLMConfig struct {
+	Model               string `json:"model"`
+	BaseURL             string `json:"base_url"`
+	ContextWindowTokens int    `json:"context_window_tokens"`
+}
+
+// Validate reports whether Model and ContextWindowTokens are both set to
+// usable values.
+func (c LLMConfig) Validate() error {
+	if c.Model == "" {
+		return fmt.Errorf("llm.model is required")
+	}
+	if c.ContextWindowTokens <= 0 {
+		return fmt.Errorf("llm.context_window_tokens must be a positive number of tokens")
+	}
+
+	return nil
+}
+
 // Config is unjira's top-level configuration.
 type Config struct {
 	Jira       []JiraConnection          `json:"jira"`
@@ -55,6 +87,7 @@ type Config struct {
 	// placeholder-ticket conventions.
 	ExcludeFromLinking []string      `json:"exclude_from_linking"`
 	Tracker            TrackerConfig `json:"tracker"`
+	LLM                LLMConfig     `json:"llm"`
 	DBPath             string        `json:"db_path"`
 }
 
