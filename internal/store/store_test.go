@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -111,4 +112,128 @@ func TestCursorCounts_GroupsAndCounts(t *testing.T) {
 	require.Len(t, counts, 1)
 	assert.Equal(t, "claude_code", counts[0].Collector)
 	assert.Equal(t, 2, counts[0].Count)
+}
+
+// -- local issues --------------------------------------------------------
+
+func TestGetLocalIssue_MissingReturnsErrLocalIssueNotFound(t *testing.T) {
+	s := openStore(t)
+
+	_, err := s.GetLocalIssue("PROJ-1")
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrLocalIssueNotFound))
+}
+
+func TestInsertLocalIssue_AssignsSequentialKeyPerProject(t *testing.T) {
+	s := openStore(t)
+
+	key1, err := s.InsertLocalIssue("PROJ", "First issue", "Task", "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "PROJ-1", key1)
+
+	key2, err := s.InsertLocalIssue("PROJ", "Second issue", "Task", "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "PROJ-2", key2)
+
+	otherKey, err := s.InsertLocalIssue("OTHER", "Different project", "Task", "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "OTHER-1", otherKey)
+}
+
+func TestSetLocalIssueStatus_UpdatesCategory(t *testing.T) {
+	s := openStore(t)
+	key, err := s.InsertLocalIssue("PROJ", "Do the thing", "Task", "", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetLocalIssueStatus(key, "in_progress"))
+
+	issue, err := s.GetLocalIssue(key)
+	require.NoError(t, err)
+	assert.Equal(t, "in_progress", issue.StatusCategory)
+}
+
+func TestSetLocalIssueStatus_MissingReturnsErrLocalIssueNotFound(t *testing.T) {
+	s := openStore(t)
+
+	err := s.SetLocalIssueStatus("PROJ-1", "done")
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrLocalIssueNotFound))
+}
+
+func TestInsertLocalIssueComment_LocalIssueComments_RoundTrips(t *testing.T) {
+	s := openStore(t)
+	key, err := s.InsertLocalIssue("PROJ", "Do the thing", "Task", "", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, s.InsertLocalIssueComment(key, "first comment"))
+	require.NoError(t, s.InsertLocalIssueComment(key, "second comment"))
+
+	comments, err := s.LocalIssueComments(key)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"first comment", "second comment"}, comments)
+}
+
+func TestInsertLocalIssueComment_MissingReturnsErrLocalIssueNotFound(t *testing.T) {
+	s := openStore(t)
+
+	err := s.InsertLocalIssueComment("PROJ-1", "a comment")
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrLocalIssueNotFound))
+}
+
+func TestSearchLocalIssues_NoQueryReturnsAll(t *testing.T) {
+	s := openStore(t)
+	_, err := s.InsertLocalIssue("PROJ", "Fix the bug", "Task", "", nil)
+	require.NoError(t, err)
+	_, err = s.InsertLocalIssue("PROJ", "Write the docs", "Task", "", nil)
+	require.NoError(t, err)
+
+	issues, err := s.SearchLocalIssues("", 10)
+	require.NoError(t, err)
+	assert.Len(t, issues, 2)
+}
+
+func TestSearchLocalIssues_CaseInsensitiveSubstringMatchesSubset(t *testing.T) {
+	s := openStore(t)
+	_, err := s.InsertLocalIssue("PROJ", "Fix the bug", "Task", "", nil)
+	require.NoError(t, err)
+	_, err = s.InsertLocalIssue("PROJ", "Write the docs", "Task", "", nil)
+	require.NoError(t, err)
+
+	issues, err := s.SearchLocalIssues("BUG", 10)
+	require.NoError(t, err)
+	require.Len(t, issues, 1)
+	assert.Equal(t, "Fix the bug", issues[0].Summary)
+}
+
+func TestSearchLocalIssues_RespectsLimit(t *testing.T) {
+	s := openStore(t)
+	_, err := s.InsertLocalIssue("PROJ", "First", "Task", "", nil)
+	require.NoError(t, err)
+	_, err = s.InsertLocalIssue("PROJ", "Second", "Task", "", nil)
+	require.NoError(t, err)
+
+	issues, err := s.SearchLocalIssues("", 1)
+	require.NoError(t, err)
+	assert.Len(t, issues, 1)
+}
+
+func TestInsertLocalIssue_GetLocalIssue_RoundTrips(t *testing.T) {
+	s := openStore(t)
+
+	key, err := s.InsertLocalIssue("PROJ", "Do the thing", "Task", "a description", []string{"bug", "urgent"})
+	require.NoError(t, err)
+
+	issue, err := s.GetLocalIssue(key)
+	require.NoError(t, err)
+	assert.Equal(t, key, issue.Key)
+	assert.Equal(t, "PROJ", issue.Project)
+	assert.Equal(t, "Do the thing", issue.Summary)
+	assert.Equal(t, "a description", issue.Description)
+	assert.Equal(t, "Task", issue.IssueType)
+	assert.Equal(t, "todo", issue.StatusCategory)
+	assert.Equal(t, []string{"bug", "urgent"}, issue.Labels)
 }
