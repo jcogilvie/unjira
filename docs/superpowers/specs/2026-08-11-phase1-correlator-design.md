@@ -87,24 +87,38 @@ per the same keep/modify/reject shape.
 
 ## Components
 
-**`internal/clients/anthropic`** — thin facade over the official `anthropic-sdk-go` (root
-package only; no `bedrock`/`vertex` imports, since Bedrock is reached via the litellm proxy's
-`ANTHROPIC_BASE_URL`, not directly). One method to start:
-`Complete(ctx, systemPrompt, userPrompt string) (string, error)` — non-streaming, single-turn.
-Auth/base-URL come from the SDK's own default env-var loading
-(`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`), matching this environment's existing configuration —
-no new credential plumbing. Chosen over hand-rolling `net/http`: the SDK's root-package-only
-dependency footprint is small (verified: ~11 packages — webhook verification, JSON
-schema/ordered-map helpers, tidwall's JSON libs, one `x/sync` — the heavy AWS/GCP/OTel
-dependencies belong to the optional `bedrock`/`vertex` subpackages, only pulled in if imported),
-and it provides typed request/response structs, automatic retry-with-backoff on 429s, a typed
-error hierarchy, and built-in tool-use support — real capability worth having, matching the
-existing "buy over build, behind our seam" rationale already used for `go-jira`.
+**`internal/clients/openai`** (revised from an earlier Anthropic-Messages-API-shaped design — see
+below) — thin facade over the official `openai-go` (root package only; no Azure/AWS-auth
+subpackages, since those exist for Azure AD and Bedrock-native auth flows unjira doesn't use).
+One method to start: `Complete(ctx, systemPrompt, userPrompt string) (string, error)` —
+non-streaming, single-turn, against `Chat.Completions.New`. Config is unjira's own — a base URL
+and credential, **not** read from ambient `ANTHROPIC_*`/`OPENAI_*` env vars — following the same
+"our own explicit config, not reused ambient credentials" precedent as
+`UNJIRA_JIRA_CREDENTIALS`. Verified (not assumed): importing the root package only resolves to 4
+small `tidwall` JSON packages, no AWS/Azure weight — confirmed with a throwaway `go mod tidy`
+against a minimal program, same verification method used for the earlier (superseded) Anthropic
+SDK check.
+
+*Why OpenAI-shaped Chat Completions, not Anthropic's Messages API, despite this environment's own
+`ANTHROPIC_BASE_URL`:* that env var is Claude Code's own interactive-session config, pointing at
+this org's specific litellm deployment — coupling unjira (a separate, unattended background
+service) to it would mean every other production user needs an Anthropic-Messages-API-speaking
+endpoint specifically. Research into the two specs' actual divergence and adoption found OpenAI's
+Chat Completions shape, not Anthropic's, is the real ecosystem lingua franca: it's litellm's own
+*native* interface ("every response follows the OpenAI Chat Completions format, regardless of
+provider" — from litellm's own docs), and it's what nearly every other self-hosted or third-party
+gateway already speaks natively (Azure OpenAI, OpenRouter, Ollama, vLLM, DeepSeek, Qwen,
+Moonshot/Kimi, GLM). Anthropic's Messages API is comparatively narrow — native only to Anthropic
+itself, requiring a translation layer everywhere else. Building unjira's own Anthropic↔OpenAI
+translation layer would just reimplement what litellm/every gateway already does; speaking the
+already-universal shape gets the same breadth for free. The SDK provides typed request/response
+structs, automatic retry-with-backoff on 429s, and a typed error hierarchy — matching the existing
+"buy over build, behind our seam" rationale already used for `go-jira`.
 
 **`internal/correlator`** (new package, sibling to `correlator/refs`/`correlator/fanout`) — the
 narrative-clustering unit, split into compute and persist:
 
-- `Cluster(events []Event, existingNarratives []Narrative, anthropicClient, window TimeRange) ([]ClusterResult, error)` —
+- `Cluster(events []Event, existingNarratives []Narrative, llmClient, window TimeRange) ([]ClusterResult, error)` —
   pure compute. Input is the *full* available context: every event already linked to a narrative
   whose window overlaps or sits adjacent to `window`, plus every unlinked event within `window`
   (temporal proximity is real clustering signal; excluding already-narrated events to "dedupe"
@@ -145,7 +159,7 @@ graduation prompt surfaced in `triage`) — never flipped by the system on its o
 approval history looks clean.
 
 **`internal/rules`** (new package) — the distillation unit `triage` calls on its learn-interval.
-`Distill(corrections []Action, anthropicClient, since time.Time) ([]ProposedRule, error)`: reads
+`Distill(corrections []Action, llmClient, since time.Time) ([]ProposedRule, error)`: reads
 `actions.feedback` (see schema below) for rejected/edited actions since the last learn-check,
 prompts the model to draft candidate `rules/*.md` frontmatter+body per correction (or per cluster
 of related corrections), returns them for `triage`'s keep/modify/reject loop. No file I/O in this
@@ -208,10 +222,10 @@ session — not deferred to the next `watch` tick. This is separate from `learn`
 Following `docs/go-conventions.md` (testify, table-driven, `httptest`-based facades, no
 live-network in the offline suite):
 
-- `internal/clients/anthropic`: `httptest.Server` standing in for the litellm endpoint, same
-  pattern as `clients/jira` — request-shape assertions, error-translation tests, no real API
-  calls.
-- `internal/correlator`: `Cluster`'s compute half is pure given a fake `anthropicClient`
+- `internal/clients/openai`: `httptest.Server` standing in for the litellm/OpenAI-compatible
+  endpoint, same pattern as `clients/jira` — request-shape assertions, error-translation tests,
+  no real API calls.
+- `internal/correlator`: `Cluster`'s compute half is pure given a fake `llmClient`
   interface (consumer-owned, mirroring the `projectMiner` pattern in `internal/workflow`) — tests
   supply canned model responses and assert on returned structs, no store needed. Separate tests
   cover the extend-vs-new decision and the overlap/adjacency window-selection logic in isolation.
@@ -238,7 +252,7 @@ live-network in the offline suite):
 Each slice is implemented, then real usage feeds back into design revisions before the next
 slice starts — this is not a fixed waterfall plan.
 
-1. **`internal/clients/anthropic`** — facade + tests, no callers yet.
+1. **`internal/clients/openai`** — facade + tests, no callers yet.
 2. **`internal/correlator`** (compute only) — `Cluster` against `claude_code` events, unit-tested
    with a fake LLM client. No persistence, no CLI command yet.
 3. **Persistence + `narrate` groundwork** — `Persist`, the extend-vs-new logic against real
