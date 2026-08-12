@@ -309,10 +309,12 @@ slice starts — this is not a fixed waterfall plan.
    `config.LLM.{Model, ContextWindowTokens}` and the populated `config/unjira.example.json`
    values. See `docs/superpowers/plans/2026-08-11-openai-client-facade.md` for the implementation
    plan.
-2. **`internal/correlator`** (compute only) — `Cluster` against `claude_code` events, unit-tested
-   with a fake LLM client, including the split-by-time-and-merge overflow path (needed from this
-   slice on — it's part of `Cluster`'s own contract, not an add-on). No persistence, no CLI
-   command yet.
+2. **`internal/correlator`** (compute only) — ✅ landed. `Cluster` against `claude_code` events,
+   unit-tested with a fake LLM client, including the split-by-time-and-merge overflow path. No
+   persistence, no CLI command yet. See
+   `docs/superpowers/specs/2026-08-12-correlator-cluster-design.md` for this slice's design and
+   `docs/superpowers/plans/2026-08-12-correlator-cluster-implementation.md` for the implementation
+   plan.
 3. **Persistence + `narrate` groundwork** — `Persist`, the extend-vs-new logic against real
    `narratives`/`narrative_events` rows, tail-summarization overflow handling (`config.Correlator.
    {TailSummarizeThresholdTokens, RecentEventsKept}`), the lease lock (needed even for a
