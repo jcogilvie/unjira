@@ -305,8 +305,10 @@ live-network in the offline suite):
 Each slice is implemented, then real usage feeds back into design revisions before the next
 slice starts — this is not a fixed waterfall plan.
 
-1. **`internal/clients/openai`** — facade + tests, no callers yet. Includes `config.LLM.
-   {Model, ContextWindowTokens}` and the populated `config/unjira.example.json` values.
+1. **`internal/clients/openai`** — ✅ landed. Facade + tests, no callers yet. Includes
+   `config.LLM.{Model, ContextWindowTokens}` and the populated `config/unjira.example.json`
+   values. See `docs/superpowers/plans/2026-08-11-openai-client-facade.md` for the implementation
+   plan.
 2. **`internal/correlator`** (compute only) — `Cluster` against `claude_code` events, unit-tested
    with a fake LLM client, including the split-by-time-and-merge overflow path (needed from this
    slice on — it's part of `Cluster`'s own contract, not an add-on). No persistence, no CLI
