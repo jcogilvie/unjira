@@ -8,6 +8,7 @@ package correlator_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -127,4 +128,49 @@ func TestCluster_MixedBatchOfNewAndExtends(t *testing.T) {
 	assert.Equal(t, correlator.ClusterNew, results[0].Kind)
 	assert.Equal(t, correlator.ClusterExtends, results[1].Kind)
 	assert.Equal(t, int64(7), results[1].NarrativeID)
+}
+
+func TestCluster_ResponseAndCallFailuresErrorLoudly(t *testing.T) {
+	tests := []struct {
+		name        string
+		responses   []string
+		llmErr      error
+		wantErrText string
+	}{
+		{
+			name:        "malformed JSON response",
+			responses:   []string{"not json"},
+			wantErrText: "not json",
+		},
+		{
+			name:        "out of range event index",
+			responses:   []string{`[{"kind":"new","title":"t","summary":"s","event_indices":[5]}]`},
+			wantErrText: "out of range",
+		},
+		{
+			name:        "unknown kind",
+			responses:   []string{`[{"kind":"maybe","title":"t","summary":"s","event_indices":[0]}]`},
+			wantErrText: `unknown kind "maybe"`,
+		},
+		{
+			name:        "LLM call failure wrapped",
+			llmErr:      errors.New("rate limited"),
+			wantErrText: "rate limited",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := time.Now()
+			llm := &fakeLLM{responses: tt.responses, err: tt.llmErr}
+			evts := []correlator.Event{mustEvent(t, "claude_code", "e1", "x", base)}
+
+			_, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+				Start: base.Add(-time.Hour), End: base.Add(time.Hour),
+			}, 128000)
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.wantErrText)
+		})
+	}
 }
