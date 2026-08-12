@@ -261,6 +261,7 @@ func TestCluster_ExtendsResultsSharingNarrativeIDMergeAcrossSplit(t *testing.T) 
 	}, 1200)
 
 	require.NoError(t, err)
+	require.Len(t, llm.prompts, 2, "extends-merge is deterministic; it must not trigger a merge-boundary same-story LLM call")
 	require.Len(t, results, 1, "both halves' extends-9 results should merge into one")
 	assert.Equal(t, correlator.ClusterExtends, results[0].Kind)
 	assert.Equal(t, int64(9), results[0].NarrativeID)
