@@ -9,10 +9,13 @@ package correlator_test
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/jcogilvie/unjira/internal/correlator"
+	"github.com/jcogilvie/unjira/internal/events"
 )
 
 // fakeLLM satisfies correlator's llmClient interface without making any
@@ -45,4 +48,83 @@ func TestCluster_EmptyEventsReturnsEmptyResult(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Empty(t, results)
+}
+
+func mustEvent(t *testing.T, source, externalID, summary string, occurredAt time.Time) correlator.Event {
+	t.Helper()
+	e := events.NewEvent(source, externalID, occurredAt, summary)
+	return e
+}
+
+func TestCluster_SingleNewCluster(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "Started investigating flaky test", base),
+		mustEvent(t, "claude_code", "e2", "Found root cause: race condition", base.Add(time.Minute)),
+	}
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"new","title":"Fix flaky test","summary":"Investigated and found a race condition.","event_indices":[0,1]}]`,
+	}}
+
+	results, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+		Start: base.Add(-time.Hour), End: base.Add(time.Hour),
+	}, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, correlator.ClusterNew, results[0].Kind)
+	assert.Equal(t, "Fix flaky test", results[0].Title)
+	assert.Equal(t, "Investigated and found a race condition.", results[0].Summary)
+	require.Len(t, results[0].Events, 2)
+	assert.Equal(t, "e1", results[0].Events[0].ExternalID)
+	assert.Equal(t, "e2", results[0].Events[1].ExternalID)
+}
+
+func TestCluster_SingleExtendsCluster(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "Continued the fix", base),
+	}
+	existing := []correlator.Narrative{
+		{ID: 42, WindowStart: base.Add(-time.Hour), WindowEnd: base, Title: "Fix flaky test", Summary: "prior work"},
+	}
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"extends","narrative_id":42,"title":"Fix flaky test","summary":"Continued and finished the fix.","event_indices":[0]}]`,
+	}}
+
+	results, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
+		Start: base.Add(-time.Minute), End: base.Add(time.Hour),
+	}, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, correlator.ClusterExtends, results[0].Kind)
+	assert.Equal(t, int64(42), results[0].NarrativeID)
+	require.Len(t, results[0].Events, 1)
+	assert.Equal(t, "e1", results[0].Events[0].ExternalID)
+}
+
+func TestCluster_MixedBatchOfNewAndExtends(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "unrelated new work", base),
+		mustEvent(t, "claude_code", "e2", "continuing prior work", base.Add(time.Minute)),
+	}
+	existing := []correlator.Narrative{
+		{ID: 7, WindowStart: base.Add(-time.Hour), WindowEnd: base, Title: "Prior", Summary: "s"},
+	}
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"new","title":"New thing","summary":"s1","event_indices":[0]},` +
+			`{"kind":"extends","narrative_id":7,"title":"Prior","summary":"s2","event_indices":[1]}]`,
+	}}
+
+	results, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
+		Start: base.Add(-time.Minute), End: base.Add(time.Hour),
+	}, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, correlator.ClusterNew, results[0].Kind)
+	assert.Equal(t, correlator.ClusterExtends, results[1].Kind)
+	assert.Equal(t, int64(7), results[1].NarrativeID)
 }
