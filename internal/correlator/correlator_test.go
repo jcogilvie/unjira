@@ -130,6 +130,26 @@ func TestCluster_MixedBatchOfNewAndExtends(t *testing.T) {
 	assert.Equal(t, int64(7), results[1].NarrativeID)
 }
 
+func TestCluster_ExcludesNarrativesOutsideWindowAndNotAdjacent(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	existing := []correlator.Narrative{
+		{ID: 1, Title: "adjacent-before", WindowStart: base.Add(-2 * time.Hour), WindowEnd: base},
+		{ID: 2, Title: "overlapping", WindowStart: base.Add(30 * time.Minute), WindowEnd: base.Add(2 * time.Hour)},
+		{ID: 3, Title: "far-away", WindowStart: base.Add(-24 * time.Hour), WindowEnd: base.Add(-12 * time.Hour)},
+	}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, err := correlator.Cluster(t.Context(), nil, existing, llm, window, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, llm.prompts, 1)
+	assert.Contains(t, llm.prompts[0], "adjacent-before")
+	assert.Contains(t, llm.prompts[0], "overlapping")
+	assert.NotContains(t, llm.prompts[0], "far-away")
+}
+
 func TestCluster_ResponseAndCallFailuresErrorLoudly(t *testing.T) {
 	tests := []struct {
 		name        string
