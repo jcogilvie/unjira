@@ -207,6 +207,10 @@ func TestCluster_OversizedWindowSplitsAndCallsLLMPerHalf(t *testing.T) {
 	llm := &fakeLLM{responses: []string{
 		`[{"kind":"new","title":"first","summary":"s1","event_indices":[0]}]`,
 		`[{"kind":"new","title":"second","summary":"s2","event_indices":[0]}]`,
+		// Third response: the two split halves each yield an adjacent
+		// ClusterNew result, so mergeSplitResults makes one merge-boundary
+		// same-story check. These are unrelated events, so the model says no.
+		`{"same_story":false}`,
 	}}
 
 	// contextWindowTokens sized so one event alone fits comfortably but
@@ -216,7 +220,7 @@ func TestCluster_OversizedWindowSplitsAndCallsLLMPerHalf(t *testing.T) {
 	}, 1200)
 
 	require.NoError(t, err)
-	require.Len(t, llm.prompts, 2, "expected one Complete call per split half, not one for the whole window")
+	require.Len(t, llm.prompts, 3, "one Complete call per split half, plus one merge-boundary same-story check")
 	require.Len(t, results, 2)
 	titles := []string{results[0].Title, results[1].Title}
 	assert.ElementsMatch(t, []string{"first", "second"}, titles)
@@ -236,6 +240,83 @@ func TestCluster_SingleEventOverBudgetErrorsLoudlyWithoutCallingLLM(t *testing.T
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "e1")
 	assert.Empty(t, llm.prompts, "no Complete call should be made for a doomed-to-fail oversized request")
+}
+
+func TestCluster_ExtendsResultsSharingNarrativeIDMergeAcrossSplit(t *testing.T) {
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", strings.Repeat("a", 4000), base),
+		mustEvent(t, "claude_code", "e2", strings.Repeat("b", 4000), base.Add(time.Hour)),
+	}
+	existing := []correlator.Narrative{
+		{ID: 9, Title: "Ongoing", Summary: "s", WindowStart: base.Add(-time.Hour), WindowEnd: base},
+	}
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"extends","narrative_id":9,"title":"Ongoing","summary":"s1","event_indices":[0]}]`,
+		`[{"kind":"extends","narrative_id":9,"title":"Ongoing","summary":"s2","event_indices":[0]}]`,
+	}}
+
+	results, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
+		Start: base, End: base.Add(2 * time.Hour),
+	}, 1200)
+
+	require.NoError(t, err)
+	require.Len(t, results, 1, "both halves' extends-9 results should merge into one")
+	assert.Equal(t, correlator.ClusterExtends, results[0].Kind)
+	assert.Equal(t, int64(9), results[0].NarrativeID)
+	require.Len(t, results[0].Events, 2, "merged result should union both halves' events")
+}
+
+func TestCluster_AdjacentNewClustersMergeViaLLMWhenSameStory(t *testing.T) {
+	tests := []struct {
+		name            string
+		sameStoryReply  string
+		wantResultCount int
+		wantTitle       string
+		wantSummary     string
+	}{
+		{
+			name:            "same story merges into one result",
+			sameStoryReply:  `{"same_story":true,"title":"Merged story","summary":"unified summary"}`,
+			wantResultCount: 1,
+			wantTitle:       "Merged story",
+			wantSummary:     "unified summary",
+		},
+		{
+			name:            "distinct stories stay separate",
+			sameStoryReply:  `{"same_story":false}`,
+			wantResultCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+			evts := []correlator.Event{
+				mustEvent(t, "claude_code", "e1", strings.Repeat("a", 4000), base),
+				mustEvent(t, "claude_code", "e2", strings.Repeat("b", 4000), base.Add(time.Hour)),
+			}
+			llm := &fakeLLM{responses: []string{
+				`[{"kind":"new","title":"Part 1","summary":"s1","event_indices":[0]}]`,
+				`[{"kind":"new","title":"Part 2","summary":"s2","event_indices":[0]}]`,
+				tt.sameStoryReply,
+			}}
+
+			results, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+				Start: base, End: base.Add(2 * time.Hour),
+			}, 1200)
+
+			require.NoError(t, err)
+			require.Len(t, llm.prompts, 3, "expected exactly one merge-boundary call after the two split-half calls")
+			require.Len(t, results, tt.wantResultCount)
+
+			if tt.wantResultCount == 1 {
+				assert.Equal(t, tt.wantTitle, results[0].Title)
+				assert.Equal(t, tt.wantSummary, results[0].Summary)
+				require.Len(t, results[0].Events, 2)
+			}
+		})
+	}
 }
 
 func TestCluster_DegenerateBisectionOfIdenticalTimestampsErrorsLoudly(t *testing.T) {

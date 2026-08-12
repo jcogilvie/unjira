@@ -289,8 +289,131 @@ func irreducibleUnitError(window TimeRange, filtered []Event) error {
 	)
 }
 
-// mergeSplitResults is implemented in Task 6 (extends-merge + LLM
-// same-story merge at the split boundary).
-func mergeSplitResults(_ context.Context, _ llmClient, first, second []ClusterResult) ([]ClusterResult, error) {
-	return append(first, second...), nil
+// mergeSplitResults combines two split halves' results: ClusterExtends
+// results sharing a NarrativeID merge deterministically (union events, keep
+// the earlier half's title/summary); at most one adjacent-boundary pair of
+// ClusterNew results (the last of first, the first of second) gets one
+// extra LLM call asking whether they're the same emerging story, merging
+// on yes.
+func mergeSplitResults(ctx context.Context, llm llmClient, first, second []ClusterResult) ([]ClusterResult, error) {
+	merged := make([]ClusterResult, 0, len(first)+len(second))
+	usedFromSecond := make(map[int]bool)
+
+	for _, f := range first {
+		if f.Kind != ClusterExtends {
+			merged = append(merged, f)
+			continue
+		}
+
+		mergedWithSecond := false
+		for j, s := range second {
+			if usedFromSecond[j] || s.Kind != ClusterExtends || s.NarrativeID != f.NarrativeID {
+				continue
+			}
+			merged = append(merged, ClusterResult{
+				Kind:        ClusterExtends,
+				NarrativeID: f.NarrativeID,
+				Title:       f.Title,
+				Summary:     f.Summary,
+				Events:      append(append([]Event{}, f.Events...), s.Events...),
+			})
+			usedFromSecond[j] = true
+			mergedWithSecond = true
+			break
+		}
+		if !mergedWithSecond {
+			merged = append(merged, f)
+		}
+	}
+
+	var remainingSecond []ClusterResult
+	for j, s := range second {
+		if !usedFromSecond[j] {
+			remainingSecond = append(remainingSecond, s)
+		}
+	}
+
+	// Adjacent-boundary same-story check: last ClusterNew of `merged` (from
+	// first) vs first ClusterNew of remainingSecond.
+	lastNewIdx := lastNewIndex(merged)
+	firstNewIdx := firstNewIndex(remainingSecond)
+
+	if lastNewIdx == -1 || firstNewIdx == -1 {
+		return append(merged, remainingSecond...), nil
+	}
+
+	a, b := merged[lastNewIdx], remainingSecond[firstNewIdx]
+
+	sameStory, mergedResult, err := checkSameStory(ctx, llm, a, b)
+	if err != nil {
+		return nil, err
+	}
+
+	if !sameStory {
+		return append(merged, remainingSecond...), nil
+	}
+
+	merged[lastNewIdx] = mergedResult
+	remainingSecond = append(remainingSecond[:firstNewIdx], remainingSecond[firstNewIdx+1:]...)
+
+	return append(merged, remainingSecond...), nil
+}
+
+func lastNewIndex(results []ClusterResult) int {
+	for i := len(results) - 1; i >= 0; i-- {
+		if results[i].Kind == ClusterNew {
+			return i
+		}
+	}
+	return -1
+}
+
+func firstNewIndex(results []ClusterResult) int {
+	for i, r := range results {
+		if r.Kind == ClusterNew {
+			return i
+		}
+	}
+	return -1
+}
+
+// sameStoryResponse is the wire shape of the merge-boundary judgment call.
+type sameStoryResponse struct {
+	SameStory bool   `json:"same_story"`
+	Title     string `json:"title"`
+	Summary   string `json:"summary"`
+}
+
+const sameStorySystemPrompt = `You will be shown two narrative clusters that sit on either side of a time-window split. Decide whether they describe the same emerging story (the split point fell in the middle of one continuous narrative) or two distinct stories. Return ONLY a JSON object, no prose, no markdown fences: {"same_story": true|false, "title": "...", "summary": "..."} — title and summary are only meaningful when same_story is true (the unified title/summary for the merged cluster); omit or ignore them when false.`
+
+// checkSameStory asks the model whether a and b (both ClusterNew) are the
+// same emerging story. On yes, returns the merged ClusterResult (unioned
+// events, model-provided title/summary). On no, mergedResult is the zero
+// value and must be ignored.
+func checkSameStory(ctx context.Context, llm llmClient, a, b ClusterResult) (bool, ClusterResult, error) {
+	userPrompt := fmt.Sprintf(
+		"Cluster A: title=%q summary=%q\nCluster B: title=%q summary=%q",
+		a.Title, a.Summary, b.Title, b.Summary,
+	)
+
+	raw, err := llm.Complete(ctx, sameStorySystemPrompt, userPrompt)
+	if err != nil {
+		return false, ClusterResult{}, fmt.Errorf("checking same-story merge for split boundary: %w", err)
+	}
+
+	var resp sameStoryResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return false, ClusterResult{}, fmt.Errorf("parsing same-story response %q: %w", raw, err)
+	}
+
+	if !resp.SameStory {
+		return false, ClusterResult{}, nil
+	}
+
+	return true, ClusterResult{
+		Kind:    ClusterNew,
+		Title:   resp.Title,
+		Summary: resp.Summary,
+		Events:  append(append([]Event{}, a.Events...), b.Events...),
+	}, nil
 }
