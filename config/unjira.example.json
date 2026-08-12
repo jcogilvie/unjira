@@ -28,5 +28,10 @@
     "backend": "jira",
     "default_project": "PROJ"
   },
+  "llm": {
+    "model": "gpt-5-2",
+    "base_url": "http://localhost:4000/v1",
+    "context_window_tokens": 128000
+  },
   "db_path": "data/unjira.db"
 }

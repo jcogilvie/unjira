@@ -193,6 +193,62 @@ func TestDefaultProjectConnection_SetAndCoveredReturnsConnection(t *testing.T) {
 	assert.Equal(t, "default", conn.Name)
 }
 
+func TestLLMConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         config.LLMConfig
+		wantErrText string // empty means Validate must return nil
+	}{
+		{
+			name:        "requires model",
+			cfg:         config.LLMConfig{ContextWindowTokens: 128000},
+			wantErrText: "model",
+		},
+		{
+			name:        "requires context window tokens",
+			cfg:         config.LLMConfig{Model: "gpt-5-2"},
+			wantErrText: "context_window_tokens",
+		},
+		{
+			name:        "requires positive context window tokens",
+			cfg:         config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 0},
+			wantErrText: "context_window_tokens",
+		},
+		{
+			name: "passes with model and context window",
+			cfg:  config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 128000},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+
+			if tt.wantErrText == "" {
+				require.NoError(t, err)
+				return
+			}
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrText)
+		})
+	}
+}
+
+func TestLoad_ParsesLLMBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"llm": {"model": "gpt-5-2", "base_url": "http://localhost:4000/v1", "context_window_tokens": 128000}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-5-2", cfg.LLM.Model)
+	assert.Equal(t, "http://localhost:4000/v1", cfg.LLM.BaseURL)
+	assert.Equal(t, 128000, cfg.LLM.ContextWindowTokens)
+}
+
 func TestDefaultConfig_HasClaudeCodeEnabledByDefault(t *testing.T) {
 	cfg := config.Default()
 
