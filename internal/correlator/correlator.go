@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,6 +52,8 @@ type Narrative struct {
 // existing row.
 type ClusterKind int
 
+// The two cluster kinds: a brand-new narrative, or one extending an
+// existing narrative row (identified by ClusterResult.NarrativeID).
 const (
 	ClusterNew ClusterKind = iota
 	ClusterExtends
@@ -360,8 +363,8 @@ func mergeSplitResults(ctx context.Context, llm llmClient, first, second []Clust
 }
 
 func lastNewIndex(results []ClusterResult) int {
-	for i := len(results) - 1; i >= 0; i-- {
-		if results[i].Kind == ClusterNew {
+	for i, r := range slices.Backward(results) {
+		if r.Kind == ClusterNew {
 			return i
 		}
 	}
