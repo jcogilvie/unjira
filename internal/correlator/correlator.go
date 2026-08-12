@@ -150,7 +150,13 @@ func buildClusterPrompt(evts []Event, existing []Narrative) (systemPrompt, userP
 	var b strings.Builder
 	b.WriteString("Events:\n")
 	for i, e := range evts {
-		fmt.Fprintf(&b, "%d. [%s] %s (occurred_at=%s)\n", i, e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+		// %q on Summary (not %s): event summaries come from arbitrary
+		// upstream session/commit text, so an embedded newline or a
+		// fabricated "N. [source] ..." line could otherwise inject a
+		// spurious entry into this numbered list as the model reads it.
+		// Quoting escapes those, matching the %q already used for the
+		// narrative fields below.
+		fmt.Fprintf(&b, "%d. [%s] %q (occurred_at=%s)\n", i, e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
 	}
 	b.WriteString("\nExisting narratives:\n")
 	if len(existing) == 0 {
