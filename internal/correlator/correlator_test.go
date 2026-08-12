@@ -9,6 +9,7 @@ package correlator_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,4 +194,64 @@ func TestCluster_ResponseAndCallFailuresErrorLoudly(t *testing.T) {
 			assert.ErrorContains(t, err, tt.wantErrText)
 		})
 	}
+}
+
+func TestCluster_OversizedWindowSplitsAndCallsLLMPerHalf(t *testing.T) {
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	// Two events spaced an hour apart so a time-midpoint split cleanly
+	// separates them into two non-empty halves.
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", strings.Repeat("a", 4000), base),
+		mustEvent(t, "claude_code", "e2", strings.Repeat("b", 4000), base.Add(time.Hour)),
+	}
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"new","title":"first","summary":"s1","event_indices":[0]}]`,
+		`[{"kind":"new","title":"second","summary":"s2","event_indices":[0]}]`,
+	}}
+
+	// contextWindowTokens sized so one event alone fits comfortably but
+	// both together (in one prompt) don't.
+	results, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+		Start: base, End: base.Add(2 * time.Hour),
+	}, 1200)
+
+	require.NoError(t, err)
+	require.Len(t, llm.prompts, 2, "expected one Complete call per split half, not one for the whole window")
+	require.Len(t, results, 2)
+	titles := []string{results[0].Title, results[1].Title}
+	assert.ElementsMatch(t, []string{"first", "second"}, titles)
+}
+
+func TestCluster_SingleEventOverBudgetErrorsLoudlyWithoutCallingLLM(t *testing.T) {
+	base := time.Now()
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", strings.Repeat("a", 10000), base),
+	}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
+	}, 100)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "e1")
+	assert.Empty(t, llm.prompts, "no Complete call should be made for a doomed-to-fail oversized request")
+}
+
+func TestCluster_DegenerateBisectionOfIdenticalTimestampsErrorsLoudly(t *testing.T) {
+	base := time.Now()
+	// All events share the exact same timestamp, so a time-midpoint
+	// bisection can never separate them into two non-empty halves.
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", strings.Repeat("a", 4000), base),
+		mustEvent(t, "claude_code", "e2", strings.Repeat("b", 4000), base),
+		mustEvent(t, "claude_code", "e3", strings.Repeat("c", 4000), base),
+	}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
+	}, 1000)
+
+	require.Error(t, err)
 }

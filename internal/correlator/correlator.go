@@ -226,20 +226,71 @@ func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, error) {
 	return results, nil
 }
 
-// clusterWithSplit is implemented in Task 5 (window bisection + merge).
-// This task only needs it to exist so Cluster compiles; it errors loudly
-// rather than silently proceeding with an oversized request.
+// clusterWithSplit bisects window in half by time and recurses on each
+// half, then merges the results (see mergeSplitResults). If bisection
+// cannot make progress — the filtered event count doesn't decrease from
+// the parent window to at least one non-empty half smaller than the whole
+// — the window is irreducible: return a loud error naming what didn't fit
+// rather than looping forever or silently truncating.
 func clusterWithSplit(
-	_ context.Context,
-	_ []Event,
-	_ []Narrative,
-	_ llmClient,
+	ctx context.Context,
+	evts []Event,
+	existing []Narrative,
+	llm llmClient,
 	window TimeRange,
-	_ int,
+	contextWindowTokens int,
 	filtered []Event,
 ) ([]ClusterResult, error) {
-	return nil, fmt.Errorf(
-		"context budget exceeded for window [%s, %s) with %d event(s): split-and-merge not yet implemented",
-		window.Start, window.End, len(filtered),
+	if len(filtered) <= 1 {
+		return nil, irreducibleUnitError(window, filtered)
+	}
+
+	mid := window.Start.Add(window.End.Sub(window.Start) / 2)
+	firstHalf := TimeRange{Start: window.Start, End: mid}
+	secondHalf := TimeRange{Start: mid, End: window.End}
+
+	firstFiltered := filterEventsInWindow(filtered, firstHalf)
+	secondFiltered := filterEventsInWindow(filtered, secondHalf)
+
+	if len(firstFiltered) == len(filtered) || len(secondFiltered) == len(filtered) {
+		// Bisection made no progress (e.g. every remaining event shares the
+		// same timestamp) — recursing again would loop forever on an
+		// unchanged set. Treat as irreducible now.
+		return nil, irreducibleUnitError(window, filtered)
+	}
+
+	firstResults, err := Cluster(ctx, evts, existing, llm, firstHalf, contextWindowTokens)
+	if err != nil {
+		return nil, err
+	}
+
+	secondResults, err := Cluster(ctx, evts, existing, llm, secondHalf, contextWindowTokens)
+	if err != nil {
+		return nil, err
+	}
+
+	return mergeSplitResults(ctx, llm, firstResults, secondResults)
+}
+
+// irreducibleUnitError reports a window that cannot be split further and
+// still doesn't fit the configured budget — the "error loudly rather than
+// silently drop" floor for this overflow path.
+func irreducibleUnitError(window TimeRange, filtered []Event) error {
+	if len(filtered) == 0 {
+		return fmt.Errorf(
+			"context budget exceeded for window [%s, %s) with existing-narrative context alone (no events): cannot split further",
+			window.Start, window.End,
+		)
+	}
+
+	return fmt.Errorf(
+		"context budget exceeded for irreducible event %q (source=%s) in window [%s, %s): cannot split further",
+		filtered[0].ExternalID, filtered[0].Source, window.Start, window.End,
 	)
+}
+
+// mergeSplitResults is implemented in Task 6 (extends-merge + LLM
+// same-story merge at the split boundary).
+func mergeSplitResults(_ context.Context, _ llmClient, first, second []ClusterResult) ([]ClusterResult, error) {
+	return append(first, second...), nil
 }
