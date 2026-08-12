@@ -193,39 +193,46 @@ func TestDefaultProjectConnection_SetAndCoveredReturnsConnection(t *testing.T) {
 	assert.Equal(t, "default", conn.Name)
 }
 
-func TestLLMConfig_Validate_RequiresModel(t *testing.T) {
-	cfg := config.LLMConfig{ContextWindowTokens: 128000}
+func TestLLMConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         config.LLMConfig
+		wantErrText string // empty means Validate must return nil
+	}{
+		{
+			name:        "requires model",
+			cfg:         config.LLMConfig{ContextWindowTokens: 128000},
+			wantErrText: "model",
+		},
+		{
+			name:        "requires context window tokens",
+			cfg:         config.LLMConfig{Model: "gpt-5-2"},
+			wantErrText: "context_window_tokens",
+		},
+		{
+			name:        "requires positive context window tokens",
+			cfg:         config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 0},
+			wantErrText: "context_window_tokens",
+		},
+		{
+			name: "passes with model and context window",
+			cfg:  config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 128000},
+		},
+	}
 
-	err := cfg.Validate()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "model")
-}
+			if tt.wantErrText == "" {
+				require.NoError(t, err)
+				return
+			}
 
-func TestLLMConfig_Validate_RequiresContextWindowTokens(t *testing.T) {
-	cfg := config.LLMConfig{Model: "gpt-5-2"}
-
-	err := cfg.Validate()
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "context_window_tokens")
-}
-
-func TestLLMConfig_Validate_RequiresPositiveContextWindowTokens(t *testing.T) {
-	cfg := config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 0}
-
-	err := cfg.Validate()
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "context_window_tokens")
-}
-
-func TestLLMConfig_Validate_PassesWithModelAndContextWindow(t *testing.T) {
-	cfg := config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 128000}
-
-	err := cfg.Validate()
-
-	require.NoError(t, err)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrText)
+		})
+	}
 }
 
 func TestLoad_ParsesLLMBlock(t *testing.T) {
