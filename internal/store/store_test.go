@@ -284,3 +284,116 @@ func TestOpen_MigratesPreExistingNarrativesTableWithoutColumn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, cols, "compaction_boundary")
 }
+
+// -- narrative store accessors -------------------------------------------
+
+func seedEvent(t *testing.T, s *store.Store, externalID, summary string, at time.Time) {
+	t.Helper()
+	e := events.NewEvent("claude_code", externalID, at, summary)
+	_, err := s.InsertEvent(e)
+	require.NoError(t, err)
+}
+
+func TestNarrative_InsertGetRoundTrip(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	we := ws.Add(time.Hour)
+
+	id, err := s.InsertNarrative(ws, we, "Title", "Summary")
+	require.NoError(t, err)
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.Equal(t, id, row.ID)
+	assert.Equal(t, "Title", row.Title)
+	assert.Equal(t, "Summary", row.Summary)
+	assert.Equal(t, "open", row.Status)
+	assert.True(t, ws.Equal(row.WindowStart))
+	assert.True(t, we.Equal(row.WindowEnd))
+	assert.Empty(t, row.IssueKey)
+	assert.Nil(t, row.CompactionBoundary)
+}
+
+func TestGetNarrative_MissingReturnsErrNarrativeNotFound(t *testing.T) {
+	s := openStore(t)
+	_, err := s.GetNarrative(999)
+	require.ErrorIs(t, err, store.ErrNarrativeNotFound)
+}
+
+func TestExtendNarrative_UpdatesWindowEndAndSummary(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "old")
+	require.NoError(t, err)
+
+	newEnd := ws.Add(3 * time.Hour)
+	require.NoError(t, s.ExtendNarrative(id, newEnd, "new summary"))
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.True(t, newEnd.Equal(row.WindowEnd))
+	assert.Equal(t, "new summary", row.Summary)
+}
+
+func TestSetCompactionBoundary_PersistsBoundaryAndRecap(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+
+	boundary := ws.Add(30 * time.Minute)
+	require.NoError(t, s.SetCompactionBoundary(id, boundary, "recap: earlier work"))
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	require.NotNil(t, row.CompactionBoundary)
+	assert.True(t, boundary.Equal(*row.CompactionBoundary))
+	assert.Equal(t, "recap: earlier work", row.Summary)
+}
+
+func TestAddNarrativeEvents_IsIdempotent(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "e1", "first", ws)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+	eid, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid})) // re-link: no error
+
+	evs, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	assert.Equal(t, "e1", evs[0].ExternalID)
+}
+
+func TestEventIDByExternalID_MissingReturnsErrEventNotFound(t *testing.T) {
+	s := openStore(t)
+	_, err := s.EventIDByExternalID("claude_code", "nope")
+	require.ErrorIs(t, err, store.ErrEventNotFound)
+}
+
+func TestNarrativeEventsForContext_ExcludesAtOrBeforeBoundary(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "old", "old event", ws)
+	seedEvent(t, s, "new", "new event", ws.Add(time.Hour))
+	id, err := s.InsertNarrative(ws, ws.Add(2*time.Hour), "T", "s")
+	require.NoError(t, err)
+	oldID, err := s.EventIDByExternalID("claude_code", "old")
+	require.NoError(t, err)
+	newID, err := s.EventIDByExternalID("claude_code", "new")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{oldID, newID}))
+
+	// Boundary at the old event's time: strictly-after filter excludes it,
+	// keeps the newer one.
+	require.NoError(t, s.SetCompactionBoundary(id, ws, "recap"))
+
+	evs, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	assert.Equal(t, "new", evs[0].ExternalID)
+}

@@ -26,6 +26,13 @@ import (
 // convenience, "not found" is meaningful here and must not be swallowed.
 var ErrLocalIssueNotFound = errors.New("local issue not found")
 
+// ErrNarrativeNotFound is returned by GetNarrative when no row matches.
+var ErrNarrativeNotFound = errors.New("narrative not found")
+
+// ErrEventNotFound is returned by EventIDByExternalID when no event matches
+// the given (source, external_id).
+var ErrEventNotFound = errors.New("event not found")
+
 const schema = `
 CREATE TABLE IF NOT EXISTS events (
     id           INTEGER PRIMARY KEY,
@@ -547,6 +554,180 @@ func (s *Store) SearchLocalIssues(query string, limit int) ([]LocalIssue, error)
 		}
 
 		out = append(out, issue)
+	}
+
+	return out, rows.Err()
+}
+
+// -- narratives ----------------------------------------------------------
+
+// NarrativeRow mirrors a narratives table row. correlator.Persist maps this
+// to/from its own correlator.Narrative domain type (keeping store free of any
+// correlator import — the dependency runs correlator -> store).
+type NarrativeRow struct {
+	ID                 int64
+	WindowStart        time.Time
+	WindowEnd          time.Time
+	Title              string
+	Summary            string
+	IssueKey           string
+	Confidence         float64
+	Status             string
+	CompactionBoundary *time.Time
+}
+
+// InsertNarrative inserts a new narrative row (status 'open', no compaction
+// boundary) and returns its id.
+func (s *Store) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO narratives (window_start, window_end, title, summary) VALUES (?, ?, ?, ?)`,
+		windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339), title, summary,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("inserting narrative %q: %w", title, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("getting inserted narrative id for %q: %w", title, err)
+	}
+
+	return id, nil
+}
+
+// GetNarrative returns the narrative with the given id, or
+// ErrNarrativeNotFound.
+func (s *Store) GetNarrative(id int64) (NarrativeRow, error) {
+	var (
+		row                NarrativeRow
+		windowStart        string
+		windowEnd          string
+		issueKey           sql.NullString
+		confidence         sql.NullFloat64
+		compactionBoundary sql.NullString
+	)
+	err := s.db.QueryRow(
+		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status, compaction_boundary
+		 FROM narratives WHERE id = ?`, id,
+	).Scan(&row.ID, &windowStart, &windowEnd, &row.Title, &row.Summary,
+		&issueKey, &confidence, &row.Status, &compactionBoundary)
+	if err == sql.ErrNoRows {
+		return NarrativeRow{}, ErrNarrativeNotFound
+	}
+	if err != nil {
+		return NarrativeRow{}, fmt.Errorf("querying narrative %d: %w", id, err)
+	}
+
+	if row.WindowStart, err = time.Parse(time.RFC3339, windowStart); err != nil {
+		return NarrativeRow{}, fmt.Errorf("parsing window_start for narrative %d: %w", id, err)
+	}
+	if row.WindowEnd, err = time.Parse(time.RFC3339, windowEnd); err != nil {
+		return NarrativeRow{}, fmt.Errorf("parsing window_end for narrative %d: %w", id, err)
+	}
+	row.IssueKey = issueKey.String
+	if confidence.Valid {
+		row.Confidence = confidence.Float64
+	}
+	if compactionBoundary.Valid {
+		parsed, err := time.Parse(time.RFC3339, compactionBoundary.String)
+		if err != nil {
+			return NarrativeRow{}, fmt.Errorf("parsing compaction_boundary for narrative %d: %w", id, err)
+		}
+		row.CompactionBoundary = &parsed
+	}
+
+	return row, nil
+}
+
+// ExtendNarrative advances a narrative's window_end and overwrites its
+// summary.
+func (s *Store) ExtendNarrative(id int64, windowEnd time.Time, summary string) error {
+	_, err := s.db.Exec(
+		`UPDATE narratives SET window_end = ?, summary = ? WHERE id = ?`,
+		windowEnd.Format(time.RFC3339), summary, id,
+	)
+	if err != nil {
+		return fmt.Errorf("extending narrative %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// SetCompactionBoundary records the occurred_at of the newest compacted event
+// and stores the recap-prefixed summary.
+func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, recapSummary string) error {
+	_, err := s.db.Exec(
+		`UPDATE narratives SET compaction_boundary = ?, summary = ? WHERE id = ?`,
+		boundary.Format(time.RFC3339), recapSummary, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting compaction boundary for narrative %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// AddNarrativeEvents links events to a narrative (INSERT OR IGNORE, so
+// re-linking an already-linked event is a harmless no-op).
+func (s *Store) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	for _, eid := range eventIDs {
+		if _, err := s.db.Exec(
+			`INSERT OR IGNORE INTO narrative_events (narrative_id, event_id) VALUES (?, ?)`,
+			narrativeID, eid,
+		); err != nil {
+			return fmt.Errorf("linking event %d to narrative %d: %w", eid, narrativeID, err)
+		}
+	}
+
+	return nil
+}
+
+// EventIDByExternalID returns the row id of the event with the given
+// (source, external_id), or ErrEventNotFound.
+func (s *Store) EventIDByExternalID(source, externalID string) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(
+		`SELECT id FROM events WHERE source = ? AND external_id = ?`, source, externalID,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, ErrEventNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("querying event id for %s/%s: %w", source, externalID, err)
+	}
+
+	return id, nil
+}
+
+// NarrativeEventsForContext returns a narrative's events with occurred_at
+// strictly after its compaction_boundary (all of them when the boundary is
+// NULL), ordered by occurred_at — the events the caller hydrates into
+// correlator.Narrative.Events. The recap of anything at/before the boundary
+// already lives in the summary.
+func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, error) {
+	rows, err := s.db.Query(
+		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
+		 FROM events e
+		 JOIN narrative_events ne ON ne.event_id = e.id
+		 WHERE ne.narrative_id = ?
+		   AND (
+		     (SELECT compaction_boundary FROM narratives WHERE id = ?) IS NULL
+		     OR e.occurred_at > (SELECT compaction_boundary FROM narratives WHERE id = ?)
+		   )
+		 ORDER BY e.occurred_at`,
+		narrativeID, narrativeID, narrativeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying context events for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []events.Event
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning context event row: %w", err)
+		}
+		out = append(out, e)
 	}
 
 	return out, rows.Err()
