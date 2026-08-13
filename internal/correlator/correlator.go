@@ -7,8 +7,10 @@
 // See docs/superpowers/specs/2026-08-11-phase1-correlator-design.md for the
 // full phase-1 vertical this package is one component of, and
 // docs/superpowers/specs/2026-08-12-correlator-cluster-design.md for this
-// package's own design (prompt/response contract, overflow handling,
-// rationale for every non-obvious choice below).
+// package's own design (overflow handling, rationale for every non-obvious
+// choice below). The prompt/response contract in that doc is superseded by
+// docs/superpowers/specs/2026-08-12-correlator-hydrated-context-rework.md,
+// which adds each narrative's raw events to the prompt as context.
 package correlator
 
 import (
@@ -33,9 +35,9 @@ type Event = events.Event
 
 // Narrative mirrors internal/store's `narratives` table row shape so a
 // later slice's Persist doesn't have to reshape this type when it starts
-// writing real rows — Cluster only reads WindowStart/WindowEnd (for
-// overlap/adjacency) and ID/Title/Summary (for prompt context), but the
-// full shape is defined now so nothing here changes when persistence
+// writing real rows — Cluster reads WindowStart/WindowEnd (for
+// overlap/adjacency), ID/Title/Summary, and Events (all for prompt context),
+// but the full shape is defined now so nothing here changes when persistence
 // lands.
 type Narrative struct {
 	ID          int64
