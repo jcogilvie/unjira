@@ -249,6 +249,54 @@ func TestLoad_ParsesLLMBlock(t *testing.T) {
 	assert.Equal(t, 128000, cfg.LLM.ContextWindowTokens)
 }
 
+func TestCorrelatorConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         config.CorrelatorConfig
+		wantErrText string
+	}{
+		{
+			name:        "requires positive threshold",
+			cfg:         config.CorrelatorConfig{TailSummarizeThresholdTokens: 0, RecentEventsKept: 20},
+			wantErrText: "tail_summarize_threshold_tokens",
+		},
+		{
+			name:        "requires positive recent-events-kept",
+			cfg:         config.CorrelatorConfig{TailSummarizeThresholdTokens: 6000, RecentEventsKept: 0},
+			wantErrText: "recent_events_kept",
+		},
+		{
+			name: "passes when both positive",
+			cfg:  config.CorrelatorConfig{TailSummarizeThresholdTokens: 6000, RecentEventsKept: 20},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErrText == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErrText)
+		})
+	}
+}
+
+func TestLoad_ParsesCorrelatorBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"correlator": {"tail_summarize_threshold_tokens": 6000, "recent_events_kept": 20}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, 6000, cfg.Correlator.TailSummarizeThresholdTokens)
+	assert.Equal(t, 20, cfg.Correlator.RecentEventsKept)
+}
+
 func TestDefaultConfig_HasClaudeCodeEnabledByDefault(t *testing.T) {
 	cfg := config.Default()
 
