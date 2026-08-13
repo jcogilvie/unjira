@@ -46,6 +46,12 @@ type Narrative struct {
 	IssueKey    string
 	Confidence  float64
 	Status      string
+	// Events is the narrative's context events, hydrated by the caller
+	// (see store.NarrativeEventsForContext) before Cluster is called —
+	// everything newer than the narrative's compaction boundary; the recap
+	// of older events lives in Summary. Cluster reads these for context
+	// only and never fetches them itself, keeping Cluster pure compute.
+	Events []Event
 }
 
 // ClusterKind distinguishes a brand-new narrative from one extending an
@@ -143,15 +149,16 @@ func estimateTokens(text string) int {
 	return (len(text) + 3) / 4
 }
 
-// buildClusterPrompt renders the fixed system prompt and a user prompt
-// listing evts (numbered 0..N-1) and existing narratives, per this
-// package's documented prompt/response contract (see
-// docs/superpowers/specs/2026-08-12-correlator-cluster-design.md).
+// buildClusterPrompt renders the fixed system prompt and a two-section user
+// prompt: the in-window events to cluster (numbered 0..N-1, assignable via
+// event_indices), then the overlapping/adjacent narratives as CONTEXT ONLY
+// (their events carry no index, so the model structurally cannot reassign
+// them). See docs/superpowers/specs/2026-08-12-correlator-hydrated-context-rework.md.
 func buildClusterPrompt(evts []Event, existing []Narrative) (systemPrompt, userPrompt string) {
 	systemPrompt = clusterSystemPrompt
 
 	var b strings.Builder
-	b.WriteString("Events:\n")
+	b.WriteString("Events to cluster:\n")
 	for i, e := range evts {
 		// %q on Summary (not %s): event summaries come from arbitrary
 		// upstream session/commit text, so an embedded newline or a
@@ -161,19 +168,27 @@ func buildClusterPrompt(evts []Event, existing []Narrative) (systemPrompt, userP
 		// narrative fields below.
 		fmt.Fprintf(&b, "%d. [%s] %q (occurred_at=%s)\n", i, e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
 	}
-	b.WriteString("\nExisting narratives:\n")
+
+	b.WriteString("\nExisting narratives (CONTEXT ONLY):\n")
 	if len(existing) == 0 {
 		b.WriteString("(none)\n")
 	}
 	for _, n := range existing {
-		fmt.Fprintf(&b, "narrative_id=%d title=%q summary=%q window=[%s, %s)\n",
-			n.ID, n.Title, n.Summary, n.WindowStart.Format(time.RFC3339), n.WindowEnd.Format(time.RFC3339))
+		fmt.Fprintf(&b, "narrative_id=%d title=%q window=[%s, %s)\n",
+			n.ID, n.Title, n.WindowStart.Format(time.RFC3339), n.WindowEnd.Format(time.RFC3339))
+		fmt.Fprintf(&b, "  summary: %q\n", n.Summary)
+		if len(n.Events) > 0 {
+			b.WriteString("  events:\n")
+			for _, e := range n.Events {
+				fmt.Fprintf(&b, "    - [%s] %q (occurred_at=%s)\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+			}
+		}
 	}
 
 	return systemPrompt, b.String()
 }
 
-const clusterSystemPrompt = `Cluster the given events into narratives. Every event index belongs to exactly one cluster. Tag each cluster "new" or "extends"; if "extends", include the narrative_id of the existing narrative it continues. Return ONLY a JSON array matching this shape, no prose, no markdown fences:
+const clusterSystemPrompt = `Cluster the given events into narratives. "Events to cluster" are numbered; assign each to exactly one cluster via event_indices. "Existing narratives" are CONTEXT ONLY — never put their events in event_indices; use them only to decide whether a numbered event extends one of them. Tag each cluster "new" or "extends" (include narrative_id when extending). Return ONLY a JSON array matching this shape, no prose, no markdown fences:
 [{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"...","summary":"...","event_indices":[0,2,5]}]`
 
 // clusterResponseItem is the wire shape of one element in the model's JSON

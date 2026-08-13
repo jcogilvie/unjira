@@ -131,24 +131,48 @@ func TestCluster_MixedBatchOfNewAndExtends(t *testing.T) {
 	assert.Equal(t, int64(7), results[1].NarrativeID)
 }
 
-func TestCluster_ExcludesNarrativesOutsideWindowAndNotAdjacent(t *testing.T) {
+func TestCluster_HydratedNarrativeEventsAppearAsContextNotAssignable(t *testing.T) {
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
 	existing := []correlator.Narrative{
-		{ID: 1, Title: "adjacent-before", WindowStart: base.Add(-2 * time.Hour), WindowEnd: base},
-		{ID: 2, Title: "overlapping", WindowStart: base.Add(30 * time.Minute), WindowEnd: base.Add(2 * time.Hour)},
-		{ID: 3, Title: "far-away", WindowStart: base.Add(-24 * time.Hour), WindowEnd: base.Add(-12 * time.Hour)},
+		{
+			ID: 9, Title: "Cache rework", Summary: "Reworking the shared cache",
+			WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+			Events: []correlator.Event{
+				mustEvent(t, "github", "pr-412", "PR #412 add cache layer", base.Add(-2*time.Hour)),
+			},
+		},
+		{
+			ID: 3, Title: "far-away", Summary: "unrelated",
+			WindowStart: base.Add(-48 * time.Hour), WindowEnd: base.Add(-24 * time.Hour),
+			Events: []correlator.Event{
+				mustEvent(t, "github", "pr-1", "PR #1 ancient", base.Add(-48*time.Hour)),
+			},
+		},
+	}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "debugging cache eviction", base.Add(5*time.Minute)),
 	}
 	llm := &fakeLLM{responses: []string{"[]"}}
 
-	_, err := correlator.Cluster(t.Context(), nil, existing, llm, window, 128000)
+	_, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 
 	require.NoError(t, err)
 	require.Len(t, llm.prompts, 1)
-	assert.Contains(t, llm.prompts[0], "adjacent-before")
-	assert.Contains(t, llm.prompts[0], "overlapping")
-	assert.NotContains(t, llm.prompts[0], "far-away")
+	prompt := llm.prompts[0]
+	// Adjacent narrative 9 and its event are present as context.
+	assert.Contains(t, prompt, "Cache rework")
+	assert.Contains(t, prompt, "PR #412 add cache layer")
+	// Non-adjacent narrative 3 is excluded entirely.
+	assert.NotContains(t, prompt, "far-away")
+	assert.NotContains(t, prompt, "PR #1 ancient")
+	// The in-window event is present and numbered/assignable.
+	assert.Contains(t, prompt, "debugging cache eviction")
+	// Structural: two labeled sections exist, and the context section warns
+	// against reassigning its events.
+	assert.Contains(t, prompt, "Events to cluster")
+	assert.Contains(t, prompt, "CONTEXT ONLY")
 }
 
 func TestCluster_ResponseAndCallFailuresErrorLoudly(t *testing.T) {
