@@ -175,6 +175,54 @@ func TestCluster_HydratedNarrativeEventsAppearAsContextNotAssignable(t *testing.
 	assert.Contains(t, prompt, "CONTEXT ONLY")
 }
 
+func TestCluster_UsesNarrativeContextEventsForExtendsDecision(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+	existing := []correlator.Narrative{{
+		ID: 9, Title: "Cache rework", Summary: "Reworking the shared cache",
+		WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+		Events: []correlator.Event{
+			mustEvent(t, "github", "pr-412", "PR #412 add cache layer", base.Add(-2*time.Hour)),
+		},
+	}}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "fixed the cache eviction bug from PR #412", base.Add(5*time.Minute)),
+	}
+	// Model, having seen narrative 9's events, extends it.
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"extends","narrative_id":9,"title":"Cache rework","summary":"Reworking the shared cache; fixed eviction","event_indices":[0]}]`,
+	}}
+
+	results, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, correlator.ClusterExtends, results[0].Kind)
+	assert.Equal(t, int64(9), results[0].NarrativeID)
+	require.Len(t, results[0].Events, 1)
+	assert.Equal(t, "e1", results[0].Events[0].ExternalID)
+}
+
+func TestCluster_IncludesMidWindowOverlappingNarrativeAsContext(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+	existing := []correlator.Narrative{{
+		ID: 5, Title: "mid-overlap", Summary: "overlaps the middle of the window",
+		WindowStart: base.Add(30 * time.Minute), WindowEnd: base.Add(90 * time.Minute),
+		Events: []correlator.Event{
+			mustEvent(t, "github", "pr-77", "PR #77 mid overlap work", base.Add(35*time.Minute)),
+		},
+	}}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, err := correlator.Cluster(t.Context(), nil, existing, llm, window, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, llm.prompts, 1)
+	assert.Contains(t, llm.prompts[0], "mid-overlap")
+	assert.Contains(t, llm.prompts[0], "PR #77 mid overlap work")
+}
+
 func TestCluster_ResponseAndCallFailuresErrorLoudly(t *testing.T) {
 	tests := []struct {
 		name        string
