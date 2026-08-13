@@ -1,12 +1,15 @@
 package store_test
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/store"
@@ -235,4 +238,49 @@ func TestInsertLocalIssue_GetLocalIssue_RoundTrips(t *testing.T) {
 	assert.Equal(t, "Task", issue.IssueType)
 	assert.Equal(t, "todo", issue.StatusCategory)
 	assert.Equal(t, []string{"bug", "urgent"}, issue.Labels)
+}
+
+// -- narratives.compaction_boundary migration ----------------------------
+
+func TestOpen_CompactionBoundaryColumnPresentAndReopenable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s1, err := store.Open(path)
+	require.NoError(t, err)
+	require.NoError(t, s1.Close())
+
+	// Reopen must not error (idempotent ALTER guard).
+	s2, err := store.Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
+
+	// Column exists (queryable without error).
+	cols, err := s2.NarrativeColumns()
+	require.NoError(t, err)
+	assert.Contains(t, cols, "compaction_boundary")
+}
+
+func TestOpen_MigratesPreExistingNarrativesTableWithoutColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	// Simulate a pre-column database: create a narratives table WITHOUT
+	// compaction_boundary, using a raw connection, then close it.
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = raw.Exec(`CREATE TABLE narratives (
+		id INTEGER PRIMARY KEY, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
+		title TEXT NOT NULL, summary TEXT NOT NULL, issue_key TEXT, confidence REAL,
+		status TEXT NOT NULL DEFAULT 'open',
+		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+	)`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	// store.Open must migrate it (add the column) without error.
+	s, err := store.Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	cols, err := s.NarrativeColumns()
+	require.NoError(t, err)
+	assert.Contains(t, cols, "compaction_boundary")
 }

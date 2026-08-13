@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS narratives (
     issue_key    TEXT,
     confidence   REAL,
     status       TEXT NOT NULL DEFAULT 'open',
+    compaction_boundary TEXT,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -147,12 +148,80 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
+	if err := ensureNarrativeCompactionBoundary(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrating narratives.compaction_boundary in %s: %w", dbPath, err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// ensureNarrativeCompactionBoundary adds narratives.compaction_boundary to a
+// database whose narratives table predates the column. CREATE TABLE IF NOT
+// EXISTS is a no-op on an existing table, so a fresh DB gets the column from
+// the schema while an older DB needs this explicit ALTER. Idempotent: it
+// checks column presence first and does nothing when already present.
+func ensureNarrativeCompactionBoundary(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(narratives)`)
+	if err != nil {
+		return fmt.Errorf("reading narratives table info: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			cid                 int
+			name, colType       string
+			notNull, primaryKey int
+			dfltValue           sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &primaryKey); err != nil {
+			return fmt.Errorf("scanning narratives table info: %w", err)
+		}
+		if name == "compaction_boundary" {
+			return rows.Err() // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if _, err := db.Exec(`ALTER TABLE narratives ADD COLUMN compaction_boundary TEXT`); err != nil {
+		return fmt.Errorf("adding compaction_boundary column: %w", err)
+	}
+
+	return nil
 }
 
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// NarrativeColumns returns the column names of the narratives table — a thin
+// introspection helper for tests verifying the compaction_boundary migration.
+func (s *Store) NarrativeColumns() ([]string, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(narratives)`)
+	if err != nil {
+		return nil, fmt.Errorf("reading narratives table info: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var cols []string
+	for rows.Next() {
+		var (
+			cid                 int
+			name, colType       string
+			notNull, primaryKey int
+			dfltValue           sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &primaryKey); err != nil {
+			return nil, fmt.Errorf("scanning narratives table info: %w", err)
+		}
+		cols = append(cols, name)
+	}
+
+	return cols, rows.Err()
 }
 
 // -- events ------------------------------------------------------------
