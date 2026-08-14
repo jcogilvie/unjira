@@ -702,7 +702,9 @@ func (s *Store) EventIDByExternalID(source, externalID string) (int64, error) {
 // strictly after its compaction_boundary (all of them when the boundary is
 // NULL), ordered by occurred_at — the events the caller hydrates into
 // correlator.Narrative.Events. The recap of anything at/before the boundary
-// already lives in the summary.
+// already lives in the summary. A narrative id with no matching row (or one
+// with no linked events) returns (nil, nil), not an error — callers only
+// invoke this with an id they already obtained from the store.
 func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, error) {
 	rows, err := s.db.Query(
 		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
