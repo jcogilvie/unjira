@@ -136,6 +136,44 @@ type Store struct {
 	db *sql.DB
 }
 
+// dbConn is the subset of *sql.DB / *sql.Tx the narrative accessors need, so
+// each accessor's SQL body can run either directly (*Store) or inside a
+// transaction (*Tx) without duplicating the query logic.
+type dbConn interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// Tx is a transaction-scoped handle exposing the narrative write/read methods
+// correlator.Persist needs to run atomically. Obtain one via WithTx.
+type Tx struct {
+	tx *sql.Tx
+}
+
+// WithTx runs fn inside a single transaction, committing if fn returns nil and
+// rolling back (preserving fn's error) otherwise. This is how Persist gets its
+// all-or-nothing guarantee.
+func (s *Store) WithTx(fn func(*Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+
+	if err := fn(&Tx{tx: tx}); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("rolling back after error %v: %w", err, rbErr)
+		}
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
+}
+
 // Open opens (creating if needed) the SQLite database at dbPath, ensures its
 // parent directory exists, and applies the schema.
 func Open(dbPath string) (*Store, error) {
@@ -579,7 +617,16 @@ type NarrativeRow struct {
 // InsertNarrative inserts a new narrative row (status 'open', no compaction
 // boundary) and returns its id.
 func (s *Store) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
-	res, err := s.db.Exec(
+	return insertNarrativeImpl(s.db, windowStart, windowEnd, title, summary)
+}
+
+// InsertNarrative is the *Tx-scoped variant of (*Store).InsertNarrative.
+func (t *Tx) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
+	return insertNarrativeImpl(t.tx, windowStart, windowEnd, title, summary)
+}
+
+func insertNarrativeImpl(c dbConn, windowStart, windowEnd time.Time, title, summary string) (int64, error) {
+	res, err := c.Exec(
 		`INSERT INTO narratives (window_start, window_end, title, summary) VALUES (?, ?, ?, ?)`,
 		windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339), title, summary,
 	)
@@ -597,6 +644,15 @@ func (s *Store) InsertNarrative(windowStart, windowEnd time.Time, title, summary
 // GetNarrative returns the narrative with the given id, or
 // ErrNarrativeNotFound.
 func (s *Store) GetNarrative(id int64) (NarrativeRow, error) {
+	return getNarrativeImpl(s.db, id)
+}
+
+// GetNarrative is the *Tx-scoped variant of (*Store).GetNarrative.
+func (t *Tx) GetNarrative(id int64) (NarrativeRow, error) {
+	return getNarrativeImpl(t.tx, id)
+}
+
+func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
 	var (
 		row                NarrativeRow
 		windowStart        string
@@ -605,7 +661,7 @@ func (s *Store) GetNarrative(id int64) (NarrativeRow, error) {
 		confidence         sql.NullFloat64
 		compactionBoundary sql.NullString
 	)
-	err := s.db.QueryRow(
+	err := c.QueryRow(
 		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status, compaction_boundary
 		 FROM narratives WHERE id = ?`, id,
 	).Scan(&row.ID, &windowStart, &windowEnd, &row.Title, &row.Summary,
@@ -641,7 +697,16 @@ func (s *Store) GetNarrative(id int64) (NarrativeRow, error) {
 // ExtendNarrative advances a narrative's window_end and overwrites its
 // summary.
 func (s *Store) ExtendNarrative(id int64, windowEnd time.Time, summary string) error {
-	_, err := s.db.Exec(
+	return extendNarrativeImpl(s.db, id, windowEnd, summary)
+}
+
+// ExtendNarrative is the *Tx-scoped variant of (*Store).ExtendNarrative.
+func (t *Tx) ExtendNarrative(id int64, windowEnd time.Time, summary string) error {
+	return extendNarrativeImpl(t.tx, id, windowEnd, summary)
+}
+
+func extendNarrativeImpl(c dbConn, id int64, windowEnd time.Time, summary string) error {
+	_, err := c.Exec(
 		`UPDATE narratives SET window_end = ?, summary = ? WHERE id = ?`,
 		windowEnd.Format(time.RFC3339), summary, id,
 	)
@@ -655,7 +720,17 @@ func (s *Store) ExtendNarrative(id int64, windowEnd time.Time, summary string) e
 // SetCompactionBoundary records the occurred_at of the newest compacted event
 // and stores the recap-prefixed summary.
 func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, recapSummary string) error {
-	_, err := s.db.Exec(
+	return setCompactionBoundaryImpl(s.db, id, boundary, recapSummary)
+}
+
+// SetCompactionBoundary is the *Tx-scoped variant of
+// (*Store).SetCompactionBoundary.
+func (t *Tx) SetCompactionBoundary(id int64, boundary time.Time, recapSummary string) error {
+	return setCompactionBoundaryImpl(t.tx, id, boundary, recapSummary)
+}
+
+func setCompactionBoundaryImpl(c dbConn, id int64, boundary time.Time, recapSummary string) error {
+	_, err := c.Exec(
 		`UPDATE narratives SET compaction_boundary = ?, summary = ? WHERE id = ?`,
 		boundary.Format(time.RFC3339), recapSummary, id,
 	)
@@ -669,8 +744,18 @@ func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, recapSummary
 // AddNarrativeEvents links events to a narrative (INSERT OR IGNORE, so
 // re-linking an already-linked event is a harmless no-op).
 func (s *Store) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return addNarrativeEventsImpl(s.db, narrativeID, eventIDs)
+}
+
+// AddNarrativeEvents is the *Tx-scoped variant of
+// (*Store).AddNarrativeEvents.
+func (t *Tx) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return addNarrativeEventsImpl(t.tx, narrativeID, eventIDs)
+}
+
+func addNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) error {
 	for _, eid := range eventIDs {
-		if _, err := s.db.Exec(
+		if _, err := c.Exec(
 			`INSERT OR IGNORE INTO narrative_events (narrative_id, event_id) VALUES (?, ?)`,
 			narrativeID, eid,
 		); err != nil {
@@ -684,8 +769,18 @@ func (s *Store) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
 // EventIDByExternalID returns the row id of the event with the given
 // (source, external_id), or ErrEventNotFound.
 func (s *Store) EventIDByExternalID(source, externalID string) (int64, error) {
+	return eventIDByExternalIDImpl(s.db, source, externalID)
+}
+
+// EventIDByExternalID is the *Tx-scoped variant of
+// (*Store).EventIDByExternalID.
+func (t *Tx) EventIDByExternalID(source, externalID string) (int64, error) {
+	return eventIDByExternalIDImpl(t.tx, source, externalID)
+}
+
+func eventIDByExternalIDImpl(c dbConn, source, externalID string) (int64, error) {
 	var id int64
-	err := s.db.QueryRow(
+	err := c.QueryRow(
 		`SELECT id FROM events WHERE source = ? AND external_id = ?`, source, externalID,
 	).Scan(&id)
 	if err == sql.ErrNoRows {

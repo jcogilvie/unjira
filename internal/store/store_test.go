@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -396,4 +397,41 @@ func TestNarrativeEventsForContext_ExcludesAtOrBeforeBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, evs, 1)
 	assert.Equal(t, "new", evs[0].ExternalID)
+}
+
+// -- transaction seam -----------------------------------------------------
+
+func TestWithTx_RollsBackOnError(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+	wantErr := errors.New("boom")
+	err := s.WithTx(func(tx *store.Tx) error {
+		_, iErr := tx.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+		require.NoError(t, iErr)
+		return wantErr // force rollback
+	})
+	require.ErrorIs(t, err, wantErr)
+
+	// The narrative inserted inside the rolled-back tx must not be present.
+	// (No narrative with id 1 should exist.)
+	_, gErr := s.GetNarrative(1)
+	require.ErrorIs(t, gErr, store.ErrNarrativeNotFound)
+}
+
+func TestWithTx_CommitsOnSuccess(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+	var id int64
+	err := s.WithTx(func(tx *store.Tx) error {
+		var iErr error
+		id, iErr = tx.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+		return iErr
+	})
+	require.NoError(t, err)
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.Equal(t, "T", row.Title)
 }
