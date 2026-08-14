@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -434,4 +435,99 @@ func TestWithTx_CommitsOnSuccess(t *testing.T) {
 	row, err := s.GetNarrative(id)
 	require.NoError(t, err)
 	assert.Equal(t, "T", row.Title)
+}
+
+// -- pipeline lock --------------------------------------------------------
+
+func TestTryAcquire_UnheldSucceeds(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestTryAcquire_HeldBeforeExpiryFails(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	ok, err = s.TryAcquire("run-2", now.Add(30*time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.False(t, ok, "lease still valid, second acquirer must fail")
+}
+
+func TestTryAcquire_ExpiredLeaseCanBeStolen(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// 2 minutes later, run-1's lease has expired; run-2 steals it.
+	ok, err = s.TryAcquire("run-2", now.Add(2*time.Minute), time.Minute)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestReleaseLock_ByHolderFreesLock(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	_, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, s.ReleaseLock("run-1"))
+
+	// Now immediately acquirable by another run, before any expiry.
+	ok, err := s.TryAcquire("run-2", now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestReleaseLock_ByNonHolderIsNoOp(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	_, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+
+	require.NoError(t, s.ReleaseLock("run-2")) // not the holder: no-op, no error
+
+	// run-1 still holds it.
+	ok, err := s.TryAcquire("run-3", now.Add(30*time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestAcquire_BlocksThenSucceedsWhenLeaseExpires(t *testing.T) {
+	s := openStore(t)
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	_, err := s.TryAcquire("run-1", start, 100*time.Millisecond)
+	require.NoError(t, err)
+
+	// A clock that advances past the lease each call.
+	calls := 0
+	clock := func() time.Time {
+		calls++
+		return start.Add(time.Duration(calls) * 60 * time.Millisecond)
+	}
+	err = s.Acquire(t.Context(), "run-2", clock, 100*time.Millisecond, 10*time.Millisecond)
+	require.NoError(t, err)
+}
+
+func TestAcquire_HonorsContextCancellation(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	_, err := s.TryAcquire("run-1", now, time.Hour) // long lease, never expires during test
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // already cancelled
+	err = s.Acquire(ctx, "run-2", func() time.Time { return now }, time.Hour, 10*time.Millisecond)
+	require.Error(t, err)
 }

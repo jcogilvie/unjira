@@ -8,10 +8,12 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -128,6 +130,13 @@ CREATE TABLE IF NOT EXISTS local_issue_comments (
     issue_key  TEXT NOT NULL REFERENCES local_issues (key),
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_lock (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    run_id     TEXT NOT NULL,
+    held_since TEXT NOT NULL,
+    expires_at TEXT NOT NULL
 );
 `
 
@@ -880,4 +889,78 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// -- pipeline lock ---------------------------------------------------------
+
+// TryAcquire attempts to take the singleton pipeline lock without blocking.
+// It succeeds when the lock is unheld or its lease has expired (expires_at <
+// now), replacing the row with a fresh lease for runID; otherwise it returns
+// false immediately. Stealing an expired lease logs a warning naming the
+// stale run_id and how long it was held — the crash-recovery path. now is
+// passed in (not time.Now()) so steal-on-expiry is deterministically testable.
+func (s *Store) TryAcquire(runID string, now time.Time, ttl time.Duration) (bool, error) {
+	var (
+		heldRunID string
+		expiresAt string
+	)
+	err := s.db.QueryRow(`SELECT run_id, expires_at FROM pipeline_lock WHERE id = 1`).Scan(&heldRunID, &expiresAt)
+	switch {
+	case err == sql.ErrNoRows:
+		// unheld
+	case err != nil:
+		return false, fmt.Errorf("reading pipeline lock: %w", err)
+	default:
+		exp, perr := time.Parse(time.RFC3339, expiresAt)
+		if perr != nil {
+			return false, fmt.Errorf("parsing pipeline lock expiry: %w", perr)
+		}
+		if !now.Before(exp) {
+			log.Printf("pipeline lock: stealing expired lease from run_id=%s (expired %s ago)", heldRunID, now.Sub(exp))
+		} else {
+			return false, nil // still held
+		}
+	}
+
+	if _, err := s.db.Exec(
+		`INSERT INTO pipeline_lock (id, run_id, held_since, expires_at) VALUES (1, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET run_id = excluded.run_id, held_since = excluded.held_since, expires_at = excluded.expires_at`,
+		runID, now.Format(time.RFC3339), now.Add(ttl).Format(time.RFC3339),
+	); err != nil {
+		return false, fmt.Errorf("acquiring pipeline lock for %s: %w", runID, err)
+	}
+
+	return true, nil
+}
+
+// Acquire is TryAcquire's blocking sibling: it polls every poll interval
+// until it can take the lock (unheld or lease expired), honoring ctx
+// cancellation. now is a clock func since Acquire loops.
+func (s *Store) Acquire(ctx context.Context, runID string, now func() time.Time, ttl, poll time.Duration) error {
+	for {
+		ok, err := s.TryAcquire(runID, now(), ttl)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("acquiring pipeline lock for %s: %w", runID, ctx.Err())
+		case <-time.After(poll):
+		}
+	}
+}
+
+// ReleaseLock releases the pipeline lock iff it is currently held by runID
+// (a no-op otherwise, so it never clobbers a newer holder that stole an
+// expired lease).
+func (s *Store) ReleaseLock(runID string) error {
+	if _, err := s.db.Exec(`DELETE FROM pipeline_lock WHERE id = 1 AND run_id = ?`, runID); err != nil {
+		return fmt.Errorf("releasing pipeline lock for %s: %w", runID, err)
+	}
+
+	return nil
 }
