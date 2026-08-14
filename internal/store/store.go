@@ -154,6 +154,13 @@ type Tx struct {
 // WithTx runs fn inside a single transaction, committing if fn returns nil and
 // rolling back (preserving fn's error) otherwise. This is how Persist gets its
 // all-or-nothing guarantee.
+//
+// There is no defer-based rollback guard: a panic inside fn propagates without
+// an immediate Rollback, leaving the transaction to be rolled back by its
+// context-cancellation goroutine when the *sql.Tx is GC'd. That is acceptable
+// for unjira's single-shot, lease-serialized batch model (a panic crashes the
+// process anyway); revisit if this ever runs inside a longer-lived process that
+// recovers panics.
 func (s *Store) WithTx(fn func(*Tx) error) error {
 	tx, err := s.db.Begin()
 	if err != nil {
