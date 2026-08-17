@@ -518,6 +518,58 @@ func TestAcquire_BlocksThenSucceedsWhenLeaseExpires(t *testing.T) {
 	}
 	err = s.Acquire(t.Context(), "run-2", clock, 100*time.Millisecond, 10*time.Millisecond)
 	require.NoError(t, err)
+
+	// The lease is still valid on the first call (60ms < 100ms), so Acquire
+	// must actually block and retry at least once before the second call
+	// (120ms) sees it expired. This is the regression guard for the
+	// RFC3339-truncation bug, where every sub-second TryAcquire call saw an
+	// "already expired" lease and this test passed without ever blocking.
+	assert.GreaterOrEqual(t, calls, 2, "Acquire must poll at least twice before the lease actually expires")
+}
+
+func TestTryAcquire_SubSecondLeasePrecisionIsHonored(t *testing.T) {
+	s := openStore(t)
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", start, 100*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// 50ms in: lease (100ms TTL) is still valid, second acquirer must fail.
+	ok, err = s.TryAcquire("run-2", start.Add(50*time.Millisecond), 100*time.Millisecond)
+	require.NoError(t, err)
+	assert.False(t, ok, "lease has sub-second time remaining and must still be held")
+
+	// 150ms in: lease has expired, second acquirer may steal it.
+	ok, err = s.TryAcquire("run-3", start.Add(150*time.Millisecond), 100*time.Millisecond)
+	require.NoError(t, err)
+	assert.True(t, ok, "lease has expired (sub-second TTL) and must be stealable")
+}
+
+func TestTryAcquire_TrailingZeroBoundaryOrdersCorrectly(t *testing.T) {
+	// Regression guard for the trailing-zero lexicographic-ordering trap: a
+	// naive fractional-second format (e.g. time.RFC3339Nano) strips trailing
+	// zeros, so 100ms formats as ".1" and 150ms formats as ".15". Comparing
+	// those two strings gives "2026-08-01T12:00:00.1Z" <
+	// "2026-08-01T12:00:00.15Z" == false — the trailing-zero-stripped
+	// strings sort in the WRONG order relative to true chronological order
+	// (verified directly against time.RFC3339Nano's actual output). The
+	// lock's fixed-width format must keep these two writes in correct order
+	// under TryAcquire's string-based SQL guard.
+	s := openStore(t)
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	// run-1's lease expires at exactly start + 100ms (".100000000").
+	ok, err := s.TryAcquire("run-1", start, 100*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// At start + 100ms + 50ms = 150ms (".150000000"), the lease (expired at
+	// .100000000) must be stealable: .100000000 <= .150000000 must hold as a
+	// string comparison, not just a time comparison.
+	ok, err = s.TryAcquire("run-2", start.Add(150*time.Millisecond), 100*time.Millisecond)
+	require.NoError(t, err)
+	assert.True(t, ok, "expires_at=.100000000 must compare <= now=.150000000 lexicographically")
 }
 
 func TestAcquire_HonorsContextCancellation(t *testing.T) {
