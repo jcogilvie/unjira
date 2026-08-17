@@ -178,7 +178,9 @@ func (s *Store) WithTx(fn func(*Tx) error) error {
 
 	if err := fn(&Tx{tx: tx}); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
-			return fmt.Errorf("rolling back after error %v: %w", err, rbErr)
+			// Wrap both: callers may need errors.Is against either the
+			// original failure or the rollback failure that masked it.
+			return fmt.Errorf("rolling back after error %w: %w", err, rbErr)
 		}
 		return err
 	}
@@ -380,7 +382,7 @@ func (s *Store) GetCursor(collector, resource string) (string, error) {
 		`SELECT position FROM cursors WHERE collector = ? AND resource = ?`,
 		collector, resource,
 	).Scan(&position)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -682,7 +684,7 @@ func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
 		 FROM narratives WHERE id = ?`, id,
 	).Scan(&row.ID, &windowStart, &windowEnd, &row.Title, &row.Summary,
 		&issueKey, &confidence, &row.Status, &compactionBoundary)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return NarrativeRow{}, ErrNarrativeNotFound
 	}
 	if err != nil {
@@ -799,7 +801,7 @@ func eventIDByExternalIDImpl(c dbConn, source, externalID string) (int64, error)
 	err := c.QueryRow(
 		`SELECT id FROM events WHERE source = ? AND external_id = ?`, source, externalID,
 	).Scan(&id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrEventNotFound
 	}
 	if err != nil {
@@ -942,7 +944,7 @@ func (s *Store) TryAcquire(runID string, now time.Time, ttl time.Duration) (bool
 	)
 	if err := s.db.QueryRow(
 		`SELECT run_id, expires_at FROM pipeline_lock WHERE id = 1`,
-	).Scan(&priorRunID, &priorExp); err != nil && err != sql.ErrNoRows {
+	).Scan(&priorRunID, &priorExp); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("reading pipeline lock for diagnostics: %w", err)
 	}
 

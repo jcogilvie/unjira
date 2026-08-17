@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 
 	"github.com/jcogilvie/unjira/internal/events"
