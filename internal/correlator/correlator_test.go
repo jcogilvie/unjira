@@ -9,6 +9,8 @@ package correlator_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,8 +18,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/store"
 )
 
 // fakeLLM satisfies correlator's llmClient interface without making any
@@ -408,4 +412,217 @@ func TestCluster_DegenerateBisectionOfIdenticalTimestampsErrorsLoudly(t *testing
 	}, 1000)
 
 	require.Error(t, err)
+}
+
+// -- Persist ---------------------------------------------------------------
+
+func persistStore(t *testing.T) *store.Store {
+	t.Helper()
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func seedPersistedEvent(t *testing.T, s *store.Store, extID, summary string, at time.Time) correlator.Event {
+	t.Helper()
+	e := events.NewEvent("claude_code", extID, at, summary)
+	_, err := s.InsertEvent(e)
+	require.NoError(t, err)
+	return e
+}
+
+func TestPersist_NewNarrativeRoundTrips(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	e1 := seedPersistedEvent(t, s, "e1", "started work", base)
+	e2 := seedPersistedEvent(t, s, "e2", "more work", base.Add(time.Minute))
+	llm := &fakeLLM{} // no LLM call expected for a new narrative
+
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+	got, err := correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+		Kind: correlator.ClusterNew, Title: "New story", Summary: "did some work",
+		Events: []correlator.Event{e1, e2},
+	}}, cfg)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.NotZero(t, got[0].ID)
+	assert.Empty(t, llm.prompts, "new narrative needs no compaction call")
+
+	row, err := s.GetNarrative(got[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, "New story", row.Title)
+	assert.True(t, base.Equal(row.WindowStart))
+	assert.True(t, base.Add(time.Minute).Equal(row.WindowEnd))
+	ctxEvents, err := s.NarrativeEventsForContext(got[0].ID)
+	require.NoError(t, err)
+	assert.Len(t, ctxEvents, 2)
+}
+
+func TestPersist_ExtendUpdatesExistingNarrative(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	seedPersistedEvent(t, s, "e1", "start", base)
+	id, err := s.InsertNarrative(base, base.Add(time.Minute), "Story", "old summary")
+	require.NoError(t, err)
+	eid, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+
+	e2 := seedPersistedEvent(t, s, "e2", "continued", base.Add(time.Hour))
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+	got, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Story", Summary: "new cumulative summary",
+		Events: []correlator.Event{e2},
+	}}, cfg)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.True(t, base.Add(time.Hour).Equal(row.WindowEnd), "window_end advanced")
+	assert.Equal(t, "new cumulative summary", row.Summary)
+	ctxEvents, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	assert.Len(t, ctxEvents, 2, "both events now linked")
+}
+
+func TestPersist_ExtendUnknownNarrativeIDErrorsLoudly(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	e1 := seedPersistedEvent(t, s, "e1", "x", base)
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+
+	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: 999, Title: "x", Summary: "x",
+		Events: []correlator.Event{e1},
+	}}, cfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "999")
+}
+
+func TestPersist_EventNotInStoreErrorsLoudly(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	// Event constructed but never inserted into the store.
+	ghost := events.NewEvent("claude_code", "ghost", base, "never persisted")
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+
+	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+		Kind: correlator.ClusterNew, Title: "x", Summary: "x", Events: []correlator.Event{ghost},
+	}}, cfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ghost")
+}
+
+func TestPersist_AllOrNothingRollsBackFirstResultOnLaterFailure(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	e1 := seedPersistedEvent(t, s, "e1", "ok", base)
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+
+	// First result is a valid new narrative; second references a missing id.
+	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{
+		{Kind: correlator.ClusterNew, Title: "First", Summary: "s", Events: []correlator.Event{e1}},
+		{Kind: correlator.ClusterExtends, NarrativeID: 999, Title: "x", Summary: "x", Events: []correlator.Event{e1}},
+	}, cfg)
+
+	require.Error(t, err)
+	// The first result's narrative must NOT have been persisted (rollback).
+	_, gErr := s.GetNarrative(1)
+	require.ErrorIs(t, gErr, store.ErrNarrativeNotFound)
+}
+
+func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	// Seed a narrative with several linked events; make its summary large so
+	// the post-boundary history estimate exceeds a small threshold.
+	id, err := s.InsertNarrative(base, base.Add(5*time.Hour), "Long", strings.Repeat("x", 4000))
+	require.NoError(t, err)
+	linkIDs := make([]int64, 0, 5)
+	for i := range 5 {
+		seedPersistedEvent(t, s, fmt.Sprintf("old-%d", i), strings.Repeat("y", 500), base.Add(time.Duration(i)*time.Hour))
+		eid, err := s.EventIDByExternalID("claude_code", fmt.Sprintf("old-%d", i))
+		require.NoError(t, err)
+		linkIDs = append(linkIDs, eid)
+	}
+	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+
+	newE := seedPersistedEvent(t, s, "new-1", "newest", base.Add(6*time.Hour))
+	llm := &fakeLLM{responses: []string{"recap: earlier work compacted"}}
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 500, RecentEventsKept: 2}
+
+	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Long", Summary: strings.Repeat("z", 4000),
+		Events: []correlator.Event{newE},
+	}}, cfg)
+
+	require.NoError(t, err)
+	require.Len(t, llm.prompts, 1, "compaction should make exactly one LLM call")
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	require.NotNil(t, row.CompactionBoundary, "boundary set after compaction")
+	assert.Contains(t, row.Summary, "recap: earlier work compacted")
+
+	// narrative_events rows are never deleted: all 6 events still linked in
+	// the store even though context now returns only the recent tail.
+	ctxEvents, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(ctxEvents), cfg.RecentEventsKept+1) // recent kept + the new one, all post-boundary
+}
+
+func TestPersist_NoCompactionBelowThreshold(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedPersistedEvent(t, s, "e1", "start", base)
+	id, err := s.InsertNarrative(base, base.Add(time.Minute), "Small", "tiny")
+	require.NoError(t, err)
+	eid, _ := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+
+	e2 := seedPersistedEvent(t, s, "e2", "next", base.Add(time.Hour))
+	llm := &fakeLLM{}
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+
+	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Small", Summary: "still tiny",
+		Events: []correlator.Event{e2},
+	}}, cfg)
+
+	require.NoError(t, err)
+	assert.Empty(t, llm.prompts, "below threshold: no compaction call")
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.Nil(t, row.CompactionBoundary)
+}
+
+func TestPersist_EmptyResultsIsNoOp(t *testing.T) {
+	s := persistStore(t)
+	got, err := correlator.Persist(t.Context(), s, &fakeLLM{}, nil,
+		config.CorrelatorConfig{TailSummarizeThresholdTokens: 100, RecentEventsKept: 2})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// TestPersist_UnknownClusterKindErrorsLoudly guards this repo's
+// "never silently drop data" invariant (see CLAUDE.md): a ClusterResult
+// tagged with neither ClusterNew nor ClusterExtends must fail the whole
+// pass, not vanish from the touched-narratives result silently.
+func TestPersist_UnknownClusterKindErrorsLoudly(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	e1 := seedPersistedEvent(t, s, "e1", "x", base)
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+
+	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+		Kind: correlator.ClusterKind(99), Title: "x", Summary: "x", Events: []correlator.Event{e1},
+	}}, cfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown ClusterKind")
 }
