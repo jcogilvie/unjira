@@ -1,5 +1,5 @@
 // Package correlator_test exercises Cluster against a hand-written fake
-// llmClient, not a real HTTP server — Cluster's own logic (window/adjacency
+// llm.Client, not a real HTTP server — Cluster's own logic (window/adjacency
 // filtering, prompt construction, response parsing, split/merge) is what's
 // under test here, not any wire protocol. Compare
 // internal/workflow/workflow_test.go's fakeMiner, which decouples
@@ -21,22 +21,25 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
-// fakeLLM satisfies correlator's llmClient interface without making any
-// real call. responses is consumed in call order; a test that only cares
-// about one canned response can set a single-element slice.
+// fakeLLM satisfies llm.Client without making any real call. responses is
+// consumed in call order; a test that only cares about one canned response
+// can set a single-element slice. usagePerCall is returned from every call,
+// so a test can assert Stats aggregates across a bisected pass.
 type fakeLLM struct {
-	responses []string
-	prompts   []string // captured user prompts, in call order, for assertions
-	err       error
+	responses    []string
+	prompts      []string // captured user prompts, in call order, for assertions
+	err          error
+	usagePerCall llm.Usage
 }
 
-func (f *fakeLLM) Complete(_ context.Context, _ string, userPrompt string) (string, error) {
+func (f *fakeLLM) Complete(_ context.Context, _ string, userPrompt string) (string, llm.Usage, error) {
 	f.prompts = append(f.prompts, userPrompt)
 	if f.err != nil {
-		return "", f.err
+		return "", llm.Usage{}, f.err
 	}
 
 	idx := len(f.prompts) - 1
@@ -44,13 +47,13 @@ func (f *fakeLLM) Complete(_ context.Context, _ string, userPrompt string) (stri
 		idx = len(f.responses) - 1
 	}
 
-	return f.responses[idx], nil
+	return f.responses[idx], f.usagePerCall, nil
 }
 
 func TestCluster_EmptyEventsReturnsEmptyResult(t *testing.T) {
 	llm := &fakeLLM{responses: []string{"[]"}}
 
-	results, err := correlator.Cluster(t.Context(), nil, nil, llm, correlator.TimeRange{}, 128000)
+	results, _, err := correlator.Cluster(t.Context(), nil, nil, llm, correlator.TimeRange{}, 128000)
 
 	require.NoError(t, err)
 	require.Empty(t, results)
@@ -72,7 +75,7 @@ func TestCluster_SingleNewCluster(t *testing.T) {
 		`[{"kind":"new","title":"Fix flaky test","summary":"Investigated and found a race condition.","event_indices":[0,1]}]`,
 	}}
 
-	results, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+	results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base.Add(-time.Hour), End: base.Add(time.Hour),
 	}, 128000)
 
@@ -98,7 +101,7 @@ func TestCluster_SingleExtendsCluster(t *testing.T) {
 		`[{"kind":"extends","narrative_id":42,"title":"Fix flaky test","summary":"Continued and finished the fix.","event_indices":[0]}]`,
 	}}
 
-	results, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
+	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Hour),
 	}, 128000)
 
@@ -124,7 +127,7 @@ func TestCluster_MixedBatchOfNewAndExtends(t *testing.T) {
 			`{"kind":"extends","narrative_id":7,"title":"Prior","summary":"s2","event_indices":[1]}]`,
 	}}
 
-	results, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
+	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Hour),
 	}, 128000)
 
@@ -160,7 +163,7 @@ func TestCluster_HydratedNarrativeEventsAppearAsContextNotAssignable(t *testing.
 	}
 	llm := &fakeLLM{responses: []string{"[]"}}
 
-	_, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 
 	require.NoError(t, err)
 	require.Len(t, llm.prompts, 1)
@@ -197,7 +200,7 @@ func TestCluster_UsesNarrativeContextEventsForExtendsDecision(t *testing.T) {
 		`[{"kind":"extends","narrative_id":9,"title":"Cache rework","summary":"Reworking the shared cache; fixed eviction","event_indices":[0]}]`,
 	}}
 
-	results, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+	results, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 
 	require.NoError(t, err)
 	require.Len(t, results, 1)
@@ -219,7 +222,7 @@ func TestCluster_IncludesMidWindowOverlappingNarrativeAsContext(t *testing.T) {
 	}}
 	llm := &fakeLLM{responses: []string{"[]"}}
 
-	_, err := correlator.Cluster(t.Context(), nil, existing, llm, window, 128000)
+	_, _, err := correlator.Cluster(t.Context(), nil, existing, llm, window, 128000)
 
 	require.NoError(t, err)
 	require.Len(t, llm.prompts, 1)
@@ -262,7 +265,7 @@ func TestCluster_ResponseAndCallFailuresErrorLoudly(t *testing.T) {
 			llm := &fakeLLM{responses: tt.responses, err: tt.llmErr}
 			evts := []correlator.Event{mustEvent(t, "claude_code", "e1", "x", base)}
 
-			_, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+			_, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 				Start: base.Add(-time.Hour), End: base.Add(time.Hour),
 			}, 128000)
 
@@ -291,7 +294,7 @@ func TestCluster_OversizedWindowSplitsAndCallsLLMPerHalf(t *testing.T) {
 
 	// contextWindowTokens sized so one event alone fits comfortably but
 	// both together (in one prompt) don't.
-	results, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+	results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base, End: base.Add(2 * time.Hour),
 	}, 1200)
 
@@ -309,7 +312,7 @@ func TestCluster_SingleEventOverBudgetErrorsLoudlyWithoutCallingLLM(t *testing.T
 	}
 	llm := &fakeLLM{responses: []string{"[]"}}
 
-	_, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+	_, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
 	}, 100)
 
@@ -332,7 +335,7 @@ func TestCluster_ExtendsResultsSharingNarrativeIDMergeAcrossSplit(t *testing.T) 
 		`[{"kind":"extends","narrative_id":9,"title":"Ongoing","summary":"s2","event_indices":[0]}]`,
 	}}
 
-	results, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
+	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
 		Start: base, End: base.Add(2 * time.Hour),
 	}, 1200)
 
@@ -379,7 +382,7 @@ func TestCluster_AdjacentNewClustersMergeViaLLMWhenSameStory(t *testing.T) {
 				tt.sameStoryReply,
 			}}
 
-			results, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+			results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 				Start: base, End: base.Add(2 * time.Hour),
 			}, 1200)
 
@@ -407,11 +410,75 @@ func TestCluster_DegenerateBisectionOfIdenticalTimestampsErrorsLoudly(t *testing
 	}
 	llm := &fakeLLM{responses: []string{"[]"}}
 
-	_, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
+	_, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
 	}, 1000)
 
 	require.Error(t, err)
+}
+
+func TestCluster_StatsCountsCallsAndAggregatesUsage(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "did a thing", base),
+	}
+	llmFake := &fakeLLM{
+		responses:    []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+		usagePerCall: llm.Usage{PromptTokens: 100, CompletionTokens: 20, Model: "m"},
+	}
+
+	_, stats, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+		Start: base, End: base.Add(time.Hour),
+	}, 128000)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.Calls)
+	assert.Equal(t, int64(100), stats.PromptTokens)
+	assert.Equal(t, int64(20), stats.CompletionTokens)
+	assert.Zero(t, stats.Splits, "a window that fits needs no bisection")
+	assert.Positive(t, stats.EstimatedTokens, "the len/4 estimate is recorded for comparison")
+}
+
+func TestCluster_StatsAggregatesAcrossBisection(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	// Two events far enough apart that bisection separates them, with
+	// summaries large enough to overflow a tiny context budget.
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", strings.Repeat("x", 400), base),
+		mustEvent(t, "claude_code", "e2", strings.Repeat("y", 400), base.Add(50*time.Minute)),
+	}
+	llmFake := &fakeLLM{
+		// Both halves yield an adjacent ClusterNew result, so Cluster makes a
+		// third, merge-boundary same-story call after the two split-half
+		// calls; its response must parse as a sameStoryResponse, not a
+		// cluster-response array.
+		responses: []string{
+			`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+			`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+			`{"same_story":false}`,
+		},
+		usagePerCall: llm.Usage{PromptTokens: 10, CompletionTokens: 2},
+	}
+
+	// 300 sits strictly between each half's own prompt estimate (~268 tokens,
+	// dominated by the fixed system prompt) and the combined two-event
+	// estimate (~382): tight enough that the top-level window must bisect,
+	// loose enough that each half fits on its own and doesn't recurse again.
+	_, stats, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+		Start: base, End: base.Add(time.Hour),
+	}, 300)
+
+	require.NoError(t, err)
+	assert.Positive(t, stats.Splits, "an over-budget window must record its bisection")
+	assert.GreaterOrEqual(t, stats.Calls, 2, "each half costs a call")
+	// Ground truth is llmFake.prompts, not stats.Calls: an assertion phrased
+	// against stats.Calls itself is self-referential and would still pass
+	// even if a recursive Add were silently dropped (undercounting Calls and
+	// PromptTokens by the same missing call, in the same ratio).
+	require.Len(t, llmFake.prompts, 3, "two split-half calls plus one merge-boundary same-story check")
+	assert.Equal(t, 3, stats.Calls, "Stats.Calls must match every completion actually made")
+	assert.Equal(t, int64(10*len(llmFake.prompts)), stats.PromptTokens,
+		"usage must sum across the whole recursion, not just the top call")
 }
 
 // -- Persist ---------------------------------------------------------------
@@ -440,7 +507,7 @@ func TestPersist_NewNarrativeRoundTrips(t *testing.T) {
 	llm := &fakeLLM{} // no LLM call expected for a new narrative
 
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
-	got, err := correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+	got, _, err := correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
 		Kind: correlator.ClusterNew, Title: "New story", Summary: "did some work",
 		Events: []correlator.Event{e1, e2},
 	}}, cfg)
@@ -472,7 +539,7 @@ func TestPersist_ExtendUpdatesExistingNarrative(t *testing.T) {
 
 	e2 := seedPersistedEvent(t, s, "e2", "continued", base.Add(time.Hour))
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
-	got, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+	got, _, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
 		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Story", Summary: "new cumulative summary",
 		Events: []correlator.Event{e2},
 	}}, cfg)
@@ -504,7 +571,7 @@ func TestPersist_ExtendWithOlderEventsDoesNotMoveWindowEndBackward(t *testing.T)
 	olderE := seedPersistedEvent(t, s, "older", "a late-arriving older event", base.Add(30*time.Minute))
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
 
-	got, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+	got, _, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
 		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Story", Summary: "updated summary",
 		Events: []correlator.Event{olderE},
 	}}, cfg)
@@ -524,7 +591,7 @@ func TestPersist_ExtendUnknownNarrativeIDErrorsLoudly(t *testing.T) {
 	e1 := seedPersistedEvent(t, s, "e1", "x", base)
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
 
-	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+	_, _, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
 		Kind: correlator.ClusterExtends, NarrativeID: 999, Title: "x", Summary: "x",
 		Events: []correlator.Event{e1},
 	}}, cfg)
@@ -540,7 +607,7 @@ func TestPersist_EventNotInStoreErrorsLoudly(t *testing.T) {
 	ghost := events.NewEvent("claude_code", "ghost", base, "never persisted")
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
 
-	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+	_, _, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
 		Kind: correlator.ClusterNew, Title: "x", Summary: "x", Events: []correlator.Event{ghost},
 	}}, cfg)
 
@@ -555,7 +622,7 @@ func TestPersist_AllOrNothingRollsBackFirstResultOnLaterFailure(t *testing.T) {
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
 
 	// First result is a valid new narrative; second references a missing id.
-	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{
+	_, _, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{
 		{Kind: correlator.ClusterNew, Title: "First", Summary: "s", Events: []correlator.Event{e1}},
 		{Kind: correlator.ClusterExtends, NarrativeID: 999, Title: "x", Summary: "x", Events: []correlator.Event{e1}},
 	}, cfg)
@@ -586,7 +653,7 @@ func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
 	llm := &fakeLLM{responses: []string{"recap: earlier work compacted"}}
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 500, RecentEventsKept: 2}
 
-	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+	_, _, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
 		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Long", Summary: strings.Repeat("z", 4000),
 		Events: []correlator.Event{newE},
 	}}, cfg)
@@ -657,7 +724,7 @@ func TestPersist_CompactionBoundaryTieDoesNotLoseVisibleEvent(t *testing.T) {
 	llm := &fakeLLM{responses: []string{"recap: a and b folded"}}
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1, RecentEventsKept: 2}
 
-	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+	_, _, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
 		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Tied", Summary: "updated summary",
 		Events: []correlator.Event{z},
 	}}, cfg)
@@ -717,7 +784,7 @@ func TestPersist_CompactionBoundarySubSecondTieDoesNotLoseVisibleEvent(t *testin
 	llm := &fakeLLM{responses: []string{"recap: a and b folded"}}
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1, RecentEventsKept: 2}
 
-	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+	_, _, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
 		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Tied", Summary: "updated summary",
 		Events: []correlator.Event{z},
 	}}, cfg)
@@ -750,7 +817,7 @@ func TestPersist_NoCompactionBelowThreshold(t *testing.T) {
 	llm := &fakeLLM{}
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
 
-	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+	_, _, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
 		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Small", Summary: "still tiny",
 		Events: []correlator.Event{e2},
 	}}, cfg)
@@ -764,7 +831,7 @@ func TestPersist_NoCompactionBelowThreshold(t *testing.T) {
 
 func TestPersist_EmptyResultsIsNoOp(t *testing.T) {
 	s := persistStore(t)
-	got, err := correlator.Persist(t.Context(), s, &fakeLLM{}, nil,
+	got, _, err := correlator.Persist(t.Context(), s, &fakeLLM{}, nil,
 		config.CorrelatorConfig{TailSummarizeThresholdTokens: 100, RecentEventsKept: 2})
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -780,10 +847,43 @@ func TestPersist_UnknownClusterKindErrorsLoudly(t *testing.T) {
 	e1 := seedPersistedEvent(t, s, "e1", "x", base)
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
 
-	_, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+	_, _, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
 		Kind: correlator.ClusterKind(99), Title: "x", Summary: "x", Events: []correlator.Event{e1},
 	}}, cfg)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown ClusterKind")
+}
+
+func TestPersist_StatsRecordsCompaction(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(base, base.Add(5*time.Hour), "Long", strings.Repeat("x", 4000))
+	require.NoError(t, err)
+	linkIDs := make([]int64, 0, 5)
+	for i := range 5 {
+		extID := fmt.Sprintf("old-%d", i)
+		seedPersistedEvent(t, s, extID, strings.Repeat("y", 500), base.Add(time.Duration(i)*time.Hour))
+		eid, eerr := s.EventIDByExternalID("claude_code", extID)
+		require.NoError(t, eerr)
+		linkIDs = append(linkIDs, eid)
+	}
+	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+
+	newE := seedPersistedEvent(t, s, "new-1", "newest", base.Add(6*time.Hour))
+	llmFake := &fakeLLM{
+		responses:    []string{"recap: earlier work compacted"},
+		usagePerCall: llm.Usage{PromptTokens: 500, CompletionTokens: 40},
+	}
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 500, RecentEventsKept: 2}
+
+	_, stats, err := correlator.Persist(t.Context(), s, llmFake, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Long", Summary: strings.Repeat("z", 4000),
+		Events: []correlator.Event{newE},
+	}}, cfg)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.Compactions)
+	assert.Equal(t, 1, stats.Calls)
+	assert.Equal(t, int64(500), stats.PromptTokens)
 }
