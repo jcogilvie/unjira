@@ -33,9 +33,10 @@ In scope:
 - `config.Span`, a duration type accepting day/week units (delegating to
   `github.com/xhit/go-str2duration/v2`, a new direct dependency), since `time.ParseDuration`
   rejects them.
-- LLM observability: `openai.Usage` returned from `Complete` (currently discarded), a
-  `correlator.Stats` return on `Cluster`/`Persist`, and exporting `correlator.llmClient` as
-  `correlator.LLMClient`. This touches slice-1/2/3 call sites deliberately.
+- A new `internal/llm` contract package (`llm.Client`, `llm.Usage`), mirroring
+  `internal/tasktracker`'s backend-agnostic shape.
+- LLM observability: `Complete` returns `llm.Usage` (currently discarded) and `Cluster`/`Persist`
+  return a `correlator.Stats`. This touches slice-1/2/3 call sites deliberately.
 - `UNJIRA_LLM_API_KEY` wiring in `cmd/unjira`, deferred from slice 1 and needed here for the first
   time.
 
@@ -174,7 +175,7 @@ type Compaction struct {
 func RunNarrate(
     ctx context.Context,
     s *store.Store,
-    llm correlator.LLMClient,
+    client llm.Client,
     cfg config.Config,
     window correlator.TimeRange,
     opts NarrateOptions,
@@ -186,8 +187,8 @@ Sequence:
 1. `s.UnlinkedEventsInRange(window.Start, window.End)` → candidates.
 2. `s.NarrativesOverlapping(window.Start, window.End)` → map each `NarrativeRow` to
    `correlator.Narrative` and hydrate `.Events` via `s.NarrativeEventsForContext(row.ID)`.
-3. `correlator.Cluster(ctx, events, narratives, llm, window, cfg.LLM.ContextWindowTokens)`.
-4. Unless `opts.DryRun`: `correlator.Persist(ctx, s, llm, results, cfg.Correlator)`.
+3. `correlator.Cluster(ctx, events, narratives, client, window, cfg.LLM.ContextWindowTokens)`.
+4. Unless `opts.DryRun`: `correlator.Persist(ctx, s, client, results, cfg.Correlator)`.
 5. Assemble `NarrateResult`.
 
 Early return: zero unlinked events → a `NarrateResult` with counts populated, zero-valued `Stats`, no LLM call, no error.
@@ -224,7 +225,35 @@ So usage flows from the client through the correlator, rather than being inferre
 
 **`internal/clients/openai`:**
 
+#### `internal/llm` — the backend-agnostic contract
+
+The interface and the usage type go in their own contract package, **not** in `clients/openai` and
+**not** in `correlator`. This mirrors `internal/tasktracker` exactly, whose package doc states the
+rule this repo already follows:
+
+> Package tasktracker defines the backend-agnostic interface phase-1's correlator/reconciler/applier
+> use [...] plus the normalized types every backend (Jira, GitHub Issues, a local no-op-tracker)
+> speaks. **It has no imports of `internal/clients`** — like `internal/events`, it's a shared contract
+> with multiple producers and no single owning consumer.
+
+The dependency direction there is the inverse of a client-owned type: `clients/jira/tracker.go` and
+`clients/local/local.go` both import `internal/tasktracker`, and nothing imports back. `clients/local`
+was added alongside `clients/jira` with no upstream changes, which is the property we want here.
+
 ```go
+// Package llm defines the backend-agnostic interface the correlator uses to
+// reach a language model, plus the normalized usage every backend reports.
+// It has no imports of internal/clients — like internal/tasktracker and
+// internal/events, it's a shared contract with multiple producers
+// (clients/openai today, an Anthropic-shaped client later) and no single
+// owning consumer.
+package llm
+
+// Client is the narrow capability the correlator needs from any LLM backend.
+type Client interface {
+    Complete(ctx context.Context, systemPrompt, userPrompt string) (string, Usage, error)
+}
+
 // Usage reports what one completion actually consumed, as the server counted
 // it — distinct from correlator.estimateTokens's len/4 heuristic, which only
 // has to be good enough to decide whether to split before spending a call.
@@ -236,20 +265,27 @@ type Usage struct {
     // model requested when a gateway (litellm, OpenRouter) remaps it.
     Model string
 }
-
-func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, Usage, error)
 ```
 
-**`internal/correlator`:** the client interface gains the same return, and `Cluster`/`Persist`
-aggregate across every call they make — including recursive bisection calls and the compaction call.
+`clients/openai` imports `internal/llm` and returns `llm.Usage`; `correlator` imports `internal/llm`.
+Neither knows the other exists, so a future `clients/anthropic` satisfies `llm.Client` with no change
+upstream. Had `Usage` lived in `clients/openai`, an Anthropic client would have had to import a
+*competing provider's* package to return its own token counts.
+
+This also replaces an earlier draft's plan to export `correlator.llmClient` as
+`correlator.LLMClient`. Consumer-defined interfaces are idiomatic Go in general, but not when there
+are already two prospective implementations plus a normalized value type they must agree on — that is
+the case a shared contract package exists for, and the case `tasktracker` is already an instance of.
+`correlator.llmClient` is deleted; `Cluster`/`Persist` take `llm.Client`.
 
 ```go
-// LLMClient is the narrow capability the correlator needs from an LLM
-// backend. Exported (it was unexported) so internal/pipeline can name it.
-type LLMClient interface {
-    Complete(ctx context.Context, systemPrompt, userPrompt string) (string, openai.Usage, error)
-}
+func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, llm.Usage, error)
+```
 
+**`internal/correlator`:** `Cluster` and `Persist` aggregate usage across every call they make —
+including recursive bisection calls and the compaction call.
+
+```go
 // Stats is what one Cluster or Persist call spent and why. Splits and
 // MergeChecks are what distinguish an expensive-but-correct pass (a wide
 // window that bisected) from a pathological one.
@@ -269,12 +305,6 @@ func Persist(...) ([]Narrative, Stats, error)
 
 `Stats` values from recursive `Cluster` calls sum into the parent's, so a top-level call reports the
 whole tree. `RunNarrate` merges `Cluster`'s and `Persist`'s into `NarrateResult.Stats`.
-
-**Dependency note:** `correlator` importing `internal/clients/openai` for the `Usage` type is
-acceptable — it is a data-only struct in the package that already owns the LLM seam, and `correlator`
-already imports `internal/store` and `internal/config`. The alternative (defining `Usage` in
-`correlator` and having the client import it) would invert the natural direction: the facade should
-not depend on its consumer.
 
 **Call-site churn:** `Cluster` has 4 call sites (itself twice in `clusterWithSplit`, `checkSameStory`,
 and `RunNarrate`), `Persist` 1, plus `fakeLLM` and every correlator test asserting on returns. The
@@ -448,8 +478,9 @@ Offline, no network, following the repo's existing patterns:
   behavior needs only light coverage (it has its own tests); what must be covered is the behavior
   `Span` adds — rejecting `-3d` and `0s`. Without that, a backwards window silently produces an
   empty pass.
-- **`openai.Usage`**: the existing `httptest`-based client test asserts usage is populated from the
-  response body, not dropped.
+- **`llm.Usage` plumbing**: the existing `httptest`-based `clients/openai` test asserts usage is
+  populated from the response body rather than dropped. `internal/llm` itself needs no tests — it
+  is types and an interface only, exactly like `internal/tasktracker`.
 
 Per this project's practice, each regression test is validated by deliberately breaking the behavior
 it guards and confirming the test fails. Three tests in slice 3 looked like they covered a failure
