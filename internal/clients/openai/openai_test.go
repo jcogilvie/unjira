@@ -65,7 +65,7 @@ func TestComplete_ReturnsMessageContent(t *testing.T) {
 		})
 	})
 
-	result, err := client.Complete(t.Context(), "You are helpful.", "What is 2+2?")
+	result, _, err := client.Complete(t.Context(), "You are helpful.", "What is 2+2?")
 
 	require.NoError(t, err)
 	assert.Equal(t, "the answer is 4", result)
@@ -84,7 +84,7 @@ func TestComplete_SendsSystemAndUserMessages(t *testing.T) {
 		})
 	})
 
-	_, err := client.Complete(t.Context(), "sys prompt", "user prompt")
+	_, _, err := client.Complete(t.Context(), "sys prompt", "user prompt")
 
 	require.NoError(t, err)
 	messages, ok := gotBody["messages"].([]any)
@@ -115,7 +115,7 @@ func TestComplete_ErrorTranslatedToOpenAIError(t *testing.T) {
 		})
 	})
 
-	_, err := client.Complete(t.Context(), "sys", "user")
+	_, _, err := client.Complete(t.Context(), "sys", "user")
 
 	require.Error(t, err)
 	var apiErr *upstreamopenai.Error
@@ -126,4 +126,56 @@ func TestComplete_ErrorTranslatedToOpenAIError(t *testing.T) {
 	// format, so asserting on the field directly is the more reliable check.
 	assert.Equal(t, "rate limited", apiErr.Message)
 	assert.Equal(t, 429, apiErr.StatusCode)
+}
+
+func TestComplete_ReturnsUsageFromResponse(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":     "chatcmpl-1",
+			"object": "chat.completion",
+			"model":  "gpt-5-2-served",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "4"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{
+				"prompt_tokens":     31,
+				"completion_tokens": 7,
+				"total_tokens":      38,
+			},
+		})
+	})
+
+	text, usage, err := client.Complete(t.Context(), "You are helpful.", "What is 2+2?")
+
+	require.NoError(t, err)
+	assert.Equal(t, "4", text)
+	assert.Equal(t, int64(31), usage.PromptTokens)
+	assert.Equal(t, int64(7), usage.CompletionTokens)
+	assert.Equal(t, "gpt-5-2-served", usage.Model,
+		"the served model can differ from the requested one behind a gateway")
+}
+
+func TestComplete_MissingUsageIsZeroNotAnError(t *testing.T) {
+	// A backend that omits usage must not fail a completion that succeeded.
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":     "chatcmpl-2",
+			"object": "chat.completion",
+			"model":  "gpt-5-2",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+		})
+	})
+
+	text, usage, err := client.Complete(t.Context(), "sys", "user")
+
+	require.NoError(t, err)
+	assert.Equal(t, "ok", text)
+	assert.Zero(t, usage.PromptTokens)
+	assert.Zero(t, usage.CompletionTokens)
 }
