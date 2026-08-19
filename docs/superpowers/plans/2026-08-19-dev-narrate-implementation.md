@@ -863,18 +863,41 @@ func TestCluster_StatsAggregatesAcrossBisection(t *testing.T) {
 		mustEvent(t, "claude_code", "e2", strings.Repeat("y", 400), base.Add(50*time.Minute)),
 	}
 	llmFake := &fakeLLM{
-		responses:    []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+		// Both halves yield an adjacent ClusterNew result, so Cluster makes a
+		// third, merge-boundary same-story call after the two split-half
+		// calls; its response must parse as a sameStoryResponse, not a
+		// cluster-response array.
+		responses: []string{
+			`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+			`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+			`{"same_story":false}`,
+		},
 		usagePerCall: llm.Usage{PromptTokens: 10, CompletionTokens: 2},
 	}
 
+	// 300 sits strictly between each half's own prompt estimate (~268 tokens,
+	// dominated by the fixed system prompt) and the combined two-event
+	// estimate (~382): tight enough that the top-level window must bisect,
+	// loose enough that each half fits on its own and doesn't recurse again.
+	// A smaller budget (the 200 an earlier draft of this plan used) makes each
+	// half overflow too, so Cluster hits the irreducible-unit error and the
+	// assertions below are never reached.
 	_, stats, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
 		Start: base, End: base.Add(time.Hour),
-	}, 200)
+	}, 300)
 
 	require.NoError(t, err)
 	assert.Positive(t, stats.Splits, "an over-budget window must record its bisection")
 	assert.GreaterOrEqual(t, stats.Calls, 2, "each half costs a call")
-	assert.Equal(t, int64(10)*int64(stats.Calls), stats.PromptTokens,
+	// Ground truth is llmFake.prompts, not stats.Calls. An assertion phrased
+	// against stats.Calls itself is self-referential: dropping a recursive Add
+	// loses one call AND its tokens, preserving the ratio, so
+	//   assert.Equal(int64(10)*int64(stats.Calls), stats.PromptTokens)
+	// passes at 2/20 exactly as it does at 3/30 — verified. Only an
+	// independent count sees the bug.
+	require.Len(t, llmFake.prompts, 3, "two split-half calls plus one merge-boundary same-story check")
+	assert.Equal(t, 3, stats.Calls, "Stats.Calls must match every completion actually made")
+	assert.Equal(t, int64(10*len(llmFake.prompts)), stats.PromptTokens,
 		"usage must sum across the whole recursion, not just the top call")
 }
 
