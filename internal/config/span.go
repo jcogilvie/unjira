@@ -44,13 +44,17 @@ func (s *Span) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// Duration returns the span as a time.Duration.
+// Duration returns the span as a time.Duration. Pointer receiver to match
+// UnmarshalText, which must be a pointer to satisfy encoding.TextUnmarshaler:
+// a type mixing value and pointer receivers is both a lint finding
+// (recvcheck) and a real hazard, since only the pointer method set is
+// complete.
+//
+// Deliberately no String method. An earlier revision had one, but with a
+// pointer receiver it does not participate in formatting a Span *value* —
+// fmt.Printf("%s", someSpan) renders %!s(config.Span=604800000000000) rather
+// than 168h0m0s, which is worse than having no method at all. Callers that
+// want a human-readable form call Duration().String(), which always works.
 func (s *Span) Duration() time.Duration {
 	return time.Duration(*s)
-}
-
-// String renders the span using time.Duration's formatting, so help text and
-// error messages show a canonical form (168h0m0s) rather than the input.
-func (s *Span) String() string {
-	return time.Duration(*s).String()
 }
