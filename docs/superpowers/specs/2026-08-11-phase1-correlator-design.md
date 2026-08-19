@@ -315,10 +315,34 @@ slice starts — this is not a fixed waterfall plan.
    `docs/superpowers/specs/2026-08-12-correlator-cluster-design.md` for this slice's design and
    `docs/superpowers/plans/2026-08-12-correlator-cluster-implementation.md` for the implementation
    plan.
-3. **Persistence + `narrate` groundwork** — `Persist`, the extend-vs-new logic against real
-   `narratives`/`narrative_events` rows, tail-summarization overflow handling (`config.Correlator.
-   {TailSummarizeThresholdTokens, RecentEventsKept}`), the lease lock (needed even for a
-   single-command first cut, since crash-recovery correctness shouldn't be deferred).
+3. **Persistence + narrative groundwork** — ✅ landed. `Persist` (extend-vs-new against real
+   `narratives`/`narrative_events` rows, all-or-nothing via a `store.WithTx` seam),
+   tail-summarization compaction (`config.Correlator.{TailSummarizeThresholdTokens,
+   RecentEventsKept}`, via a `compaction_boundary`; `narrative_events` rows are never deleted —
+   only the context assembled for future `Cluster` calls shrinks), and the `pipeline_lock` lease
+   (built + tested, no caller until slice 5). Landed together with a rework of slice 2's `Cluster`
+   so it clusters against the *raw events* of overlapping narratives, not just their summaries —
+   restoring this spec's original "full available context" intent, which slice 2 had silently
+   narrowed to summaries. See
+   `docs/superpowers/specs/2026-08-12-correlator-hydrated-context-rework.md`,
+   `docs/superpowers/specs/2026-08-12-correlator-persist-design.md`, and
+   `docs/superpowers/plans/2026-08-12-correlator-persist-and-rework-implementation.md`.
+
+   Two corrections to that plan's design, both driven by bugs found in review:
+
+   - **The compaction trigger measures post-boundary *history*, not summary text.** The threshold
+     compares `estimateTokens(summary + rendered post-boundary events)` — the plan's draft measured
+     the summary alone, which would never fire for a narrative accreting many small events.
+   - **The compaction boundary is a `(occurred_at, event_id)` pair, not a bare timestamp.**
+     `InsertEvent` stores `occurred_at` via `time.RFC3339` (whole seconds), so two events in the
+     same second are indistinguishable by timestamp — and sub-second inputs truncate into exactly
+     that case. A bare `occurred_at > boundary` filter therefore dropped whichever tied event was
+     meant to stay visible: its `narrative_events` link survived, but it vanished from all future
+     `Cluster` context. `events.id` is a monotonic `INTEGER PRIMARY KEY`, so pairing it with
+     `occurred_at` makes the cut exact regardless of timestamp collisions. Storing events at
+     sub-second precision was considered and rejected: it would mean re-auditing every query that
+     string-compares `occurred_at` (`EventsOn`, the digest range scans, hydration), and it would
+     not eliminate ties anyway — two events can still share a nanosecond.
 4. **`internal/reconciler`** (compute + persist) — delta computation, verification via
    `TaskTracker`, action drafting. Unit-tested with fake trackers.
 5. **Auto-commit gate + `watch`** — wires collect → correlator → reconciler → gate into one

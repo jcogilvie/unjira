@@ -8,10 +8,12 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -25,6 +27,13 @@ import (
 // row matches the given key — unlike GetCursor's silent-empty-string
 // convenience, "not found" is meaningful here and must not be swallowed.
 var ErrLocalIssueNotFound = errors.New("local issue not found")
+
+// ErrNarrativeNotFound is returned by GetNarrative when no row matches.
+var ErrNarrativeNotFound = errors.New("narrative not found")
+
+// ErrEventNotFound is returned by EventIDByExternalID when no event matches
+// the given (source, external_id).
+var ErrEventNotFound = errors.New("event not found")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS events (
@@ -58,6 +67,13 @@ CREATE TABLE IF NOT EXISTS narratives (
     issue_key    TEXT,
     confidence   REAL,
     status       TEXT NOT NULL DEFAULT 'open',
+    compaction_boundary TEXT,
+    -- Paired with compaction_boundary to break ties: occurred_at alone
+    -- cannot uniquely order events (it's stored via time.RFC3339, whole
+    -- seconds only), so NarrativeEventsForContext compares the
+    -- (occurred_at, event_id) pair — events.id is a monotonic
+    -- INTEGER PRIMARY KEY, an exact tiebreaker for events sharing a second.
+    compaction_boundary_event_id INTEGER,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -121,11 +137,65 @@ CREATE TABLE IF NOT EXISTS local_issue_comments (
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+CREATE TABLE IF NOT EXISTS pipeline_lock (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    run_id     TEXT NOT NULL,
+    held_since TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
 `
 
 // Store wraps a SQLite connection with unjira's schema and access methods.
 type Store struct {
 	db *sql.DB
+}
+
+// dbConn is the subset of *sql.DB / *sql.Tx the narrative accessors need, so
+// each accessor's SQL body can run either directly (*Store) or inside a
+// transaction (*Tx) without duplicating the query logic.
+type dbConn interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// Tx is a transaction-scoped handle exposing the narrative write/read methods
+// correlator.Persist needs to run atomically. Obtain one via WithTx.
+type Tx struct {
+	tx *sql.Tx
+}
+
+// WithTx runs fn inside a single transaction, committing if fn returns nil and
+// rolling back (preserving fn's error) otherwise. This is how Persist gets its
+// all-or-nothing guarantee.
+//
+// There is no defer-based rollback guard: a panic inside fn propagates without
+// an immediate Rollback, leaving the transaction to be rolled back by its
+// context-cancellation goroutine when the *sql.Tx is GC'd. That is acceptable
+// for unjira's single-shot, lease-serialized batch model (a panic crashes the
+// process anyway); revisit if this ever runs inside a longer-lived process that
+// recovers panics.
+func (s *Store) WithTx(fn func(*Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+
+	if err := fn(&Tx{tx: tx}); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			// Wrap both: callers may need errors.Is against either the
+			// original failure or the rollback failure that masked it.
+			return fmt.Errorf("rolling back after error %w: %w", err, rbErr)
+		}
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
 }
 
 // Open opens (creating if needed) the SQLite database at dbPath, ensures its
@@ -250,7 +320,7 @@ func (s *Store) GetCursor(collector, resource string) (string, error) {
 		`SELECT position FROM cursors WHERE collector = ? AND resource = ?`,
 		collector, resource,
 	).Scan(&position)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -483,6 +553,296 @@ func (s *Store) SearchLocalIssues(query string, limit int) ([]LocalIssue, error)
 	return out, rows.Err()
 }
 
+// -- narratives ----------------------------------------------------------
+
+// NarrativeRow mirrors a narratives table row. correlator.Persist maps this
+// to/from its own correlator.Narrative domain type (keeping store free of any
+// correlator import — the dependency runs correlator -> store).
+type NarrativeRow struct {
+	ID                 int64
+	WindowStart        time.Time
+	WindowEnd          time.Time
+	Title              string
+	Summary            string
+	IssueKey           string
+	Confidence         float64
+	Status             string
+	CompactionBoundary *time.Time
+	// CompactionBoundaryEventID pairs with CompactionBoundary to break ties:
+	// occurred_at alone cannot uniquely order events (stored via
+	// time.RFC3339 — whole seconds only), so NarrativeEventsForContext
+	// filters on the (occurred_at, event_id) pair rather than occurred_at
+	// alone. nil iff CompactionBoundary is nil (never compacted).
+	CompactionBoundaryEventID *int64
+}
+
+// InsertNarrative inserts a new narrative row (status 'open', no compaction
+// boundary) and returns its id.
+func (s *Store) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
+	return insertNarrativeImpl(s.db, windowStart, windowEnd, title, summary)
+}
+
+// InsertNarrative is the *Tx-scoped variant of (*Store).InsertNarrative.
+func (t *Tx) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
+	return insertNarrativeImpl(t.tx, windowStart, windowEnd, title, summary)
+}
+
+func insertNarrativeImpl(c dbConn, windowStart, windowEnd time.Time, title, summary string) (int64, error) {
+	res, err := c.Exec(
+		`INSERT INTO narratives (window_start, window_end, title, summary) VALUES (?, ?, ?, ?)`,
+		windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339), title, summary,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("inserting narrative %q: %w", title, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("getting inserted narrative id for %q: %w", title, err)
+	}
+
+	return id, nil
+}
+
+// GetNarrative returns the narrative with the given id, or
+// ErrNarrativeNotFound.
+func (s *Store) GetNarrative(id int64) (NarrativeRow, error) {
+	return getNarrativeImpl(s.db, id)
+}
+
+// GetNarrative is the *Tx-scoped variant of (*Store).GetNarrative.
+func (t *Tx) GetNarrative(id int64) (NarrativeRow, error) {
+	return getNarrativeImpl(t.tx, id)
+}
+
+func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
+	var (
+		row                NarrativeRow
+		windowStart        string
+		windowEnd          string
+		issueKey           sql.NullString
+		confidence         sql.NullFloat64
+		compactionBoundary sql.NullString
+		compactionEventID  sql.NullInt64
+	)
+	err := c.QueryRow(
+		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
+		        compaction_boundary, compaction_boundary_event_id
+		 FROM narratives WHERE id = ?`, id,
+	).Scan(&row.ID, &windowStart, &windowEnd, &row.Title, &row.Summary,
+		&issueKey, &confidence, &row.Status, &compactionBoundary, &compactionEventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NarrativeRow{}, ErrNarrativeNotFound
+	}
+	if err != nil {
+		return NarrativeRow{}, fmt.Errorf("querying narrative %d: %w", id, err)
+	}
+
+	if row.WindowStart, err = time.Parse(time.RFC3339, windowStart); err != nil {
+		return NarrativeRow{}, fmt.Errorf("parsing window_start for narrative %d: %w", id, err)
+	}
+	if row.WindowEnd, err = time.Parse(time.RFC3339, windowEnd); err != nil {
+		return NarrativeRow{}, fmt.Errorf("parsing window_end for narrative %d: %w", id, err)
+	}
+	row.IssueKey = issueKey.String
+	if confidence.Valid {
+		row.Confidence = confidence.Float64
+	}
+	if compactionBoundary.Valid {
+		parsed, err := time.Parse(time.RFC3339, compactionBoundary.String)
+		if err != nil {
+			return NarrativeRow{}, fmt.Errorf("parsing compaction_boundary for narrative %d: %w", id, err)
+		}
+		row.CompactionBoundary = &parsed
+	}
+	if compactionEventID.Valid {
+		row.CompactionBoundaryEventID = &compactionEventID.Int64
+	}
+
+	return row, nil
+}
+
+// ExtendNarrative advances a narrative's window_end and overwrites its
+// summary.
+func (s *Store) ExtendNarrative(id int64, windowEnd time.Time, summary string) error {
+	return extendNarrativeImpl(s.db, id, windowEnd, summary)
+}
+
+// ExtendNarrative is the *Tx-scoped variant of (*Store).ExtendNarrative.
+func (t *Tx) ExtendNarrative(id int64, windowEnd time.Time, summary string) error {
+	return extendNarrativeImpl(t.tx, id, windowEnd, summary)
+}
+
+func extendNarrativeImpl(c dbConn, id int64, windowEnd time.Time, summary string) error {
+	_, err := c.Exec(
+		`UPDATE narratives SET window_end = ?, summary = ? WHERE id = ?`,
+		windowEnd.Format(time.RFC3339), summary, id,
+	)
+	if err != nil {
+		return fmt.Errorf("extending narrative %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// SetCompactionBoundary records the occurred_at and row id of the newest
+// compacted event and stores the recap-prefixed summary. boundaryEventID is
+// required alongside boundary: occurred_at alone cannot uniquely order
+// events sharing a stored second (time.RFC3339 truncates to whole seconds —
+// see the comment on NarrativeEventsForContext), so the pair is what
+// NarrativeEventsForContext's row-value comparison uses to avoid dropping a
+// tied event from future context.
+func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
+	return setCompactionBoundaryImpl(s.db, id, boundary, boundaryEventID, recapSummary)
+}
+
+// SetCompactionBoundary is the *Tx-scoped variant of
+// (*Store).SetCompactionBoundary.
+func (t *Tx) SetCompactionBoundary(id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
+	return setCompactionBoundaryImpl(t.tx, id, boundary, boundaryEventID, recapSummary)
+}
+
+func setCompactionBoundaryImpl(c dbConn, id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
+	_, err := c.Exec(
+		`UPDATE narratives SET compaction_boundary = ?, compaction_boundary_event_id = ?, summary = ? WHERE id = ?`,
+		boundary.Format(time.RFC3339), boundaryEventID, recapSummary, id,
+	)
+	if err != nil {
+		return fmt.Errorf("setting compaction boundary for narrative %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// AddNarrativeEvents links events to a narrative (INSERT OR IGNORE, so
+// re-linking an already-linked event is a harmless no-op).
+func (s *Store) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return addNarrativeEventsImpl(s.db, narrativeID, eventIDs)
+}
+
+// AddNarrativeEvents is the *Tx-scoped variant of
+// (*Store).AddNarrativeEvents.
+func (t *Tx) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return addNarrativeEventsImpl(t.tx, narrativeID, eventIDs)
+}
+
+func addNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) error {
+	for _, eid := range eventIDs {
+		if _, err := c.Exec(
+			`INSERT OR IGNORE INTO narrative_events (narrative_id, event_id) VALUES (?, ?)`,
+			narrativeID, eid,
+		); err != nil {
+			return fmt.Errorf("linking event %d to narrative %d: %w", eid, narrativeID, err)
+		}
+	}
+
+	return nil
+}
+
+// EventIDByExternalID returns the row id of the event with the given
+// (source, external_id), or ErrEventNotFound.
+func (s *Store) EventIDByExternalID(source, externalID string) (int64, error) {
+	return eventIDByExternalIDImpl(s.db, source, externalID)
+}
+
+// EventIDByExternalID is the *Tx-scoped variant of
+// (*Store).EventIDByExternalID.
+func (t *Tx) EventIDByExternalID(source, externalID string) (int64, error) {
+	return eventIDByExternalIDImpl(t.tx, source, externalID)
+}
+
+func eventIDByExternalIDImpl(c dbConn, source, externalID string) (int64, error) {
+	var id int64
+	err := c.QueryRow(
+		`SELECT id FROM events WHERE source = ? AND external_id = ?`, source, externalID,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrEventNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("querying event id for %s/%s: %w", source, externalID, err)
+	}
+
+	return id, nil
+}
+
+// NarrativeEventsForContext returns a narrative's events strictly after its
+// compaction boundary (all of them when the boundary is NULL), ordered by
+// (occurred_at, event id) — the events the caller hydrates into
+// correlator.Narrative.Events. The recap of anything at/before the boundary
+// already lives in the summary.
+//
+// The boundary comparison is on the pair (compaction_boundary,
+// compaction_boundary_event_id), not occurred_at alone: occurred_at is
+// stored via time.RFC3339 (whole seconds only — see InsertEvent), so two
+// events in the same second are indistinguishable by timestamp. A bare
+// "occurred_at > boundary" filter would then either include or exclude
+// *both* tied events depending on which one the boundary happened to be set
+// from, silently dropping whichever tied event was meant to stay visible.
+// events.id is a monotonic INTEGER PRIMARY KEY, so pairing it with
+// occurred_at makes the ordering exact regardless of timestamp collisions
+// (this is also why compaction picks its boundary event's row id, not just
+// its timestamp — see correlator.compactNarrativeTail).
+//
+// Uses a SQL row-value comparison ("(a, b) > (x, y)"), verified against
+// modernc.org/sqlite (the driver this package uses) with a standalone
+// scratch program before relying on it here; modernc.org/sqlite is well
+// past the SQLite 3.15 baseline that introduced row values. The explicit
+// equivalent ("a > x OR (a = x AND b > y)") is the documented fallback if a
+// future driver swap ever regresses this.
+//
+// A narrative id with no matching row (or one with no linked events)
+// returns (nil, nil), not an error — callers only invoke this with an id
+// they already obtained from the store.
+func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, error) {
+	rows, err := s.db.Query(
+		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
+		 FROM events e
+		 JOIN narrative_events ne ON ne.event_id = e.id
+		 WHERE ne.narrative_id = ?
+		   AND (
+		     (SELECT compaction_boundary FROM narratives WHERE id = ?) IS NULL
+		     OR (e.occurred_at, e.id) > (
+		       (SELECT compaction_boundary FROM narratives WHERE id = ?),
+		       (SELECT compaction_boundary_event_id FROM narratives WHERE id = ?)
+		     )
+		   )
+		 ORDER BY e.occurred_at, e.id`,
+		narrativeID, narrativeID, narrativeID, narrativeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying context events for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []events.Event
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning context event row: %w", err)
+		}
+		out = append(out, e)
+	}
+
+	return out, rows.Err()
+}
+
+// NarrativeEventCount returns how many events are linked to a narrative,
+// ignoring its compaction boundary — unlike NarrativeEventsForContext, which
+// returns only the post-boundary tail. This is a test-support introspection
+// accessor: it's what lets a test prove the "narrative_events rows are never
+// deleted" invariant, since compaction shrinks the assembled context, never
+// the links.
+func (s *Store) NarrativeEventCount(narrativeID int64) (int, error) {
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM narrative_events WHERE narrative_id = ?`, narrativeID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting linked events for narrative %d: %w", narrativeID, err)
+	}
+
+	return count, nil
+}
+
 // scanRow is the subset of *sql.Rows this package needs to scan an event.
 type scanRow interface {
 	Scan(dest ...any) error
@@ -526,4 +886,136 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// -- pipeline lock ---------------------------------------------------------
+
+// lockTimeFormat is the timestamp layout used for pipeline_lock.held_since
+// and pipeline_lock.expires_at only — NOT the layout used elsewhere in this
+// package. events/narratives/cursors stay on time.RFC3339; switching those
+// would mean re-auditing every query that string-compares a timestamp
+// (EventsOn, the digest range scans, NarrativeEventsForContext), which is
+// why only the lock — where sub-second TTLs are load-bearing — uses this.
+//
+// It differs from time.RFC3339 in two ways, both required for TryAcquire's
+// atomic steal guard (a SQL string comparison, not a time comparison):
+//
+//   - Fixed sub-second width. time.RFC3339 has no fractional-second
+//     placeholder at all, so Format silently truncates to whole seconds —
+//     any sub-second TTL becomes indistinguishable from "already expired."
+//     time.RFC3339Nano fixes precision but strips trailing zeros, which
+//     breaks the lexicographic-order property below.
+//   - Lexicographic order equals chronological order. A fixed-width
+//     fractional part (always 9 digits) means comparing the formatted
+//     strings byte-by-byte gives the same answer as comparing the times.
+//     "...12:00:00.100000000Z" < "...12:00:00.150000000Z" holds as strings
+//     exactly because both are always 9 digits; RFC3339Nano would format
+//     these as ".1" and ".15", where the string comparison is wrong.
+//
+// TryAcquire normalizes now to UTC before formatting so two callers with
+// the same instant but different offsets can't produce different Z07:00
+// suffixes and defeat the ordering.
+const lockTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+// TryAcquire attempts to take the singleton pipeline lock without blocking,
+// in a single atomic statement (safe across concurrent processes/connections,
+// unlike a separate read-then-write: two callers observing "unheld" could
+// otherwise both upsert and both be told they acquired it). It succeeds when
+// the lock is unheld or its lease has expired (expires_at at or before now),
+// replacing the row with a fresh lease for runID; otherwise it returns false
+// immediately. now is passed in (not time.Now()) so steal-on-expiry is
+// deterministically testable.
+//
+// Stealing an expired lease logs a warning naming the stale run_id and how
+// long it was held — the crash-recovery path. That diagnostic comes from a
+// plain SELECT taken just before the atomic statement; it is best-effort
+// (another acquirer could race between the SELECT and the write) and never
+// gates the outcome — only the atomic statement's own RowsAffected does that.
+func (s *Store) TryAcquire(runID string, now time.Time, ttl time.Duration) (bool, error) {
+	now = now.UTC()
+	nowStr := now.Format(lockTimeFormat)
+
+	var (
+		priorRunID string
+		priorExp   string
+	)
+	if err := s.db.QueryRow(
+		`SELECT run_id, expires_at FROM pipeline_lock WHERE id = 1`,
+	).Scan(&priorRunID, &priorExp); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("reading pipeline lock for diagnostics: %w", err)
+	}
+
+	res, err := s.db.Exec(
+		`INSERT INTO pipeline_lock (id, run_id, held_since, expires_at) VALUES (1, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		     run_id = excluded.run_id, held_since = excluded.held_since, expires_at = excluded.expires_at
+		 WHERE pipeline_lock.expires_at <= ?`,
+		runID, nowStr, now.Add(ttl).Format(lockTimeFormat), nowStr,
+	)
+	if err != nil {
+		return false, fmt.Errorf("acquiring pipeline lock for %s: %w", runID, err)
+	}
+
+	acquired, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("checking rows affected acquiring pipeline lock for %s: %w", runID, err)
+	}
+	if acquired == 0 {
+		return false, nil // still held by someone else
+	}
+
+	if priorRunID != "" && priorRunID != runID {
+		if priorExpTime, perr := time.Parse(lockTimeFormat, priorExp); perr == nil {
+			log.Printf("pipeline lock: stealing expired lease from run_id=%s (expired %s ago)",
+				priorRunID, now.Sub(priorExpTime))
+		}
+	}
+
+	return true, nil
+}
+
+// Acquire is TryAcquire's blocking sibling: it polls every poll interval
+// until it can take the lock (unheld or lease expired), honoring ctx
+// cancellation. now is a clock func since Acquire loops. poll must be
+// positive — a zero or negative poll turns this into a hot loop.
+func (s *Store) Acquire(ctx context.Context, runID string, now func() time.Time, ttl, poll time.Duration) error {
+	for {
+		ok, err := s.TryAcquire(runID, now(), ttl)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("acquiring pipeline lock for %s: %w", runID, ctx.Err())
+		case <-time.After(poll):
+		}
+	}
+}
+
+// ReleaseLock releases the pipeline lock iff it is currently held by runID.
+// Releasing when runID is not the holder is a no-op — not an error, since it
+// never clobbers a newer holder that stole an expired lease — but it is
+// logged, for the same reason TryAcquire logs a steal: it is a noteworthy
+// runtime condition (a run trying to release a lock it no longer holds,
+// e.g. because its lease already expired and was stolen out from under it)
+// that operators should be able to see without it failing the caller.
+func (s *Store) ReleaseLock(runID string) error {
+	res, err := s.db.Exec(`DELETE FROM pipeline_lock WHERE id = 1 AND run_id = ?`, runID)
+	if err != nil {
+		return fmt.Errorf("releasing pipeline lock for %s: %w", runID, err)
+	}
+
+	released, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected releasing pipeline lock for %s: %w", runID, err)
+	}
+	if released == 0 {
+		log.Printf("pipeline lock: release by run_id=%s was a no-op (not the current holder)", runID)
+	}
+
+	return nil
 }

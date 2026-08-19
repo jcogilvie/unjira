@@ -76,6 +76,31 @@ func (c LLMConfig) Validate() error {
 	return nil
 }
 
+// CorrelatorConfig configures narrative persistence and compaction. Both
+// fields are required (positive), validated by Validate. See
+// docs/superpowers/specs/2026-08-12-correlator-persist-design.md.
+type CorrelatorConfig struct {
+	// TailSummarizeThresholdTokens: once a narrative's post-boundary history
+	// (recap + raw tail) estimates above this, Persist compacts the old tail
+	// into the summary's recap prefix via one LLM call.
+	TailSummarizeThresholdTokens int `json:"tail_summarize_threshold_tokens"`
+	// RecentEventsKept: how many of the newest events stay raw after a
+	// compaction — a count, so it's well-defined regardless of event density.
+	RecentEventsKept int `json:"recent_events_kept"`
+}
+
+// Validate reports whether both correlator limits are set to usable values.
+func (c CorrelatorConfig) Validate() error {
+	if c.TailSummarizeThresholdTokens <= 0 {
+		return fmt.Errorf("correlator.tail_summarize_threshold_tokens must be a positive number of tokens")
+	}
+	if c.RecentEventsKept <= 0 {
+		return fmt.Errorf("correlator.recent_events_kept must be a positive count")
+	}
+
+	return nil
+}
+
 // Config is unjira's top-level configuration.
 type Config struct {
 	Jira       []JiraConnection          `json:"jira"`
@@ -85,10 +110,11 @@ type Config struct {
 	// Jira link (see internal/events.CompileLinkExclusionPatterns). Empty by
 	// default — unjira makes no assumption about any workflow's own
 	// placeholder-ticket conventions.
-	ExcludeFromLinking []string      `json:"exclude_from_linking"`
-	Tracker            TrackerConfig `json:"tracker"`
-	LLM                LLMConfig     `json:"llm"`
-	DBPath             string        `json:"db_path"`
+	ExcludeFromLinking []string         `json:"exclude_from_linking"`
+	Tracker            TrackerConfig    `json:"tracker"`
+	LLM                LLMConfig        `json:"llm"`
+	Correlator         CorrelatorConfig `json:"correlator"`
+	DBPath             string           `json:"db_path"`
 }
 
 // JiraConnectionForProject finds the connection whose ProjectKeys contains

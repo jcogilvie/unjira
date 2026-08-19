@@ -1,6 +1,8 @@
 package store_test
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -235,4 +237,354 @@ func TestInsertLocalIssue_GetLocalIssue_RoundTrips(t *testing.T) {
 	assert.Equal(t, "Task", issue.IssueType)
 	assert.Equal(t, "todo", issue.StatusCategory)
 	assert.Equal(t, []string{"bug", "urgent"}, issue.Labels)
+}
+
+// -- narrative store accessors -------------------------------------------
+
+func seedEvent(t *testing.T, s *store.Store, externalID, summary string, at time.Time) {
+	t.Helper()
+	e := events.NewEvent("claude_code", externalID, at, summary)
+	_, err := s.InsertEvent(e)
+	require.NoError(t, err)
+}
+
+func TestNarrative_InsertGetRoundTrip(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	we := ws.Add(time.Hour)
+
+	id, err := s.InsertNarrative(ws, we, "Title", "Summary")
+	require.NoError(t, err)
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.Equal(t, id, row.ID)
+	assert.Equal(t, "Title", row.Title)
+	assert.Equal(t, "Summary", row.Summary)
+	assert.Equal(t, "open", row.Status)
+	assert.True(t, ws.Equal(row.WindowStart))
+	assert.True(t, we.Equal(row.WindowEnd))
+	assert.Empty(t, row.IssueKey)
+	assert.Nil(t, row.CompactionBoundary)
+}
+
+func TestGetNarrative_MissingReturnsErrNarrativeNotFound(t *testing.T) {
+	s := openStore(t)
+	_, err := s.GetNarrative(999)
+	require.ErrorIs(t, err, store.ErrNarrativeNotFound)
+}
+
+func TestExtendNarrative_UpdatesWindowEndAndSummary(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "old")
+	require.NoError(t, err)
+
+	newEnd := ws.Add(3 * time.Hour)
+	require.NoError(t, s.ExtendNarrative(id, newEnd, "new summary"))
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.True(t, newEnd.Equal(row.WindowEnd))
+	assert.Equal(t, "new summary", row.Summary)
+}
+
+func TestSetCompactionBoundary_PersistsBoundaryAndRecap(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+	boundary := ws.Add(30 * time.Minute)
+	seedEvent(t, s, "boundary-event", "the compacted-up-to event", boundary)
+	boundaryEventID, err := s.EventIDByExternalID("claude_code", "boundary-event")
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetCompactionBoundary(id, boundary, boundaryEventID, "recap: earlier work"))
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	require.NotNil(t, row.CompactionBoundary)
+	assert.True(t, boundary.Equal(*row.CompactionBoundary))
+	require.NotNil(t, row.CompactionBoundaryEventID)
+	assert.Equal(t, boundaryEventID, *row.CompactionBoundaryEventID)
+	assert.Equal(t, "recap: earlier work", row.Summary)
+}
+
+func TestAddNarrativeEvents_IsIdempotent(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "e1", "first", ws)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+	eid, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid})) // re-link: no error
+
+	evs, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	assert.Equal(t, "e1", evs[0].ExternalID)
+}
+
+func TestEventIDByExternalID_MissingReturnsErrEventNotFound(t *testing.T) {
+	s := openStore(t)
+	_, err := s.EventIDByExternalID("claude_code", "nope")
+	require.ErrorIs(t, err, store.ErrEventNotFound)
+}
+
+func TestNarrativeEventsForContext_ExcludesAtOrBeforeBoundary(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "old", "old event", ws)
+	seedEvent(t, s, "new", "new event", ws.Add(time.Hour))
+	id, err := s.InsertNarrative(ws, ws.Add(2*time.Hour), "T", "s")
+	require.NoError(t, err)
+	oldID, err := s.EventIDByExternalID("claude_code", "old")
+	require.NoError(t, err)
+	newID, err := s.EventIDByExternalID("claude_code", "new")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{oldID, newID}))
+
+	// Boundary at the old event's (time, id): strictly-after filter excludes
+	// it, keeps the newer one.
+	require.NoError(t, s.SetCompactionBoundary(id, ws, oldID, "recap"))
+
+	evs, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	assert.Equal(t, "new", evs[0].ExternalID)
+}
+
+// TestNarrativeEventCount_IgnoresCompactionBoundary is what proves
+// NarrativeEventCount is not just NarrativeEventsForContext under another
+// name: it must count a narrative's linked events regardless of the
+// compaction boundary, since it exists specifically to let a caller verify
+// that narrative_events rows survive compaction (which only shrinks what
+// NarrativeEventsForContext returns, never the underlying links).
+func TestNarrativeEventCount_IgnoresCompactionBoundary(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "old", "old event", ws)
+	seedEvent(t, s, "new", "new event", ws.Add(time.Hour))
+	id, err := s.InsertNarrative(ws, ws.Add(2*time.Hour), "T", "s")
+	require.NoError(t, err)
+	oldID, err := s.EventIDByExternalID("claude_code", "old")
+	require.NoError(t, err)
+	newID, err := s.EventIDByExternalID("claude_code", "new")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{oldID, newID}))
+
+	count, err := s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "both links counted before any compaction")
+
+	// Set a boundary that makes NarrativeEventsForContext exclude "old" —
+	// NarrativeEventCount must be unaffected, since the link itself is not
+	// deleted by compaction.
+	require.NoError(t, s.SetCompactionBoundary(id, ws, oldID, "recap"))
+
+	ctxEvents, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	require.Len(t, ctxEvents, 1, "sanity: boundary really does filter context")
+
+	count, err = s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "count unchanged by the boundary — links are never deleted")
+}
+
+func TestNarrativeEventCount_NoLinksReturnsZero(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+
+	count, err := s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+// -- transaction seam -----------------------------------------------------
+
+func TestWithTx_RollsBackOnError(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+	wantErr := errors.New("boom")
+	err := s.WithTx(func(tx *store.Tx) error {
+		_, iErr := tx.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+		require.NoError(t, iErr)
+		return wantErr // force rollback
+	})
+	require.ErrorIs(t, err, wantErr)
+
+	// The narrative inserted inside the rolled-back tx must not be present.
+	// (No narrative with id 1 should exist.)
+	_, gErr := s.GetNarrative(1)
+	require.ErrorIs(t, gErr, store.ErrNarrativeNotFound)
+}
+
+func TestWithTx_CommitsOnSuccess(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+	var id int64
+	err := s.WithTx(func(tx *store.Tx) error {
+		var iErr error
+		id, iErr = tx.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+		return iErr
+	})
+	require.NoError(t, err)
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.Equal(t, "T", row.Title)
+}
+
+// -- pipeline lock --------------------------------------------------------
+
+func TestTryAcquire_UnheldSucceeds(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestTryAcquire_HeldBeforeExpiryFails(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	ok, err = s.TryAcquire("run-2", now.Add(30*time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.False(t, ok, "lease still valid, second acquirer must fail")
+}
+
+func TestTryAcquire_ExpiredLeaseCanBeStolen(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// 2 minutes later, run-1's lease has expired; run-2 steals it.
+	ok, err = s.TryAcquire("run-2", now.Add(2*time.Minute), time.Minute)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestReleaseLock_ByHolderFreesLock(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	_, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, s.ReleaseLock("run-1"))
+
+	// Now immediately acquirable by another run, before any expiry.
+	ok, err := s.TryAcquire("run-2", now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.True(t, ok)
+}
+
+func TestReleaseLock_ByNonHolderIsNoOp(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	_, err := s.TryAcquire("run-1", now, time.Minute)
+	require.NoError(t, err)
+
+	require.NoError(t, s.ReleaseLock("run-2")) // not the holder: no-op, no error
+
+	// run-1 still holds it.
+	ok, err := s.TryAcquire("run-3", now.Add(30*time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestAcquire_BlocksThenSucceedsWhenLeaseExpires(t *testing.T) {
+	s := openStore(t)
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	_, err := s.TryAcquire("run-1", start, 100*time.Millisecond)
+	require.NoError(t, err)
+
+	// A clock that advances past the lease each call.
+	calls := 0
+	clock := func() time.Time {
+		calls++
+		return start.Add(time.Duration(calls) * 60 * time.Millisecond)
+	}
+	err = s.Acquire(t.Context(), "run-2", clock, 100*time.Millisecond, 10*time.Millisecond)
+	require.NoError(t, err)
+
+	// The lease is still valid on the first call (60ms < 100ms), so Acquire
+	// must actually block and retry at least once before the second call
+	// (120ms) sees it expired. This is the regression guard for the
+	// RFC3339-truncation bug, where every sub-second TryAcquire call saw an
+	// "already expired" lease and this test passed without ever blocking.
+	assert.GreaterOrEqual(t, calls, 2, "Acquire must poll at least twice before the lease actually expires")
+}
+
+func TestTryAcquire_SubSecondLeasePrecisionIsHonored(t *testing.T) {
+	s := openStore(t)
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	ok, err := s.TryAcquire("run-1", start, 100*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// 50ms in: lease (100ms TTL) is still valid, second acquirer must fail.
+	ok, err = s.TryAcquire("run-2", start.Add(50*time.Millisecond), 100*time.Millisecond)
+	require.NoError(t, err)
+	assert.False(t, ok, "lease has sub-second time remaining and must still be held")
+
+	// 150ms in: lease has expired, second acquirer may steal it.
+	ok, err = s.TryAcquire("run-3", start.Add(150*time.Millisecond), 100*time.Millisecond)
+	require.NoError(t, err)
+	assert.True(t, ok, "lease has expired (sub-second TTL) and must be stealable")
+}
+
+func TestTryAcquire_TrailingZeroBoundaryOrdersCorrectly(t *testing.T) {
+	// Regression guard for the trailing-zero lexicographic-ordering trap: a
+	// naive fractional-second format (e.g. time.RFC3339Nano) strips trailing
+	// zeros, so 100ms formats as ".1" and 150ms formats as ".15". Comparing
+	// those two strings gives "2026-08-01T12:00:00.1Z" <
+	// "2026-08-01T12:00:00.15Z" == false — the trailing-zero-stripped
+	// strings sort in the WRONG order relative to true chronological order
+	// (verified directly against time.RFC3339Nano's actual output). The
+	// lock's fixed-width format must keep these two writes in correct order
+	// under TryAcquire's string-based SQL guard.
+	s := openStore(t)
+	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	// run-1's lease expires at exactly start + 100ms (".100000000").
+	ok, err := s.TryAcquire("run-1", start, 100*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// At start + 100ms + 50ms = 150ms (".150000000"), the lease (expired at
+	// .100000000) must be stealable: .100000000 <= .150000000 must hold as a
+	// string comparison, not just a time comparison.
+	ok, err = s.TryAcquire("run-2", start.Add(150*time.Millisecond), 100*time.Millisecond)
+	require.NoError(t, err)
+	assert.True(t, ok, "expires_at=.100000000 must compare <= now=.150000000 lexicographically")
+}
+
+func TestAcquire_HonorsContextCancellation(t *testing.T) {
+	s := openStore(t)
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	_, err := s.TryAcquire("run-1", now, time.Hour) // long lease, never expires during test
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // already cancelled
+	err = s.Acquire(ctx, "run-2", func() time.Time { return now }, time.Hour, 10*time.Millisecond)
+	require.Error(t, err)
 }

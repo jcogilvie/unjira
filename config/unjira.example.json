@@ -33,5 +33,9 @@
     "base_url": "http://localhost:4000/v1",
     "context_window_tokens": 128000
   },
+  "correlator": {
+    "tail_summarize_threshold_tokens": 6000,
+    "recent_events_kept": 20
+  },
   "db_path": "data/unjira.db"
 }
