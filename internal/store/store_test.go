@@ -634,11 +634,19 @@ func TestUnlinkedEventsInRange_EmptyRangeReturnsNoError(t *testing.T) {
 	assert.Empty(t, got, "no candidates is a normal outcome, not a failure")
 }
 
-// TestUnlinkedEventsInRange_OrdersDeterministicallyWithinSameSecond proves the
-// composite ORDER BY (occurred_at, id) matters: two events sharing the same
-// occurred_at second must still come back in a fixed, predictable order
-// (ascending id) rather than in whatever order SQLite happens to produce for
-// a tie on the first ORDER BY key.
+// TestUnlinkedEventsInRange_OrdersDeterministicallyWithinSameSecond pins the
+// order of two events sharing an occurred_at second: ascending row id.
+//
+// Read this as a documentation test, not a regression guard. Dropping ", e.id"
+// from the query's ORDER BY leaves it passing — verified, 5/5 runs — because
+// modernc.org/sqlite happens to return tied rows in rowid order on this
+// schema, there being no secondary index to push it toward another scan order.
+//
+// The explicit tiebreaker is still required. occurred_at is stored via
+// time.RFC3339 (whole seconds — see InsertEvent) and so cannot uniquely order
+// events, and depending on an engine's incidental tie behavior is precisely
+// how the compaction boundary came to silently drop a tied event from all
+// future Cluster context before it was paired with an event id.
 func TestUnlinkedEventsInRange_OrdersDeterministicallyWithinSameSecond(t *testing.T) {
 	s := openStore(t)
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
