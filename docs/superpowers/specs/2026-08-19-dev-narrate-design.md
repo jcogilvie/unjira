@@ -30,6 +30,8 @@ In scope:
   left open.
 - `pipeline.RunNarrate` — the reusable orchestration `watch` will call.
 - The `dev narrate` CLI command, its output rendering, and `--dry-run`.
+- `config.Span`, a duration type accepting day/week units, since `time.ParseDuration` rejects them.
+- Exporting `correlator.llmClient` as `correlator.LLMClient` so the pipeline layer can name it.
 - `UNJIRA_LLM_API_KEY` wiring in `cmd/unjira`, deferred from slice 1 and needed here for the first
   time.
 
@@ -227,11 +229,8 @@ interface, not a new abstraction — `Cluster` and `Persist` keep taking it.
 unjira dev narrate [--since 7d] [--dry-run]
 ```
 
-- `--since` — a `time.Duration`, default `24h`. Kong parses this natively, which means
-  `time.ParseDuration` rules apply: `24h` and `168h` are valid, **`7d` is not** (`time: unknown unit
-  "d"`). Days are not a `ParseDuration` unit. Accept that rather than hand-rolling a parser: the help
-  text gives `168h` as the week-long example, so the constraint is discoverable instead of a runtime
-  surprise. The window is `TimeRange{now-since, now}` in UTC.
+- `--since` — a `config.Span` (see below), default `24h`. Accepts day and week units, so `--since 7d`
+  works. The window is `TimeRange{now-since, now}` in UTC.
 
   **One window**, not a loop: `Cluster` bisects only when the prompt would overflow
   `cfg.LLM.ContextWindowTokens`, so splits are adaptive rather than falling on arbitrary calendar
@@ -251,6 +250,56 @@ Flow in `devNarrateCmd.Run(app *appContext)`:
 
 `runID` is `fmt.Sprintf("dev-narrate-%d", os.Getpid())` — identifies the holder in the lease's
 steal-on-expiry log without needing a UUID dependency.
+
+### `config.Span` — durations that accept days and weeks
+
+`time.ParseDuration` stops at `h`: `d`, `w`, and `y` are all rejected. That is deliberate in the
+stdlib — a calendar day is not reliably 24h once DST is involved, so Go refuses to guess. There is no
+stdlib type that accepts day units, and no existing dependency provides one.
+
+The stdlib's objection does not apply here. unjira's windows are **UTC** spans measured back from
+now, and UTC has no DST, so a day is exactly 24h and a week exactly 168h. Requiring operators to
+write `168h` for "a week" is a needless arithmetic burden on the tool's most common use.
+
+Kong decodes any type implementing `encoding.TextUnmarshaler`, so a named type gets clean parsing
+with no new dependency, and the same type works for JSON config fields:
+
+```go
+// Span is a duration that also accepts day ("7d") and week ("2w") units,
+// which time.ParseDuration rejects. unjira measures spans backward from now
+// in UTC, where a day is exactly 24h — so the DST ambiguity the stdlib guards
+// against cannot arise. Everything else delegates to time.ParseDuration, so
+// every stdlib unit keeps working.
+type Span time.Duration
+
+func (s *Span) UnmarshalText(text []byte) error
+func (s Span) Duration() time.Duration
+```
+
+Parsing rules, all verified against a prototype:
+
+| Input | Result | Note |
+| --- | --- | --- |
+| `7d`, `2w`, `1d` | `168h`, `336h`, `24h` | the point of the type |
+| `0.5d` | `12h` | fractional values work (`ParseFloat`, not `Atoi`) |
+| `36h`, `90m`, `30s` | unchanged | delegated to `time.ParseDuration` |
+| `1d12h` | **error** | compound forms with `d`/`w` are unsupported |
+| `7D` | **error** | case-sensitive, matching the stdlib (`1H` also fails) |
+| `-3d`, `0s` | **error** | see below |
+| `""` | error | empty is not a duration |
+
+Two deliberate restrictions:
+
+- **Compound forms containing `d`/`w` are rejected**, not silently mis-parsed. Only a bare
+  `<number><d|w>` is special-cased; anything else goes to `time.ParseDuration`, which errors on the
+  `d`. Supporting `1d12h` would mean reimplementing the stdlib's tokenizer for marginal benefit —
+  write `36h`. The error must name the constraint so it reads as a design, not a bug.
+- **Non-positive spans are rejected.** `-3d` would otherwise parse to `-72h`, making `window.Start`
+  later than `now` and yielding an empty window with no error — the pass would silently do nothing.
+  `0s` is equally meaningless. Both error loudly, per this repo's never-silently-drop-data invariant.
+
+Used by `--since` now; `watch --interval` and any future lookback/retention setting reuse it, so
+duration syntax stays consistent across every flag and config field.
 
 ### `UNJIRA_LLM_API_KEY`
 
@@ -322,6 +371,9 @@ Offline, no network, following the repo's existing patterns:
   narratives reach `Cluster`'s prompt (the Path-B round trip); `LLMCalls` reflects actual calls.
 - **Rendering**: a pure function from `NarrateResult` to string, table-tested — including the
   zero-narrative and dry-run variants.
+- **`config.Span`**: table-driven over every row in the parsing table above, including each rejected
+  case (`1d12h`, `7D`, `-3d`, `0s`, `""`). The negative-span rejection matters most — without it a
+  backwards window silently produces an empty pass.
 
 Per this project's practice, each regression test is validated by deliberately breaking the behavior
 it guards and confirming the test fails. Three tests in slice 3 looked like they covered a failure
