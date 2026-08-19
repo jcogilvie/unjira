@@ -1510,7 +1510,7 @@ func RunNarrate(
 
 	result.Narratives = describePersisted(clustered, persisted, priorEnds)
 
-	result.Compactions, err = collectCompactions(s, persisted, persistStats)
+	result.Compactions, err = collectCompactions(s, existing, clustered, persisted, persistStats)
 	if err != nil {
 		return NarrateResult{}, err
 	}
@@ -1632,11 +1632,26 @@ func eventWindow(evts []correlator.Event) (lo, hi time.Time) {
 // happened; this says which, so the lossy step is auditable from the output.
 func collectCompactions(
 	s *store.Store,
+	existing []correlator.Narrative,
+	clustered []correlator.ClusterResult,
 	persisted []correlator.Narrative,
 	stats correlator.Stats,
 ) ([]Compaction, error) {
 	if stats.Compactions == 0 {
 		return nil, nil
+	}
+
+	// What each narrative had visible before this pass, and what this pass
+	// added — together these bound what compaction could have folded now.
+	priorVisible := make(map[int64]int, len(existing))
+	for _, n := range existing {
+		priorVisible[n.ID] = len(n.Events)
+	}
+	incomingCount := make(map[int64]int, len(clustered))
+	for _, r := range clustered {
+		if r.Kind == correlator.ClusterExtends {
+			incomingCount[r.NarrativeID] += len(r.Events)
+		}
 	}
 
 	var out []Compaction
@@ -1649,18 +1664,20 @@ func collectCompactions(
 			continue
 		}
 
-		linked, err := s.NarrativeEventCount(n.ID)
-		if err != nil {
-			return nil, fmt.Errorf("counting linked events for narrative %d: %w", n.ID, err)
-		}
 		visible, err := s.NarrativeEventsForContext(n.ID)
 		if err != nil {
 			return nil, fmt.Errorf("counting context events for narrative %d: %w", n.ID, err)
 		}
 
+		// EventsFolded is what THIS pass folded, not the lifetime total.
+		// NarrativeEventCount would give the latter: narrative_events rows are
+		// never deleted, so on a narrative compacted in an earlier pass,
+		// lifetime-linked minus now-visible counts every event ever folded.
+		// The right measure is what was visible going in (the hydrated context
+		// events) plus what this pass linked, minus what remains visible.
 		out = append(out, Compaction{
 			NarrativeID:  n.ID,
-			EventsFolded: linked - len(visible),
+			EventsFolded: priorVisible[n.ID] + incomingCount[n.ID] - len(visible),
 			Boundary:     *row.CompactionBoundary,
 		})
 	}
