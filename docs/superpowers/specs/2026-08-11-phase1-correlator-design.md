@@ -340,8 +340,9 @@ slice starts — this is not a fixed waterfall plan.
      meant to stay visible: its `narrative_events` link survived, but it vanished from all future
      `Cluster` context. `events.id` is a monotonic `INTEGER PRIMARY KEY`, so pairing it with
      `occurred_at` makes the cut exact regardless of timestamp collisions. Storing events at
-     sub-second precision was considered and rejected: it's a migration over every existing event
-     row plus a re-audit of every `occurred_at` string comparison, and it would not eliminate ties.
+     sub-second precision was considered and rejected: it would mean re-auditing every query that
+     string-compares `occurred_at` (`EventsOn`, the digest range scans, hydration), and it would
+     not eliminate ties anyway — two events can still share a nanosecond.
 4. **`internal/reconciler`** (compute + persist) — delta computation, verification via
    `TaskTracker`, action drafting. Unit-tested with fake trackers.
 5. **Auto-commit gate + `watch`** — wires collect → correlator → reconciler → gate into one

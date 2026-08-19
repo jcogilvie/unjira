@@ -892,8 +892,10 @@ func nullable(s string) any {
 
 // lockTimeFormat is the timestamp layout used for pipeline_lock.held_since
 // and pipeline_lock.expires_at only — NOT the layout used elsewhere in this
-// package (events/narratives/cursors stay on time.RFC3339; changing those
-// would be a migration).
+// package. events/narratives/cursors stay on time.RFC3339; switching those
+// would mean re-auditing every query that string-compares a timestamp
+// (EventsOn, the digest range scans, NarrativeEventsForContext), which is
+// why only the lock — where sub-second TTLs are load-bearing — uses this.
 //
 // It differs from time.RFC3339 in two ways, both required for TryAcquire's
 // atomic steal guard (a SQL string comparison, not a time comparison):
