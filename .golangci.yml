@@ -61,8 +61,13 @@ linters:
 
     # Warns about struct instantiations that don't specify every field.
     # Would have far more false positives (partial option structs, table
-    # tests) than useful catches here.
+    # tests) than useful catches here. Renamed exhaustruct_v5 in newer
+    # golangci-lint releases; disable both spellings so an upgrade doesn't
+    # silently re-enable it — the same trap wsl/wsl_v5 above documents, and
+    # one that only surfaced when the CI container (which installs @latest)
+    # reported 142 findings a pinned local binary did not.
     - exhaustruct
+    - exhaustruct_v5
 
     # Bans fmt.Print*/println. unjira's cmd/unjira package is a CLI whose
     # entire job is printing to stdout — this linter fights the package's
