@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS narratives (
     confidence   REAL,
     status       TEXT NOT NULL DEFAULT 'open',
     compaction_boundary TEXT,
+    -- Paired with compaction_boundary to break ties: occurred_at alone
+    -- cannot uniquely order events (it's stored via time.RFC3339, whole
+    -- seconds only), so NarrativeEventsForContext compares the
+    -- (occurred_at, event_id) pair — events.id is a monotonic
+    -- INTEGER PRIMARY KEY, an exact tiebreaker for events sharing a second.
+    compaction_boundary_event_id INTEGER,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -211,20 +217,28 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
-	if err := ensureNarrativeCompactionBoundary(db); err != nil {
+	if err := ensureNarrativeColumn(db, "compaction_boundary", "TEXT"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrating narratives.compaction_boundary in %s: %w", dbPath, err)
+	}
+	if err := ensureNarrativeColumn(db, "compaction_boundary_event_id", "INTEGER"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrating narratives.compaction_boundary_event_id in %s: %w", dbPath, err)
 	}
 
 	return &Store{db: db}, nil
 }
 
-// ensureNarrativeCompactionBoundary adds narratives.compaction_boundary to a
-// database whose narratives table predates the column. CREATE TABLE IF NOT
-// EXISTS is a no-op on an existing table, so a fresh DB gets the column from
-// the schema while an older DB needs this explicit ALTER. Idempotent: it
-// checks column presence first and does nothing when already present.
-func ensureNarrativeCompactionBoundary(db *sql.DB) error {
+// ensureNarrativeColumn adds the named column (with the given SQL type) to a
+// database whose narratives table predates it. CREATE TABLE IF NOT EXISTS is
+// a no-op on an existing table, so a fresh DB gets every column already
+// listed in the schema string while an older DB needs this explicit ALTER
+// for anything added after it was created. Idempotent: it checks column
+// presence first (via PRAGMA table_info, never by matching an ALTER's error
+// string) and does nothing when already present. Shared by both
+// compaction_boundary (Task 4) and compaction_boundary_event_id (this
+// change) so a third such column doesn't need its own bespoke migration.
+func ensureNarrativeColumn(db *sql.DB, column, sqlType string) error {
 	rows, err := db.Query(`PRAGMA table_info(narratives)`)
 	if err != nil {
 		return fmt.Errorf("reading narratives table info: %w", err)
@@ -241,7 +255,7 @@ func ensureNarrativeCompactionBoundary(db *sql.DB) error {
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &primaryKey); err != nil {
 			return fmt.Errorf("scanning narratives table info: %w", err)
 		}
-		if name == "compaction_boundary" {
+		if name == column {
 			return rows.Err() // already present
 		}
 	}
@@ -249,8 +263,8 @@ func ensureNarrativeCompactionBoundary(db *sql.DB) error {
 		return err
 	}
 
-	if _, err := db.Exec(`ALTER TABLE narratives ADD COLUMN compaction_boundary TEXT`); err != nil {
-		return fmt.Errorf("adding compaction_boundary column: %w", err)
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE narratives ADD COLUMN %s %s`, column, sqlType)); err != nil {
+		return fmt.Errorf("adding %s column: %w", column, err)
 	}
 
 	return nil
@@ -630,6 +644,12 @@ type NarrativeRow struct {
 	Confidence         float64
 	Status             string
 	CompactionBoundary *time.Time
+	// CompactionBoundaryEventID pairs with CompactionBoundary to break ties:
+	// occurred_at alone cannot uniquely order events (stored via
+	// time.RFC3339 — whole seconds only), so NarrativeEventsForContext
+	// filters on the (occurred_at, event_id) pair rather than occurred_at
+	// alone. nil iff CompactionBoundary is nil (never compacted).
+	CompactionBoundaryEventID *int64
 }
 
 // InsertNarrative inserts a new narrative row (status 'open', no compaction
@@ -678,12 +698,14 @@ func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
 		issueKey           sql.NullString
 		confidence         sql.NullFloat64
 		compactionBoundary sql.NullString
+		compactionEventID  sql.NullInt64
 	)
 	err := c.QueryRow(
-		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status, compaction_boundary
+		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
+		        compaction_boundary, compaction_boundary_event_id
 		 FROM narratives WHERE id = ?`, id,
 	).Scan(&row.ID, &windowStart, &windowEnd, &row.Title, &row.Summary,
-		&issueKey, &confidence, &row.Status, &compactionBoundary)
+		&issueKey, &confidence, &row.Status, &compactionBoundary, &compactionEventID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NarrativeRow{}, ErrNarrativeNotFound
 	}
@@ -707,6 +729,9 @@ func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
 			return NarrativeRow{}, fmt.Errorf("parsing compaction_boundary for narrative %d: %w", id, err)
 		}
 		row.CompactionBoundary = &parsed
+	}
+	if compactionEventID.Valid {
+		row.CompactionBoundaryEventID = &compactionEventID.Int64
 	}
 
 	return row, nil
@@ -735,22 +760,27 @@ func extendNarrativeImpl(c dbConn, id int64, windowEnd time.Time, summary string
 	return nil
 }
 
-// SetCompactionBoundary records the occurred_at of the newest compacted event
-// and stores the recap-prefixed summary.
-func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, recapSummary string) error {
-	return setCompactionBoundaryImpl(s.db, id, boundary, recapSummary)
+// SetCompactionBoundary records the occurred_at and row id of the newest
+// compacted event and stores the recap-prefixed summary. boundaryEventID is
+// required alongside boundary: occurred_at alone cannot uniquely order
+// events sharing a stored second (time.RFC3339 truncates to whole seconds —
+// see the comment on NarrativeEventsForContext), so the pair is what
+// NarrativeEventsForContext's row-value comparison uses to avoid dropping a
+// tied event from future context.
+func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
+	return setCompactionBoundaryImpl(s.db, id, boundary, boundaryEventID, recapSummary)
 }
 
 // SetCompactionBoundary is the *Tx-scoped variant of
 // (*Store).SetCompactionBoundary.
-func (t *Tx) SetCompactionBoundary(id int64, boundary time.Time, recapSummary string) error {
-	return setCompactionBoundaryImpl(t.tx, id, boundary, recapSummary)
+func (t *Tx) SetCompactionBoundary(id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
+	return setCompactionBoundaryImpl(t.tx, id, boundary, boundaryEventID, recapSummary)
 }
 
-func setCompactionBoundaryImpl(c dbConn, id int64, boundary time.Time, recapSummary string) error {
+func setCompactionBoundaryImpl(c dbConn, id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
 	_, err := c.Exec(
-		`UPDATE narratives SET compaction_boundary = ?, summary = ? WHERE id = ?`,
-		boundary.Format(time.RFC3339), recapSummary, id,
+		`UPDATE narratives SET compaction_boundary = ?, compaction_boundary_event_id = ?, summary = ? WHERE id = ?`,
+		boundary.Format(time.RFC3339), boundaryEventID, recapSummary, id,
 	)
 	if err != nil {
 		return fmt.Errorf("setting compaction boundary for narrative %d: %w", id, err)
@@ -811,13 +841,34 @@ func eventIDByExternalIDImpl(c dbConn, source, externalID string) (int64, error)
 	return id, nil
 }
 
-// NarrativeEventsForContext returns a narrative's events with occurred_at
-// strictly after its compaction_boundary (all of them when the boundary is
-// NULL), ordered by occurred_at — the events the caller hydrates into
+// NarrativeEventsForContext returns a narrative's events strictly after its
+// compaction boundary (all of them when the boundary is NULL), ordered by
+// (occurred_at, event id) — the events the caller hydrates into
 // correlator.Narrative.Events. The recap of anything at/before the boundary
-// already lives in the summary. A narrative id with no matching row (or one
-// with no linked events) returns (nil, nil), not an error — callers only
-// invoke this with an id they already obtained from the store.
+// already lives in the summary.
+//
+// The boundary comparison is on the pair (compaction_boundary,
+// compaction_boundary_event_id), not occurred_at alone: occurred_at is
+// stored via time.RFC3339 (whole seconds only — see InsertEvent), so two
+// events in the same second are indistinguishable by timestamp. A bare
+// "occurred_at > boundary" filter would then either include or exclude
+// *both* tied events depending on which one the boundary happened to be set
+// from, silently dropping whichever tied event was meant to stay visible.
+// events.id is a monotonic INTEGER PRIMARY KEY, so pairing it with
+// occurred_at makes the ordering exact regardless of timestamp collisions
+// (this is also why compaction picks its boundary event's row id, not just
+// its timestamp — see correlator.compactNarrativeTail).
+//
+// Uses a SQL row-value comparison ("(a, b) > (x, y)"), verified against
+// modernc.org/sqlite (the driver this package uses) with a standalone
+// scratch program before relying on it here; modernc.org/sqlite is well
+// past the SQLite 3.15 baseline that introduced row values. The explicit
+// equivalent ("a > x OR (a = x AND b > y)") is the documented fallback if a
+// future driver swap ever regresses this.
+//
+// A narrative id with no matching row (or one with no linked events)
+// returns (nil, nil), not an error — callers only invoke this with an id
+// they already obtained from the store.
 func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, error) {
 	rows, err := s.db.Query(
 		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
@@ -826,10 +877,13 @@ func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, er
 		 WHERE ne.narrative_id = ?
 		   AND (
 		     (SELECT compaction_boundary FROM narratives WHERE id = ?) IS NULL
-		     OR e.occurred_at > (SELECT compaction_boundary FROM narratives WHERE id = ?)
+		     OR (e.occurred_at, e.id) > (
+		       (SELECT compaction_boundary FROM narratives WHERE id = ?),
+		       (SELECT compaction_boundary_event_id FROM narratives WHERE id = ?)
+		     )
 		   )
-		 ORDER BY e.occurred_at`,
-		narrativeID, narrativeID, narrativeID,
+		 ORDER BY e.occurred_at, e.id`,
+		narrativeID, narrativeID, narrativeID, narrativeID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying context events for narrative %d: %w", narrativeID, err)

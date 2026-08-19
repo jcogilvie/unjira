@@ -284,6 +284,60 @@ func TestOpen_MigratesPreExistingNarrativesTableWithoutColumn(t *testing.T) {
 	cols, err := s.NarrativeColumns()
 	require.NoError(t, err)
 	assert.Contains(t, cols, "compaction_boundary")
+	assert.Contains(t, cols, "compaction_boundary_event_id")
+}
+
+func TestOpen_CompactionBoundaryEventIDColumnPresentAndReopenable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s1, err := store.Open(path)
+	require.NoError(t, err)
+	require.NoError(t, s1.Close())
+
+	// Reopen must not error (idempotent ALTER guard).
+	s2, err := store.Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
+
+	cols, err := s2.NarrativeColumns()
+	require.NoError(t, err)
+	assert.Contains(t, cols, "compaction_boundary_event_id")
+}
+
+// TestOpen_MigratesNarrativesTableWithBoundaryButWithoutEventIDColumn is the
+// realistic upgrade path: a DB created by an earlier version of this
+// package (post-Task-4, pre-this-fix) already has compaction_boundary but
+// not compaction_boundary_event_id. store.Open must add just the missing
+// column, idempotently, without touching the column that's already there.
+func TestOpen_MigratesNarrativesTableWithBoundaryButWithoutEventIDColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	raw, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = raw.Exec(`CREATE TABLE narratives (
+		id INTEGER PRIMARY KEY, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
+		title TEXT NOT NULL, summary TEXT NOT NULL, issue_key TEXT, confidence REAL,
+		status TEXT NOT NULL DEFAULT 'open',
+		compaction_boundary TEXT,
+		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+	)`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	s, err := store.Open(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	cols, err := s.NarrativeColumns()
+	require.NoError(t, err)
+	assert.Contains(t, cols, "compaction_boundary")
+	assert.Contains(t, cols, "compaction_boundary_event_id")
+
+	// Reopening once more (both columns now present) must still be a no-op,
+	// proving the migration is genuinely idempotent, not just tolerant of
+	// running twice by accident.
+	s2, err := store.Open(path)
+	require.NoError(t, err)
+	require.NoError(t, s2.Close())
 }
 
 // -- narrative store accessors -------------------------------------------
@@ -341,14 +395,19 @@ func TestSetCompactionBoundary_PersistsBoundaryAndRecap(t *testing.T) {
 	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
 	require.NoError(t, err)
-
 	boundary := ws.Add(30 * time.Minute)
-	require.NoError(t, s.SetCompactionBoundary(id, boundary, "recap: earlier work"))
+	seedEvent(t, s, "boundary-event", "the compacted-up-to event", boundary)
+	boundaryEventID, err := s.EventIDByExternalID("claude_code", "boundary-event")
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetCompactionBoundary(id, boundary, boundaryEventID, "recap: earlier work"))
 
 	row, err := s.GetNarrative(id)
 	require.NoError(t, err)
 	require.NotNil(t, row.CompactionBoundary)
 	assert.True(t, boundary.Equal(*row.CompactionBoundary))
+	require.NotNil(t, row.CompactionBoundaryEventID)
+	assert.Equal(t, boundaryEventID, *row.CompactionBoundaryEventID)
 	assert.Equal(t, "recap: earlier work", row.Summary)
 }
 
@@ -389,9 +448,9 @@ func TestNarrativeEventsForContext_ExcludesAtOrBeforeBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.AddNarrativeEvents(id, []int64{oldID, newID}))
 
-	// Boundary at the old event's time: strictly-after filter excludes it,
-	// keeps the newer one.
-	require.NoError(t, s.SetCompactionBoundary(id, ws, "recap"))
+	// Boundary at the old event's (time, id): strictly-after filter excludes
+	// it, keeps the newer one.
+	require.NoError(t, s.SetCompactionBoundary(id, ws, oldID, "recap"))
 
 	evs, err := s.NarrativeEventsForContext(id)
 	require.NoError(t, err)
@@ -425,7 +484,7 @@ func TestNarrativeEventCount_IgnoresCompactionBoundary(t *testing.T) {
 	// Set a boundary that makes NarrativeEventsForContext exclude "old" —
 	// NarrativeEventCount must be unaffected, since the link itself is not
 	// deleted by compaction.
-	require.NoError(t, s.SetCompactionBoundary(id, ws, "recap"))
+	require.NoError(t, s.SetCompactionBoundary(id, ws, oldID, "recap"))
 
 	ctxEvents, err := s.NarrativeEventsForContext(id)
 	require.NoError(t, err)

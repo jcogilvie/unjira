@@ -617,6 +617,126 @@ func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
 	assert.LessOrEqual(t, len(ctxEvents), cfg.RecentEventsKept+1) // recent kept + the new one, all post-boundary
 }
 
+// TestPersist_CompactionBoundaryTieDoesNotLoseVisibleEvent guards against a
+// bare-timestamp compaction boundary silently dropping a post-boundary
+// event from future Cluster context. Setup: a@0h b@1h c@2h d@2h (c and d
+// share a stored whole-second occurred_at) already linked, extended by a
+// new z@3h, RecentEventsKept=2 — the recent tail should be [d, z]. Because
+// c and d collide on their stored (RFC3339, whole-second) occurred_at,
+// boundary=c's timestamp and NarrativeEventsForContext's strict
+// occurred_at > boundary filter excludes d too (its stored timestamp is not
+// strictly greater than c's — they're equal), even though d was meant to
+// survive as part of the kept tail. Only links (never deleted) protect
+// against total data loss here; this asserts the *visible* context is
+// correct, which the links-survive assertion alone does not cover.
+func TestPersist_CompactionBoundaryTieDoesNotLoseVisibleEvent(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(base, base.Add(2*time.Hour), "Tied", "old summary")
+	require.NoError(t, err)
+
+	linkIDs := make([]int64, 0, 4)
+	for _, spec := range []struct{ extID, summary string }{
+		{"a", "a event"}, {"b", "b event"}, {"c", "c event"}, {"d", "d event"},
+	} {
+		at := base
+		switch spec.extID {
+		case "b":
+			at = base.Add(time.Hour)
+		case "c", "d":
+			at = base.Add(2 * time.Hour) // c and d share the same stored second
+		}
+		seedPersistedEvent(t, s, spec.extID, spec.summary, at)
+		eid, err := s.EventIDByExternalID("claude_code", spec.extID)
+		require.NoError(t, err)
+		linkIDs = append(linkIDs, eid)
+	}
+	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+
+	z := seedPersistedEvent(t, s, "z", "z event", base.Add(3*time.Hour))
+	llm := &fakeLLM{responses: []string{"recap: a and b folded"}}
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1, RecentEventsKept: 2}
+
+	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Tied", Summary: "updated summary",
+		Events: []correlator.Event{z},
+	}}, cfg)
+	require.NoError(t, err)
+
+	// Links survive regardless: 4 seeded + 1 new = 5, never deleted.
+	linkCount, err := s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	require.Equal(t, 5, linkCount, "sanity: no links deleted")
+
+	// The bug: RecentEventsKept=2 should keep [d, z] visible in context, but
+	// d's stored occurred_at ties with the compaction boundary (c's), so the
+	// strict > filter drops it too.
+	ctxEvents, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	extIDs := make([]string, len(ctxEvents))
+	for i, e := range ctxEvents {
+		extIDs[i] = e.ExternalID
+	}
+	assert.ElementsMatch(t, []string{"d", "z"}, extIDs,
+		"RecentEventsKept=2 must keep exactly the 2 newest events visible, even when the cut falls on a timestamp tie")
+}
+
+// TestPersist_CompactionBoundarySubSecondTieDoesNotLoseVisibleEvent is the
+// sub-second variant of the tie above: two events at 2h+100ms and 2h+500ms
+// are distinct time.Time values in Go, but InsertEvent stores occurred_at
+// via time.RFC3339 (whole-second only, see store.go), so both persist as
+// the same "...T02:00:00Z" string — the identical collision as two events
+// that were seeded with literally the same timestamp. Documents that
+// sub-second precision does not make this rarer; it is the same bug via a
+// different route, and the fix (an event-id tiebreaker) must handle both.
+func TestPersist_CompactionBoundarySubSecondTieDoesNotLoseVisibleEvent(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(base, base.Add(2*time.Hour+500*time.Millisecond), "Tied", "old summary")
+	require.NoError(t, err)
+
+	linkIDs := make([]int64, 0, 4)
+	for _, spec := range []struct {
+		extID   string
+		summary string
+		at      time.Time
+	}{
+		{"a", "a event", base},
+		{"b", "b event", base.Add(time.Hour)},
+		{"c", "c event", base.Add(2*time.Hour + 100*time.Millisecond)},
+		{"d", "d event", base.Add(2*time.Hour + 500*time.Millisecond)},
+	} {
+		seedPersistedEvent(t, s, spec.extID, spec.summary, spec.at)
+		eid, err := s.EventIDByExternalID("claude_code", spec.extID)
+		require.NoError(t, err)
+		linkIDs = append(linkIDs, eid)
+	}
+	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+
+	z := seedPersistedEvent(t, s, "z", "z event", base.Add(3*time.Hour))
+	llm := &fakeLLM{responses: []string{"recap: a and b folded"}}
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1, RecentEventsKept: 2}
+
+	_, err = correlator.Persist(t.Context(), s, llm, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Tied", Summary: "updated summary",
+		Events: []correlator.Event{z},
+	}}, cfg)
+	require.NoError(t, err)
+
+	linkCount, err := s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	require.Equal(t, 5, linkCount, "sanity: no links deleted")
+
+	ctxEvents, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	extIDs := make([]string, len(ctxEvents))
+	for i, e := range ctxEvents {
+		extIDs[i] = e.ExternalID
+	}
+	assert.ElementsMatch(t, []string{"d", "z"}, extIDs,
+		"sub-second timestamps that truncate to the same stored second must not lose the kept event either")
+}
+
 func TestPersist_NoCompactionBelowThreshold(t *testing.T) {
 	s := persistStore(t)
 	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)

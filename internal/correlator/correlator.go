@@ -447,13 +447,14 @@ func checkSameStory(ctx context.Context, llm llmClient, a, b ClusterResult) (boo
 // crosses the compaction threshold — the compaction recap/boundary already
 // computed via the (at most one) LLM call this result needs. See Persist.
 type preparedResult struct {
-	result    ClusterResult
-	eventIDs  []int64
-	windowLo  time.Time
-	windowHi  time.Time
-	doCompact bool
-	recap     string
-	boundary  time.Time
+	result          ClusterResult
+	eventIDs        []int64
+	windowLo        time.Time
+	windowHi        time.Time
+	doCompact       bool
+	recap           string
+	boundary        time.Time
+	boundaryEventID int64
 }
 
 // Persist writes Cluster's results to the narratives/narrative_events
@@ -617,7 +618,7 @@ func prepareExtend(
 	postBoundary := mergePostBoundaryEvents(ctxEvents, r.Events)
 
 	if estimateTokens(r.Summary+renderEventsForEstimate(postBoundary)) > cfg.TailSummarizeThresholdTokens {
-		recap, boundary, err := compactNarrativeTail(ctx, llm, r.NarrativeID, r.Summary, postBoundary, cfg.RecentEventsKept)
+		recap, boundary, boundaryEventID, err := compactNarrativeTail(ctx, s, llm, r.NarrativeID, r.Summary, postBoundary, cfg.RecentEventsKept)
 		if err != nil {
 			return preparedResult{}, err
 		}
@@ -629,6 +630,7 @@ func prepareExtend(
 			p.doCompact = true
 			p.recap = recap
 			p.boundary = boundary
+			p.boundaryEventID = boundaryEventID
 		}
 	}
 
@@ -676,7 +678,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 			return Narrative{}, err
 		}
 		if p.doCompact {
-			if err := tx.SetCompactionBoundary(r.NarrativeID, p.boundary, p.recap); err != nil {
+			if err := tx.SetCompactionBoundary(r.NarrativeID, p.boundary, p.boundaryEventID, p.recap); err != nil {
 				return Narrative{}, err
 			}
 		}
@@ -740,29 +742,51 @@ func renderEventsForEstimate(evts []Event) string {
 // compactNarrativeTail summarizes a narrative's older post-boundary events
 // (postBoundary, everything but the newest recentEventsKept of them) into a
 // recap via one LLM call, and returns the recap plus the new compaction
-// boundary (the occurred_at of the newest compacted event). It does not
-// write anything — the caller applies the recap/boundary inside Persist's
-// transaction. A zero boundary return means there weren't enough
-// post-boundary events to compact (recentEventsKept or fewer); the caller
-// must treat that as "no compaction happened," even though the size
-// estimate that triggered this call was over threshold. Logs what it
-// folded, for auditability — per this repo's "never silently drop data"
-// invariant, a lossy compaction step must leave a trace of what it
-// discarded even though narrative_events itself keeps the raw rows forever.
+// boundary: both the occurred_at of the newest compacted event and that
+// event's store row id. The row id is required alongside the timestamp —
+// see store.NarrativeEventsForContext's doc comment for why a bare
+// timestamp cannot uniquely order events (occurred_at is stored at
+// whole-second granularity, so two events in the same second are
+// indistinguishable by timestamp alone, and a cut landing between them
+// would otherwise silently drop the tied event from future context).
+// correlator.Event carries no row id of its own (it's events.Event, the
+// same shape every collector emits), so this resolves it via the same
+// EventIDByExternalID accessor prepareOneResult already uses, rather than
+// adding a second lookup path.
+//
+// compactNarrativeTail does not write anything — the caller applies the
+// recap/boundary inside Persist's transaction. A zero boundary return means
+// there weren't enough post-boundary events to compact (recentEventsKept or
+// fewer); the caller must treat that as "no compaction happened," even
+// though the size estimate that triggered this call was over threshold.
+// Logs what it folded, for auditability — per this repo's "never silently
+// drop data" invariant, a lossy compaction step must leave a trace of what
+// it discarded even though narrative_events itself keeps the raw rows
+// forever.
 func compactNarrativeTail(
 	ctx context.Context,
+	s *store.Store,
 	llm llmClient,
 	narrativeID int64,
 	existingSummary string,
 	postBoundary []Event,
 	recentEventsKept int,
-) (recap string, boundary time.Time, err error) {
+) (recap string, boundary time.Time, boundaryEventID int64, err error) {
 	if len(postBoundary) <= recentEventsKept {
-		return "", time.Time{}, nil
+		return "", time.Time{}, 0, nil
 	}
 
 	toCompact := postBoundary[:len(postBoundary)-recentEventsKept]
-	boundary = toCompact[len(toCompact)-1].OccurredAt
+	newest := toCompact[len(toCompact)-1]
+	boundary = newest.OccurredAt
+
+	boundaryEventID, err = s.EventIDByExternalID(newest.Source, newest.ExternalID)
+	if err != nil {
+		return "", time.Time{}, 0, fmt.Errorf(
+			"resolving compaction boundary event %s/%s for narrative %d: %w",
+			newest.Source, newest.ExternalID, narrativeID, err,
+		)
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Existing recap/summary:\n%s\n\nOlder events to fold into a concise recap:\n%s",
@@ -770,13 +794,13 @@ func compactNarrativeTail(
 
 	recap, err = llm.Complete(ctx, compactionSystemPrompt, b.String())
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("compacting narrative %d tail: %w", narrativeID, err)
+		return "", time.Time{}, 0, fmt.Errorf("compacting narrative %d tail: %w", narrativeID, err)
 	}
 
-	log.Printf("correlator: compacted narrative %d — folded %d event(s) up to %s into recap",
-		narrativeID, len(toCompact), boundary.Format(time.RFC3339))
+	log.Printf("correlator: compacted narrative %d — folded %d event(s) up to %s (event id %d) into recap",
+		narrativeID, len(toCompact), boundary.Format(time.RFC3339), boundaryEventID)
 
-	return recap, boundary, nil
+	return recap, boundary, boundaryEventID, nil
 }
 
 // compactionSystemPrompt instructs the model to fold a narrative's older
