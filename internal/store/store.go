@@ -217,88 +217,12 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
-	if err := ensureNarrativeColumn(db, "compaction_boundary", "TEXT"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrating narratives.compaction_boundary in %s: %w", dbPath, err)
-	}
-	if err := ensureNarrativeColumn(db, "compaction_boundary_event_id", "INTEGER"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrating narratives.compaction_boundary_event_id in %s: %w", dbPath, err)
-	}
-
 	return &Store{db: db}, nil
-}
-
-// ensureNarrativeColumn adds the named column (with the given SQL type) to a
-// database whose narratives table predates it. CREATE TABLE IF NOT EXISTS is
-// a no-op on an existing table, so a fresh DB gets every column already
-// listed in the schema string while an older DB needs this explicit ALTER
-// for anything added after it was created. Idempotent: it checks column
-// presence first (via PRAGMA table_info, never by matching an ALTER's error
-// string) and does nothing when already present. Shared by both
-// compaction_boundary (Task 4) and compaction_boundary_event_id (this
-// change) so a third such column doesn't need its own bespoke migration.
-func ensureNarrativeColumn(db *sql.DB, column, sqlType string) error {
-	rows, err := db.Query(`PRAGMA table_info(narratives)`)
-	if err != nil {
-		return fmt.Errorf("reading narratives table info: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var (
-			cid                 int
-			name, colType       string
-			notNull, primaryKey int
-			dfltValue           sql.NullString
-		)
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &primaryKey); err != nil {
-			return fmt.Errorf("scanning narratives table info: %w", err)
-		}
-		if name == column {
-			return rows.Err() // already present
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE narratives ADD COLUMN %s %s`, column, sqlType)); err != nil {
-		return fmt.Errorf("adding %s column: %w", column, err)
-	}
-
-	return nil
 }
 
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
-}
-
-// NarrativeColumns returns the column names of the narratives table — a thin
-// introspection helper for tests verifying the compaction_boundary migration.
-func (s *Store) NarrativeColumns() ([]string, error) {
-	rows, err := s.db.Query(`PRAGMA table_info(narratives)`)
-	if err != nil {
-		return nil, fmt.Errorf("reading narratives table info: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var cols []string
-	for rows.Next() {
-		var (
-			cid                 int
-			name, colType       string
-			notNull, primaryKey int
-			dfltValue           sql.NullString
-		)
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &primaryKey); err != nil {
-			return nil, fmt.Errorf("scanning narratives table info: %w", err)
-		}
-		cols = append(cols, name)
-	}
-
-	return cols, rows.Err()
 }
 
 // -- events ------------------------------------------------------------
@@ -905,9 +829,9 @@ func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, er
 // NarrativeEventCount returns how many events are linked to a narrative,
 // ignoring its compaction boundary — unlike NarrativeEventsForContext, which
 // returns only the post-boundary tail. This is a test-support introspection
-// accessor (see NarrativeColumns for the precedent): it's what lets a test
-// prove the "narrative_events rows are never deleted" invariant, since
-// compaction shrinks the assembled context, never the links.
+// accessor: it's what lets a test prove the "narrative_events rows are never
+// deleted" invariant, since compaction shrinks the assembled context, never
+// the links.
 func (s *Store) NarrativeEventCount(narrativeID int64) (int, error) {
 	var count int
 	if err := s.db.QueryRow(
