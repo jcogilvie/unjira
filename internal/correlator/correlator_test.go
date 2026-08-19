@@ -488,6 +488,36 @@ func TestPersist_ExtendUpdatesExistingNarrative(t *testing.T) {
 	assert.Len(t, ctxEvents, 2, "both events now linked")
 }
 
+// TestPersist_ExtendWithOlderEventsDoesNotMoveWindowEndBackward guards spec
+// step 3's "advance window_end to max(existing, this batch's latest event)
+// — never backward." A batch whose events are all older than the
+// narrative's current window_end (e.g. a late-arriving out-of-order event,
+// or a re-clustered older window) must leave window_end untouched.
+func TestPersist_ExtendWithOlderEventsDoesNotMoveWindowEndBackward(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	currentEnd := base.Add(2 * time.Hour)
+	id, err := s.InsertNarrative(base, currentEnd, "Story", "old summary")
+	require.NoError(t, err)
+
+	// olderE occurred well before the narrative's existing window_end.
+	olderE := seedPersistedEvent(t, s, "older", "a late-arriving older event", base.Add(30*time.Minute))
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+
+	got, err := correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Title: "Story", Summary: "updated summary",
+		Events: []correlator.Event{olderE},
+	}}, cfg)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.True(t, currentEnd.Equal(got[0].WindowEnd), "returned Narrative's window_end must not move backward")
+
+	row, err := s.GetNarrative(id)
+	require.NoError(t, err)
+	assert.True(t, currentEnd.Equal(row.WindowEnd), "window_end unchanged when the batch's events are all older")
+}
+
 func TestPersist_ExtendUnknownNarrativeIDErrorsLoudly(t *testing.T) {
 	s := persistStore(t)
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
@@ -569,8 +599,19 @@ func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
 	require.NotNil(t, row.CompactionBoundary, "boundary set after compaction")
 	assert.Contains(t, row.Summary, "recap: earlier work compacted")
 
-	// narrative_events rows are never deleted: all 6 events still linked in
-	// the store even though context now returns only the recent tail.
+	// narrative_events rows are never deleted: all 6 events (5 seeded old-*
+	// plus the new one) are still linked in the store even though context
+	// now returns only the recent tail. NarrativeEventCount ignores the
+	// compaction boundary, unlike NarrativeEventsForContext below, so it's
+	// what actually proves survival rather than just a bounded context size
+	// (which a destructive compaction that deleted rows down to the kept
+	// tail would satisfy just as well).
+	linkCount, err := s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	assert.Equal(t, 6, linkCount, "all narrative_events links survive compaction, none deleted")
+
+	// Separately: the assembled context (what future Cluster calls see) is
+	// bounded to the post-boundary tail — recent kept + the new one.
 	ctxEvents, err := s.NarrativeEventsForContext(id)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(ctxEvents), cfg.RecentEventsKept+1) // recent kept + the new one, all post-boundary

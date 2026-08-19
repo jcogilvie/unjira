@@ -399,6 +399,54 @@ func TestNarrativeEventsForContext_ExcludesAtOrBeforeBoundary(t *testing.T) {
 	assert.Equal(t, "new", evs[0].ExternalID)
 }
 
+// TestNarrativeEventCount_IgnoresCompactionBoundary is what proves
+// NarrativeEventCount is not just NarrativeEventsForContext under another
+// name: it must count a narrative's linked events regardless of the
+// compaction boundary, since it exists specifically to let a caller verify
+// that narrative_events rows survive compaction (which only shrinks what
+// NarrativeEventsForContext returns, never the underlying links).
+func TestNarrativeEventCount_IgnoresCompactionBoundary(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "old", "old event", ws)
+	seedEvent(t, s, "new", "new event", ws.Add(time.Hour))
+	id, err := s.InsertNarrative(ws, ws.Add(2*time.Hour), "T", "s")
+	require.NoError(t, err)
+	oldID, err := s.EventIDByExternalID("claude_code", "old")
+	require.NoError(t, err)
+	newID, err := s.EventIDByExternalID("claude_code", "new")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{oldID, newID}))
+
+	count, err := s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "both links counted before any compaction")
+
+	// Set a boundary that makes NarrativeEventsForContext exclude "old" —
+	// NarrativeEventCount must be unaffected, since the link itself is not
+	// deleted by compaction.
+	require.NoError(t, s.SetCompactionBoundary(id, ws, "recap"))
+
+	ctxEvents, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	require.Len(t, ctxEvents, 1, "sanity: boundary really does filter context")
+
+	count, err = s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "count unchanged by the boundary — links are never deleted")
+}
+
+func TestNarrativeEventCount_NoLinksReturnsZero(t *testing.T) {
+	s := openStore(t)
+	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(ws, ws.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+
+	count, err := s.NarrativeEventCount(id)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
 // -- transaction seam -----------------------------------------------------
 
 func TestWithTx_RollsBackOnError(t *testing.T) {

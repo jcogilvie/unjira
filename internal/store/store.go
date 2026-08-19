@@ -848,6 +848,23 @@ func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, er
 	return out, rows.Err()
 }
 
+// NarrativeEventCount returns how many events are linked to a narrative,
+// ignoring its compaction boundary — unlike NarrativeEventsForContext, which
+// returns only the post-boundary tail. This is a test-support introspection
+// accessor (see NarrativeColumns for the precedent): it's what lets a test
+// prove the "narrative_events rows are never deleted" invariant, since
+// compaction shrinks the assembled context, never the links.
+func (s *Store) NarrativeEventCount(narrativeID int64) (int, error) {
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM narrative_events WHERE narrative_id = ?`, narrativeID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting linked events for narrative %d: %w", narrativeID, err)
+	}
+
+	return count, nil
+}
+
 // scanRow is the subset of *sql.Rows this package needs to scan an event.
 type scanRow interface {
 	Scan(dest ...any) error
