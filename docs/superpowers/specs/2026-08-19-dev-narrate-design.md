@@ -30,8 +30,12 @@ In scope:
   left open.
 - `pipeline.RunNarrate` — the reusable orchestration `watch` will call.
 - The `dev narrate` CLI command, its output rendering, and `--dry-run`.
-- `config.Span`, a duration type accepting day/week units, since `time.ParseDuration` rejects them.
-- Exporting `correlator.llmClient` as `correlator.LLMClient` so the pipeline layer can name it.
+- `config.Span`, a duration type accepting day/week units (delegating to
+  `github.com/xhit/go-str2duration/v2`, a new direct dependency), since `time.ParseDuration`
+  rejects them.
+- LLM observability: `openai.Usage` returned from `Complete` (currently discarded), a
+  `correlator.Stats` return on `Cluster`/`Persist`, and exporting `correlator.llmClient` as
+  `correlator.LLMClient`. This touches slice-1/2/3 call sites deliberately.
 - `UNJIRA_LLM_API_KEY` wiring in `cmd/unjira`, deferred from slice 1 and needed here for the first
   time.
 
@@ -142,7 +146,7 @@ type NarrateResult struct {
     Window            correlator.TimeRange
     UnlinkedEvents    int   // candidates considered
     ContextNarratives int   // passed to Cluster as context
-    LLMCalls          int   // includes bisection splits and merge checks
+    Stats             correlator.Stats // calls, splits, tokens; see below
     Narratives        []NarratedNarrative
     Compactions       []Compaction
 }
@@ -182,11 +186,11 @@ Sequence:
 1. `s.UnlinkedEventsInRange(window.Start, window.End)` → candidates.
 2. `s.NarrativesOverlapping(window.Start, window.End)` → map each `NarrativeRow` to
    `correlator.Narrative` and hydrate `.Events` via `s.NarrativeEventsForContext(row.ID)`.
-3. `correlator.Cluster(ctx, events, narratives, countingLLM, window, cfg.LLM.ContextWindowTokens)`.
-4. Unless `opts.DryRun`: `correlator.Persist(ctx, s, countingLLM, results, cfg.Correlator)`.
+3. `correlator.Cluster(ctx, events, narratives, llm, window, cfg.LLM.ContextWindowTokens)`.
+4. Unless `opts.DryRun`: `correlator.Persist(ctx, s, llm, results, cfg.Correlator)`.
 5. Assemble `NarrateResult`.
 
-Early return: zero unlinked events → a `NarrateResult` with counts populated, no LLM call, no error.
+Early return: zero unlinked events → a `NarrateResult` with counts populated, zero-valued `Stats`, no LLM call, no error.
 An empty window is a normal outcome, not a failure.
 
 ### The lease is the caller's responsibility
@@ -199,29 +203,83 @@ acquisition in the caller gives both call sites identical semantics.
 `dev narrate` acquires the lease **even under `--dry-run`**, so a dry run cannot interleave with a
 real pass and read half-written state.
 
-### Pass stats via a counting decorator
+### LLM observability: token usage threaded through, not a call counter
 
-`Cluster` returns only `[]ClusterResult` — LLM call count and split/merge activity are not
-observable. Rather than change correlator code that just completed two review cycles, the pipeline
-layer wraps the client:
+An earlier draft wrapped the client in a decorator that counted `Complete` calls. That was too
+little, for three reasons:
+
+1. **We already discard the data that matters.** `openai.Client.Complete` returns only
+   `resp.Choices[0].Message.Content` — `resp.Usage` (prompt, completion, and total tokens, all
+   `int64`) and `resp.Model` are thrown away. Token counts, not call counts, are what govern cost and
+   reveal whether `LLM.ContextWindowTokens` is tuned correctly.
+2. **`estimateTokens` has never been validated.** It is `(len(text)+3)/4` — a heuristic that decides
+   *when `Cluster` bisects*. Nothing has ever compared it against a real tokenizer. If it is off by
+   30%, bisection fires at the wrong threshold, which is a correctness problem, not just missing
+   telemetry. Capturing actual usage alongside the estimate makes the heuristic checkable.
+3. **The metric set is already growing** — calls, splits, merge checks, compactions, and now tokens,
+   with per-run cost accounting needed by slice 5's `watch` gate. A bare `int` counter gets discarded
+   at that point.
+
+So usage flows from the client through the correlator, rather than being inferred outside it.
+
+**`internal/clients/openai`:**
 
 ```go
-// countingLLM counts Complete calls so a pass can report how many LLM round
-// trips it took — the signal that reveals bisection or compaction activity a
-// caller would otherwise not see.
-type countingLLM struct {
-    inner correlator.LLMClient
-    calls int
+// Usage reports what one completion actually consumed, as the server counted
+// it — distinct from correlator.estimateTokens's len/4 heuristic, which only
+// has to be good enough to decide whether to split before spending a call.
+// Comparing the two is how that heuristic gets validated.
+type Usage struct {
+    PromptTokens     int64
+    CompletionTokens int64
+    // Model is what the server reported serving, which can differ from the
+    // model requested when a gateway (litellm, OpenRouter) remaps it.
+    Model string
 }
+
+func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, Usage, error)
 ```
 
-This yields a total, not a breakdown (a bisect split is indistinguishable from a merge check). That
-is enough for its purpose: spotting a pathological pass. `Compactions` is populated separately, from
-`Persist`'s returned narratives compared against their pre-pass `compaction_boundary`.
+**`internal/correlator`:** the client interface gains the same return, and `Cluster`/`Persist`
+aggregate across every call they make — including recursive bisection calls and the compaction call.
 
-**Required change:** `correlator.llmClient` is unexported, so `internal/pipeline` cannot name it.
-Export it as `correlator.LLMClient` (same single-method shape). This is a rename of an existing
-interface, not a new abstraction — `Cluster` and `Persist` keep taking it.
+```go
+// LLMClient is the narrow capability the correlator needs from an LLM
+// backend. Exported (it was unexported) so internal/pipeline can name it.
+type LLMClient interface {
+    Complete(ctx context.Context, systemPrompt, userPrompt string) (string, openai.Usage, error)
+}
+
+// Stats is what one Cluster or Persist call spent and why. Splits and
+// MergeChecks are what distinguish an expensive-but-correct pass (a wide
+// window that bisected) from a pathological one.
+type Stats struct {
+    Calls            int
+    Splits           int   // window bisections
+    MergeChecks      int   // same-story checks at split seams
+    Compactions      int   // Persist only
+    PromptTokens     int64
+    CompletionTokens int64
+    EstimatedTokens  int   // estimateTokens's guess, for comparison
+}
+
+func Cluster(...) ([]ClusterResult, Stats, error)
+func Persist(...) ([]Narrative, Stats, error)
+```
+
+`Stats` values from recursive `Cluster` calls sum into the parent's, so a top-level call reports the
+whole tree. `RunNarrate` merges `Cluster`'s and `Persist`'s into `NarrateResult.Stats`.
+
+**Dependency note:** `correlator` importing `internal/clients/openai` for the `Usage` type is
+acceptable — it is a data-only struct in the package that already owns the LLM seam, and `correlator`
+already imports `internal/store` and `internal/config`. The alternative (defining `Usage` in
+`correlator` and having the client import it) would invert the natural direction: the facade should
+not depend on its consumer.
+
+**Call-site churn:** `Cluster` has 4 call sites (itself twice in `clusterWithSplit`, `checkSameStory`,
+and `RunNarrate`), `Persist` 1, plus `fakeLLM` and every correlator test asserting on returns. The
+user confirmed this churn is acceptable given the utility, and that Serena makes the mechanical part
+cheap.
 
 ## CLI: `unjira dev narrate`
 
@@ -261,42 +319,54 @@ The stdlib's objection does not apply here. unjira's windows are **UTC** spans m
 now, and UTC has no DST, so a day is exactly 24h and a week exactly 168h. Requiring operators to
 write `168h` for "a week" is a needless arithmetic burden on the tool's most common use.
 
-Kong decodes any type implementing `encoding.TextUnmarshaler`, so a named type gets clean parsing
-with no new dependency, and the same type works for JSON config fields:
+**Do not hand-roll the parser.** `github.com/xhit/go-str2duration/v2` does this properly, and better
+than a local implementation would: it handles *compound* forms (`7d12h`, `1w2d3h4m`), which a simple
+"strip the trailing `d`, multiply" approach cannot. It is single-purpose, has no transitive
+dependencies beyond the stdlib, and delegates to `time.ParseDuration` for the units the stdlib already
+covers.
+
+Worth noting what the ecosystem does here, since cert-manager was raised as a possible precedent: it
+does **not** solve this. Its docs state the `duration`/`renewBefore` fields "must be specified using a
+Go `time.Duration` string format, which does not allow the `d` (days) suffix," and its own examples
+read `duration: 2160h # 90d` — a comment doing the arithmetic. That is the outcome to avoid, not
+imitate.
+
+Kong decodes any type implementing `encoding.TextUnmarshaler`, so `Span` is a thin wrapper that
+delegates parsing and adds one validation. The same type works for JSON config fields.
 
 ```go
 // Span is a duration that also accepts day ("7d") and week ("2w") units,
-// which time.ParseDuration rejects. unjira measures spans backward from now
-// in UTC, where a day is exactly 24h — so the DST ambiguity the stdlib guards
-// against cannot arise. Everything else delegates to time.ParseDuration, so
-// every stdlib unit keeps working.
+// including compound forms ("7d12h"), which time.ParseDuration rejects — it
+// stops at "h", deliberately, since a calendar day is not reliably 24h under
+// DST. unjira measures spans backward from now in UTC, where a day is exactly
+// 24h, so that ambiguity cannot arise here.
+//
+// Parsing is delegated to github.com/xhit/go-str2duration; this type exists
+// to satisfy encoding.TextUnmarshaler (which Kong and encoding/json both
+// honor) and to reject non-positive spans.
 type Span time.Duration
 
 func (s *Span) UnmarshalText(text []byte) error
 func (s Span) Duration() time.Duration
 ```
 
-Parsing rules, all verified against a prototype:
+Parsing behavior, verified against the library:
 
 | Input | Result | Note |
 | --- | --- | --- |
-| `7d`, `2w`, `1d` | `168h`, `336h`, `24h` | the point of the type |
-| `0.5d` | `12h` | fractional values work (`ParseFloat`, not `Atoi`) |
-| `36h`, `90m`, `30s` | unchanged | delegated to `time.ParseDuration` |
-| `1d12h` | **error** | compound forms with `d`/`w` are unsupported |
-| `7D` | **error** | case-sensitive, matching the stdlib (`1H` also fails) |
-| `-3d`, `0s` | **error** | see below |
+| `7d`, `2w` | `168h`, `336h` | the point of the type |
+| `7d12h`, `1w2d3h4m` | `180h`, `219h4m` | compound forms — why we use the library |
+| `36h`, `90m`, `30s` | unchanged | stdlib units still work |
+| `1y` | error | years are not supported (ambiguous, and rightly so) |
+| `7D` | error | case-sensitive, matching the stdlib (`1H` also fails) |
 | `""` | error | empty is not a duration |
+| `-3d`, `0s` | **error — added by `Span`** | see below |
 
-Two deliberate restrictions:
-
-- **Compound forms containing `d`/`w` are rejected**, not silently mis-parsed. Only a bare
-  `<number><d|w>` is special-cased; anything else goes to `time.ParseDuration`, which errors on the
-  `d`. Supporting `1d12h` would mean reimplementing the stdlib's tokenizer for marginal benefit —
-  write `36h`. The error must name the constraint so it reads as a design, not a bug.
-- **Non-positive spans are rejected.** `-3d` would otherwise parse to `-72h`, making `window.Start`
-  later than `now` and yielding an empty window with no error — the pass would silently do nothing.
-  `0s` is equally meaningless. Both error loudly, per this repo's never-silently-drop-data invariant.
+**Non-positive spans are rejected by `Span`, not the library.** `str2duration` parses `-3d` happily as
+`-72h`, which would make `window.Start` later than `now` and yield an empty window with no error — a
+pass that silently does nothing. `0s` is equally meaningless. `UnmarshalText` rejects both with an
+error naming the value, per this repo's never-silently-drop-data invariant. This is the one piece of
+behavior `Span` adds beyond delegation, and the one that most needs a test.
 
 Used by `--since` now; `watch --interval` and any future lookback/retention setting reuse it, so
 duration syntax stays consistent across every flag and config field.
@@ -319,7 +389,8 @@ Missing or empty when `dev narrate` runs → a loud error naming the variable, b
 == narration pass ==
 window   2026-08-12T00:00:00Z .. 2026-08-19T00:00:00Z
 events   47 unlinked candidates, 3 narratives as context
-llm      4 call(s)
+llm      4 call(s), 2 split(s), 1 merge check
+tokens   38,412 prompt + 1,205 completion (estimated 41,000)
 compact  narrative 9: folded 12 event(s) up to 2026-08-14T08:00:00Z
 
 [NEW #14] 2026-08-14T09:12:00Z .. 2026-08-14T17:40:00Z
@@ -368,12 +439,17 @@ Offline, no network, following the repo's existing patterns:
 - **`RunNarrate`** (`internal/pipeline`): real store + the `fakeLLM` pattern from
   `correlator_test.go`. Cases: new narrative persisted end to end; `DryRun` writes nothing while
   still reporting what it would have written; zero candidates makes no LLM call; hydrated context
-  narratives reach `Cluster`'s prompt (the Path-B round trip); `LLMCalls` reflects actual calls.
+  narratives reach `Cluster`'s prompt (the Path-B round trip); `Stats` aggregates correctly across
+  a bisected pass (a `fakeLLM` returning canned usage proves the sums, including the recursive
+  `Cluster` calls).
 - **Rendering**: a pure function from `NarrateResult` to string, table-tested — including the
   zero-narrative and dry-run variants.
-- **`config.Span`**: table-driven over every row in the parsing table above, including each rejected
-  case (`1d12h`, `7D`, `-3d`, `0s`, `""`). The negative-span rejection matters most — without it a
-  backwards window silently produces an empty pass.
+- **`config.Span`**: table-driven over every row in the parsing table above. The library's own
+  behavior needs only light coverage (it has its own tests); what must be covered is the behavior
+  `Span` adds — rejecting `-3d` and `0s`. Without that, a backwards window silently produces an
+  empty pass.
+- **`openai.Usage`**: the existing `httptest`-based client test asserts usage is populated from the
+  response body, not dropped.
 
 Per this project's practice, each regression test is validated by deliberately breaking the behavior
 it guards and confirming the test fails. Three tests in slice 3 looked like they covered a failure
