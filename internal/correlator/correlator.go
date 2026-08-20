@@ -258,9 +258,41 @@ type clusterResponseItem struct {
 // Any malformed shape — invalid JSON, an out-of-range index, an unknown
 // kind — is a loud error including the raw response, never a partial or
 // best-effort result.
+// stripJSONFence removes a Markdown code fence wrapping an LLM's JSON reply,
+// returning the payload unchanged when there is no fence.
+//
+// Both system prompts say "no markdown fences", and models emit them anyway —
+// a live litellm-fronted Claude model returned "```json\n[]\n```" for a
+// prompt that forbade exactly that. Fencing is a property of the interface,
+// not a prompt bug, so the parsers tolerate it rather than failing a pass over
+// formatting. Everything past the fence stays strict: malformed JSON inside
+// one is still a loud error naming the raw response.
+func stripJSONFence(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "```") {
+		return raw
+	}
+
+	// Drop the opening fence and its optional language tag ("```json"), which
+	// runs to the end of that first line.
+	if newline := strings.IndexByte(trimmed, '\n'); newline >= 0 {
+		trimmed = trimmed[newline+1:]
+	} else {
+		// A fence with no newline carries no payload to parse; let the caller
+		// report the original text rather than inventing a valid-looking one.
+		return raw
+	}
+
+	if closing := strings.LastIndex(trimmed, "```"); closing >= 0 {
+		trimmed = trimmed[:closing]
+	}
+
+	return strings.TrimSpace(trimmed)
+}
+
 func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, error) {
 	var items []clusterResponseItem
-	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &items); err != nil {
 		return nil, fmt.Errorf("parsing cluster response %q: %w", raw, err)
 	}
 
@@ -489,7 +521,7 @@ func checkSameStory(ctx context.Context, client llm.Client, a, b ClusterResult) 
 	stats.addUsage(usage)
 
 	var resp sameStoryResponse
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &resp); err != nil {
 		return false, ClusterResult{}, stats, fmt.Errorf("parsing same-story response %q: %w", raw, err)
 	}
 

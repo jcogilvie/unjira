@@ -887,3 +887,61 @@ func TestPersist_StatsRecordsCompaction(t *testing.T) {
 	assert.Equal(t, 1, stats.Calls)
 	assert.Equal(t, int64(500), stats.PromptTokens)
 }
+
+// TestStripJSONFence covers the fenced-response shapes a real model actually
+// produces. Reproduced against a live litellm-fronted Claude model, which
+// returned "```json\n[]\n```" for a prompt that explicitly said "no markdown
+// fences" — models emit them regardless of instruction, so both parsers have
+// to tolerate them.
+func TestCluster_TolerateFencedResponseFromRealModel(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{mustEvent(t, "claude_code", "e1", "did a thing", base)}
+	body := `[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "json-tagged fence", raw: "```json\n" + body + "\n```"},
+		{name: "bare fence", raw: "```\n" + body + "\n```"},
+		{name: "fence with surrounding whitespace", raw: "\n  ```json\n" + body + "\n```  \n"},
+		{name: "unfenced still works", raw: body},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llmFake := &fakeLLM{responses: []string{tt.raw}}
+
+			results, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+				Start: base, End: base.Add(time.Hour),
+			}, 128000)
+
+			require.NoError(t, err)
+			require.Len(t, results, 1)
+			assert.Equal(t, "T", results[0].Title)
+		})
+	}
+}
+
+func TestCluster_TolerateFencedSameStoryResponse(t *testing.T) {
+	// The same-story merge check parses a JSON object, and is exposed to the
+	// same fencing as the cluster-response parser.
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", strings.Repeat("x", 400), base),
+		mustEvent(t, "claude_code", "e2", strings.Repeat("y", 400), base.Add(50*time.Minute)),
+	}
+	llmFake := &fakeLLM{responses: []string{
+		`[{"kind":"new","title":"A","summary":"s","event_indices":[0]}]`,
+		`[{"kind":"new","title":"B","summary":"s","event_indices":[0]}]`,
+		"```json\n{\"same_story\":true,\"title\":\"Merged\",\"summary\":\"m\"}\n```",
+	}}
+
+	results, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+		Start: base, End: base.Add(time.Hour),
+	}, 300)
+
+	require.NoError(t, err)
+	require.Len(t, results, 1, "a fenced same_story:true must still merge the two halves")
+	assert.Equal(t, "Merged", results[0].Title)
+}

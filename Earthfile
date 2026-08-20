@@ -2,6 +2,12 @@
 VERSION --try --raw-output 0.8
 
 ARG --global GO_VERSION=1.26.0
+# Pinned, not @latest. golangci-lint hard-errors on an unknown linter name, and
+# releases rename linters (2.13.0: exhaustruct -> exhaustruct_v5), so a floating
+# version means an upstream release can fail CI with no change on our side —
+# and makes local lint disagree with CI. Bump this deliberately, together with
+# any renamed names in .golangci.yml.
+ARG --global GOLANGCI_LINT_VERSION=v2.12.2
 
 # reviewable checks that a branch is ready for review. Run it before opening
 # a pull request.
@@ -86,7 +92,7 @@ go-test:
 
 go-lint:
   FROM +go-deps
-  RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+  RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}
   RUN golangci-lint run ./...
 
 go-modules-tidy:
