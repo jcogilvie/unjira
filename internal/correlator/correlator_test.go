@@ -30,14 +30,19 @@ import (
 // can set a single-element slice. usagePerCall is returned from every call,
 // so a test can assert Stats aggregates across a bisected pass.
 type fakeLLM struct {
-	responses    []string
-	prompts      []string // captured user prompts, in call order, for assertions
-	err          error
-	usagePerCall llm.Usage
+	responses []string
+	prompts   []string // captured user prompts, in call order, for assertions
+	// systemPrompts mirrors prompts for the system half. Captured because
+	// estimateTokens sizes system+user together, so a test comparing the
+	// estimate against only the user prompt would pass trivially.
+	systemPrompts []string
+	err           error
+	usagePerCall  llm.Usage
 }
 
-func (f *fakeLLM) Complete(_ context.Context, _ string, userPrompt string) (string, llm.Usage, error) {
+func (f *fakeLLM) Complete(_ context.Context, systemPrompt, userPrompt string) (string, llm.Usage, error) {
 	f.prompts = append(f.prompts, userPrompt)
+	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	if f.err != nil {
 		return "", llm.Usage{}, f.err
 	}
@@ -296,7 +301,7 @@ func TestCluster_OversizedWindowSplitsAndCallsLLMPerHalf(t *testing.T) {
 	// both together (in one prompt) don't.
 	results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base, End: base.Add(2 * time.Hour),
-	}, 1200)
+	}, 2400)
 
 	require.NoError(t, err)
 	require.Len(t, llm.prompts, 3, "one Complete call per split half, plus one merge-boundary same-story check")
@@ -314,7 +319,7 @@ func TestCluster_SingleEventOverBudgetErrorsLoudlyWithoutCallingLLM(t *testing.T
 
 	_, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
-	}, 100)
+	}, 200)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "e1")
@@ -337,7 +342,7 @@ func TestCluster_ExtendsResultsSharingNarrativeIDMergeAcrossSplit(t *testing.T) 
 
 	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
 		Start: base, End: base.Add(2 * time.Hour),
-	}, 1200)
+	}, 2400)
 
 	require.NoError(t, err)
 	require.Len(t, llm.prompts, 2, "extends-merge is deterministic; it must not trigger a merge-boundary same-story LLM call")
@@ -384,7 +389,7 @@ func TestCluster_AdjacentNewClustersMergeViaLLMWhenSameStory(t *testing.T) {
 
 			results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 				Start: base, End: base.Add(2 * time.Hour),
-			}, 1200)
+			}, 2400)
 
 			require.NoError(t, err)
 			require.Len(t, llm.prompts, 3, "expected exactly one merge-boundary call after the two split-half calls")
@@ -412,7 +417,7 @@ func TestCluster_DegenerateBisectionOfIdenticalTimestampsErrorsLoudly(t *testing
 
 	_, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
-	}, 1000)
+	}, 2000)
 
 	require.Error(t, err)
 }
@@ -466,7 +471,7 @@ func TestCluster_StatsAggregatesAcrossBisection(t *testing.T) {
 	// loose enough that each half fits on its own and doesn't recurse again.
 	_, stats, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
 		Start: base, End: base.Add(time.Hour),
-	}, 300)
+	}, 600)
 
 	require.NoError(t, err)
 	assert.Positive(t, stats.Splits, "an over-budget window must record its bisection")
@@ -939,9 +944,65 @@ func TestCluster_TolerateFencedSameStoryResponse(t *testing.T) {
 
 	results, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
 		Start: base, End: base.Add(time.Hour),
-	}, 300)
+	}, 600)
 
 	require.NoError(t, err)
 	require.Len(t, results, 1, "a fenced same_story:true must still merge the two halves")
 	assert.Equal(t, "Merged", results[0].Title)
+}
+
+// TestCluster_TokenEstimateIsNotOptimistic pins the character-per-token ratio
+// behind estimateTokens against real measurements, because that estimate is
+// what decides whether Cluster bisects a window. An optimistic estimate means
+// Cluster builds a prompt it believes fits and the API rejects it mid-pass —
+// the opposite of the clean split bisection exists to produce.
+//
+// Measured over three live passes (litellm-fronted Claude, dev narrate
+// --dry-run), comparing Stats.EstimatedTokens against the server's own
+// PromptTokens:
+//
+//	estimated  actual  implied chars/token
+//	      344     548                 2.51
+//	      963    1598                 2.41
+//	      909    1505                 2.42
+//
+// ~2.4, not the 4.0 a prose-calibrated ratio assumes: these prompts are dense
+// with RFC3339 timestamps, quoted JSON keys, and branch names, all of which
+// tokenize far worse than English sentences.
+func TestCluster_TokenEstimateIsNotOptimistic(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	// A prompt shaped like the real thing: timestamps, quoting, identifiers.
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "sess-1",
+			`Claude Code session in unjira on branch worktree-dev-narrate: 19 user messages.`, base),
+		mustEvent(t, "claude_code", "sess-2",
+			`Claude Code session in helm-charts on branch add-structured-assertion: 7 user messages.`,
+			base.Add(20*time.Minute)),
+	}
+	llmFake := &fakeLLM{responses: []string{
+		`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1]}]`,
+	}}
+
+	_, stats, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+		Start: base, End: base.Add(time.Hour),
+	}, 128000)
+
+	require.NoError(t, err)
+
+	// estimateTokens sizes system+user together, so both halves have to be
+	// counted here — measuring against the user prompt alone would pass
+	// trivially, since the system prompt is the larger of the two.
+	require.Len(t, llmFake.prompts, 1)
+	require.Len(t, llmFake.systemPrompts, 1)
+	promptChars := len(llmFake.systemPrompts[0]) + len(llmFake.prompts[0])
+
+	// At worst-observed density the estimate must still cover the prompt.
+	const worstObservedCharsPerToken = 2.4
+	require.Positive(t, stats.EstimatedTokens)
+	budgetedChars := float64(stats.EstimatedTokens) * worstObservedCharsPerToken
+	assert.GreaterOrEqual(t, budgetedChars, float64(promptChars),
+		"estimateTokens assumes more than %.1f chars/token: %d estimated tokens budgets for %.0f "+
+			"chars against a %d-char prompt, so a window near the real limit would overflow "+
+			"instead of bisecting",
+		worstObservedCharsPerToken, stats.EstimatedTokens, budgetedChars, promptChars)
 }

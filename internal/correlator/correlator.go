@@ -193,12 +193,35 @@ func filterAdjacentOrOverlapping(existing []Narrative, window TimeRange) []Narra
 	return out
 }
 
-// estimateTokens gives a conservative, non-exact token count estimate —
-// exactness isn't the goal, only a margin safe enough to decide whether to
-// split before spending a real call. ~4 characters per token is the
-// standard rough ratio for English text against OpenAI-family tokenizers.
+// charsPerTokenEstimate is how many characters this package assumes one token
+// covers. Deliberately pessimistic: it must never exceed the true density, or
+// estimateTokens under-counts and Cluster builds a prompt it believes fits.
+//
+// The familiar "~4 characters per token" figure is calibrated on English
+// prose, and these prompts are not prose — they are dense with RFC3339
+// timestamps, quoted JSON keys, branch names, and repo paths, all of which
+// tokenize much harder. Measured against the server's own count over three
+// live passes (litellm-fronted Claude, via `dev narrate --dry-run`, comparing
+// Stats.EstimatedTokens with Stats.PromptTokens):
+//
+//	estimated  actual  implied chars/token
+//	      344     548                 2.51
+//	      963    1598                 2.41
+//	      909    1505                 2.42
+//
+// 2 rounds that ~2.4 down rather than up, leaving margin for prompts denser
+// still (a burst of long branch names, say) without needing a real tokenizer
+// dependency. Over-estimating only costs an unnecessary bisection; under-
+// estimating costs a rejected request part-way through a pass.
+const charsPerTokenEstimate = 2
+
+// estimateTokens gives a pessimistic, non-exact token count — exactness isn't
+// the goal, only a margin safe enough to decide whether to split before
+// spending a real call. See charsPerTokenEstimate for why the ratio is what
+// it is; TestCluster_TokenEstimateIsNotOptimistic pins it against the
+// measurements so a future "optimization" back toward 4 fails loudly.
 func estimateTokens(text string) int {
-	return (len(text) + 3) / 4
+	return (len(text) + charsPerTokenEstimate - 1) / charsPerTokenEstimate
 }
 
 // buildClusterPrompt renders the fixed system prompt and a two-section user
