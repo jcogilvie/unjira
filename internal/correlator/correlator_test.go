@@ -55,6 +55,33 @@ func (f *fakeLLM) Complete(_ context.Context, systemPrompt, userPrompt string) (
 	return f.responses[idx], f.usagePerCall, nil
 }
 
+// budgetFitting returns a contextWindowTokens value large enough for the
+// prompt Cluster builds from these events, with a little headroom.
+//
+// Tests use this instead of a literal so a budget says what it means. A bare
+// number encodes the chars-per-token ratio of whichever day it was written:
+// change the ratio and every such fixture breaks at once, and the only way to
+// repair one is to try values until the test passes — at which point a test
+// that pinned "this window must bisect" may be pinning nothing at all.
+func budgetFitting(t *testing.T, evts []correlator.Event, existing []correlator.Narrative) int {
+	t.Helper()
+	sys, user := correlator.BuildClusterPromptForTest(evts, existing)
+
+	// +10% so a fixture sits clear of the threshold rather than exactly on it.
+	return correlator.EstimateTokensForTest(sys+user) * 110 / 100
+}
+
+// budgetTooSmallFor returns a contextWindowTokens value the prompt for these
+// events cannot fit, forcing Cluster down its bisection path.
+func budgetTooSmallFor(t *testing.T, evts []correlator.Event, existing []correlator.Narrative) int {
+	t.Helper()
+	sys, user := correlator.BuildClusterPromptForTest(evts, existing)
+
+	// 90% of the estimate: over budget, but not so far under that a caller
+	// mistakes it for "no budget at all".
+	return correlator.EstimateTokensForTest(sys+user) * 90 / 100
+}
+
 func TestCluster_EmptyEventsReturnsEmptyResult(t *testing.T) {
 	llm := &fakeLLM{responses: []string{"[]"}}
 
@@ -301,7 +328,7 @@ func TestCluster_OversizedWindowSplitsAndCallsLLMPerHalf(t *testing.T) {
 	// both together (in one prompt) don't.
 	results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base, End: base.Add(2 * time.Hour),
-	}, 2400)
+	}, budgetFitting(t, evts[:1], nil))
 
 	require.NoError(t, err)
 	require.Len(t, llm.prompts, 3, "one Complete call per split half, plus one merge-boundary same-story check")
@@ -319,7 +346,7 @@ func TestCluster_SingleEventOverBudgetErrorsLoudlyWithoutCallingLLM(t *testing.T
 
 	_, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
-	}, 200)
+	}, budgetTooSmallFor(t, evts[:1], nil))
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "e1")
@@ -342,7 +369,7 @@ func TestCluster_ExtendsResultsSharingNarrativeIDMergeAcrossSplit(t *testing.T) 
 
 	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
 		Start: base, End: base.Add(2 * time.Hour),
-	}, 2400)
+	}, budgetFitting(t, evts[:1], existing))
 
 	require.NoError(t, err)
 	require.Len(t, llm.prompts, 2, "extends-merge is deterministic; it must not trigger a merge-boundary same-story LLM call")
@@ -389,7 +416,7 @@ func TestCluster_AdjacentNewClustersMergeViaLLMWhenSameStory(t *testing.T) {
 
 			results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 				Start: base, End: base.Add(2 * time.Hour),
-			}, 2400)
+			}, budgetFitting(t, evts[:1], nil))
 
 			require.NoError(t, err)
 			require.Len(t, llm.prompts, 3, "expected exactly one merge-boundary call after the two split-half calls")
@@ -417,7 +444,7 @@ func TestCluster_DegenerateBisectionOfIdenticalTimestampsErrorsLoudly(t *testing
 
 	_, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
 		Start: base.Add(-time.Minute), End: base.Add(time.Minute),
-	}, 2000)
+	}, budgetTooSmallFor(t, evts[:1], nil))
 
 	require.Error(t, err)
 }
@@ -471,7 +498,7 @@ func TestCluster_StatsAggregatesAcrossBisection(t *testing.T) {
 	// loose enough that each half fits on its own and doesn't recurse again.
 	_, stats, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
 		Start: base, End: base.Add(time.Hour),
-	}, 600)
+	}, budgetFitting(t, evts[:1], nil))
 
 	require.NoError(t, err)
 	assert.Positive(t, stats.Splits, "an over-budget window must record its bisection")
@@ -944,7 +971,7 @@ func TestCluster_TolerateFencedSameStoryResponse(t *testing.T) {
 
 	results, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
 		Start: base, End: base.Add(time.Hour),
-	}, 600)
+	}, budgetFitting(t, evts[:1], nil))
 
 	require.NoError(t, err)
 	require.Len(t, results, 1, "a fenced same_story:true must still merge the two halves")
