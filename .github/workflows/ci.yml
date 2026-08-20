@@ -6,18 +6,23 @@ on:
   pull_request:
 
 env:
-  # Pinned rather than resolved at install time. earthbuild's install.sh asks
-  # api.github.com for the latest release *unauthenticated*, and that endpoint
-  # allows only 60 requests/hour per IP — a limit GitHub-hosted runners share
-  # across every job on the box. It fails with an opaque 403 seconds into the
-  # run, at random, in whichever job loses the race; that is what broke
-  # unit-tests while lint and integration passed in the same run.
+  # Pinned, and installed via EarthBuild/actions-setup rather than piping
+  # install.sh to a shell. That installer resolves "latest" through
+  # *unauthenticated* api.github.com, which allows 60 requests/hour per IP —
+  # a budget GitHub-hosted runners share across every job on the box — so it
+  # died with an opaque 403 seconds into the run, at random, in whichever job
+  # lost the race. That is what broke unit-tests while lint and integration
+  # passed in the same run.
   #
-  # Downloading a known tag from releases/download/ skips the API entirely, so
-  # there is no rate limit to lose. (crossplane-diff avoids the same trap via
-  # earthly/actions-setup, which passes a token and takes a pinned version —
-  # that action hardcodes github.com/earthly/earthly, so it cannot install
-  # this fork.) Renovate should own this bump; see the renovate setup task.
+  # The action fixes both halves: it authenticates with GITHUB_TOKEN (1000
+  # req/hour) and, given an explicit version, needs no version lookup at all.
+  # It also caches the binary between runs. This mirrors what crossplane-diff
+  # does with earthly/actions-setup; note that action hardcodes
+  # github.com/earthly/earthly, so the EarthBuild fork of it is the one that
+  # can install this fork's releases.
+  #
+  # Renovate should own both this version and the action's pinned SHA; see
+  # the renovate setup task.
   EARTHBUILD_VERSION: v0.8.18
 
 jobs:
@@ -26,11 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install earthbuild
-        run: |
-          curl -fsSL -o /usr/local/bin/earth \
-            "https://github.com/EarthBuild/earthbuild/releases/download/${EARTHBUILD_VERSION}/earth-linux-amd64"
-          chmod +x /usr/local/bin/earth
-          earth --version
+        uses: EarthBuild/actions-setup@f4d20223e70dbb43b5fc08c4d857ab9cf0dbf3ae # v2.2.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          version: ${{ env.EARTHBUILD_VERSION }}
       - run: earth +lint
 
   unit-tests:
@@ -38,11 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install earthbuild
-        run: |
-          curl -fsSL -o /usr/local/bin/earth \
-            "https://github.com/EarthBuild/earthbuild/releases/download/${EARTHBUILD_VERSION}/earth-linux-amd64"
-          chmod +x /usr/local/bin/earth
-          earth --version
+        uses: EarthBuild/actions-setup@f4d20223e70dbb43b5fc08c4d857ab9cf0dbf3ae # v2.2.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          version: ${{ env.EARTHBUILD_VERSION }}
       - run: earth +test
 
   codeql:
