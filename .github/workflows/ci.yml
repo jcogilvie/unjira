@@ -5,13 +5,32 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # Pinned rather than resolved at install time. earthbuild's install.sh asks
+  # api.github.com for the latest release *unauthenticated*, and that endpoint
+  # allows only 60 requests/hour per IP — a limit GitHub-hosted runners share
+  # across every job on the box. It fails with an opaque 403 seconds into the
+  # run, at random, in whichever job loses the race; that is what broke
+  # unit-tests while lint and integration passed in the same run.
+  #
+  # Downloading a known tag from releases/download/ skips the API entirely, so
+  # there is no rate limit to lose. (crossplane-diff avoids the same trap via
+  # earthly/actions-setup, which passes a token and takes a pinned version —
+  # that action hardcodes github.com/earthly/earthly, so it cannot install
+  # this fork.) Renovate should own this bump; see the renovate setup task.
+  EARTHBUILD_VERSION: v0.8.18
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install earthbuild
-        run: curl -fsSL https://www.earthbuild.dev/install.sh | sh
+        run: |
+          curl -fsSL -o /usr/local/bin/earth \
+            "https://github.com/EarthBuild/earthbuild/releases/download/${EARTHBUILD_VERSION}/earth-linux-amd64"
+          chmod +x /usr/local/bin/earth
+          earth --version
       - run: earth +lint
 
   unit-tests:
@@ -19,7 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install earthbuild
-        run: curl -fsSL https://www.earthbuild.dev/install.sh | sh
+        run: |
+          curl -fsSL -o /usr/local/bin/earth \
+            "https://github.com/EarthBuild/earthbuild/releases/download/${EARTHBUILD_VERSION}/earth-linux-amd64"
+          chmod +x /usr/local/bin/earth
+          earth --version
       - run: earth +test
 
   codeql:

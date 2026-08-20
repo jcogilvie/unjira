@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
 
+env:
+  # Keep in sync with .github/workflows/ci.yml, which explains why this is
+  # pinned rather than resolved by install.sh (unauthenticated api.github.com,
+  # 60 req/hour shared across runners, opaque 403 on the loser).
+  EARTHBUILD_VERSION: v0.8.18
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -16,7 +22,11 @@ jobs:
           fetch-depth: 0
 
       - name: Install earthbuild
-        run: curl -fsSL https://www.earthbuild.dev/install.sh | sh
+        run: |
+          curl -fsSL -o /usr/local/bin/earth \
+            "https://github.com/EarthBuild/earthbuild/releases/download/${EARTHBUILD_VERSION}/earth-linux-amd64"
+          chmod +x /usr/local/bin/earth
+          earth --version
 
       - name: Build release artifacts
         run: earth +multiplatform-build --RELEASE_ARTIFACTS=true
