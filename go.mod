@@ -5,7 +5,9 @@ go 1.26.0
 require (
 	github.com/alecthomas/kong v1.16.0
 	github.com/andygrunwald/go-jira/v2 v2.0.0-20260614144923-204ada8a4252
+	github.com/openai/openai-go/v3 v3.50.0
 	github.com/stretchr/testify v1.11.1
+	github.com/xhit/go-str2duration/v2 v2.1.0
 	modernc.org/sqlite v1.56.0
 )
 
@@ -18,7 +20,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/openai/openai-go/v3 v3.50.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect

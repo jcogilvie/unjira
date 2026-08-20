@@ -343,6 +343,21 @@ slice starts — this is not a fixed waterfall plan.
      sub-second precision was considered and rejected: it would mean re-auditing every query that
      string-compares `occurred_at` (`EventsOn`, the digest range scans, hydration), and it would
      not eliminate ties anyway — two events can still share a nanosecond.
+
+   - **`unjira dev narrate` exercises this slice end to end.** Slice 3 shipped with no caller, which
+     hid a gap: nothing in the store could assemble `Cluster`'s inputs — neither "events not yet
+     linked to a narrative" nor "narratives overlapping a window" had a query, invisible while every
+     test built its inputs by hand. Both accessors landed with that command, alongside
+     `pipeline.RunNarrate` (the orchestration `watch` reuses, which deliberately does *not* take the
+     lease so `watch` can span collect → narrate → reconcile under one), a backend-agnostic
+     `internal/llm` contract, and real token-usage observability — `Complete` had been discarding
+     `resp.Usage`, so `estimateTokens`, the `len/4` heuristic that decides when `Cluster` bisects,
+     had never been checked against a real tokenizer. See
+     `docs/superpowers/specs/2026-08-19-dev-narrate-design.md`.
+
+     The command lives under `dev` rather than as a top-level verb: this spec commits to two verbs
+     (`watch`, `triage`) and treats narration as a stage inside `watch`, so a top-level `narrate`
+     would be scaffolding awaiting deletion.
 4. **`internal/reconciler`** (compute + persist) — delta computation, verification via
    `TaskTracker`, action drafting. Unit-tested with fake trackers.
 5. **Auto-commit gate + `watch`** — wires collect → correlator → reconciler → gate into one

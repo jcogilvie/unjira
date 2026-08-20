@@ -18,6 +18,8 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+
+	"github.com/jcogilvie/unjira/internal/llm"
 )
 
 // Client is a facade over openai-go, exposing only the surface unjira needs.
@@ -25,6 +27,9 @@ type Client struct {
 	upstream openai.Client
 	model    string
 }
+
+// Compile-time proof the facade satisfies the contract the correlator uses.
+var _ llm.Client = (*Client)(nil)
 
 // New constructs a Client pointed at baseURL, authenticating with apiKey,
 // making every completion call against model.
@@ -38,8 +43,14 @@ func New(baseURL, apiKey, model string) *Client {
 }
 
 // Complete sends one non-streaming, single-turn chat completion request and
-// returns the assistant's reply text.
-func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+// returns the assistant's reply text plus what the call consumed.
+//
+// Usage comes from the server's own accounting, which is why it is returned
+// rather than estimated: it is the ground truth the correlator's own
+// token-estimate heuristic gets validated against. A response omitting usage
+// yields a zero Usage, not an error — missing telemetry must never fail a
+// completion that otherwise succeeded.
+func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, llm.Usage, error) {
 	resp, err := c.upstream.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model: c.model,
 		Messages: []openai.ChatCompletionMessageParamUnion{
@@ -48,12 +59,18 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("completing chat prompt: %w", err)
+		return "", llm.Usage{}, fmt.Errorf("completing chat prompt: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("completing chat prompt: response had no choices")
+		return "", llm.Usage{}, fmt.Errorf("completing chat prompt: response had no choices")
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	usage := llm.Usage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		Model:            resp.Model,
+	}
+
+	return resp.Choices[0].Message.Content, usage, nil
 }

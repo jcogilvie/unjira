@@ -588,3 +588,131 @@ func TestAcquire_HonorsContextCancellation(t *testing.T) {
 	err = s.Acquire(ctx, "run-2", func() time.Time { return now }, time.Hour, 10*time.Millisecond)
 	require.Error(t, err)
 }
+
+// -- Cluster input assembly ----------------------------------------------
+
+func TestUnlinkedEventsInRange_ExcludesLinkedEvents(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "linked", "already narrated", base)
+	seedEvent(t, s, "loose", "not yet narrated", base.Add(time.Minute))
+
+	linkedID, err := s.EventIDByExternalID("claude_code", "linked")
+	require.NoError(t, err)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(nid, []int64{linkedID}))
+
+	got, err := s.UnlinkedEventsInRange(base, base.Add(time.Hour))
+
+	require.NoError(t, err)
+	require.Len(t, got, 1, "the linked event must not be a clustering candidate")
+	assert.Equal(t, "loose", got[0].ExternalID)
+}
+
+func TestUnlinkedEventsInRange_HalfOpenBoundary(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "before", "just before start", base.Add(-time.Second))
+	seedEvent(t, s, "at-start", "exactly at start", base)
+	seedEvent(t, s, "at-end", "exactly at end", base.Add(time.Hour))
+
+	got, err := s.UnlinkedEventsInRange(base, base.Add(time.Hour))
+
+	require.NoError(t, err)
+	require.Len(t, got, 1, "[start, end): start included, end excluded")
+	assert.Equal(t, "at-start", got[0].ExternalID)
+}
+
+func TestUnlinkedEventsInRange_EmptyRangeReturnsNoError(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	got, err := s.UnlinkedEventsInRange(base, base.Add(time.Hour))
+
+	require.NoError(t, err)
+	assert.Empty(t, got, "no candidates is a normal outcome, not a failure")
+}
+
+// TestUnlinkedEventsInRange_OrdersDeterministicallyWithinSameSecond pins the
+// order of two events sharing an occurred_at second: ascending row id.
+//
+// Read this as a documentation test, not a regression guard. Dropping ", e.id"
+// from the query's ORDER BY leaves it passing — verified, 5/5 runs — because
+// modernc.org/sqlite happens to return tied rows in rowid order on this
+// schema, there being no secondary index to push it toward another scan order.
+//
+// The explicit tiebreaker is still required. occurred_at is stored via
+// time.RFC3339 (whole seconds — see InsertEvent) and so cannot uniquely order
+// events, and depending on an engine's incidental tie behavior is precisely
+// how the compaction boundary came to silently drop a tied event from all
+// future Cluster context before it was paired with an event id.
+func TestUnlinkedEventsInRange_OrdersDeterministicallyWithinSameSecond(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	// Both events share the same occurred_at second. The row inserted first
+	// (external_id "second", a deliberately misleading name) gets the lower
+	// id, so an id-based tiebreak is the only thing that can put it ahead of
+	// the row named "first" (inserted second, higher id) in the result.
+	seedEvent(t, s, "second", "event with the lower row id", base)
+	seedEvent(t, s, "first", "event with the higher row id", base)
+
+	got, err := s.UnlinkedEventsInRange(base, base.Add(time.Minute))
+
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "second", got[0].ExternalID, "lower id (inserted first) must sort first on a tied occurred_at")
+	assert.Equal(t, "first", got[1].ExternalID)
+}
+
+func TestNarrativesOverlapping_IncludesOverlapAndTouching(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	windowStart := base
+	windowEnd := base.Add(time.Hour)
+
+	// Ends exactly at window start — adjacent, must be included.
+	touchingBefore, err := s.InsertNarrative(base.Add(-2*time.Hour), windowStart, "touching-before", "s")
+	require.NoError(t, err)
+	// Straddles the window start.
+	overlapping, err := s.InsertNarrative(base.Add(-30*time.Minute), base.Add(30*time.Minute), "overlapping", "s")
+	require.NoError(t, err)
+	// Begins exactly at window end — adjacent, must be included.
+	touchingAfter, err := s.InsertNarrative(windowEnd, windowEnd.Add(time.Hour), "touching-after", "s")
+	require.NoError(t, err)
+	// Strictly disjoint on both sides — must be excluded.
+	_, err = s.InsertNarrative(base.Add(-48*time.Hour), base.Add(-24*time.Hour), "ancient", "s")
+	require.NoError(t, err)
+	_, err = s.InsertNarrative(base.Add(24*time.Hour), base.Add(48*time.Hour), "future", "s")
+	require.NoError(t, err)
+
+	got, err := s.NarrativesOverlapping(windowStart, windowEnd)
+
+	require.NoError(t, err)
+	gotIDs := make([]int64, 0, len(got))
+	for _, row := range got {
+		gotIDs = append(gotIDs, row.ID)
+	}
+	assert.ElementsMatch(t, []int64{touchingBefore, overlapping, touchingAfter}, gotIDs,
+		"touching endpoints count as adjacent; strictly disjoint windows do not")
+}
+
+func TestNarrativesOverlapping_CarriesCompactionBoundary(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	seedEvent(t, s, "e1", "an event", base)
+	eventID, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "T", "s")
+	require.NoError(t, err)
+	require.NoError(t, s.SetCompactionBoundary(nid, base, eventID, "recap"))
+
+	got, err := s.NarrativesOverlapping(base, base.Add(time.Hour))
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.NotNil(t, got[0].CompactionBoundary, "boundary must round-trip for hydration to filter on")
+	assert.True(t, base.Equal(*got[0].CompactionBoundary))
+	require.NotNil(t, got[0].CompactionBoundaryEventID)
+	assert.Equal(t, eventID, *got[0].CompactionBoundaryEventID)
+}

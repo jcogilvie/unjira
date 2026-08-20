@@ -615,21 +615,11 @@ func (t *Tx) GetNarrative(id int64) (NarrativeRow, error) {
 }
 
 func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
-	var (
-		row                NarrativeRow
-		windowStart        string
-		windowEnd          string
-		issueKey           sql.NullString
-		confidence         sql.NullFloat64
-		compactionBoundary sql.NullString
-		compactionEventID  sql.NullInt64
-	)
-	err := c.QueryRow(
+	row, err := scanNarrativeRow(c.QueryRow(
 		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
 		        compaction_boundary, compaction_boundary_event_id
 		 FROM narratives WHERE id = ?`, id,
-	).Scan(&row.ID, &windowStart, &windowEnd, &row.Title, &row.Summary,
-		&issueKey, &confidence, &row.Status, &compactionBoundary, &compactionEventID)
+	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return NarrativeRow{}, ErrNarrativeNotFound
 	}
@@ -637,28 +627,57 @@ func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
 		return NarrativeRow{}, fmt.Errorf("querying narrative %d: %w", id, err)
 	}
 
-	if row.WindowStart, err = time.Parse(time.RFC3339, windowStart); err != nil {
-		return NarrativeRow{}, fmt.Errorf("parsing window_start for narrative %d: %w", id, err)
-	}
-	if row.WindowEnd, err = time.Parse(time.RFC3339, windowEnd); err != nil {
-		return NarrativeRow{}, fmt.Errorf("parsing window_end for narrative %d: %w", id, err)
-	}
-	row.IssueKey = issueKey.String
-	if confidence.Valid {
-		row.Confidence = confidence.Float64
-	}
-	if compactionBoundary.Valid {
-		parsed, err := time.Parse(time.RFC3339, compactionBoundary.String)
-		if err != nil {
-			return NarrativeRow{}, fmt.Errorf("parsing compaction_boundary for narrative %d: %w", id, err)
-		}
-		row.CompactionBoundary = &parsed
-	}
-	if compactionEventID.Valid {
-		row.CompactionBoundaryEventID = &compactionEventID.Int64
+	return row, nil
+}
+
+// scanNarrativeRow scans one narratives row (in the column order
+// id, window_start, window_end, title, summary, issue_key, confidence,
+// status, compaction_boundary, compaction_boundary_event_id) and parses its
+// RFC3339 timestamps. Shared by GetNarrative (single row, via *sql.Row) and
+// NarrativesOverlapping (many, via *sql.Rows) so the nullable-column handling
+// exists once. Takes scanRow rather than a concrete type for exactly that
+// reason — both *sql.Row and *sql.Rows satisfy it, mirroring scanEvent.
+func scanNarrativeRow(row scanRow) (NarrativeRow, error) {
+	var (
+		out                NarrativeRow
+		windowStart        string
+		windowEnd          string
+		issueKey           sql.NullString
+		confidence         sql.NullFloat64
+		compactionBoundary sql.NullString
+		compactionEventID  sql.NullInt64
+	)
+
+	if err := row.Scan(&out.ID, &windowStart, &windowEnd, &out.Title, &out.Summary,
+		&issueKey, &confidence, &out.Status, &compactionBoundary, &compactionEventID); err != nil {
+		return NarrativeRow{}, err
 	}
 
-	return row, nil
+	var err error
+	if out.WindowStart, err = time.Parse(time.RFC3339, windowStart); err != nil {
+		return NarrativeRow{}, fmt.Errorf("parsing window_start for narrative %d: %w", out.ID, err)
+	}
+	if out.WindowEnd, err = time.Parse(time.RFC3339, windowEnd); err != nil {
+		return NarrativeRow{}, fmt.Errorf("parsing window_end for narrative %d: %w", out.ID, err)
+	}
+
+	out.IssueKey = issueKey.String
+	if confidence.Valid {
+		out.Confidence = confidence.Float64
+	}
+	if compactionBoundary.Valid {
+		parsed, perr := time.Parse(time.RFC3339, compactionBoundary.String)
+		if perr != nil {
+			return NarrativeRow{}, fmt.Errorf("parsing compaction_boundary for narrative %d: %w", out.ID, perr)
+		}
+		out.CompactionBoundary = &parsed
+	}
+	if compactionEventID.Valid {
+		id := compactionEventID.Int64
+		out.CompactionBoundaryEventID = &id
+	}
+
+	return out, nil
 }
 
 // ExtendNarrative advances a narrative's window_end and overwrites its
@@ -821,6 +840,86 @@ func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, er
 			return nil, fmt.Errorf("scanning context event row: %w", err)
 		}
 		out = append(out, e)
+	}
+
+	return out, rows.Err()
+}
+
+// UnlinkedEventsInRange returns events in [start, end) that are not yet
+// linked to any narrative, ordered by (occurred_at, id) — the clustering
+// candidates a narration pass considers.
+//
+// "Unlinked" means no narrative_events row at all, not "linked to a narrative
+// outside this range": an event belongs to exactly one narrative, so once
+// linked it is never a candidate again. Such an event can still reach a
+// prompt as context via its narrative's hydration
+// (NarrativeEventsForContext), which is why excluding it here does not starve
+// the model.
+//
+// Ordering is composite because occurred_at is stored via time.RFC3339
+// (whole seconds — see InsertEvent) and cannot uniquely order events.
+func (s *Store) UnlinkedEventsInRange(start, end time.Time) ([]events.Event, error) {
+	rows, err := s.db.Query(
+		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
+		 FROM events e
+		 WHERE e.occurred_at >= ? AND e.occurred_at < ?
+		   AND NOT EXISTS (SELECT 1 FROM narrative_events ne WHERE ne.event_id = e.id)
+		 ORDER BY e.occurred_at, e.id`,
+		start.Format(time.RFC3339), end.Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying unlinked events in [%s, %s): %w",
+			start.Format(time.RFC3339), end.Format(time.RFC3339), err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []events.Event
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning unlinked event row: %w", err)
+		}
+		out = append(out, event)
+	}
+
+	return out, rows.Err()
+}
+
+// NarrativesOverlapping returns narratives whose window overlaps or merely
+// touches [start, end), ordered by (window_start, id) — the context a
+// narration pass passes to Cluster.
+//
+// The predicate mirrors correlator's own adjacency filter: keep unless
+// strictly disjoint (window_end < start || window_start > end). Touching
+// endpoints count as adjacent deliberately — temporal proximity is real
+// clustering signal, so a narrative ending exactly when this window opens is
+// the most likely thing an early event extends.
+//
+// status is not filtered: every narrative is 'open' today and nothing sets
+// otherwise, so filtering would be speculative. When status becomes
+// meaningful, the predicate belongs here.
+func (s *Store) NarrativesOverlapping(start, end time.Time) ([]NarrativeRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
+		        compaction_boundary, compaction_boundary_event_id
+		 FROM narratives
+		 WHERE window_end >= ? AND window_start <= ?
+		 ORDER BY window_start, id`,
+		start.Format(time.RFC3339), end.Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying narratives overlapping [%s, %s): %w",
+			start.Format(time.RFC3339), end.Format(time.RFC3339), err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []NarrativeRow
+	for rows.Next() {
+		row, err := scanNarrativeRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning overlapping narrative row: %w", err)
+		}
+		out = append(out, row)
 	}
 
 	return out, rows.Err()

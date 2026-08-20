@@ -2,9 +2,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"time"
@@ -13,13 +16,25 @@ import (
 
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/clients/local"
+	"github.com/jcogilvie/unjira/internal/clients/openai"
 	"github.com/jcogilvie/unjira/internal/collector/claudecode"
 	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/devtools"
+	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/workflow"
+)
+
+const (
+	// narrateLeaseTTL bounds how long a crashed narration pass can hold the
+	// pipeline lock before another run may steal it. Generous relative to a
+	// pass (minutes), since stealing a live lease is worse than waiting.
+	narrateLeaseTTL = 30 * time.Minute
+	// narrateLeasePoll is how often a blocked Acquire retries.
+	narrateLeasePoll = 2 * time.Second
 )
 
 // registry maps collector names to factories, mirroring
@@ -34,6 +49,7 @@ type appContext struct {
 	config          config.Config
 	store           *store.Store
 	jiraCredentials JiraCredentials
+	llmAPIKey       string
 }
 
 // jiraCredential is one Jira connection's email/token pair.
@@ -112,6 +128,31 @@ func (a *appContext) projectKey(flag string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no project key: pass --project or set jira[].project_keys in config")
+}
+
+// llmClient builds the configured LLM client, validating the config and the
+// credential first so a misconfiguration fails before any collector runs or
+// any lease is taken.
+//
+// The key comes from the environment (UNJIRA_LLM_API_KEY), never a config
+// file — the same rule UNJIRA_JIRA_CREDENTIALS follows.
+func (a *appContext) llmClient() (llm.Client, error) {
+	if err := a.config.LLM.Validate(); err != nil {
+		return nil, err
+	}
+	// LLMConfig.Validate covers Model and ContextWindowTokens but not BaseURL
+	// (verified in internal/config/config.go). An empty base URL would send
+	// unjira's prompts to the SDK's own default endpoint — api.openai.com —
+	// which is both wrong and a credential-leak risk when the configured
+	// backend was meant to be a local gateway. Fail loudly instead.
+	if a.config.LLM.BaseURL == "" {
+		return nil, fmt.Errorf("llm.base_url is required: refusing to fall back to the SDK's default endpoint")
+	}
+	if a.llmAPIKey == "" {
+		return nil, fmt.Errorf("UNJIRA_LLM_API_KEY is not set: the LLM backend needs a credential")
+	}
+
+	return openai.New(a.config.LLM.BaseURL, a.llmAPIKey, a.config.LLM.Model), nil
 }
 
 type collectCmd struct{}
@@ -281,15 +322,94 @@ func (c *devWorkflowCmd) Run(app *appContext) error {
 	return nil
 }
 
+// devNarrateCmd runs one collect -> Cluster -> Persist pass under the
+// pipeline lease and prints the narratives it produced — the first real
+// exercise of slice 3's machinery against a real event history and a real
+// LLM. See devWorkflowCmd for the same "run a real stage and show me the
+// output" shape.
+type devNarrateCmd struct {
+	Since  config.Span `default:"24h" help:"How far back to narrate (e.g. 36h, 7d, 2w, 7d12h)."`
+	DryRun bool        `help:"Run the full pass, including real LLM calls, but persist nothing."`
+}
+
+// Run assembles the LLM client and validates config before doing any
+// collector or store work, so a misconfiguration (missing credential, bad
+// correlator config) fails immediately rather than after collectors have
+// already run or the pipeline lease has been taken.
+func (c *devNarrateCmd) Run(app *appContext) error {
+	client, err := app.llmClient()
+	if err != nil {
+		return err
+	}
+	if err := app.config.Correlator.Validate(); err != nil {
+		return err
+	}
+
+	linkExclusions, err := app.config.CompiledLinkExclusions()
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	runID := fmt.Sprintf("dev-narrate-%d", os.Getpid())
+	if err := app.acquireNarrateLease(ctx, runID); err != nil {
+		return err
+	}
+	defer app.releaseNarrateLease(runID)
+
+	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions); err != nil {
+		return err
+	}
+
+	window := c.window()
+
+	result, err := pipeline.RunNarrate(ctx, app.store, client, app.config, window,
+		pipeline.NarrateOptions{DryRun: c.DryRun})
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(pipeline.RenderNarrateResult(result))
+
+	return nil
+}
+
+// window returns the [now-Since, now) range to narrate, in UTC.
+func (c *devNarrateCmd) window() correlator.TimeRange {
+	now := time.Now().UTC()
+
+	return correlator.TimeRange{Start: now.Add(-c.Since.Duration()), End: now}
+}
+
+// acquireNarrateLease blocks until the pipeline lock is free, so a
+// concurrent pass waits rather than fails.
+func (a *appContext) acquireNarrateLease(ctx context.Context, runID string) error {
+	return a.store.Acquire(ctx, runID, time.Now, narrateLeaseTTL, narrateLeasePoll)
+}
+
+// releaseNarrateLease releases the pipeline lock, logging any error rather
+// than returning it — a release failure must never mask a real failure from
+// the pass itself, which by this point has already returned (or is about
+// to).
+func (a *appContext) releaseNarrateLease(runID string) {
+	if err := a.store.ReleaseLock(runID); err != nil {
+		log.Printf("releasing pipeline lock: %v", err)
+	}
+}
+
 type devCmd struct {
 	Seed     devSeedCmd     `cmd:"" help:"Create labeled test issues and generate changelog history."`
 	Reset    devResetCmd    `cmd:"" help:"Delete every seed-labeled issue in the project."`
 	Workflow devWorkflowCmd `cmd:"" help:"Mine and print the observed workflow graph for a project."`
+	Narrate  devNarrateCmd  `cmd:"" help:"Run one collect+cluster+persist pass and print the narratives."`
 }
 
 var cli struct {
 	Config          string          `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
 	JiraCredentials JiraCredentials `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
+	LLMAPIKey       string          `name:"llm-api-key" env:"UNJIRA_LLM_API_KEY" help:"API key for the LLM backend."`
 
 	Collect collectCmd `cmd:"" help:"Run every enabled collector and persist new events."`
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
@@ -323,7 +443,12 @@ func run() error {
 	}
 	defer func() { _ = s.Close() }()
 
-	return ctx.Run(&appContext{config: cfg, store: s, jiraCredentials: cli.JiraCredentials})
+	return ctx.Run(&appContext{
+		config:          cfg,
+		store:           s,
+		jiraCredentials: cli.JiraCredentials,
+		llmAPIKey:       cli.LLMAPIKey,
+	})
 }
 
 func sortedKeys(m map[string]string) []string {

@@ -24,6 +24,7 @@ import (
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -80,14 +81,52 @@ type ClusterResult struct {
 	Events      []Event
 }
 
-// llmClient is the narrow capability Cluster needs from an LLM backend — a
-// consumer-owned interface (same pattern as internal/workflow's
-// projectMiner) so tests use a fake with no real HTTP server.
-// *openai.Client (internal/clients/openai) already satisfies this with
-// zero adapter code; this package deliberately never imports
-// internal/clients/openai to keep that decoupling real, not incidental.
-type llmClient interface {
-	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+// Stats is what one Cluster or Persist call spent, and why. Splits and
+// MergeChecks are what separate an expensive-but-correct pass (a wide window
+// that legitimately bisected) from a pathological one, which a bare call count
+// cannot distinguish.
+//
+// EstimatedTokens records what estimateTokens guessed for each prompt this
+// call built — including every recursion level's own prompt when the pass
+// bisected — summed across the whole tree. That means a bisected pass's
+// EstimatedTokens is larger than any single prompt's estimate: it is what
+// the pass would have had to fit in total, not a top-level estimate, and is
+// compared against PromptTokens (the server's actual count) to check whether
+// that heuristic is any good.
+type Stats struct {
+	Calls            int
+	Splits           int // window bisections
+	MergeChecks      int // same-story checks at split seams
+	Compactions      int // Persist only
+	PromptTokens     int64
+	CompletionTokens int64
+	EstimatedTokens  int
+}
+
+// Add folds other into s, so a recursive Cluster call's cost rolls up into its
+// parent's and a top-level call reports the whole tree. EstimatedTokens is
+// summed like everything else: each level estimated its own prompt, and the
+// total is what the pass would have had to fit.
+//
+// Exported because internal/pipeline merges Cluster's and Persist's stats into
+// one pass total.
+func (s *Stats) Add(other Stats) {
+	s.Calls += other.Calls
+	s.Splits += other.Splits
+	s.MergeChecks += other.MergeChecks
+	s.Compactions += other.Compactions
+	s.PromptTokens += other.PromptTokens
+	s.CompletionTokens += other.CompletionTokens
+	s.EstimatedTokens += other.EstimatedTokens
+}
+
+// addUsage folds one completion's server-reported usage into s and counts the
+// call. Unexported: only this package makes completions, so nothing outside it
+// has a Usage to fold.
+func (s *Stats) addUsage(u llm.Usage) {
+	s.Calls++
+	s.PromptTokens += u.PromptTokens
+	s.CompletionTokens += u.CompletionTokens
 }
 
 // Cluster groups evts (filtered to window) plus any Narrative in existing
@@ -97,26 +136,34 @@ func Cluster(
 	ctx context.Context,
 	evts []Event,
 	existing []Narrative,
-	llm llmClient,
+	client llm.Client,
 	window TimeRange,
 	contextWindowTokens int,
-) ([]ClusterResult, error) {
+) ([]ClusterResult, Stats, error) {
 	filtered := filterEventsInWindow(evts, window)
 	relevant := filterAdjacentOrOverlapping(existing, window)
 
 	systemPrompt, userPrompt := buildClusterPrompt(filtered, relevant)
 
+	var stats Stats
 	estimated := estimateTokens(systemPrompt + userPrompt)
+	stats.EstimatedTokens = estimated
 	if estimated > contextWindowTokens {
-		return clusterWithSplit(ctx, evts, existing, llm, window, contextWindowTokens, filtered)
+		return clusterWithSplit(ctx, evts, existing, client, window, contextWindowTokens, filtered, stats)
 	}
 
-	raw, err := llm.Complete(ctx, systemPrompt, userPrompt)
+	raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("clustering events in window [%s, %s): %w", window.Start, window.End, err)
+		return nil, stats, fmt.Errorf("clustering events in window [%s, %s): %w", window.Start, window.End, err)
+	}
+	stats.addUsage(usage)
+
+	results, err := parseClusterResponse(raw, filtered)
+	if err != nil {
+		return nil, stats, err
 	}
 
-	return parseClusterResponse(raw, filtered)
+	return results, stats, nil
 }
 
 // filterEventsInWindow returns the events in evts whose OccurredAt falls in
@@ -211,9 +258,41 @@ type clusterResponseItem struct {
 // Any malformed shape — invalid JSON, an out-of-range index, an unknown
 // kind — is a loud error including the raw response, never a partial or
 // best-effort result.
+// stripJSONFence removes a Markdown code fence wrapping an LLM's JSON reply,
+// returning the payload unchanged when there is no fence.
+//
+// Both system prompts say "no markdown fences", and models emit them anyway —
+// a live litellm-fronted Claude model returned "```json\n[]\n```" for a
+// prompt that forbade exactly that. Fencing is a property of the interface,
+// not a prompt bug, so the parsers tolerate it rather than failing a pass over
+// formatting. Everything past the fence stays strict: malformed JSON inside
+// one is still a loud error naming the raw response.
+func stripJSONFence(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "```") {
+		return raw
+	}
+
+	// Drop the opening fence and its optional language tag ("```json"), which
+	// runs to the end of that first line.
+	if newline := strings.IndexByte(trimmed, '\n'); newline >= 0 {
+		trimmed = trimmed[newline+1:]
+	} else {
+		// A fence with no newline carries no payload to parse; let the caller
+		// report the original text rather than inventing a valid-looking one.
+		return raw
+	}
+
+	if closing := strings.LastIndex(trimmed, "```"); closing >= 0 {
+		trimmed = trimmed[:closing]
+	}
+
+	return strings.TrimSpace(trimmed)
+}
+
 func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, error) {
 	var items []clusterResponseItem
-	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &items); err != nil {
 		return nil, fmt.Errorf("parsing cluster response %q: %w", raw, err)
 	}
 
@@ -259,13 +338,14 @@ func clusterWithSplit(
 	ctx context.Context,
 	evts []Event,
 	existing []Narrative,
-	llm llmClient,
+	client llm.Client,
 	window TimeRange,
 	contextWindowTokens int,
 	filtered []Event,
-) ([]ClusterResult, error) {
+	stats Stats,
+) ([]ClusterResult, Stats, error) {
 	if len(filtered) <= 1 {
-		return nil, irreducibleUnitError(window, filtered)
+		return nil, stats, irreducibleUnitError(window, filtered)
 	}
 
 	mid := window.Start.Add(window.End.Sub(window.Start) / 2)
@@ -279,20 +359,30 @@ func clusterWithSplit(
 		// Bisection made no progress (e.g. every remaining event shares the
 		// same timestamp) — recursing again would loop forever on an
 		// unchanged set. Treat as irreducible now.
-		return nil, irreducibleUnitError(window, filtered)
+		return nil, stats, irreducibleUnitError(window, filtered)
 	}
 
-	firstResults, err := Cluster(ctx, evts, existing, llm, firstHalf, contextWindowTokens)
+	stats.Splits++
+
+	firstResults, firstStats, err := Cluster(ctx, evts, existing, client, firstHalf, contextWindowTokens)
+	stats.Add(firstStats)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
-	secondResults, err := Cluster(ctx, evts, existing, llm, secondHalf, contextWindowTokens)
+	secondResults, secondStats, err := Cluster(ctx, evts, existing, client, secondHalf, contextWindowTokens)
+	stats.Add(secondStats)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
-	return mergeSplitResults(ctx, llm, firstResults, secondResults)
+	merged, mergeStats, err := mergeSplitResults(ctx, client, firstResults, secondResults)
+	stats.Add(mergeStats)
+	if err != nil {
+		return nil, stats, err
+	}
+
+	return merged, stats, nil
 }
 
 // irreducibleUnitError reports a window that cannot be split further and
@@ -318,7 +408,8 @@ func irreducibleUnitError(window TimeRange, filtered []Event) error {
 // ClusterNew results (the last of first, the first of second) gets one
 // extra LLM call asking whether they're the same emerging story, merging
 // on yes.
-func mergeSplitResults(ctx context.Context, llm llmClient, first, second []ClusterResult) ([]ClusterResult, error) {
+func mergeSplitResults(ctx context.Context, client llm.Client, first, second []ClusterResult) ([]ClusterResult, Stats, error) {
+	var stats Stats
 	merged := make([]ClusterResult, 0, len(first)+len(second))
 	usedFromSecond := make(map[int]bool)
 
@@ -362,24 +453,25 @@ func mergeSplitResults(ctx context.Context, llm llmClient, first, second []Clust
 	firstNewIdx := firstNewIndex(remainingSecond)
 
 	if lastNewIdx == -1 || firstNewIdx == -1 {
-		return append(merged, remainingSecond...), nil
+		return append(merged, remainingSecond...), stats, nil
 	}
 
 	a, b := merged[lastNewIdx], remainingSecond[firstNewIdx]
 
-	sameStory, mergedResult, err := checkSameStory(ctx, llm, a, b)
+	sameStory, mergedResult, checkStats, err := checkSameStory(ctx, client, a, b)
+	stats.Add(checkStats)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
 	if !sameStory {
-		return append(merged, remainingSecond...), nil
+		return append(merged, remainingSecond...), stats, nil
 	}
 
 	merged[lastNewIdx] = mergedResult
 	remainingSecond = append(remainingSecond[:firstNewIdx], remainingSecond[firstNewIdx+1:]...)
 
-	return append(merged, remainingSecond...), nil
+	return append(merged, remainingSecond...), stats, nil
 }
 
 func lastNewIndex(results []ClusterResult) int {
@@ -413,24 +505,28 @@ const sameStorySystemPrompt = `You will be shown two narrative clusters that sit
 // same emerging story. On yes, returns the merged ClusterResult (unioned
 // events, model-provided title/summary). On no, mergedResult is the zero
 // value and must be ignored.
-func checkSameStory(ctx context.Context, llm llmClient, a, b ClusterResult) (bool, ClusterResult, error) {
+func checkSameStory(ctx context.Context, client llm.Client, a, b ClusterResult) (bool, ClusterResult, Stats, error) {
+	var stats Stats
+	stats.MergeChecks++
+
 	userPrompt := fmt.Sprintf(
 		"Cluster A: title=%q summary=%q\nCluster B: title=%q summary=%q",
 		a.Title, a.Summary, b.Title, b.Summary,
 	)
 
-	raw, err := llm.Complete(ctx, sameStorySystemPrompt, userPrompt)
+	raw, usage, err := client.Complete(ctx, sameStorySystemPrompt, userPrompt)
 	if err != nil {
-		return false, ClusterResult{}, fmt.Errorf("checking same-story merge for split boundary: %w", err)
+		return false, ClusterResult{}, stats, fmt.Errorf("checking same-story merge for split boundary: %w", err)
 	}
+	stats.addUsage(usage)
 
 	var resp sameStoryResponse
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		return false, ClusterResult{}, fmt.Errorf("parsing same-story response %q: %w", raw, err)
+	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &resp); err != nil {
+		return false, ClusterResult{}, stats, fmt.Errorf("parsing same-story response %q: %w", raw, err)
 	}
 
 	if !resp.SameStory {
-		return false, ClusterResult{}, nil
+		return false, ClusterResult{}, stats, nil
 	}
 
 	return true, ClusterResult{
@@ -438,7 +534,7 @@ func checkSameStory(ctx context.Context, llm llmClient, a, b ClusterResult) (boo
 		Title:   resp.Title,
 		Summary: resp.Summary,
 		Events:  append(append([]Event{}, a.Events...), b.Events...),
-	}, nil
+	}, stats, nil
 }
 
 // preparedResult is one ClusterResult after phase-1 (pre-transaction)
@@ -464,8 +560,10 @@ type preparedResult struct {
 // history (recap + raw tail) crosses cfg.TailSummarizeThresholdTokens,
 // older events are compacted into the summary's recap prefix via one LLM
 // call (their narrative_events rows are never deleted). Returns the
-// narratives touched this run. All-or-nothing per call: any failure aborts
-// the whole pass with a loud error and, via a transaction, persists
+// narratives touched this run, plus Stats for every compaction call made
+// while preparing them (Cluster's own calls are not included — that Stats
+// comes back from Cluster itself). All-or-nothing per call: any failure
+// aborts the whole pass with a loud error and, via a transaction, persists
 // nothing.
 //
 // Every result's compaction recap (the only LLM calls Persist makes) is
@@ -479,17 +577,17 @@ type preparedResult struct {
 func Persist(
 	ctx context.Context,
 	s *store.Store,
-	llm llmClient,
+	client llm.Client,
 	results []ClusterResult,
 	cfg config.CorrelatorConfig,
-) ([]Narrative, error) {
+) ([]Narrative, Stats, error) {
 	if len(results) == 0 {
-		return nil, nil
+		return nil, Stats{}, nil
 	}
 
-	preps, err := prepareResults(ctx, s, llm, results, cfg)
+	preps, stats, err := prepareResults(ctx, s, client, results, cfg)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
 	var touched []Narrative
@@ -505,10 +603,10 @@ func Persist(
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 
-	return touched, nil
+	return touched, stats, nil
 }
 
 // prepareResults is Persist's pre-transaction phase: resolve each result's
@@ -521,21 +619,23 @@ func Persist(
 func prepareResults(
 	ctx context.Context,
 	s *store.Store,
-	llm llmClient,
+	client llm.Client,
 	results []ClusterResult,
 	cfg config.CorrelatorConfig,
-) ([]preparedResult, error) {
+) ([]preparedResult, Stats, error) {
+	var stats Stats
 	preps := make([]preparedResult, 0, len(results))
 
 	for _, r := range results {
-		p, err := prepareOneResult(ctx, s, llm, r, cfg)
+		p, oneStats, err := prepareOneResult(ctx, s, client, r, cfg)
+		stats.Add(oneStats)
 		if err != nil {
-			return nil, err
+			return nil, stats, err
 		}
 		preps = append(preps, p)
 	}
 
-	return preps, nil
+	return preps, stats, nil
 }
 
 // prepareOneResult is prepareResults' per-ClusterResult body, split out to
@@ -546,16 +646,16 @@ func prepareResults(
 func prepareOneResult(
 	ctx context.Context,
 	s *store.Store,
-	llm llmClient,
+	client llm.Client,
 	r ClusterResult,
 	cfg config.CorrelatorConfig,
-) (preparedResult, error) {
+) (preparedResult, Stats, error) {
 	p := preparedResult{result: r}
 
 	for i, e := range r.Events {
 		eid, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 		if err != nil {
-			return preparedResult{}, fmt.Errorf("resolving event %s/%s for narrative %q: %w", e.Source, e.ExternalID, r.Title, err)
+			return preparedResult{}, Stats{}, fmt.Errorf("resolving event %s/%s for narrative %q: %w", e.Source, e.ExternalID, r.Title, err)
 		}
 		p.eventIDs = append(p.eventIDs, eid)
 		if i == 0 || e.OccurredAt.Before(p.windowLo) {
@@ -570,11 +670,11 @@ func prepareOneResult(
 	case ClusterNew:
 		// Nothing further to prepare: no existing row to validate, no
 		// compaction possible for a narrative that doesn't exist yet.
-		return p, nil
+		return p, Stats{}, nil
 	case ClusterExtends:
-		return prepareExtend(ctx, s, llm, r, cfg, p)
+		return prepareExtend(ctx, s, client, r, cfg, p)
 	default:
-		return preparedResult{}, fmt.Errorf("persisting narrative %q: unknown ClusterKind %v", r.Title, r.Kind)
+		return preparedResult{}, Stats{}, fmt.Errorf("persisting narrative %q: unknown ClusterKind %v", r.Title, r.Kind)
 	}
 }
 
@@ -588,13 +688,13 @@ func prepareOneResult(
 func prepareExtend(
 	ctx context.Context,
 	s *store.Store,
-	llm llmClient,
+	client llm.Client,
 	r ClusterResult,
 	cfg config.CorrelatorConfig,
 	p preparedResult,
-) (preparedResult, error) {
+) (preparedResult, Stats, error) {
 	if _, err := s.GetNarrative(r.NarrativeID); err != nil {
-		return preparedResult{}, fmt.Errorf("extending narrative %d: %w", r.NarrativeID, err)
+		return preparedResult{}, Stats{}, fmt.Errorf("extending narrative %d: %w", r.NarrativeID, err)
 	}
 
 	// Per docs/superpowers/specs/2026-08-12-correlator-persist-design.md
@@ -613,14 +713,16 @@ func prepareExtend(
 	// summary, exactly the case tail-summarization exists to catch.
 	ctxEvents, err := s.NarrativeEventsForContext(r.NarrativeID)
 	if err != nil {
-		return preparedResult{}, fmt.Errorf("loading context events for narrative %d: %w", r.NarrativeID, err)
+		return preparedResult{}, Stats{}, fmt.Errorf("loading context events for narrative %d: %w", r.NarrativeID, err)
 	}
 	postBoundary := mergePostBoundaryEvents(ctxEvents, r.Events)
 
+	var stats Stats
 	if estimateTokens(r.Summary+renderEventsForEstimate(postBoundary)) > cfg.TailSummarizeThresholdTokens {
-		recap, boundary, boundaryEventID, err := compactNarrativeTail(ctx, s, llm, r.NarrativeID, r.Summary, postBoundary, cfg.RecentEventsKept)
+		recap, boundary, boundaryEventID, compactStats, err := compactNarrativeTail(ctx, s, client, r.NarrativeID, r.Summary, postBoundary, cfg.RecentEventsKept)
+		stats.Add(compactStats)
 		if err != nil {
-			return preparedResult{}, err
+			return preparedResult{}, stats, err
 		}
 		// A zero boundary means compactNarrativeTail found nothing beyond
 		// the recent tail worth compacting (post-boundary history is short
@@ -634,7 +736,7 @@ func prepareExtend(
 		}
 	}
 
-	return p, nil
+	return p, stats, nil
 }
 
 // applyPrepared writes one preparedResult inside the caller's transaction,
@@ -766,14 +868,14 @@ func renderEventsForEstimate(evts []Event) string {
 func compactNarrativeTail(
 	ctx context.Context,
 	s *store.Store,
-	llm llmClient,
+	client llm.Client,
 	narrativeID int64,
 	existingSummary string,
 	postBoundary []Event,
 	recentEventsKept int,
-) (recap string, boundary time.Time, boundaryEventID int64, err error) {
+) (recap string, boundary time.Time, boundaryEventID int64, stats Stats, err error) {
 	if len(postBoundary) <= recentEventsKept {
-		return "", time.Time{}, 0, nil
+		return "", time.Time{}, 0, Stats{}, nil
 	}
 
 	toCompact := postBoundary[:len(postBoundary)-recentEventsKept]
@@ -782,7 +884,7 @@ func compactNarrativeTail(
 
 	boundaryEventID, err = s.EventIDByExternalID(newest.Source, newest.ExternalID)
 	if err != nil {
-		return "", time.Time{}, 0, fmt.Errorf(
+		return "", time.Time{}, 0, Stats{}, fmt.Errorf(
 			"resolving compaction boundary event %s/%s for narrative %d: %w",
 			newest.Source, newest.ExternalID, narrativeID, err,
 		)
@@ -792,15 +894,18 @@ func compactNarrativeTail(
 	fmt.Fprintf(&b, "Existing recap/summary:\n%s\n\nOlder events to fold into a concise recap:\n%s",
 		existingSummary, renderEventsForEstimate(toCompact))
 
-	recap, err = llm.Complete(ctx, compactionSystemPrompt, b.String())
+	var usage llm.Usage
+	recap, usage, err = client.Complete(ctx, compactionSystemPrompt, b.String())
 	if err != nil {
-		return "", time.Time{}, 0, fmt.Errorf("compacting narrative %d tail: %w", narrativeID, err)
+		return "", time.Time{}, 0, Stats{}, fmt.Errorf("compacting narrative %d tail: %w", narrativeID, err)
 	}
+	stats.Compactions = 1
+	stats.addUsage(usage)
 
 	log.Printf("correlator: compacted narrative %d — folded %d event(s) up to %s (event id %d) into recap",
 		narrativeID, len(toCompact), boundary.Format(time.RFC3339), boundaryEventID)
 
-	return recap, boundary, boundaryEventID, nil
+	return recap, boundary, boundaryEventID, stats, nil
 }
 
 // compactionSystemPrompt instructs the model to fold a narrative's older
