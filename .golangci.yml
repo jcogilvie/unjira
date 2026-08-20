@@ -61,15 +61,15 @@ linters:
 
     # Warns about struct instantiations that don't specify every field.
     # Would have far more false positives (partial option structs, table
-    # tests) than useful catches here.
-    #
-    # NOTE: 2.13.0 renames this exhaustruct_v5. Listing both spellings is NOT
-    # a fix — golangci-lint hard-errors on an unknown linter name, so a config
-    # naming both breaks on every version that knows only one. The Earthfile
-    # therefore pins GOLANGCI_LINT_VERSION rather than tracking @latest; bump
-    # it and this name together. (wsl/wsl_v5 below predates the pin and works
-    # only because both names happen to be valid in the pinned release.)
+    # tests) than useful catches here. Renamed exhaustruct_v5 in 2.13.0;
+    # disable both spellings, as with wsl above. The old name stays a valid
+    # identifier (so naming it doesn't error) but does NOT suppress the
+    # renamed linter — verified: with only `exhaustruct` listed, 2.13.1 still
+    # reports 144 exhaustruct_v5 findings. CI installs @latest, so keep local
+    # golangci-lint upgraded to match; a version that predates a rename will
+    # reject the new name outright.
     - exhaustruct
+    - exhaustruct_v5
 
     # Bans fmt.Print*/println. unjira's cmd/unjira package is a CLI whose
     # entire job is printing to stdout — this linter fights the package's
