@@ -10,6 +10,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/clients/local"
 	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -21,10 +22,10 @@ func TestJiraClientForProject_ResolvesCredentialsByConnectionName(t *testing.T) 
 				{Name: "paas", Site: "https://paas.atlassian.net", ProjectKeys: []string{"PAAS"}},
 			},
 		},
-		jiraCredentials: JiraCredentials{byName: map[string]jiraCredential{
+		jiraCredentials: JiraCredentials{set: credentials.NewSet(map[string]credentials.Credential{
 			"corp": {Email: "corp@example.com", Token: "corp-token"},
 			"paas": {Email: "paas@example.com", Token: "paas-token"},
-		}},
+		})},
 	}
 
 	client, err := app.jiraClientForProject("PAAS")
@@ -40,7 +41,7 @@ func TestJiraClientForProject_MissingCredentialsErrorsWithConnectionName(t *test
 				{Name: "corp", Site: "https://corp.atlassian.net", ProjectKeys: []string{"SUMO"}},
 			},
 		},
-		jiraCredentials: JiraCredentials{byName: map[string]jiraCredential{}},
+		jiraCredentials: JiraCredentials{set: credentials.NewSet(map[string]credentials.Credential{})},
 	}
 
 	_, err := app.jiraClientForProject("SUMO")
@@ -71,9 +72,15 @@ func TestJiraCredentials_UnmarshalsFromJSON(t *testing.T) {
 	err := creds.UnmarshalJSON([]byte(`{"corp":{"email":"a@x.com","token":"tok1"},"paas":{"email":"b@x.com","token":"tok2"}}`))
 
 	require.NoError(t, err)
-	assert.Equal(t, "a@x.com", creds.byName["corp"].Email)
-	assert.Equal(t, "tok1", creds.byName["corp"].Token)
-	assert.Equal(t, "b@x.com", creds.byName["paas"].Email)
+
+	corp, ok := creds.Set().For("corp")
+	require.True(t, ok)
+	assert.Equal(t, "a@x.com", corp.Email)
+	assert.Equal(t, "tok1", corp.Token)
+
+	paas, ok := creds.Set().For("paas")
+	require.True(t, ok)
+	assert.Equal(t, "b@x.com", paas.Email)
 }
 
 func openTestStore(t *testing.T) *store.Store {
@@ -95,9 +102,9 @@ func TestTaskTracker_JiraBackendReturnsJiraTracker(t *testing.T) {
 			},
 		},
 		store: openTestStore(t),
-		jiraCredentials: JiraCredentials{byName: map[string]jiraCredential{
+		jiraCredentials: JiraCredentials{set: credentials.NewSet(map[string]credentials.Credential{
 			"default": {Email: "e", Token: "t"},
-		}},
+		})},
 	}
 
 	tracker, err := app.taskTracker("PROJ")
