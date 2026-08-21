@@ -12,6 +12,7 @@ import (
 
 	"github.com/jcogilvie/unjira/internal/collector/claudecode"
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -50,7 +51,10 @@ func collect(t *testing.T, root string, options map[string]any) (*store.Store, [
 	maps.Copy(opts, options)
 
 	var out []events.Event
-	err = claudecode.New().Collect(s, opts, func(e events.Event) { out = append(out, e) })
+	err = claudecode.New().Collect(
+		pipeline.CollectContext{Store: s, Options: opts},
+		func(e events.Event) { out = append(out, e) },
+	)
 	require.NoError(t, err)
 
 	return s, out

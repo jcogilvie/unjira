@@ -20,6 +20,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/collector/claudecode"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
+	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/devtools"
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/pipeline"
@@ -52,12 +53,6 @@ type appContext struct {
 	llmAPIKey       string
 }
 
-// jiraCredential is one Jira connection's email/token pair.
-type jiraCredential struct {
-	Email string `json:"email"`
-	Token string `json:"token"`
-}
-
 // JiraCredentials maps a config.JiraConnection.Name to its credential,
 // decoded from a single JSON-object env var (UNJIRA_JIRA_CREDENTIALS), e.g.:
 //
@@ -70,13 +65,24 @@ type jiraCredential struct {
 // own built-in map decoder (which expects key=value;key2=value2 syntax, not
 // JSON), and a bare map type never satisfies json.Unmarshaler.
 type JiraCredentials struct {
-	byName map[string]jiraCredential
+	set credentials.Set
 }
 
 // UnmarshalJSON implements json.Unmarshaler so Kong decodes this type from
 // its env var automatically.
 func (c *JiraCredentials) UnmarshalJSON(data []byte) error {
-	return json.Unmarshal(data, &c.byName)
+	var byName map[string]credentials.Credential
+	if err := json.Unmarshal(data, &byName); err != nil {
+		return err
+	}
+	c.set = credentials.NewSet(byName)
+
+	return nil
+}
+
+// Set returns the parsed credentials for passing to collectors.
+func (c JiraCredentials) Set() credentials.Set {
+	return c.set
 }
 
 // jiraClientForProject resolves the Jira connection covering projectKey and
@@ -88,7 +94,7 @@ func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, erro
 		return nil, fmt.Errorf("no configured jira connection covers project %q", projectKey)
 	}
 
-	creds, ok := a.jiraCredentials.byName[conn.Name]
+	creds, ok := a.jiraCredentials.set.For(conn.Name)
 	if !ok {
 		return nil, fmt.Errorf(
 			"no credentials for jira connection %q in UNJIRA_JIRA_CREDENTIALS", conn.Name,
@@ -163,7 +169,7 @@ func (c *collectCmd) Run(app *appContext) error {
 		return err
 	}
 
-	results, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions)
+	results, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set())
 	if err != nil {
 		return err
 	}
@@ -359,7 +365,7 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	}
 	defer app.releaseNarrateLease(runID)
 
-	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions); err != nil {
+	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set()); err != nil {
 		return err
 	}
 

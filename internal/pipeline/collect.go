@@ -5,9 +5,32 @@ import (
 	"regexp"
 
 	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/store"
 )
+
+// CollectContext is everything a collector may need from its caller: the store
+// for cursors, the loaded config, resolved credentials, and its own options
+// block from config.Collectors[<name>].
+//
+// It exists as a struct rather than a parameter list because collectors differ
+// in what they need — claude_code reads local files and uses only Store and
+// Options, while a Jira or GitHub collector needs connection config and
+// credentials — and because a future need can be added here without changing
+// every implementation's signature again.
+//
+// Credentials are passed in rather than read from the environment here, so the
+// "credentials come from the environment, never config files" rule stays
+// enforced at one place (cmd/unjira) instead of in every collector.
+type CollectContext struct {
+	Store       *store.Store
+	Config      config.Config
+	Credentials credentials.Set
+	// Options is this collector's own block from config.Collectors[<name>],
+	// including the "enabled" key that got it selected.
+	Options map[string]any
+}
 
 // Collector reads its source since the last cursor, emits normalized
 // events via visit, and advances its cursor via the store. Collectors must
@@ -15,7 +38,7 @@ import (
 // (source, external_id) dedupes at insert.
 type Collector interface {
 	Name() string
-	Collect(s *store.Store, options map[string]any, visit func(events.Event)) error
+	Collect(cc CollectContext, visit func(events.Event)) error
 }
 
 // RunCollect runs every enabled collector found in registry, persisting new
@@ -26,11 +49,15 @@ type Collector interface {
 // caller) is applied to every event's ticket_keys artifact before insert: a
 // matching key is recorded in a new excluded_ticket_keys artifact, never
 // removed from ticket_keys itself. A nil/empty linkExclusions is a no-op.
+//
+// creds is passed to every collector via CollectContext.Credentials, so a
+// remote collector can authenticate without reading the environment itself.
 func RunCollect(
 	cfg config.Config,
 	s *store.Store,
 	registry map[string]func() Collector,
 	linkExclusions []*regexp.Regexp,
+	creds credentials.Set,
 ) (map[string]int, error) {
 	results := make(map[string]int)
 
@@ -45,7 +72,14 @@ func RunCollect(
 		inserted := 0
 		var collectErr error
 
-		err := collector.Collect(s, options, func(event events.Event) {
+		cc := CollectContext{
+			Store:       s,
+			Config:      cfg,
+			Credentials: creds,
+			Options:     options,
+		}
+
+		err := collector.Collect(cc, func(event events.Event) {
 			if collectErr != nil {
 				return
 			}

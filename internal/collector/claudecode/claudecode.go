@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/events"
-	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/pipeline"
 )
 
 // DefaultBackfillDays is how far back sessions are collected when no
@@ -45,12 +45,12 @@ func (c *Collector) Name() string {
 	return Name
 }
 
-// Collect scans every session transcript under options["transcript_root"]
+// Collect scans every session transcript under cc.Options["transcript_root"]
 // (default ~/.claude/projects), calling visit for each new event and
 // advancing the store's cursor for every file scanned, whether or not it
 // yielded an event.
-func (c *Collector) Collect(s *store.Store, options map[string]any, visit func(events.Event)) error {
-	root := stringOption(options, "transcript_root", "")
+func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)) error {
+	root := stringOption(cc.Options, "transcript_root", "")
 	if root == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -64,10 +64,10 @@ func (c *Collector) Collect(s *store.Store, options map[string]any, visit func(e
 		return nil
 	}
 
-	backfillDays := intOption(options, "backfill_days", DefaultBackfillDays)
+	backfillDays := intOption(cc.Options, "backfill_days", DefaultBackfillDays)
 	horizon := time.Now().UTC().AddDate(0, 0, -backfillDays)
 
-	excludeCwds := stringSliceOption(options, "exclude_cwds")
+	excludeCwds := stringSliceOption(cc.Options, "exclude_cwds")
 	normalizedExcludes := make([]string, len(excludeCwds))
 	for i, p := range excludeCwds {
 		normalizedExcludes[i] = normalizeDir(p)
@@ -86,7 +86,7 @@ func (c *Collector) Collect(s *store.Store, options map[string]any, visit func(e
 		}
 
 		position := fmt.Sprintf("%d:%d", stat.ModTime().UnixNano(), stat.Size())
-		cursor, err := s.GetCursor(Name, path)
+		cursor, err := cc.Store.GetCursor(Name, path)
 		if err != nil {
 			return fmt.Errorf("getting cursor for %s: %w", path, err)
 		}
@@ -96,7 +96,7 @@ func (c *Collector) Collect(s *store.Store, options map[string]any, visit func(e
 
 		mtime := stat.ModTime().UTC()
 		if mtime.Before(horizon) {
-			if err := s.SetCursor(Name, path, position); err != nil {
+			if err := cc.Store.SetCursor(Name, path, position); err != nil {
 				return fmt.Errorf("setting cursor for %s: %w", path, err)
 			}
 			continue
@@ -107,7 +107,7 @@ func (c *Collector) Collect(s *store.Store, options map[string]any, visit func(e
 			return fmt.Errorf("reading session %s: %w", path, err)
 		}
 
-		if err := s.SetCursor(Name, path, position); err != nil {
+		if err := cc.Store.SetCursor(Name, path, position); err != nil {
 			return fmt.Errorf("setting cursor for %s: %w", path, err)
 		}
 
