@@ -3,6 +3,7 @@ package jira_test
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -395,4 +397,88 @@ func TestCollect_MissingCredentialErrorsNamingTheConnection(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "corp")
+}
+
+func TestWatermarkClause_RendersInTheAccountTimezone(t *testing.T) {
+	// The bug this guards, found only by a live run: JQL date literals are
+	// interpreted in the account's configured timezone, not UTC. Sending UTC
+	// pushes the bound hours into the future, so every incremental pass silently
+	// under-collects — and Jira answers 200-with-zero-results rather than
+	// erroring, so nothing surfaces.
+	//
+	// The expectation is derived from the zone database rather than hardcoded:
+	// my first draft asserted 12:02 (UTC-7), which was wrong — Indianapolis is
+	// EDT (UTC-4) in August, and -0700 was the *server's* offset, not the
+	// account's. Deriving it keeps the test honest across DST and tzdata updates.
+	watermark := time.Date(2026, 8, 21, 19, 2, 24, 0, time.UTC)
+
+	const zone = "America/Indiana/Indianapolis"
+
+	loc, err := time.LoadLocation(zone)
+	require.NoError(t, err)
+
+	wantLocal := watermark.In(loc).Truncate(time.Minute).Format("2006-01-02 15:04")
+	wantUTC := watermark.UTC().Truncate(time.Minute).Format("2006-01-02 15:04")
+	require.NotEqual(t, wantLocal, wantUTC,
+		"this test only discriminates while the zone differs from UTC at this instant")
+
+	got := collectorjira.WatermarkClauseForTest(watermark, zone, "corp")
+
+	assert.Equal(t, `updated >= "`+wantLocal+`"`, got,
+		"the bound must be the account-local wall clock, not the UTC one")
+	assert.NotContains(t, got, "19:02", "a UTC bound would skip issues updated in the offset window")
+}
+
+func TestWatermarkClause_FlooringNeverRoundsUp(t *testing.T) {
+	// JQL has minute precision. Flooring re-examines a little (dedup makes that
+	// free); rounding up would step over an issue permanently.
+	watermark := time.Date(2026, 8, 21, 12, 2, 59, 999_000_000, time.UTC)
+
+	got := collectorjira.WatermarkClauseForTest(watermark, "UTC", "corp")
+
+	assert.Equal(t, `updated >= "2026-08-21 12:02"`, got,
+		"12:02:59.999 must floor to 12:02, never advance to 12:03")
+}
+
+func TestWatermarkClause_UnknownZoneWidensRatherThanSkips(t *testing.T) {
+	tests := []struct {
+		name string
+		zone string
+	}{
+		{name: "absent", zone: ""},
+		{name: "unloadable", zone: "Not/AZone"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Suppress the expected operator warning.
+			log.SetOutput(io.Discard)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			watermark := time.Date(2026, 8, 21, 19, 2, 0, 0, time.UTC)
+			want := watermark.
+				Add(-collectorjira.WatermarkZoneFallbackMarginForTest).
+				UTC().Truncate(time.Minute).Format("2006-01-02 15:04")
+
+			got := collectorjira.WatermarkClauseForTest(watermark, tt.zone, "corp")
+
+			assert.Equal(t, `updated >= "`+want+`"`, got,
+				"an unknown zone must widen the window; too-early re-examines, too-late skips forever")
+		})
+	}
+}
+
+func TestWatermarkClause_UnknownZoneIsLogged(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(log.LstdFlags)
+	})
+
+	collectorjira.WatermarkClauseForTest(time.Now(), "", "corp")
+
+	assert.Contains(t, logged.String(), "corp", "the operator must be able to see which connection")
+	assert.Contains(t, logged.String(), "timezone")
 }

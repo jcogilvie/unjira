@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -180,6 +181,46 @@ func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 	}
 }
 
+// waitUntilSearchable blocks until key is findable by JQL, not merely fetchable
+// by key.
+//
+// Jira's search index is eventually consistent — measured at roughly 3 seconds
+// on this instance — so a test that creates an issue and immediately searches
+// for it races the index. Polling rather than sleeping a fixed duration keeps
+// the common case fast and the slow case correct.
+//
+// This exists because the collector's first pass must actually match the issue:
+// if it does not, no watermark is stored and a following pass quietly reverts to
+// an unbounded query, which would make the watermark assertion vacuous.
+func waitUntilSearchable(t *testing.T, client *jira.Client, key string) {
+	t.Helper()
+
+	const (
+		attempts = 20
+		interval = time.Second
+	)
+
+	jql := fmt.Sprintf("key = %s", key)
+
+	for range attempts {
+		var found bool
+		if err := client.SearchIssues(jql, []string{"key"}, 1, func(map[string]any) {
+			found = true
+		}); err != nil {
+			t.Fatalf("searching for %s while waiting for the index: %v", key, err)
+		}
+
+		if found {
+			return
+		}
+
+		time.Sleep(interval)
+	}
+
+	t.Fatalf("%s was still not findable by JQL after %s; the search index is unusually far behind",
+		key, time.Duration(attempts)*interval)
+}
+
 // TestLiveCollectorSeesSeededCommentAndTransition is the first real check that
 // this collector's JSON-shape assumptions match Jira's actual responses. The
 // offline fakes encode what we *believe* Jira returns; only this can establish
@@ -212,12 +253,23 @@ func TestLiveCollectorSeesSeededCommentAndTransition(t *testing.T) {
 	_, err = client.AddComment(key, commentBody)
 	require.NoError(t, err)
 
+	// The collector finds issues by JQL, and Jira's search index lags issue
+	// creation by a few seconds. Without waiting, Collect matches nothing, `got`
+	// is empty, and the assertion loop below simply never executes — so the
+	// sawComment/sawStatus flags carry the whole test. Those final require calls
+	// are what keep an empty collection from reading as success.
+	waitUntilSearchable(t, client, key)
+
 	cc := liveCollectContext(t, key)
 
 	var got []events.Event
 	require.NoError(t, collectorjira.New().Collect(cc, func(e events.Event) {
 		got = append(got, e)
 	}))
+
+	require.NotEmpty(t, got,
+		"the collector matched no events at all; every per-event assertion below would "+
+			"vacuously pass on an empty slice")
 
 	var sawComment, sawStatus bool
 	for _, e := range got {
@@ -268,6 +320,14 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 	_, err = client.AddComment(key, "watermark probe")
 	require.NoError(t, err)
 
+	// Jira's search index is eventually consistent: a just-created issue is
+	// fetchable by key immediately but takes a few seconds to become findable
+	// by JQL (measured at ~3.3s on this instance). Without waiting, the first
+	// pass searches, matches nothing, stores no watermark, and the second pass
+	// silently degrades into another unbounded query — proving nothing. This is
+	// a property of Jira, not of the collector.
+	waitUntilSearchable(t, client, key)
+
 	cc := liveCollectContext(t, key)
 	collector := collectorjira.New()
 
@@ -281,10 +341,27 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 		"a successful first pass must store a watermark, or the second pass proves nothing")
 
 	// Second pass: the stored watermark is now decoded and rendered into the
-	// JQL. A malformed date literal surfaces here as a 400 from Jira.
-	err = collector.Collect(cc, func(events.Event) {})
+	// JQL.
+	//
+	// Asserting only NoError here would be nearly worthless, which is worth
+	// spelling out because the obvious version of this test is exactly that.
+	// Measured against this instance: Jira answers HTTP 200 with an EMPTY result
+	// set for a malformed date literal (`updated >= "totally-not-a-date"`), for
+	// an RFC3339 literal, and even for an unknown field name — it reserves 400
+	// for structural syntax errors like an unclosed paren. So a wrong date
+	// format would not raise; the collector would quietly match nothing on every
+	// incremental pass, forever, while reporting success.
+	//
+	// The only assertion that discriminates is that the watermarked query still
+	// MATCHES the issue. The watermark is floored to the minute and the issue
+	// was just updated, so `updated >= <watermark>` must include it.
+	var secondPass []events.Event
+	err = collector.Collect(cc, func(e events.Event) { secondPass = append(secondPass, e) })
+	require.NoError(t, err)
 
-	require.NoError(t, err,
-		"Jira rejected the watermark-bounded JQL; the `updated >= %%q` date literal in "+
-			"collectQuery is wrong. This is the failure all offline tests are blind to.")
+	require.NotEmpty(t, secondPass,
+		"the watermark-bounded query matched nothing, but the issue's updated time is at or after "+
+			"the watermark. Jira returns 200-with-zero-results for a bad date literal rather than "+
+			"400, so this is what a wrong `updated >= %%q` format in collectQuery looks like — and "+
+			"it is invisible to every offline test.")
 }

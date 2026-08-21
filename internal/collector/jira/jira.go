@@ -77,23 +77,31 @@ func (c *Collector) collectConnection(
 		return err
 	}
 
-	// One Myself() call per connection per pass, not per issue. An empty
-	// accountID (a permission that does not allow reading self) degrades to
-	// "tag nothing", which is preferable to failing the whole pass — the tag is
-	// an optimisation for the reconciler, not a correctness requirement of
-	// collection.
-	selfAccountID := ""
+	// One Myself() call per connection per pass, not per issue. It yields two
+	// things: our own accountId (for the self-authored tag) and the account's
+	// configured timezone (which JQL date literals are interpreted in — see
+	// watermarkClause).
+	//
+	// An empty accountID (a permission that does not allow reading self)
+	// degrades to "tag nothing", which is preferable to failing the whole pass —
+	// the tag is an optimisation for the reconciler, not a correctness
+	// requirement of collection.
+	var selfAccountID, accountZone string
+
 	if me, meErr := client.Myself(); meErr != nil {
 		log.Printf("jira: connection %s: could not read own account id (%v); "+
 			"self-authored changes will not be tagged this pass", conn.Name, meErr)
 	} else {
 		selfAccountID, _ = me["accountId"].(string)
+		accountZone, _ = me["timeZone"].(string)
 	}
 
 	var failures []error
 
 	for _, query := range conn.Queries {
-		if err := c.collectQuery(cc, conn, query, client, selfAccountID, limit, visit); err != nil {
+		if err := c.collectQuery(
+			cc, conn, query, client, selfAccountID, accountZone, limit, visit,
+		); err != nil {
 			failures = append(failures, fmt.Errorf("query %s/%s: %w", conn.Name, query.Name, err))
 		}
 	}
@@ -109,6 +117,7 @@ func (c *Collector) collectQuery(
 	query config.JiraQuery,
 	client *jiraclient.Client,
 	selfAccountID string,
+	accountZone string,
 	limit int,
 	visit func(events.Event),
 ) error {
@@ -126,11 +135,7 @@ func (c *Collector) collectQuery(
 
 	searchJQL := effectiveJQL
 	if watermark, ok := DecodePosition(position, effectiveJQL); ok {
-		// Jira's JQL date literal has minute precision, so this floors to the
-		// minute rather than dropping precision it cannot express. Flooring
-		// re-examines a little (free, thanks to dedup); rounding up would skip.
-		searchJQL = fmt.Sprintf("%s AND updated >= %q", effectiveJQL,
-			watermark.UTC().Truncate(time.Minute).Format("2006-01-02 15:04"))
+		searchJQL = effectiveJQL + " AND " + watermarkClause(watermark, accountZone, conn.Name)
 	}
 
 	// The issues are collected before fetching changelogs rather than emitted
@@ -175,6 +180,60 @@ func (c *Collector) collectQuery(
 	}
 
 	return cc.Store.SetCursor(Name, resource, EncodePosition(effectiveJQL, highest))
+}
+
+// jqlDateFormat is JQL's date-literal layout. Minute precision is all JQL
+// expresses, so a watermark is floored (never rounded up) to it: flooring
+// re-examines a little, which dedup makes free, while rounding up would skip.
+const jqlDateFormat = "2006-01-02 15:04"
+
+// watermarkZoneFallbackMargin is how far back the watermark is pushed when the
+// account's timezone is unknown, covering the widest real UTC offset (UTC+14)
+// plus an hour of slack.
+//
+// Erring backward is deliberate: too-early re-examines issues, which costs API
+// calls and dedupes away, while too-late skips them permanently.
+const watermarkZoneFallbackMargin = 15 * time.Hour
+
+// watermarkClause renders the `updated >= "..."` bound for an incremental pass.
+//
+// **JQL date literals are interpreted in the account's configured timezone, not
+// UTC.** This is the whole reason the function exists, and getting it wrong is
+// invisible without a live test: measured against a real instance, an account in
+// America/Indiana/Indianapolis (UTC-7) querying an issue updated at
+// 12:02 local / 19:02 UTC matches on `updated >= "... 12:02"` and does NOT match
+// on `updated >= "... 19:02"`. Sending UTC therefore pushes the bound hours into
+// the future and silently under-collects on every incremental pass.
+//
+// It is silent because Jira answers HTTP 200 with an empty result set for a
+// date literal it cannot use — it reserves 400 for structural syntax errors like
+// an unclosed paren. A malformed or mis-zoned bound raises nothing; the query
+// just matches less than it should, forever, while the watermark keeps
+// advancing past work never read.
+//
+// An unknown or unloadable zone falls back to UTC minus
+// watermarkZoneFallbackMargin rather than to bare UTC, and says so, because an
+// over-wide window is recoverable and a too-narrow one is not.
+func watermarkClause(watermark time.Time, accountZone, connName string) string {
+	if accountZone == "" {
+		log.Printf("jira: connection %s: account timezone unknown; widening the watermark by %s. "+
+			"JQL dates are account-local, so a UTC bound could otherwise skip issues",
+			connName, watermarkZoneFallbackMargin)
+
+		return fmt.Sprintf("updated >= %q",
+			watermark.Add(-watermarkZoneFallbackMargin).UTC().Truncate(time.Minute).Format(jqlDateFormat))
+	}
+
+	loc, err := time.LoadLocation(accountZone)
+	if err != nil {
+		log.Printf("jira: connection %s: could not load account timezone %q (%v); "+
+			"widening the watermark by %s instead", connName, accountZone, err, watermarkZoneFallbackMargin)
+
+		return fmt.Sprintf("updated >= %q",
+			watermark.Add(-watermarkZoneFallbackMargin).UTC().Truncate(time.Minute).Format(jqlDateFormat))
+	}
+
+	return fmt.Sprintf("updated >= %q", watermark.In(loc).Truncate(time.Minute).Format(jqlDateFormat))
 }
 
 // collectIssue emits every event for one issue and returns its updated time,
