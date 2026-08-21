@@ -3,7 +3,11 @@
     {
       "name": "default",
       "site": "https://yourorg.atlassian.net",
-      "project_keys": ["PROJ"]
+      "project_keys": ["PROJ"],
+      "max_issues_per_query": 200,
+      "queries": [
+        { "name": "mine", "jql": "assignee = currentUser() AND updated >= -14d" }
+      ]
     }
   ],
   "collectors": {

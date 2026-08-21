@@ -206,6 +206,51 @@ func (c *Client) GetChangelog(key string) ([]map[string]any, error) {
 	}
 }
 
+// commentPage is the raw shape of one comment-list response page.
+type commentPage struct {
+	Comments   []map[string]any `json:"comments"`
+	StartAt    int              `json:"startAt"`
+	MaxResults int              `json:"maxResults"`
+	Total      int              `json:"total"`
+}
+
+// GetComments returns every comment on an issue, oldest first.
+//
+// Comments do not appear in an issue's changelog, so this is the only way to
+// know whether an issue has already been narrated — which is what stops the
+// reconciler proposing a comment unjira (or a human) already posted. See
+// docs/superpowers/specs/2026-08-21-jira-collector-design.md.
+//
+// Returns the raw maps rather than a typed struct, matching GetChangelog: the
+// collector picks out the fields it needs, and a thin facade should not decide
+// which of a comment's fields matter.
+func (c *Client) GetComments(key string) ([]map[string]any, error) {
+	var comments []map[string]any
+	start := 0
+
+	for {
+		path := fmt.Sprintf("rest/api/2/issue/%s/comment?startAt=%d&maxResults=100", key, start)
+
+		var page commentPage
+		if err := c.do(http.MethodGet, path, nil, &page); err != nil {
+			return nil, err
+		}
+
+		comments = append(comments, page.Comments...)
+
+		// Advance by what the server actually returned, not by maxResults: a
+		// server returning fewer than requested would otherwise make this skip
+		// comments. Stop when a page is empty (defends against Total being
+		// misreported as too large, which would otherwise loop forever) or
+		// once we have Total comments (the normal case — Jira's comment
+		// endpoint has no isLast flag, only Total, unlike GetChangelog).
+		if len(page.Comments) == 0 || len(comments) >= page.Total {
+			return comments, nil
+		}
+		start += len(page.Comments)
+	}
+}
+
 // StatusChanges returns the (from, to) status pairs from an issue's
 // changelog, oldest first.
 func (c *Client) StatusChanges(key string) ([]workflow.StatusChange, error) {
