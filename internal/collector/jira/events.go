@@ -6,7 +6,8 @@
 // can only propose comments and forward transitions, so an event about a label
 // or sprint change is something the correlator must reason about and can never
 // act on. A groomed backlog generates constant churn in those fields, and
-// emitting it would bury the signal.
+// emitting it would bury the signal. See
+// docs/superpowers/specs/2026-08-21-jira-collector-design.md.
 package jira
 
 import (
