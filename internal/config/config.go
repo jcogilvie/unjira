@@ -1,10 +1,14 @@
 // Package config loads unjira's configuration. Copy
 // config/unjira.example.json to ./unjira.config.json.
 //
-// Credentials never live in config files. They come from the environment:
-// UNJIRA_JIRA_EMAIL / UNJIRA_JIRA_TOKEN, loadable from a gitignored .env. Real
-// env vars win over .env. In CI, UNJIRA_JIRA_TOKEN is mapped from the
-// UNJIRA_CI_TOKEN repository secret.
+// Credentials never live in config files. They come from the environment, as
+// UNJIRA_JIRA_CREDENTIALS: one JSON object mapping each Jira connection's name
+// to its {email, token} pair, so the variable count does not grow with the
+// number of configured connections. internal/envfile loads a gitignored .env
+// from the repository root, and real environment variables win over it.
+//
+// In CI, UNJIRA_JIRA_CREDENTIALS is composed from the UNJIRA_CI_EMAIL variable
+// and the UNJIRA_CI_TOKEN secret — see .github/workflows/ci.yml.
 package config
 
 import (

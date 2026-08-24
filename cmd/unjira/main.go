@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -23,6 +22,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/devtools"
+	"github.com/jcogilvie/unjira/internal/envfile"
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
@@ -51,55 +51,23 @@ var registry = map[string]func() pipeline.Collector{
 type appContext struct {
 	config          config.Config
 	store           *store.Store
-	jiraCredentials JiraCredentials
+	jiraCredentials credentials.JSONSet
 	llmAPIKey       string
-}
-
-// JiraCredentials maps a config.JiraConnection.Name to its credential,
-// decoded from a single JSON-object env var (UNJIRA_JIRA_CREDENTIALS), e.g.:
-//
-//	UNJIRA_JIRA_CREDENTIALS='{"corp":{"email":"a@x.com","token":"..."},"paas":{"email":"b@x.com","token":"..."}}'
-//
-// One var per credential kind, not one pair per connection — this scales to
-// any number of configured connections without a new env var per one. Must
-// be a named struct wrapping the map (not a bare map[string]T): Kong checks
-// for a json.Unmarshaler implementation by type before falling back to its
-// own built-in map decoder (which expects key=value;key2=value2 syntax, not
-// JSON), and a bare map type never satisfies json.Unmarshaler.
-type JiraCredentials struct {
-	set credentials.Set
-}
-
-// UnmarshalJSON implements json.Unmarshaler so Kong decodes this type from
-// its env var automatically.
-func (c *JiraCredentials) UnmarshalJSON(data []byte) error {
-	var byName map[string]credentials.Credential
-	if err := json.Unmarshal(data, &byName); err != nil {
-		return err
-	}
-	c.set = credentials.NewSet(byName)
-
-	return nil
-}
-
-// Set returns the parsed credentials for passing to collectors.
-func (c JiraCredentials) Set() credentials.Set {
-	return c.set
 }
 
 // jiraClientForProject resolves the Jira connection covering projectKey and
 // constructs a client against it, using the credential registered under
-// that connection's Name in UNJIRA_JIRA_CREDENTIALS.
+// that connection's Name in credentials.EnvVar.
 func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, error) {
 	conn, ok := a.config.JiraConnectionForProject(projectKey)
 	if !ok {
 		return nil, fmt.Errorf("no configured jira connection covers project %q", projectKey)
 	}
 
-	creds, ok := a.jiraCredentials.set.For(conn.Name)
+	creds, ok := a.jiraCredentials.Set().For(conn.Name)
 	if !ok {
 		return nil, fmt.Errorf(
-			"no credentials for jira connection %q in UNJIRA_JIRA_CREDENTIALS", conn.Name,
+			"no credentials for jira connection %q in %s", conn.Name, credentials.EnvVar,
 		)
 	}
 
@@ -415,9 +383,9 @@ type devCmd struct {
 }
 
 var cli struct {
-	Config          string          `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
-	JiraCredentials JiraCredentials `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
-	LLMAPIKey       string          `name:"llm-api-key" env:"UNJIRA_LLM_API_KEY" help:"API key for the LLM backend."`
+	Config          string              `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
+	JiraCredentials credentials.JSONSet `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
+	LLMAPIKey       string              `name:"llm-api-key" env:"UNJIRA_LLM_API_KEY" help:"API key for the LLM backend."`
 
 	Collect collectCmd `cmd:"" help:"Run every enabled collector and persist new events."`
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
@@ -434,7 +402,17 @@ func main() {
 
 // run holds everything that must close (the store) before main exits, so
 // os.Exit never bypasses a deferred close.
+//
+// envfile.Load must run before kong.Parse: Kong reads env vars (including
+// UNJIRA_JIRA_CREDENTIALS and UNJIRA_LLM_API_KEY, both tagged with `env:` on
+// the cli struct) at parse time, so a .env value not yet in the process
+// environment at that point would never reach Kong's decoding — it would be
+// silently invisible to every command, not merely to some later step.
 func run() error {
+	if err := envfile.Load(); err != nil {
+		return err
+	}
+
 	ctx := kong.Parse(&cli,
 		kong.Name("unjira"),
 		kong.Description("A reconciliation agent that keeps Jira in sync with what you actually did."),

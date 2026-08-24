@@ -25,11 +25,77 @@ import (
 	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/credentials"
+	"github.com/jcogilvie/unjira/internal/envfile"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/workflow"
 )
+
+// liveConnectionNameEnvVar overrides liveConnectionName, defaulting to "dev".
+// Kept overridable rather than hardcoded because the connection name must key
+// both the UNJIRA_JIRA_CREDENTIALS lookup and the config.JiraConnection.Name
+// this test builds, and someone pointing this tier at a differently-named
+// connection in their own UNJIRA_JIRA_CREDENTIALS (e.g. a shared credentials
+// blob also used by `unjira collect`) should not have to edit this file to do
+// it.
+const liveConnectionNameEnvVar = "UNJIRA_LIVE_JIRA_CONNECTION"
+
+// liveConnectionName returns the Jira connection name this tier authenticates
+// as: the key into UNJIRA_JIRA_CREDENTIALS and the config.JiraConnection.Name
+// used to build a CollectContext.
+func liveConnectionName() string {
+	if name := os.Getenv(liveConnectionNameEnvVar); name != "" {
+		return name
+	}
+
+	return "dev"
+}
+
+// TestMain loads .env before any test reads an environment variable.
+//
+// This must happen here rather than inside a per-test helper. Loading it lazily
+// (from testCredential, say) is a real bug that this tier hit: testClient reads
+// UNJIRA_JIRA_SITE *before* it asks for a credential, so a late Load left the
+// site at its unjira.atlassian.net default while the credentials came from
+// .env — pointing a correctly-authenticated client at the wrong instance, where
+// the configured project does not exist. The failure surfaced as "The target
+// project doesn't exist or you don't have permission to create issues in it",
+// which reads like a permissions problem and is not one.
+//
+// Load walks up to the repository root, which `go test ./internal/live/` needs:
+// the test binary runs with CWD set to the package directory, not the repo root.
+func TestMain(m *testing.M) {
+	if err := envfile.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "loading .env: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(m.Run())
+}
+
+// testCredential resolves this tier's credential from UNJIRA_JIRA_CREDENTIALS.
+//
+// A missing var skips (this tier is simply not configured to run); a
+// malformed var fails loudly via require.NoError, since a broken credential
+// blob is a misconfiguration to fix, not a reason to silently skip.
+func testCredential(t *testing.T) credentials.Credential {
+	t.Helper()
+
+	set, found, err := credentials.FromEnv()
+	require.NoError(t, err)
+	if !found {
+		t.Skipf("set %s to run", credentials.EnvVar)
+	}
+
+	name := liveConnectionName()
+	cred, ok := set.For(name)
+	if !ok {
+		t.Skipf("no credential for connection %q in %s", name, credentials.EnvVar)
+	}
+
+	return cred
+}
 
 func testClient(t *testing.T) *jira.Client {
 	t.Helper()
@@ -43,13 +109,9 @@ func testClient(t *testing.T) *jira.Client {
 		site = "https://unjira.atlassian.net"
 	}
 
-	email := os.Getenv("UNJIRA_JIRA_EMAIL")
-	token := os.Getenv("UNJIRA_JIRA_TOKEN")
-	if email == "" || token == "" {
-		t.Skip("UNJIRA_JIRA_EMAIL / UNJIRA_JIRA_TOKEN not set")
-	}
+	cred := testCredential(t)
 
-	client, err := jira.New(site, email, token)
+	client, err := jira.New(site, cred.Email, cred.Token)
 	require.NoError(t, err)
 
 	return client
@@ -161,10 +223,13 @@ func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 
+	connectionName := liveConnectionName()
+	cred := testCredential(t)
+
 	return pipeline.CollectContext{
 		Store: s,
 		Config: config.Config{Jira: []config.JiraConnection{{
-			Name:        "dev",
+			Name:        connectionName,
 			Site:        site,
 			ProjectKeys: []string{testProject()},
 			Queries: []config.JiraQuery{
@@ -172,10 +237,7 @@ func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 			},
 		}}},
 		Credentials: credentials.NewSet(map[string]credentials.Credential{
-			"dev": {
-				Email: os.Getenv("UNJIRA_JIRA_EMAIL"),
-				Token: os.Getenv("UNJIRA_JIRA_TOKEN"),
-			},
+			connectionName: cred,
 		}),
 		Options: map[string]any{},
 	}
@@ -289,7 +351,7 @@ func TestLiveCollectorSeesSeededCommentAndTransition(t *testing.T) {
 
 		assert.Equal(t, key, e.Artifacts["issue_key"])
 		assert.Equal(t, testProject(), e.Artifacts["project_key"])
-		assert.Equal(t, "dev", e.Artifacts["connection"])
+		assert.Equal(t, liveConnectionName(), e.Artifacts["connection"])
 		assert.False(t, e.OccurredAt.IsZero(), "OccurredAt must parse from Jira's timestamp format")
 	}
 
@@ -335,7 +397,7 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 	// offline test already covers.
 	require.NoError(t, collector.Collect(cc, func(events.Event) {}))
 
-	position, err := cc.Store.GetCursor("jira", collectorjira.CursorResource("dev", "probe"))
+	position, err := cc.Store.GetCursor("jira", collectorjira.CursorResource(liveConnectionName(), "probe"))
 	require.NoError(t, err)
 	require.NotEmpty(t, position,
 		"a successful first pass must store a watermark, or the second pass proves nothing")
