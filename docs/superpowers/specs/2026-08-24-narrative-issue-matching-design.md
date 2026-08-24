@@ -239,7 +239,46 @@ CREATE TABLE IF NOT EXISTS narrative_issues (
     created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     PRIMARY KEY (narrative_id, issue_key)
 );
+
+-- Exactly one primary per narrative, enforced by the database rather than by
+-- convention: narratives.issue_key denormalizes the primary, so a second
+-- primary row would make that column arbitrary. The composite PRIMARY KEY
+-- above prevents duplicate *keys* per narrative but permits two rows both
+-- marked primary, which is the case this closes.
+--
+-- Verified against modernc.org/sqlite v1.56.0: a second primary insert fails
+-- with "UNIQUE constraint failed: narrative_issues.narrative_id (2067)", while
+-- same_work/mentioned siblings and other narratives' primaries insert fine.
+CREATE UNIQUE INDEX IF NOT EXISTS one_primary_per_narrative
+    ON narrative_issues (narrative_id) WHERE role = 'primary';
+
+-- Supports the reverse lookup (issue_key → narratives), which is unindexed
+-- otherwise since issue_key is the trailing column of the composite key.
+CREATE INDEX IF NOT EXISTS narrative_issues_by_key
+    ON narrative_issues (issue_key);
 ```
+
+### Directionality: there is none between issues
+
+Every row relates a **narrative to an issue**. There is no issue-to-issue column, so nothing ever
+compares two key columns for a match.
+
+`same_work` is not a claim that `PAAS-x` relates to `SUMO-y`; it is a claim that *this narrative's
+work* is also recorded in `SUMO-y`. Co-representation is therefore expressed by a **shared
+`narrative_id`**, and the PAAS/SUMO case is two sibling rows:
+
+| narrative_id | issue_key | role |
+| --- | --- | --- |
+| 42 | PAAS-x | `primary` |
+| 42 | SUMO-y | `same_work` |
+
+Symmetry is derived, not stored: "what else is this work recorded in?" is one query on
+`narrative_id`. Nothing asserts "SUMO-y is same_work-with PAAS-x" as its own fact, which keeps the
+table free of a relation that would then need maintaining in two places.
+
+The asymmetry that *does* exist is `primary` versus `same_work` — a difference of role within one
+narrative, not a directed edge between issues. The partial unique index above is what makes "exactly
+one primary" true rather than merely intended.
 
 Follows the 10 existing idempotent `CREATE TABLE IF NOT EXISTS` statements; still greenfield, so no
 migration machinery.
@@ -250,6 +289,26 @@ func (s *Store) NarrativeIssues(narrativeID int64) ([]NarrativeIssue, error)
 func (s *Store) AllNarrativeEvents(narrativeID int64) ([]events.Event, error)
 func (tx *Tx) SetNarrativeIssueLink(id int64, issueKey string, confidence float64) error
 func (tx *Tx) AddNarrativeIssues(narrativeID int64, links []NarrativeIssue) error
+
+// NarrativesForIssue is the reverse direction: every narrative that links this
+// issue, in any role.
+//
+// Matching itself never needs it — it walks narrative → issues. It is specified
+// here anyway because the reconciler will: before commenting on a same_work
+// ticket it has to ask "did another narrative already update this?", and a
+// shared SUMO ticket makes that a real duplicate-comment risk rather than a
+// hypothetical one. Adding the accessor and its test now costs less than
+// discovering the seam missing mid-implementation, which is the lesson slice 3
+// paid for.
+func (s *Store) NarrativesForIssue(issueKey string) ([]NarrativeIssueRef, error)
+
+// NarrativeIssueRef pairs a link with the narrative holding it, since the
+// caller of the reverse lookup knows the key already and needs the narrative.
+type NarrativeIssueRef struct {
+	NarrativeID int64
+	Role        Role
+	Confidence  float64
+}
 ```
 
 `AllNarrativeEvents` is load-bearing and easy to miss: `NarrativeEventsForContext` deliberately
@@ -332,7 +391,12 @@ Offline, following existing patterns:
   temp-file SQLite via the `openStore` helper.
 - Table-driven: zero candidates, one candidate, many candidates, unresolvable key, excluded key,
   unknown role rejected, and an idempotent second run.
-- Store tests for each new accessor against a real DB.
+- Store tests for each new accessor against a real DB, including two invariants the schema now
+  enforces rather than merely intends:
+  - inserting a second `primary` for one narrative fails (the partial unique index), while
+    `same_work`/`mentioned` siblings and another narrative's own `primary` succeed;
+  - `NarrativesForIssue` returns every narrative linking a shared key across roles — the
+    duplicate-comment risk the reconciler will need it for.
 
 Break-it drills on the two load-bearing behaviours:
 
