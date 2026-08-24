@@ -83,6 +83,30 @@ CREATE TABLE IF NOT EXISTS narrative_events (
     PRIMARY KEY (narrative_id, event_id)
 );
 
+CREATE TABLE IF NOT EXISTS narrative_issues (
+    narrative_id INTEGER NOT NULL REFERENCES narratives (id),
+    issue_key    TEXT    NOT NULL,
+    role         TEXT    NOT NULL,   -- primary | same_work | mentioned
+    provenance   TEXT    NOT NULL,   -- branch | jira_event | prose_first | prose_later
+    confidence   REAL,
+    connection   TEXT,               -- which JiraConnection resolved it
+    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (narrative_id, issue_key)
+);
+
+-- Exactly one primary per narrative, enforced by the database rather than by
+-- convention: narratives.issue_key denormalizes the primary, so a second
+-- primary row would make that column arbitrary. The composite PRIMARY KEY
+-- above prevents duplicate keys per narrative but permits two rows both marked
+-- primary, which is the case this closes.
+CREATE UNIQUE INDEX IF NOT EXISTS one_primary_per_narrative
+    ON narrative_issues (narrative_id) WHERE role = 'primary';
+
+-- Supports the reverse lookup (issue_key -> narratives), which is otherwise
+-- unindexed since issue_key is the trailing column of the composite key.
+CREATE INDEX IF NOT EXISTS narrative_issues_by_key
+    ON narrative_issues (issue_key);
+
 CREATE TABLE IF NOT EXISTS actions (
     id           INTEGER PRIMARY KEY,
     narrative_id INTEGER REFERENCES narratives (id),
@@ -920,6 +944,250 @@ func (s *Store) NarrativesOverlapping(start, end time.Time) ([]NarrativeRow, err
 			return nil, fmt.Errorf("scanning overlapping narrative row: %w", err)
 		}
 		out = append(out, row)
+	}
+
+	return out, rows.Err()
+}
+
+// -- narrative issues (narrative -> issue matching) -----------------------
+
+// Role is which relationship a narrative has to an issue. A closed set: an
+// unrecognized value is a parse error upstream, never persisted.
+type Role string
+
+// NarrativeIssue is one (narrative, issue) link — the narrative_issues row
+// shape, mirroring how NarrativeRow mirrors narratives.
+//
+// There is deliberately no issue-to-issue column: every row relates a
+// narrative to an issue, so co-representation of one body of work across two
+// tickets is expressed by two rows sharing a narrative_id, and symmetry is
+// derived rather than stored in two places that could disagree.
+type NarrativeIssue struct {
+	IssueKey string
+	Role     Role
+	// Provenance is a plain string rather than a typed enum: the typed
+	// Provenance lives in internal/correlator, which this package must not
+	// import, and a value read back from SQLite is untyped text regardless.
+	Provenance string
+	Confidence float64
+	// Connection is the config.JiraConnection.Name that resolved this key,
+	// recorded because a co-representation can live on a different site than
+	// the primary.
+	Connection string
+}
+
+// NarrativeIssueRef is one row of the reverse lookup: the caller already
+// knows the issue key and needs the narrative.
+type NarrativeIssueRef struct {
+	NarrativeID int64
+	Role        Role
+	Confidence  float64
+}
+
+// NarrativesWithoutIssueKey returns up to limit narratives that have not yet
+// been attributed to a primary issue, ordered by (window_start, id) — the
+// backlog a matching pass works through. InsertNarrative leaves issue_key
+// NULL (the column has no NOT NULL constraint and is omitted from the insert
+// column list), so "IS NULL" alone would suffice; the "= ”" half of the
+// predicate is defensive belt-and-suspenders in case a future writer ever
+// persists an empty string instead of leaving it NULL.
+func (s *Store) NarrativesWithoutIssueKey(limit int) ([]NarrativeRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
+		        compaction_boundary, compaction_boundary_event_id
+		 FROM narratives
+		 WHERE issue_key IS NULL OR issue_key = ''
+		 ORDER BY window_start, id
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying narratives without an issue key: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []NarrativeRow
+	for rows.Next() {
+		row, err := scanNarrativeRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning unmatched narrative row: %w", err)
+		}
+		out = append(out, row)
+	}
+
+	return out, rows.Err()
+}
+
+// SetNarrativeIssueLink denormalizes a narrative's primary issue onto
+// narratives.issue_key/confidence, so callers that only need "what issue is
+// this" (digest/status output, NarrativesWithoutIssueKey's backlog filter)
+// don't have to join narrative_issues. AddNarrativeIssues is what actually
+// records the primary relationship; call both when setting a primary.
+func (s *Store) SetNarrativeIssueLink(id int64, issueKey string, confidence float64) error {
+	return setNarrativeIssueLinkImpl(s.db, id, issueKey, confidence)
+}
+
+// SetNarrativeIssueLink is the *Tx-scoped variant of
+// (*Store).SetNarrativeIssueLink.
+func (t *Tx) SetNarrativeIssueLink(id int64, issueKey string, confidence float64) error {
+	return setNarrativeIssueLinkImpl(t.tx, id, issueKey, confidence)
+}
+
+func setNarrativeIssueLinkImpl(c dbConn, id int64, issueKey string, confidence float64) error {
+	if _, err := c.Exec(
+		`UPDATE narratives SET issue_key = ?, confidence = ? WHERE id = ?`,
+		issueKey, confidence, id,
+	); err != nil {
+		return fmt.Errorf("setting issue link for narrative %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// AddNarrativeIssues records narrative_issues rows for a narrative, one per
+// link. Each is an explicit upsert keyed on (narrative_id, issue_key) — NOT
+// INSERT OR IGNORE. That distinction is load-bearing: measured against
+// modernc.org/sqlite, INSERT OR IGNORE against the partial unique index on
+// role='primary' returns a nil error and silently keeps the FIRST primary
+// when a second primary is attempted under a different issue_key. A wrong
+// early match would then quietly outrank a later, correct one while the
+// write reported success. The explicit "ON CONFLICT ... DO UPDATE" instead
+// lets the composite-key conflict path refresh role/provenance/confidence on
+// a re-run (matching improves as better information becomes available) while
+// still letting the database's partial unique index reject a genuine second
+// primary with a real error.
+func (s *Store) AddNarrativeIssues(narrativeID int64, links []NarrativeIssue) error {
+	return addNarrativeIssuesImpl(s.db, narrativeID, links)
+}
+
+// AddNarrativeIssues is the *Tx-scoped variant of
+// (*Store).AddNarrativeIssues.
+func (t *Tx) AddNarrativeIssues(narrativeID int64, links []NarrativeIssue) error {
+	return addNarrativeIssuesImpl(t.tx, narrativeID, links)
+}
+
+func addNarrativeIssuesImpl(c dbConn, narrativeID int64, links []NarrativeIssue) error {
+	for _, link := range links {
+		if _, err := c.Exec(
+			`INSERT INTO narrative_issues
+			   (narrative_id, issue_key, role, provenance, confidence, connection)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT (narrative_id, issue_key) DO UPDATE SET
+			   role       = excluded.role,
+			   provenance = excluded.provenance,
+			   confidence = excluded.confidence,
+			   connection = excluded.connection`,
+			narrativeID, link.IssueKey, string(link.Role), link.Provenance,
+			link.Confidence, nullable(link.Connection),
+		); err != nil {
+			return fmt.Errorf("adding issue link %s (%s) to narrative %d: %w",
+				link.IssueKey, link.Role, narrativeID, err)
+		}
+	}
+
+	return nil
+}
+
+// NarrativeIssues returns every issue link recorded for a narrative — the
+// join-table rows a caller needs to see all roles (primary, same_work,
+// mentioned) at once, which narratives.issue_key alone cannot express.
+func (s *Store) NarrativeIssues(narrativeID int64) ([]NarrativeIssue, error) {
+	rows, err := s.db.Query(
+		`SELECT issue_key, role, provenance, confidence, connection
+		 FROM narrative_issues WHERE narrative_id = ? ORDER BY issue_key`,
+		narrativeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying issue links for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []NarrativeIssue
+	for rows.Next() {
+		var (
+			link       NarrativeIssue
+			role       string
+			confidence sql.NullFloat64
+			connection sql.NullString
+		)
+		if err := rows.Scan(&link.IssueKey, &role, &link.Provenance, &confidence, &connection); err != nil {
+			return nil, fmt.Errorf("scanning issue link row for narrative %d: %w", narrativeID, err)
+		}
+		link.Role = Role(role)
+		if confidence.Valid {
+			link.Confidence = confidence.Float64
+		}
+		link.Connection = connection.String
+		out = append(out, link)
+	}
+
+	return out, rows.Err()
+}
+
+// NarrativesForIssue returns every narrative linked to issueKey across all
+// roles — the reverse lookup the reconciler needs so it doesn't act twice on
+// one issue when two narratives share it (the SUMO co-representation case).
+func (s *Store) NarrativesForIssue(issueKey string) ([]NarrativeIssueRef, error) {
+	rows, err := s.db.Query(
+		`SELECT narrative_id, role, confidence
+		 FROM narrative_issues WHERE issue_key = ? ORDER BY narrative_id`,
+		issueKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying narratives for issue %s: %w", issueKey, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []NarrativeIssueRef
+	for rows.Next() {
+		var (
+			ref        NarrativeIssueRef
+			role       string
+			confidence sql.NullFloat64
+		)
+		if err := rows.Scan(&ref.NarrativeID, &role, &confidence); err != nil {
+			return nil, fmt.Errorf("scanning narrative ref row for issue %s: %w", issueKey, err)
+		}
+		ref.Role = Role(role)
+		if confidence.Valid {
+			ref.Confidence = confidence.Float64
+		}
+		out = append(out, ref)
+	}
+
+	return out, rows.Err()
+}
+
+// AllNarrativeEvents returns every event ever linked to a narrative,
+// ignoring the compaction boundary — deliberately NOT
+// NarrativeEventsForContext, which exists to hide pre-boundary events from
+// the model once their content is captured in the recap summary. Matching
+// candidate keys come from event artifacts, and the git_branch artifact
+// carrying the strongest provenance signal typically sits on a narrative's
+// oldest events — exactly the ones compaction hides. A matching pass that
+// used NarrativeEventsForContext would silently lose that signal for any
+// narrative old enough to have been compacted.
+func (s *Store) AllNarrativeEvents(narrativeID int64) ([]events.Event, error) {
+	rows, err := s.db.Query(
+		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
+		 FROM events e
+		 JOIN narrative_events ne ON ne.event_id = e.id
+		 WHERE ne.narrative_id = ?
+		 ORDER BY e.occurred_at, e.id`,
+		narrativeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying all events for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []events.Event
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning narrative event row: %w", err)
+		}
+		out = append(out, e)
 	}
 
 	return out, rows.Err()
