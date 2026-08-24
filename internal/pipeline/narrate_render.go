@@ -98,3 +98,104 @@ func narrativeIDLabel(id int64) string {
 
 	return fmt.Sprintf("%d", id)
 }
+
+// RenderMatchResult formats one matching pass for a human judging whether
+// the attributions are right.
+//
+// A narrative can end up with no links for three quite different reasons —
+// every candidate excluded as a placeholder, every candidate rejected by
+// live-tracker verification, or the events simply named no keys at all —
+// and "no links" with no explanation is indistinguishable from a silent
+// failure. writeUnmatchedNarrative exists to make those three cases
+// visually distinct rather than collapsing them into the same blank output.
+func RenderMatchResult(r MatchRunResult) string {
+	var b strings.Builder
+
+	writeMatchHeader(&b, r)
+
+	if len(r.Matched) == 0 {
+		b.WriteString("\nno narratives considered\n")
+
+		return b.String()
+	}
+
+	for _, m := range r.Matched {
+		if len(m.Links) > 0 {
+			writeMatchedNarrative(&b, m)
+		} else {
+			writeUnmatchedNarrative(&b, m)
+		}
+	}
+
+	return b.String()
+}
+
+// writeMatchHeader writes the narrative count and LLM call/token stats that
+// precede the per-narrative detail, mirroring writeNarrateHeader.
+func writeMatchHeader(b *strings.Builder, r MatchRunResult) {
+	b.WriteString("== matching pass ==\n")
+	fmt.Fprintf(b, "narratives   %d considered\n", len(r.Matched))
+	fmt.Fprintf(b, "llm          %d call(s)\n", r.Stats.Calls)
+	fmt.Fprintf(b, "tokens       %d prompt + %d completion (estimated %d)\n",
+		r.Stats.PromptTokens, r.Stats.CompletionTokens, r.Stats.EstimatedTokens)
+}
+
+// writeMatchedNarrative writes one narrative that has at least one surviving
+// link: its id, the promoted primary (or an explicit marker when the
+// winning candidate's confidence fell below the floor, so a below-floor
+// match cannot be mistaken for nothing having been found), then one line per
+// link showing role, key, provenance, and confidence — provenance is what
+// lets a human tell a stale-branch false positive from a genuine mention.
+// Any Excluded/Unresolved keys and the model's rationale, when present,
+// follow.
+func writeMatchedNarrative(b *strings.Builder, m correlator.MatchResult) {
+	b.WriteString("\n")
+	fmt.Fprintf(b, "[narrative #%d]", m.NarrativeID)
+	if m.Primary != "" {
+		fmt.Fprintf(b, " primary: %s\n", m.Primary)
+	} else {
+		b.WriteString(" primary: (no primary promoted — below confidence floor)\n")
+	}
+
+	for _, link := range m.Links {
+		fmt.Fprintf(b, "  - %s  key=%s  provenance=%s  confidence=%.2f\n",
+			link.Role, link.IssueKey, link.Provenance, link.Confidence)
+	}
+
+	writeExcludedAndUnresolved(b, m)
+
+	if m.Rationale != "" {
+		fmt.Fprintf(b, "  rationale: %s\n", m.Rationale)
+	}
+}
+
+// writeUnmatchedNarrative writes one narrative with no surviving links,
+// stating which of the three reasons applies: excluded placeholders,
+// tracker-rejected keys, or no candidate keys at all in its events. This is
+// the branch that keeps "no links" from reading as a silent failure.
+func writeUnmatchedNarrative(b *strings.Builder, m correlator.MatchResult) {
+	b.WriteString("\n")
+	fmt.Fprintf(b, "[narrative #%d] unmatched", m.NarrativeID)
+
+	switch {
+	case len(m.Excluded) > 0:
+		fmt.Fprintf(b, " — every candidate excluded: %s\n", strings.Join(m.Excluded, ", "))
+	case len(m.Unresolved) > 0:
+		fmt.Fprintf(b, " — every candidate unresolved against the tracker: %s\n",
+			strings.Join(m.Unresolved, ", "))
+	default:
+		b.WriteString(" — no candidate keys found in its events\n")
+	}
+}
+
+// writeExcludedAndUnresolved writes m's Excluded/Unresolved keys when a
+// matched narrative (one with a surviving link) also had some candidates
+// dropped along the way — e.g. a placeholder alongside a real key.
+func writeExcludedAndUnresolved(b *strings.Builder, m correlator.MatchResult) {
+	if len(m.Excluded) > 0 {
+		fmt.Fprintf(b, "  excluded: %s\n", strings.Join(m.Excluded, ", "))
+	}
+	if len(m.Unresolved) > 0 {
+		fmt.Fprintf(b, "  unresolved: %s\n", strings.Join(m.Unresolved, ", "))
+	}
+}
