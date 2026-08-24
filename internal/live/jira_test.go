@@ -24,6 +24,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/envfile"
 	"github.com/jcogilvie/unjira/internal/events"
@@ -426,4 +427,61 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 			"the watermark. Jira returns 200-with-zero-results for a bad date literal rather than "+
 			"400, so this is what a wrong `updated >= %%q` format in collectQuery looks like — and "+
 			"it is invisible to every offline test.")
+}
+
+// TestLiveMatchingSignalIsAvailable verifies the two things matching depends on
+// that no fixture can establish: that GetIssue resolves a real key through the
+// tasktracker seam, and that Description actually arrives populated.
+//
+// Description is the reason tasktracker.Issue gained the field — the Jira
+// collector deliberately never emits description snapshots as events, so a
+// never-edited ticket's body is available only on this live read path. If Jira
+// returns Atlassian Document Format here rather than a string, normalizeIssue's
+// type assertion leaves it empty and matching loses its strongest signal
+// silently. This test is what makes that visible.
+func TestLiveMatchingSignalIsAvailable(t *testing.T) {
+	client := testClient(t)
+	tracker := jira.NewTracker(client)
+
+	const body = "Live matching probe: this body is the signal matching compares against."
+
+	key, err := client.CreateIssue(
+		testProject(),
+		"[seed] live matching signal probe",
+		"Task",
+		body,
+		[]string{jira.SeedLabel},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+
+	issue, err := tracker.GetIssue(key)
+
+	require.NoError(t, err, "a key we just created must resolve — this is what verification relies on")
+	assert.Equal(t, key, issue.Key)
+	assert.Equal(t, "[seed] live matching signal probe", issue.Summary)
+	assert.Equal(t, body, issue.Description,
+		"Description must survive normalizeIssue; if this fails, Jira returned ADF rather than a "+
+			"string and matching loses its strongest signal")
+	assert.NotEmpty(t, issue.StatusCategory, "status is part of the classification prompt")
+}
+
+// TestLiveUnresolvableKeyIsNotTransport confirms the classification
+// verifyCandidates depends on.
+//
+// A stale branch name or a hallucinated key must DROP the candidate (recorded
+// as unresolved, pass continues), not fail the narrative. That hinges on
+// correlator.IsTransportError reading a real Jira 404 as not-found. The offline
+// tests assert this against a hand-built &jira.Error{Status: 404}; only a live
+// call proves the real client produces that shape.
+func TestLiveUnresolvableKeyIsNotTransport(t *testing.T) {
+	client := testClient(t)
+	tracker := jira.NewTracker(client)
+
+	_, err := tracker.GetIssue(testProject() + "-99999999")
+
+	require.Error(t, err, "a nonexistent key must error rather than returning a zero Issue")
+	assert.False(t, correlator.IsTransportError(err),
+		"a 404 must classify as not-found: misread as transport, a stale branch name would fail "+
+			"its narrative on every pass instead of being reported unresolved")
 }
