@@ -28,3 +28,32 @@ func ClusterSystemPromptForTest() string {
 func BuildClusterPromptForTest(evts []Event, existing []Narrative) (systemPrompt, userPrompt string) {
 	return buildClusterPrompt(evts, existing)
 }
+
+// ParseRoleForTest and ParseMatchResponseForTest expose the response parsers to
+// the correlator_test package. They are unexported in production because nothing
+// outside this package parses a model response, but their rejection behaviour is
+// the main thing worth testing directly.
+func ParseRoleForTest(raw string) (Role, error) { return parseRole(raw) }
+
+func ParseMatchResponseForTest(raw string) ([]MatchVerdictForTest, error) {
+	verdicts, err := parseMatchResponse(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]MatchVerdictForTest, 0, len(verdicts))
+	for _, v := range verdicts {
+		out = append(out, MatchVerdictForTest(v))
+	}
+
+	return out, nil
+}
+
+// MatchVerdictForTest mirrors the unexported matchVerdict so tests can assert on
+// its fields.
+type MatchVerdictForTest struct {
+	IssueKey   string
+	Role       Role
+	Confidence float64
+	Rationale  string
+}
