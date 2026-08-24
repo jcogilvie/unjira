@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -14,6 +15,22 @@ import (
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
+// jsonSetFor builds a credentials.JSONSet for tests. JSONSet's only
+// constructor is its UnmarshalJSON (the whole point: Kong drives it, and
+// internal/credentials keeps a single decode path), so tests go through the
+// same JSON round-trip a real UNJIRA_JIRA_CREDENTIALS value would.
+func jsonSetFor(t *testing.T, byName map[string]credentials.Credential) credentials.JSONSet {
+	t.Helper()
+
+	data, err := json.Marshal(byName)
+	require.NoError(t, err)
+
+	var set credentials.JSONSet
+	require.NoError(t, set.UnmarshalJSON(data))
+
+	return set
+}
+
 func TestJiraClientForProject_ResolvesCredentialsByConnectionName(t *testing.T) {
 	app := &appContext{
 		config: config.Config{
@@ -22,10 +39,10 @@ func TestJiraClientForProject_ResolvesCredentialsByConnectionName(t *testing.T) 
 				{Name: "paas", Site: "https://paas.atlassian.net", ProjectKeys: []string{"PAAS"}},
 			},
 		},
-		jiraCredentials: JiraCredentials{set: credentials.NewSet(map[string]credentials.Credential{
+		jiraCredentials: jsonSetFor(t, map[string]credentials.Credential{
 			"corp": {Email: "corp@example.com", Token: "corp-token"},
 			"paas": {Email: "paas@example.com", Token: "paas-token"},
-		})},
+		}),
 	}
 
 	client, err := app.jiraClientForProject("PAAS")
@@ -41,7 +58,7 @@ func TestJiraClientForProject_MissingCredentialsErrorsWithConnectionName(t *test
 				{Name: "corp", Site: "https://corp.atlassian.net", ProjectKeys: []string{"SUMO"}},
 			},
 		},
-		jiraCredentials: JiraCredentials{set: credentials.NewSet(map[string]credentials.Credential{})},
+		jiraCredentials: jsonSetFor(t, map[string]credentials.Credential{}),
 	}
 
 	_, err := app.jiraClientForProject("SUMO")
@@ -66,23 +83,6 @@ func TestJiraClientForProject_UnknownProjectErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "GHOST")
 }
 
-func TestJiraCredentials_UnmarshalsFromJSON(t *testing.T) {
-	var creds JiraCredentials
-
-	err := creds.UnmarshalJSON([]byte(`{"corp":{"email":"a@x.com","token":"tok1"},"paas":{"email":"b@x.com","token":"tok2"}}`))
-
-	require.NoError(t, err)
-
-	corp, ok := creds.Set().For("corp")
-	require.True(t, ok)
-	assert.Equal(t, "a@x.com", corp.Email)
-	assert.Equal(t, "tok1", corp.Token)
-
-	paas, ok := creds.Set().For("paas")
-	require.True(t, ok)
-	assert.Equal(t, "b@x.com", paas.Email)
-}
-
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
 
@@ -102,9 +102,9 @@ func TestTaskTracker_JiraBackendReturnsJiraTracker(t *testing.T) {
 			},
 		},
 		store: openTestStore(t),
-		jiraCredentials: JiraCredentials{set: credentials.NewSet(map[string]credentials.Credential{
+		jiraCredentials: jsonSetFor(t, map[string]credentials.Credential{
 			"default": {Email: "e", Token: "t"},
-		})},
+		}),
 	}
 
 	tracker, err := app.taskTracker("PROJ")
