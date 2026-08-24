@@ -153,9 +153,13 @@ const (
 // NarrativeIssue is one (narrative, issue) link — the narrative_issues row
 // shape, mirroring how store.NarrativeRow mirrors narratives.
 type NarrativeIssue struct {
-	IssueKey   string
-	Role       Role
-	Provenance Provenance
+	IssueKey string
+	Role     Role
+	// Provenance is stored as a plain string rather than the Provenance type:
+	// the row shape lives in internal/store, which must not import the
+	// correlator, and a persisted value read back from SQLite is untyped text
+	// regardless. The correlator converts at the boundary.
+	Provenance string
 	Confidence float64
 	// Connection is the config.JiraConnection.Name that resolved this key,
 	// recorded because a co-representation can live on a different site than
