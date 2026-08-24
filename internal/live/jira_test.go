@@ -52,17 +52,35 @@ func liveConnectionName() string {
 	return "dev"
 }
 
-// testCredential loads .env (so `go test ./internal/live/` finds it despite
-// running with CWD=internal/live, not the repo root — see envfile.Load's doc
-// comment), then resolves this tier's credential from UNJIRA_JIRA_CREDENTIALS.
+// TestMain loads .env before any test reads an environment variable.
+//
+// This must happen here rather than inside a per-test helper. Loading it lazily
+// (from testCredential, say) is a real bug that this tier hit: testClient reads
+// UNJIRA_JIRA_SITE *before* it asks for a credential, so a late Load left the
+// site at its unjira.atlassian.net default while the credentials came from
+// .env — pointing a correctly-authenticated client at the wrong instance, where
+// the configured project does not exist. The failure surfaced as "The target
+// project doesn't exist or you don't have permission to create issues in it",
+// which reads like a permissions problem and is not one.
+//
+// Load walks up to the repository root, which `go test ./internal/live/` needs:
+// the test binary runs with CWD set to the package directory, not the repo root.
+func TestMain(m *testing.M) {
+	if err := envfile.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "loading .env: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(m.Run())
+}
+
+// testCredential resolves this tier's credential from UNJIRA_JIRA_CREDENTIALS.
 //
 // A missing var skips (this tier is simply not configured to run); a
 // malformed var fails loudly via require.NoError, since a broken credential
 // blob is a misconfiguration to fix, not a reason to silently skip.
 func testCredential(t *testing.T) credentials.Credential {
 	t.Helper()
-
-	require.NoError(t, envfile.Load())
 
 	set, found, err := credentials.FromEnv()
 	require.NoError(t, err)
