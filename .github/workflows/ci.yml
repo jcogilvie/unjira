@@ -81,7 +81,8 @@ jobs:
           sarif_file: trivy-results.sarif
 
   # Live integration against unjira.atlassian.net, using the repo's existing
-  # UNJIRA_CI_EMAIL/UNJIRA_CI_TOKEN secrets. Required on every PR (unlike the
+  # UNJIRA_CI_EMAIL variable and UNJIRA_CI_TOKEN secret (composed into
+  # UNJIRA_JIRA_CREDENTIALS below). Required on every PR (unlike the
   # Python-era job, which was manual-dispatch-only) — GitHub Actions minutes
   # are free on public repos, so there's no cost reason to gate this behind
   # a manual trigger on a codebase this new.
@@ -99,8 +100,29 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # UNJIRA_JIRA_CREDENTIALS is the single credential form the whole codebase
+      # reads (see internal/credentials): a JSON object keyed by connection
+      # name. It is composed here from the same UNJIRA_CI_EMAIL variable and
+      # UNJIRA_CI_TOKEN secret this job has always used — no new repository
+      # secrets are required.
+      #
+      # jq builds the JSON rather than a YAML string template, so a token
+      # containing a quote, backslash, or other JSON metacharacter is escaped
+      # correctly instead of producing a blob that fails to parse. The values
+      # arrive as env vars and are read by jq via $ENV, so they are never
+      # interpolated into the command line where they could be logged or
+      # mangled by the shell.
+      #
+      # The "dev" key must match the connection name internal/live
+      # authenticates as (its default; override with
+      # UNJIRA_LIVE_JIRA_CONNECTION).
+      - name: Compose Jira credentials
+        env:
+          CI_EMAIL: ${{ vars.UNJIRA_CI_EMAIL }}
+          CI_TOKEN: ${{ secrets.UNJIRA_CI_TOKEN }}
+        run: |
+          printf 'UNJIRA_JIRA_CREDENTIALS=%s\n' \
+            "$(jq -cn '{dev: {email: $ENV.CI_EMAIL, token: $ENV.CI_TOKEN}}')" >> "$GITHUB_ENV"
       - run: UNJIRA_LIVE=1 go test -tags=live ./internal/live/...
         env:
           UNJIRA_JIRA_SITE: https://unjira.atlassian.net
-          UNJIRA_JIRA_EMAIL: ${{ vars.UNJIRA_CI_EMAIL }}
-          UNJIRA_JIRA_TOKEN: ${{ secrets.UNJIRA_CI_TOKEN }}
