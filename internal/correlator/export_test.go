@@ -1,5 +1,7 @@
 package correlator
 
+import "regexp"
+
 // This file exposes internals to the correlator_test package. It compiles only
 // under `go test`, so nothing here widens the package's real API.
 
@@ -56,4 +58,18 @@ type MatchVerdictForTest struct {
 	Role       Role
 	Confidence float64
 	Rationale  string
+}
+
+// GatherCandidatesForTest and ExcludedCandidatesForTest expose the pure
+// candidate-gathering functions. They are unexported in production because only
+// Match calls them, but the provenance ranking and exclusion rules are worth
+// testing without a store or a tracker.
+func GatherCandidatesForTest(
+	evts []Event, linkExclusions []*regexp.Regexp, limit int,
+) []Candidate {
+	return gatherCandidates(evts, linkExclusions, limit)
+}
+
+func ExcludedCandidatesForTest(evts []Event, linkExclusions []*regexp.Regexp) []string {
+	return excludedCandidates(evts, linkExclusions)
 }
