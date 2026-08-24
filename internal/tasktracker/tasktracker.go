@@ -26,6 +26,19 @@ type Issue struct {
 	StatusCategory StatusCategory
 	StatusName     string // native display value; "" if the backend has none
 	Labels         []string
+
+	// Description is the issue body. Populated on the live read path only —
+	// the Jira collector deliberately does not emit description snapshots as
+	// events, so this is the only place a never-edited ticket's body is
+	// available. Narrative→issue matching compares against it, since a
+	// one-line summary frequently cannot distinguish the ticket a narrative
+	// implements from one it merely mentions.
+	//
+	// Empty when the backend has none, or when Jira returns an Atlassian
+	// Document Format object rather than a string (v3 API): rendering ADF to
+	// text is deliberately out of scope, and an empty description degrades
+	// matching rather than breaking it.
+	Description string
 }
 
 // TaskTracker is the minimal surface the correlator/reconciler/applier need

@@ -72,6 +72,10 @@ func normalizeIssue(raw map[string]any) tasktracker.Issue {
 
 	issue.Summary, _ = fields["summary"].(string)
 
+	// A failed assertion leaves this empty, which is the intended degradation
+	// for an ADF object (Jira Cloud v3) rather than a string.
+	issue.Description, _ = fields["description"].(string)
+
 	if status, ok := fields["status"].(map[string]any); ok {
 		issue.StatusName, _ = status["name"].(string)
 		if category, ok := status["statusCategory"].(map[string]any); ok {

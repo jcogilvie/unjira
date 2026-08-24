@@ -44,6 +44,7 @@ func TestTracker_CreateThenGetIssue_RoundTrips(t *testing.T) {
 		StatusCategory: tasktracker.StatusTodo,
 		StatusName:     "todo",
 		Labels:         []string{"bug"},
+		Description:    "a description",
 	}, issue)
 }
 
@@ -121,6 +122,20 @@ func TestTracker_SearchIssues_SubstringMatchesSubset(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, issues, 1)
 	assert.Equal(t, "Fix the bug", issues[0].Summary)
+}
+
+func TestLocalGetIssue_CarriesDescription(t *testing.T) {
+	s, tr := openTrackerWithStore(t)
+
+	key, err := s.InsertLocalIssue("PROJ", "Fix the flaky test",
+		"Task", "Races the clock in tail compaction.", nil)
+	require.NoError(t, err)
+
+	got, err := tr.GetIssue(key)
+
+	require.NoError(t, err)
+	assert.Equal(t, "Races the clock in tail compaction.", got.Description,
+		"store.LocalIssue.Description already exists; it was only dropped at the tasktracker boundary")
 }
 
 func TestTracker_WorkflowGraph_ReturnsStaticThreeCategoryGraph(t *testing.T) {
