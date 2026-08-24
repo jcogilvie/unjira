@@ -18,6 +18,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/local"
 	"github.com/jcogilvie/unjira/internal/clients/openai"
 	"github.com/jcogilvie/unjira/internal/collector/claudecode"
+	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/credentials"
@@ -42,6 +43,7 @@ const (
 // internal/collectors.REGISTRY in the Python implementation.
 var registry = map[string]func() pipeline.Collector{
 	"claude_code": func() pipeline.Collector { return claudecode.New() },
+	"jira":        func() pipeline.Collector { return collectorjira.New() },
 }
 
 // appContext carries the loaded config, open store, and Jira credentials to

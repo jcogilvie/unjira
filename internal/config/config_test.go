@@ -305,3 +305,81 @@ func TestDefaultConfig_HasClaudeCodeEnabledByDefault(t *testing.T) {
 	require.Contains(t, enabled, "claude_code")
 	assert.Equal(t, "data/unjira.db", cfg.DBPath)
 }
+
+func TestJiraConnection_EffectiveJQLScopesToProjectKeys(t *testing.T) {
+	conn := config.JiraConnection{
+		Name:        "corp",
+		Site:        "https://corp.atlassian.net",
+		ProjectKeys: []string{"PROJ", "OPS"},
+		Queries: []config.JiraQuery{
+			{Name: "mine", JQL: "assignee = currentUser()"},
+		},
+	}
+
+	got, err := conn.EffectiveJQL(conn.Queries[0])
+
+	require.NoError(t, err)
+	assert.Equal(t, `(assignee = currentUser()) AND project IN ("PROJ", "OPS")`, got,
+		"collection must be bounded to projects the connection can also write to")
+}
+
+func TestJiraConnection_EffectiveJQLErrorsWithoutProjectKeys(t *testing.T) {
+	conn := config.JiraConnection{
+		Name:    "corp",
+		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
+	}
+
+	_, err := conn.EffectiveJQL(conn.Queries[0])
+
+	require.Error(t, err, "an unscoped query would collect issues no connection can write to")
+	assert.Contains(t, err.Error(), "corp")
+	assert.Contains(t, err.Error(), "project_keys")
+}
+
+func TestJiraConnection_MaxIssuesDefaultsAndRejectsNegative(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured int
+		want       int
+		wantErr    bool
+	}{
+		{name: "absent defaults", configured: 0, want: config.DefaultMaxIssuesPerQuery},
+		{name: "explicit is honored", configured: 50, want: 50},
+		{name: "negative is an error", configured: -1, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := config.JiraConnection{Name: "corp", MaxIssuesPerQuery: tt.configured}
+
+			got, err := conn.IssueLimit()
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "max_issues_per_query")
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestLoad_ParsesJiraQueries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"jira":[{"name":"corp","site":"https://corp.atlassian.net",
+	  "project_keys":["PROJ"],"max_issues_per_query":50,
+	  "queries":[{"name":"mine","jql":"assignee = currentUser()"}]}]}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.Jira, 1)
+	require.Len(t, cfg.Jira[0].Queries, 1)
+	assert.Equal(t, "mine", cfg.Jira[0].Queries[0].Name)
+	assert.Equal(t, "assignee = currentUser()", cfg.Jira[0].Queries[0].JQL)
+	assert.Equal(t, 50, cfg.Jira[0].MaxIssuesPerQuery)
+}

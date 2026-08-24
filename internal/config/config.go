@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
@@ -20,15 +21,88 @@ import (
 // DefaultConfigPath is where Load looks when no path is given.
 const DefaultConfigPath = "unjira.config.json"
 
+// DefaultMaxIssuesPerQuery bounds how many issues one collector query examines
+// per pass. A limit is required rather than optional: the Jira collector makes
+// two API calls per issue (changelog and comments, since the search endpoint
+// cannot expand either), so an unbounded query is unbounded API cost.
+const DefaultMaxIssuesPerQuery = 200
+
+// JiraQuery is one named JQL view of a connection's issues. Named rather than a
+// single string per connection because one Jira site legitimately has several
+// views worth collecting, and duplicating site plus credentials to get them
+// would be the wrong shape.
+//
+// The name is also the cursor key (see internal/collector/jira), so renaming a
+// query resets only that query's watermark.
+type JiraQuery struct {
+	Name string `json:"name"`
+	JQL  string `json:"jql"`
+}
+
 // JiraConnection describes one Jira Cloud site and the projects on it.
 // Multiple connections let a project set span more than one Jira instance —
 // e.g. after a migration or an acquisition merges two orgs' Jiras — without
 // unjira assuming a single global site. Name identifies the connection for
-// credential lookup (see cmd/unjira's UNJIRA_JIRA_CREDENTIALS).
+// credential lookup (see cmd/unjira's UNJIRA_JIRA_CREDENTIALS). ProjectKeys
+// routes a project key to this connection (for writes) and bounds what its
+// Queries may collect (for reads; see EffectiveJQL).
 type JiraConnection struct {
 	Name        string   `json:"name"`
 	Site        string   `json:"site"`
 	ProjectKeys []string `json:"project_keys"`
+	// Queries are the named JQL views the Jira collector reads. Empty means
+	// this connection is write-only: it routes project keys but collects
+	// nothing.
+	Queries []JiraQuery `json:"queries"`
+	// MaxIssuesPerQuery bounds one query's issue count per pass. Zero means
+	// DefaultMaxIssuesPerQuery.
+	MaxIssuesPerQuery int `json:"max_issues_per_query"`
+}
+
+// EffectiveJQL returns query's JQL scoped to this connection's ProjectKeys.
+//
+// The scope is added rather than left to the operator because the two lists
+// answer different questions that must not disagree: ProjectKeys says which
+// projects this connection can write to, and an unscoped JQL (assignee =
+// currentUser(), say) spans a whole site. Collecting an issue from a project no
+// connection covers would narrate work the reconciler can never act on —
+// JiraConnectionForProject would return false when it came time to write.
+//
+// Empty ProjectKeys is an error rather than "collect everything", for the same
+// reason.
+func (c JiraConnection) EffectiveJQL(query JiraQuery) (string, error) {
+	if len(c.ProjectKeys) == 0 {
+		return "", fmt.Errorf(
+			"jira connection %q has no project_keys: cannot scope collector query %q, and an "+
+				"unscoped query would collect issues no connection can write to",
+			c.Name, query.Name,
+		)
+	}
+
+	quoted := make([]string, 0, len(c.ProjectKeys))
+	for _, key := range c.ProjectKeys {
+		quoted = append(quoted, fmt.Sprintf("%q", key))
+	}
+
+	return fmt.Sprintf("(%s) AND project IN (%s)", query.JQL, strings.Join(quoted, ", ")), nil
+}
+
+// IssueLimit returns the per-query issue cap, defaulting when unset. A negative
+// value is a configuration error rather than silently coerced: it most likely
+// means someone intended "no limit", which this collector deliberately does not
+// offer.
+func (c JiraConnection) IssueLimit() (int, error) {
+	switch {
+	case c.MaxIssuesPerQuery < 0:
+		return 0, fmt.Errorf(
+			"jira connection %q has max_issues_per_query %d: must be positive, or omitted for the default of %d",
+			c.Name, c.MaxIssuesPerQuery, DefaultMaxIssuesPerQuery,
+		)
+	case c.MaxIssuesPerQuery == 0:
+		return DefaultMaxIssuesPerQuery, nil
+	default:
+		return c.MaxIssuesPerQuery, nil
+	}
 }
 
 // TrackerConfig selects the phase-1+ apply-target backend and, separately,

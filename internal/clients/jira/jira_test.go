@@ -265,3 +265,57 @@ func TestNew_RequiresSite(t *testing.T) {
 
 	assert.Error(t, err)
 }
+
+func TestGetComments_WalksEveryPage(t *testing.T) {
+	var calls int
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Query().Get("startAt") == "" || r.URL.Query().Get("startAt") == "0" {
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"comments": []map[string]any{
+					{
+						"id": "101", "created": "2026-08-01T12:00:00.000+0000",
+						"body": "first", "author": map[string]any{"accountId": "acct-1", "displayName": "Alice"},
+					},
+				},
+				"startAt":    0,
+				"maxResults": 1,
+				"total":      2,
+			})
+
+			return
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"comments": []map[string]any{
+				{
+					"id": "102", "created": "2026-08-01T13:00:00.000+0000",
+					"body": "second", "author": map[string]any{"accountId": "acct-2", "displayName": "Bob"},
+				},
+			},
+			"startAt":    1,
+			"maxResults": 1,
+			"total":      2,
+		})
+	})
+
+	comments, err := client.GetComments("PROJ-42")
+
+	require.NoError(t, err)
+	require.Len(t, comments, 2, "pagination must not stop after the first page")
+	assert.Equal(t, "101", comments[0]["id"])
+	assert.Equal(t, "102", comments[1]["id"])
+	assert.Equal(t, 2, calls)
+}
+
+func TestGetComments_NoCommentsReturnsEmptyNotError(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"comments": []map[string]any{}, "startAt": 0, "maxResults": 50, "total": 0,
+		})
+	})
+
+	comments, err := client.GetComments("PROJ-42")
+
+	require.NoError(t, err, "an issue with no comments is normal, not an error")
+	assert.Empty(t, comments)
+}

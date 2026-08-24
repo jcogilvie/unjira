@@ -1,13 +1,17 @@
 package pipeline_test
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/events"
@@ -228,4 +232,77 @@ func TestRunCollect_PassesConfigAndCredentialsToCollector(t *testing.T) {
 	gotCred, ok := gotContext.Credentials.For("corp")
 	require.True(t, ok, "credentials must reach the collector or no remote source can authenticate")
 	assert.Equal(t, "t1", gotCred.Token)
+}
+
+func TestRunCollect_JiraCollectorDedupesOnSecondPass(t *testing.T) {
+	// The collector re-emits changelog entries older than its watermark on
+	// every pass by design, relying on (source, external_id) dedup to make that
+	// free. Its own unit tests call Collect directly and never reach
+	// InsertEvent, so this is the only layer where that property is observable.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/myself"):
+			_, _ = w.Write([]byte(`{"accountId":"acct-unjira","displayName":"unjira"}`))
+		case strings.Contains(r.URL.Path, "/search/jql"):
+			_, _ = w.Write([]byte(`{"issues":[{"key":"PROJ-42","fields":{` +
+				`"project":{"key":"PROJ"},"updated":"2026-08-20T16:00:00.000+0000"}}]}`))
+		case strings.HasSuffix(r.URL.Path, "/changelog"):
+			_, _ = w.Write([]byte(`{"values":[{"id":"10001",` +
+				`"created":"2026-08-20T14:00:00.000+0000",` +
+				`"author":{"accountId":"acct-alice","displayName":"Alice"},` +
+				`"items":[{"field":"status","fromString":"To Do","toString":"Done"}]}],` +
+				`"isLast":true,"maxResults":100}`))
+		case strings.HasSuffix(r.URL.Path, "/comment"):
+			_, _ = w.Write([]byte(`{"comments":[],"startAt":0,"maxResults":100,"total":0}`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "unjira.db"))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, s.Close()) }()
+
+	cfg := config.Config{
+		Collectors: map[string]map[string]any{"jira": {"enabled": true}},
+		Jira: []config.JiraConnection{{
+			Name: "corp", Site: srv.URL, ProjectKeys: []string{"PROJ"},
+			Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
+		}},
+	}
+	reg := map[string]func() pipeline.Collector{
+		"jira": func() pipeline.Collector { return collectorjira.New() },
+	}
+	creds := credentials.NewSet(map[string]credentials.Credential{
+		"corp": {Email: "dev@example.com", Token: "token"},
+	})
+
+	first, err := pipeline.RunCollect(cfg, s, reg, nil, creds)
+	require.NoError(t, err)
+	assert.Equal(t, 1, first["jira"], "the status change must be inserted on the first pass")
+
+	second, err := pipeline.RunCollect(cfg, s, reg, nil, creds)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, second["jira"],
+		"(source, external_id) dedup makes re-running a collector safe; a nonzero count means it isn't")
+}
+
+func TestRunCollect_JiraEnabledButUnregisteredReportsSentinel(t *testing.T) {
+	// Guards the wiring itself: if someone enables the jira collector in config
+	// but the registry entry is missing, RunCollect reports -1 rather than
+	// silently collecting nothing. This is what Step 2 below observes.
+	s, err := store.Open(filepath.Join(t.TempDir(), "unjira.db"))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, s.Close()) }()
+
+	cfg := config.Config{Collectors: map[string]map[string]any{"jira": {"enabled": true}}}
+
+	results, err := pipeline.RunCollect(cfg, s, map[string]func() pipeline.Collector{}, nil, credentials.NewSet(nil))
+
+	require.NoError(t, err)
+	assert.Equal(t, -1, results["jira"])
 }
