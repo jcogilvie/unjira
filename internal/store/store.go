@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS narratives (
 CREATE TABLE IF NOT EXISTS narrative_events (
     narrative_id INTEGER NOT NULL REFERENCES narratives (id),
     event_id     INTEGER NOT NULL REFERENCES events (id),
+    -- Sub-second (%f, milliseconds), not %S. The reconciler's delta is
+    -- linked_at > (last action's created_at); at whole-second granularity an
+    -- event linked in the same second as the action is invisible forever,
+    -- because that action's created_at never advances. actions.created_at uses
+    -- this identical format on purpose: both are TEXT and compared lexically,
+    -- and mixing %f with %S inverts the comparison ('.' 0x2E sorts before
+    -- 'Z' 0x5A), so a later event would read as earlier.
+    linked_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (narrative_id, event_id)
 );
 
@@ -119,7 +127,15 @@ CREATE TABLE IF NOT EXISTS actions (
                                       -- proposed | approved | edited | rejected | applied | failed
     decided_at   TEXT,
     executed_at  TEXT,
-    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    -- Written by slice 6's triage/rework loop, nothing today. Added now so
+    -- that slice does not need a second schema change (see the phase-1 spec's
+    -- schema-additions section, where it was specified but never landed).
+    feedback     TEXT,
+    -- Same %f format as narrative_events.linked_at, and for the same reason:
+    -- DeltaEvents compares these two TEXT columns lexically
+    -- (linked_at > created_at), so both must share the identical format
+    -- string or the comparison silently inverts.
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS estimates (
@@ -1193,6 +1209,65 @@ func (s *Store) AllNarrativeEvents(narrativeID int64) ([]events.Event, error) {
 	return out, rows.Err()
 }
 
+// DeltaEvents returns the events linked to narrativeID since the most recent
+// action proposed for it — "what's new since a reviewer last saw this."
+//
+// Bounded by the last action's created_at (not decided_at or executed_at)
+// deliberately: created_at is always set, so a proposal sitting unreviewed in
+// the queue still suppresses re-proposing its delta. decided_at is NULL while
+// unreviewed, which would make every pass re-propose the same thing; and a
+// rejected action never gets an executed_at, so bounding on that would
+// re-propose a rejected action identically forever, giving the reviewer's "no"
+// no weight. See the design spec's comparison table.
+//
+// With no prior action every linked event is returned (COALESCE to ""; all
+// real timestamps sort above the empty string), which is the first-pass case:
+// the whole narrative is the delta.
+func (s *Store) DeltaEvents(narrativeID int64) ([]events.Event, error) {
+	rows, err := s.db.Query(
+		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
+		 FROM narrative_events ne
+		 JOIN events e ON e.id = ne.event_id
+		 WHERE ne.narrative_id = ?
+		   AND ne.linked_at > COALESCE(
+		       (SELECT MAX(created_at) FROM actions WHERE narrative_id = ?), '')
+		 ORDER BY e.occurred_at, e.id`,
+		narrativeID, narrativeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying delta events for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []events.Event
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning delta event row: %w", err)
+		}
+		out = append(out, e)
+	}
+
+	return out, rows.Err()
+}
+
+// NarrativeEventLinkedAt returns the linked_at timestamp for one
+// (narrativeID, eventID) narrative_events row. This is a test-support
+// introspection accessor — same precedent as NarrativeEventCount — so tests
+// outside this package (store_test) can assert on linked_at's format without
+// reaching into *sql.DB directly.
+func (s *Store) NarrativeEventLinkedAt(narrativeID, eventID int64) (string, error) {
+	var linkedAt string
+	if err := s.db.QueryRow(
+		`SELECT linked_at FROM narrative_events WHERE narrative_id = ? AND event_id = ?`,
+		narrativeID, eventID,
+	).Scan(&linkedAt); err != nil {
+		return "", fmt.Errorf("querying linked_at for narrative %d event %d: %w", narrativeID, eventID, err)
+	}
+
+	return linkedAt, nil
+}
+
 // NarrativeEventCount returns how many events are linked to a narrative,
 // ignoring its compaction boundary — unlike NarrativeEventsForContext, which
 // returns only the post-boundary tail. This is a test-support introspection
@@ -1253,6 +1328,197 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// -- actions ---------------------------------------------------------------
+
+// ActionRow is one row of the actions table — a proposed, decided, or
+// executed change to a tracker issue.
+//
+// IssueKey is empty for a `create` action (there is no key until it is
+// applied). DecidedAt/ExecutedAt are *string rather than string because NULL
+// is meaningful: NULL decided_at means "no human has ruled yet", which is
+// distinct from any timestamp. They stay strings rather than time.Time to
+// match how the rest of this package stores timestamps (SQLite TEXT), and
+// because nothing orders by them.
+type ActionRow struct {
+	ID          int64
+	NarrativeID int64
+	Type        string // comment | transition | create | estimate
+	IssueKey    string
+	Payload     string // JSON; shape depends on Type
+	Confidence  float64
+	Rationale   string
+	Status      string // proposed | approved | edited | rejected | applied | failed
+	Feedback    string
+	DecidedAt   *string
+	ExecutedAt  *string
+	CreatedAt   string
+}
+
+// InsertAction writes one proposed action and returns its id. created_at
+// comes from the column DEFAULT so it shares narrative_events.linked_at's
+// format exactly — see DeltaEvents.
+func (s *Store) InsertAction(a ActionRow) (int64, error) {
+	return insertActionImpl(s.db, a)
+}
+
+// InsertAction is the Tx-scoped form, so reconciler.Persist can write a whole
+// pass atomically.
+func (t *Tx) InsertAction(a ActionRow) (int64, error) {
+	return insertActionImpl(t.tx, a)
+}
+
+func insertActionImpl(c dbConn, a ActionRow) (int64, error) {
+	res, err := c.Exec(
+		`INSERT INTO actions
+		   (narrative_id, type, issue_key, payload, confidence, rationale, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.NarrativeID, a.Type, nullable(a.IssueKey), a.Payload,
+		a.Confidence, nullable(a.Rationale), a.Status,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("inserting %s action for narrative %d: %w", a.Type, a.NarrativeID, err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("reading inserted action id: %w", err)
+	}
+
+	return id, nil
+}
+
+// ActionsForNarrative returns every action ever proposed for a narrative,
+// oldest first.
+func (s *Store) ActionsForNarrative(narrativeID int64) ([]ActionRow, error) {
+	rows, err := s.db.Query(actionSelect+` WHERE narrative_id = ? ORDER BY created_at, id`, narrativeID)
+	if err != nil {
+		return nil, fmt.Errorf("querying actions for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanActions(rows)
+}
+
+// ActionsByStatus returns every action in one workflow state, oldest first —
+// the review queue's read path (slice 6's `triage`).
+func (s *Store) ActionsByStatus(status string) ([]ActionRow, error) {
+	rows, err := s.db.Query(actionSelect+` WHERE status = ? ORDER BY created_at, id`, status)
+	if err != nil {
+		return nil, fmt.Errorf("querying actions with status %q: %w", status, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanActions(rows)
+}
+
+// LatestActionForNarrative returns the most recent action for a narrative.
+//
+// "Most recent" is by (created_at, id): created_at alone cannot order two
+// actions written in the same millisecond, and id is monotonic. found is
+// false with a nil error when the narrative has no actions at all — the
+// first-pass case, not an error.
+func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, error) {
+	rows, err := s.db.Query(
+		actionSelect+` WHERE narrative_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+		narrativeID,
+	)
+	if err != nil {
+		return ActionRow{}, false, fmt.Errorf("querying latest action for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	found, err := scanActions(rows)
+	if err != nil {
+		return ActionRow{}, false, err
+	}
+	if len(found) == 0 {
+		return ActionRow{}, false, nil
+	}
+
+	return found[0], true, nil
+}
+
+// UpdateActionStatus moves an action to a new workflow state, stamping
+// decided_at and/or executed_at as that state implies.
+//
+// Both stamps are set with the same strftime format the columns default to, so
+// every timestamp in this table remains directly comparable. Terminal-state
+// semantics: any human ruling sets decided_at; only a write that actually
+// reached the tracker sets executed_at.
+func (s *Store) UpdateActionStatus(id int64, status string) error {
+	const ts = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+
+	query := `UPDATE actions SET status = ?`
+	switch status {
+	case "approved", "edited", "rejected":
+		query += `, decided_at = COALESCE(decided_at, ` + ts + `)`
+	case "applied", "failed":
+		// An applied action was necessarily decided, but decided_at may
+		// already be set from an earlier approval — COALESCE preserves the
+		// original ruling time rather than overwriting it.
+		query += `, decided_at = COALESCE(decided_at, ` + ts + `), executed_at = ` + ts
+	}
+	query += ` WHERE id = ?`
+
+	res, err := s.db.Exec(query, status, id)
+	if err != nil {
+		return fmt.Errorf("updating action %d to status %q: %w", id, status, err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected updating action %d: %w", id, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("updating action %d to status %q: no such action", id, status)
+	}
+
+	return nil
+}
+
+// actionSelect is the column list every ActionRow query shares, so a new
+// column cannot be added to one query and forgotten in another.
+const actionSelect = `SELECT id, narrative_id, type, issue_key, payload, confidence,
+	rationale, status, feedback, decided_at, executed_at, created_at FROM actions`
+
+func scanActions(rows *sql.Rows) ([]ActionRow, error) {
+	var out []ActionRow
+
+	for rows.Next() {
+		var (
+			a                             ActionRow
+			issueKey, rationale, feedback sql.NullString
+			confidence                    sql.NullFloat64
+			decidedAt, executedAt         sql.NullString
+		)
+
+		if err := rows.Scan(
+			&a.ID, &a.NarrativeID, &a.Type, &issueKey, &a.Payload, &confidence,
+			&rationale, &a.Status, &feedback, &decidedAt, &executedAt, &a.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning action row: %w", err)
+		}
+
+		a.IssueKey = issueKey.String
+		a.Rationale = rationale.String
+		a.Feedback = feedback.String
+		a.Confidence = confidence.Float64
+		if decidedAt.Valid {
+			a.DecidedAt = &decidedAt.String
+		}
+		if executedAt.Valid {
+			a.ExecutedAt = &executedAt.String
+		}
+
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating action rows: %w", err)
+	}
+
+	return out, nil
 }
 
 // -- pipeline lock ---------------------------------------------------------
