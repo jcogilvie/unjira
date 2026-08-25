@@ -74,9 +74,10 @@ func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, erro
 	return jira.New(conn.Site, creds.Email, creds.Token)
 }
 
-// taskTracker resolves the configured tracker backend for projectKey. No
-// command calls this yet (no phase-1 commands exist) — it's the seam
-// phase-1's future commands hang off of.
+// taskTracker resolves the configured tracker backend for projectKey.
+// devNarrateCmd is its first caller, resolving a single tracker from the
+// default project for its matching pass — see the call site for the
+// multi-connection limitation that implies.
 func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, error) {
 	switch a.config.TrackerBackend() {
 	case "jira":
@@ -348,6 +349,44 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	}
 
 	fmt.Print(pipeline.RenderNarrateResult(result))
+
+	if c.DryRun {
+		// Matching writes narrative_issues rows and may set
+		// narratives.issue_key, so it has no dry-run mode: skipping is
+		// stated rather than silent, or the operator is left wondering why
+		// nothing matched.
+		fmt.Println("matching skipped (--dry-run)")
+
+		return nil
+	}
+
+	// Matching uses ONE tracker, resolved from the default project. That is a
+	// real limitation on a multi-connection jira setup: a candidate key
+	// belonging to a different JiraConnection will be verified against the
+	// wrong site and reported unresolved. store.NarrativeIssue.Connection
+	// already records which connection each candidate came from, so resolving
+	// a tracker per candidate is a contained future change. The local backend
+	// ignores projectKey entirely, so it is unaffected.
+	project, err := app.projectKey("")
+	if err != nil {
+		return err
+	}
+
+	tracker, err := app.taskTracker(project)
+	if err != nil {
+		return err
+	}
+
+	matchResult, matchErr := pipeline.RunMatch(ctx, app.store, tracker, client, app.config)
+
+	// Render before returning the error: RunMatch isolates failures per
+	// narrative, so the healthy narratives matched and the operator should see
+	// them alongside whatever failed.
+	fmt.Print(pipeline.RenderMatchResult(matchResult))
+
+	if matchErr != nil {
+		return fmt.Errorf("matching narratives to issues: %w", matchErr)
+	}
 
 	return nil
 }

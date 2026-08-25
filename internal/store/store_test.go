@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -715,4 +716,238 @@ func TestNarrativesOverlapping_CarriesCompactionBoundary(t *testing.T) {
 	assert.True(t, base.Equal(*got[0].CompactionBoundary))
 	require.NotNil(t, got[0].CompactionBoundaryEventID)
 	assert.Equal(t, eventID, *got[0].CompactionBoundaryEventID)
+}
+
+// -- narrative_issues -----------------------------------------------------
+
+// insertNarrativeForTest creates a narrative and returns its id.
+func insertNarrativeForTest(t *testing.T, s *store.Store, title string) int64 {
+	t.Helper()
+
+	start := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+	id, err := s.InsertNarrative(start, start.Add(time.Hour), title, "summary text")
+	require.NoError(t, err)
+
+	return id
+}
+
+func TestNarrativesWithoutIssueKey_ExcludesLinkedOnes(t *testing.T) {
+	s := openStore(t)
+
+	unlinked := insertNarrativeForTest(t, s, "unlinked work")
+	linked := insertNarrativeForTest(t, s, "linked work")
+
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.SetNarrativeIssueLink(linked, "PROJ-1", 0.9)
+	}))
+
+	got, err := s.NarrativesWithoutIssueKey(10)
+
+	require.NoError(t, err)
+	ids := make([]int64, 0, len(got))
+	for _, n := range got {
+		ids = append(ids, n.ID)
+	}
+	assert.Equal(t, []int64{unlinked}, ids,
+		"a narrative with a primary must not be re-matched every pass")
+}
+
+func TestNarrativesWithoutIssueKey_RespectsLimit(t *testing.T) {
+	s := openStore(t)
+	for i := range 5 {
+		insertNarrativeForTest(t, s, fmt.Sprintf("narrative %d", i))
+	}
+
+	got, err := s.NarrativesWithoutIssueKey(3)
+
+	require.NoError(t, err)
+	assert.Len(t, got, 3)
+}
+
+func TestSetNarrativeIssueLink_SetsKeyAndConfidence(t *testing.T) {
+	s := openStore(t)
+	id := insertNarrativeForTest(t, s, "work")
+
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.SetNarrativeIssueLink(id, "PROJ-42", 0.83)
+	}))
+
+	row, err := s.GetNarrative(id)
+
+	require.NoError(t, err)
+	assert.Equal(t, "PROJ-42", row.IssueKey)
+	assert.InDelta(t, 0.83, row.Confidence, 1e-9)
+}
+
+func TestAddNarrativeIssues_RoundTrips(t *testing.T) {
+	s := openStore(t)
+	id := insertNarrativeForTest(t, s, "work")
+
+	links := []store.NarrativeIssue{
+		{IssueKey: "PAAS-1", Role: "primary", Provenance: "branch", Confidence: 0.9, Connection: "corp"},
+		{IssueKey: "SUMO-2", Role: "same_work", Provenance: "prose_first", Confidence: 0.7, Connection: "corp"},
+		{IssueKey: "OTHER-3", Role: "mentioned", Provenance: "prose_later", Confidence: 0.2, Connection: "corp"},
+	}
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(id, links)
+	}))
+
+	got, err := s.NarrativeIssues(id)
+
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	byKey := map[string]store.NarrativeIssue{}
+	for _, l := range got {
+		byKey[l.IssueKey] = l
+	}
+	assert.Equal(t, store.Role("primary"), byKey["PAAS-1"].Role)
+	assert.Equal(t, "branch", byKey["PAAS-1"].Provenance)
+	assert.Equal(t, store.Role("same_work"), byKey["SUMO-2"].Role)
+	assert.InDelta(t, 0.7, byKey["SUMO-2"].Confidence, 1e-9)
+	assert.Equal(t, "corp", byKey["SUMO-2"].Connection)
+}
+
+func TestAddNarrativeIssues_IsIdempotent(t *testing.T) {
+	// Matching is re-runnable over a backlog, so a second pass over the same
+	// narrative must not duplicate rows — the property (source, external_id)
+	// gives collectors.
+	s := openStore(t)
+	id := insertNarrativeForTest(t, s, "work")
+	links := []store.NarrativeIssue{
+		{IssueKey: "PAAS-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+	}
+
+	for range 2 {
+		require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+			return tx.AddNarrativeIssues(id, links)
+		}))
+	}
+
+	got, err := s.NarrativeIssues(id)
+
+	require.NoError(t, err)
+	assert.Len(t, got, 1, "re-running matching must not duplicate links")
+}
+
+func TestAddNarrativeIssues_RejectsSecondPrimary(t *testing.T) {
+	// narratives.issue_key denormalizes the primary, so two primaries would
+	// make that column arbitrary. Enforced by a partial unique index, not by
+	// convention — and NOT by INSERT OR IGNORE, which swallows the violation.
+	s := openStore(t)
+	id := insertNarrativeForTest(t, s, "work")
+
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(id, []store.NarrativeIssue{
+			{IssueKey: "PAAS-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+		})
+	}))
+
+	err := s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(id, []store.NarrativeIssue{
+			{IssueKey: "OTHER-9", Role: "primary", Provenance: "prose_first", Confidence: 0.5},
+		})
+	})
+
+	require.Error(t, err, "the database must refuse a second primary for one narrative")
+}
+
+func TestAddNarrativeIssues_AllowsSiblingsAndOtherNarrativesPrimary(t *testing.T) {
+	// The partial index must constrain only role='primary' within one
+	// narrative — not same_work/mentioned siblings, and not other narratives.
+	s := openStore(t)
+	first := insertNarrativeForTest(t, s, "first")
+	second := insertNarrativeForTest(t, s, "second")
+
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(first, []store.NarrativeIssue{
+			{IssueKey: "PAAS-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+			{IssueKey: "SUMO-2", Role: "same_work", Provenance: "prose_first", Confidence: 0.7},
+			{IssueKey: "SUMO-3", Role: "same_work", Provenance: "prose_later", Confidence: 0.6},
+			{IssueKey: "NOPE-4", Role: "mentioned", Provenance: "prose_later", Confidence: 0.1},
+		})
+	}))
+
+	err := s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(second, []store.NarrativeIssue{
+			{IssueKey: "AAA-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+		})
+	})
+
+	require.NoError(t, err, "each narrative gets its own primary")
+}
+
+func TestNarrativesForIssue_FindsEveryNarrativeAcrossRoles(t *testing.T) {
+	// The reverse direction. The reconciler needs it to avoid commenting twice
+	// on a SUMO ticket shared by two narratives.
+	s := openStore(t)
+	first := insertNarrativeForTest(t, s, "first")
+	second := insertNarrativeForTest(t, s, "second")
+
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		if err := tx.AddNarrativeIssues(first, []store.NarrativeIssue{
+			{IssueKey: "SUMO-9", Role: "same_work", Provenance: "prose_first", Confidence: 0.7},
+		}); err != nil {
+			return err
+		}
+
+		return tx.AddNarrativeIssues(second, []store.NarrativeIssue{
+			{IssueKey: "SUMO-9", Role: "primary", Provenance: "branch", Confidence: 0.95},
+		})
+	}))
+
+	got, err := s.NarrativesForIssue("SUMO-9")
+
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	roles := map[int64]store.Role{}
+	for _, r := range got {
+		roles[r.NarrativeID] = r.Role
+	}
+	assert.Equal(t, store.Role("same_work"), roles[first])
+	assert.Equal(t, store.Role("primary"), roles[second])
+}
+
+func TestAllNarrativeEvents_IncludesPreCompactionBoundaryEvents(t *testing.T) {
+	// THE most important test in this task. NarrativeEventsForContext
+	// deliberately excludes events at or before the compaction boundary;
+	// matching must see every event ever linked, or a compacted narrative
+	// loses the git_branch artifact carrying its strongest signal.
+	//
+	// The fixture MUST set a compaction boundary — without one, this test
+	// passes against NarrativeEventsForContext too and proves nothing. That is
+	// what the `context` length assertion below guards.
+	s := openStore(t)
+	id := insertNarrativeForTest(t, s, "compacted work")
+
+	early := makeEvent("early-event")
+	early.OccurredAt = time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+	early.Artifacts["git_branch"] = "feature/PROJ-42"
+	late := makeEvent("late-event")
+	late.OccurredAt = time.Date(2026, 8, 24, 11, 0, 0, 0, time.UTC)
+
+	for _, e := range []events.Event{early, late} {
+		inserted, err := s.InsertEvent(e)
+		require.NoError(t, err)
+		require.True(t, inserted)
+	}
+
+	earlyID, err := s.EventIDByExternalID(early.Source, early.ExternalID)
+	require.NoError(t, err)
+	lateID, err := s.EventIDByExternalID(late.Source, late.ExternalID)
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{earlyID, lateID}))
+
+	require.NoError(t, s.SetCompactionBoundary(id, early.OccurredAt, earlyID, "recap"))
+
+	ctxEvents, err := s.NarrativeEventsForContext(id)
+	require.NoError(t, err)
+	require.Len(t, ctxEvents, 1, "fixture sanity: the boundary must actually hide the early event")
+
+	all, err := s.AllNarrativeEvents(id)
+
+	require.NoError(t, err)
+	require.Len(t, all, 2, "matching must see pre-boundary events")
+	assert.Equal(t, "early-event", all[0].ExternalID)
+	assert.Equal(t, "feature/PROJ-42", all[0].Artifacts["git_branch"],
+		"the branch artifact is the strongest provenance signal and lives on the oldest event")
 }

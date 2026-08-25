@@ -24,6 +24,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/envfile"
 	"github.com/jcogilvie/unjira/internal/events"
@@ -426,4 +427,118 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 			"the watermark. Jira returns 200-with-zero-results for a bad date literal rather than "+
 			"400, so this is what a wrong `updated >= %%q` format in collectQuery looks like — and "+
 			"it is invisible to every offline test.")
+}
+
+// TestLiveMatchingSignalIsAvailable verifies the two things matching depends on
+// that no fixture can establish: that GetIssue resolves a real key through the
+// tasktracker seam, and that Description actually arrives populated.
+//
+// Description is the reason tasktracker.Issue gained the field — the Jira
+// collector deliberately never emits description snapshots as events, so a
+// never-edited ticket's body is available only on this live read path. If Jira
+// returns Atlassian Document Format here rather than a string, normalizeIssue's
+// type assertion leaves it empty and matching loses its strongest signal
+// silently. This test is what makes that visible.
+//
+// Measured against sumologic.atlassian.net: whether the body survives depends
+// entirely on the REST API version. rest/api/2 returns description as a plain
+// string; rest/api/3 returns an ADF object ({type, version, content}), which
+// normalizeIssue's string assertion drops to "". Client.GetIssue uses
+// rest/api/2, so this passes — but the client is already MIXED (every call is
+// v2 except rest/api/3/search/jql), which makes migrating GetIssue to v3 a
+// plausible edit that would silently blind matching.
+//
+// TestLiveGetIssueUsesAStringDescriptionAPI below pins that dependency
+// explicitly, so the breakage announces itself instead of showing up as
+// mysteriously worse matching.
+func TestLiveMatchingSignalIsAvailable(t *testing.T) {
+	client := testClient(t)
+	tracker := jira.NewTracker(client)
+
+	const body = "Live matching probe: this body is the signal matching compares against."
+
+	key, err := client.CreateIssue(
+		testProject(),
+		"[seed] live matching signal probe",
+		"Task",
+		body,
+		[]string{jira.SeedLabel},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+
+	issue, err := tracker.GetIssue(key)
+
+	require.NoError(t, err, "a key we just created must resolve — this is what verification relies on")
+	assert.Equal(t, key, issue.Key)
+	assert.Equal(t, "[seed] live matching signal probe", issue.Summary)
+	assert.Equal(t, body, issue.Description,
+		"Description must survive normalizeIssue; if this fails, Jira returned ADF rather than a "+
+			"string and matching loses its strongest signal")
+	assert.NotEmpty(t, issue.StatusCategory, "status is part of the classification prompt")
+}
+
+// TestLiveGetIssueUsesAStringDescriptionAPI pins matching's dependency on the
+// REST API version, because that dependency is invisible at the call site.
+//
+// Measured on this instance: rest/api/2 returns `description` as a string,
+// rest/api/3 returns an ADF object. normalizeIssue asserts `.(string)` and
+// leaves Description empty on failure — a deliberate degradation, not a bug,
+// since rendering ADF to text is out of scope. But it means a v3 migration
+// would silently blind narrative→issue matching: no error, no failing offline
+// test, just worse attribution. The client is already mixed (v2 everywhere
+// except rest/api/3/search/jql), so that edit is plausible rather than
+// far-fetched.
+//
+// This asserts the shape directly rather than through normalizeIssue, so a
+// failure names the actual cause instead of surfacing as an empty field.
+func TestLiveGetIssueUsesAStringDescriptionAPI(t *testing.T) {
+	client := testClient(t)
+
+	const body = "Plain-string body: this must not arrive as an ADF object."
+
+	key, err := client.CreateIssue(
+		testProject(),
+		"[seed] description api-version probe",
+		"Task",
+		body,
+		[]string{jira.SeedLabel},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+
+	raw, err := client.GetIssue(key, "")
+	require.NoError(t, err)
+
+	fields, ok := raw["fields"].(map[string]any)
+	require.True(t, ok, "issue payload has no fields object")
+
+	description, ok := fields["description"].(string)
+	require.True(t, ok,
+		"description arrived as %T, not a string — GetIssue is on a REST API version that returns "+
+			"Atlassian Document Format, so normalizeIssue drops the body and matching silently "+
+			"loses its strongest signal. Either keep GetIssue on rest/api/2 or teach normalizeIssue "+
+			"to render ADF.",
+		fields["description"])
+	assert.Equal(t, body, description)
+}
+
+// TestLiveUnresolvableKeyIsNotTransport confirms the classification
+// verifyCandidates depends on.
+//
+// A stale branch name or a hallucinated key must DROP the candidate (recorded
+// as unresolved, pass continues), not fail the narrative. That hinges on
+// correlator.IsTransportError reading a real Jira 404 as not-found. The offline
+// tests assert this against a hand-built &jira.Error{Status: 404}; only a live
+// call proves the real client produces that shape.
+func TestLiveUnresolvableKeyIsNotTransport(t *testing.T) {
+	client := testClient(t)
+	tracker := jira.NewTracker(client)
+
+	_, err := tracker.GetIssue(testProject() + "-99999999")
+
+	require.Error(t, err, "a nonexistent key must error rather than returning a zero Issue")
+	assert.False(t, correlator.IsTransportError(err),
+		"a 404 must classify as not-found: misread as transport, a stale branch name would fail "+
+			"its narrative on every pass instead of being reported unresolved")
 }

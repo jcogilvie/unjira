@@ -104,5 +104,6 @@ func toIssue(issue store.LocalIssue) tasktracker.Issue {
 		StatusCategory: tasktracker.StatusCategory(issue.StatusCategory),
 		StatusName:     issue.StatusCategory,
 		Labels:         issue.Labels,
+		Description:    issue.Description,
 	}
 }

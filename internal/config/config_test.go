@@ -297,6 +297,68 @@ func TestLoad_ParsesCorrelatorBlock(t *testing.T) {
 	assert.Equal(t, 20, cfg.Correlator.RecentEventsKept)
 }
 
+func TestMatchConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.MatchConfig
+		wantErr string // substring; "" means no error expected
+	}{
+		{name: "zero max means default", cfg: config.MatchConfig{ConfidenceFloor: 0.7}},
+		{name: "explicit max", cfg: config.MatchConfig{MaxCandidatesPerNarrative: 5, ConfidenceFloor: 0.7}},
+		{name: "floor zero is valid", cfg: config.MatchConfig{ConfidenceFloor: 0}},
+		{name: "floor one is valid", cfg: config.MatchConfig{ConfidenceFloor: 1}},
+		{
+			name:    "negative max",
+			cfg:     config.MatchConfig{MaxCandidatesPerNarrative: -1},
+			wantErr: "max_candidates_per_narrative",
+		},
+		{
+			name:    "floor above one never promotes",
+			cfg:     config.MatchConfig{ConfidenceFloor: 1.5},
+			wantErr: "confidence_floor",
+		},
+		{
+			name:    "negative floor",
+			cfg:     config.MatchConfig{ConfidenceFloor: -0.1},
+			wantErr: "confidence_floor",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr,
+				"the message must name the JSON key so an operator can find it")
+		})
+	}
+}
+
+func TestMatchConfig_CandidateLimitDefaults(t *testing.T) {
+	assert.Equal(t, config.DefaultMaxCandidatesPerNarrative,
+		config.MatchConfig{}.CandidateLimit())
+	assert.Equal(t, 5, config.MatchConfig{MaxCandidatesPerNarrative: 5}.CandidateLimit())
+}
+
+func TestLoad_ParsesMatchBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"match":{"max_candidates_per_narrative":7,"confidence_floor":0.8}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, 7, cfg.Match.MaxCandidatesPerNarrative)
+	assert.InDelta(t, 0.8, cfg.Match.ConfidenceFloor, 1e-9)
+}
+
 func TestDefaultConfig_HasClaudeCodeEnabledByDefault(t *testing.T) {
 	cfg := config.Default()
 

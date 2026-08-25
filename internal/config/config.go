@@ -179,6 +179,61 @@ func (c CorrelatorConfig) Validate() error {
 	return nil
 }
 
+// DefaultMaxCandidatesPerNarrative bounds how many candidate issue keys one
+// narrative's matching pass examines. A limit is required rather than optional
+// because each candidate costs a GetIssue call and a slot in the LLM prompt, so
+// a narrative that mentions thirty tickets would otherwise be unboundedly
+// expensive.
+const DefaultMaxCandidatesPerNarrative = 10
+
+// MatchConfig tunes narrative→issue matching. See
+// docs/superpowers/specs/2026-08-24-narrative-issue-matching-design.md.
+type MatchConfig struct {
+	// MaxCandidatesPerNarrative caps candidates examined per narrative. Zero
+	// means DefaultMaxCandidatesPerNarrative.
+	MaxCandidatesPerNarrative int `json:"max_candidates_per_narrative"`
+	// ConfidenceFloor governs only whether a primary is promoted into the
+	// denormalized narratives.issue_key. Below it, every narrative_issues row
+	// is still written — including the primary — but narratives.issue_key stays
+	// NULL. The floor governs what unjira asserts, not what it records:
+	// dropping the rows would make a low-confidence match indistinguishable
+	// from finding nothing at all.
+	ConfidenceFloor float64 `json:"confidence_floor"`
+}
+
+// CandidateLimit returns the effective per-narrative candidate cap.
+func (c MatchConfig) CandidateLimit() int {
+	if c.MaxCandidatesPerNarrative == 0 {
+		return DefaultMaxCandidatesPerNarrative
+	}
+
+	return c.MaxCandidatesPerNarrative
+}
+
+// Validate rejects configurations that would fail silently at runtime.
+//
+// A ConfidenceFloor above 1 is the important case: confidence is a 0..1 score,
+// so a floor of, say, 1.5 would never promote any primary, and matching would
+// present as broken rather than as misconfigured.
+func (c MatchConfig) Validate() error {
+	if c.MaxCandidatesPerNarrative < 0 {
+		return fmt.Errorf(
+			"match.max_candidates_per_narrative is %d: must be positive, or omitted for the default of %d",
+			c.MaxCandidatesPerNarrative, DefaultMaxCandidatesPerNarrative,
+		)
+	}
+
+	if c.ConfidenceFloor < 0 || c.ConfidenceFloor > 1 {
+		return fmt.Errorf(
+			"match.confidence_floor is %v: must be within [0, 1] — confidence is a 0..1 score, so a "+
+				"floor above 1 would never promote a primary and matching would look broken",
+			c.ConfidenceFloor,
+		)
+	}
+
+	return nil
+}
+
 // Config is unjira's top-level configuration.
 type Config struct {
 	Jira       []JiraConnection          `json:"jira"`
@@ -192,6 +247,7 @@ type Config struct {
 	Tracker            TrackerConfig    `json:"tracker"`
 	LLM                LLMConfig        `json:"llm"`
 	Correlator         CorrelatorConfig `json:"correlator"`
+	Match              MatchConfig      `json:"match"`
 	DBPath             string           `json:"db_path"`
 }
 
