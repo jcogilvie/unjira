@@ -25,11 +25,18 @@ redesign.
 scope: correlator | reconciler | estimator
 confidence: high | provisional
 learned: 2026-07-11
-source: review-queue correction on action #42
+source: "review-queue correction on action #42"
 ---
 
 Commits touching `auth/` belong to the SSO epic (PROJ-88), not new tickets.
 ```
+
+Frontmatter is parsed as YAML, so a value containing ` #` (space then hash — YAML reads
+that as starting a comment) or starting with a quote, `[`, `{`, `&`, or `*` must be
+quoted, as `source` is above. This matters most for `source`: it's provenance for a human
+auditing a rule (it is never rendered into a prompt — see `Render`) and isn't validated
+against anything, so an unquoted value that gets silently truncated at the comment would
+still look plausible and nobody would notice.
 
 `confidence: provisional` rules are loaded and labelled in the rendered prompt, not
 filtered out — the review-queue workflow that produces them needs them visible.

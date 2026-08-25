@@ -3,13 +3,21 @@
 // review queue into diffable, git-remote-shareable prose) and makes them
 // available to LLM prompts.
 //
-// Frontmatter is parsed by hand with bufio/strings rather than a YAML
-// library. go.mod's direct dependencies (kong, go-jira/v2, openai-go/v3,
-// testify, go-str2duration/v2, godotenv, modernc.org/sqlite) include no YAML
-// package, and the frontmatter shape is fixed and tiny — four scalar
-// key: value pairs between --- delimiters. Adding a real YAML dependency
-// for that would be disproportionate; if a future rule file needs nested
-// structure, that is the point to revisit this decision, not before.
+// Frontmatter is parsed with gopkg.in/yaml.v3, not hand-rolled bufio/strings
+// splitting. That dependency costs nothing: testify already pulls
+// gopkg.in/yaml.v3 into the module graph, so promoting it from an indirect
+// to a direct require in go.mod adds zero new modules and zero new go.sum
+// hashes — the earlier reasoning for hand-parsing conflated "not a direct
+// dependency" with "not in the module graph," which is not the same thing.
+// Hand-splitting each line on the first ':' is also not merely redundant
+// with a library, it is wrong on valid YAML: it silently retains the quotes
+// on `scope: "correlator"` or `scope: 'correlator'`, and folds a trailing
+// `# comment` into the value on `scope: correlator  # comment`. Because a
+// bad scope/confidence value fails the whole file's parse (see parseScope,
+// parseConfidence) and Load returns on the first error, one such file would
+// take every other rule out of every prompt — the exact failure mode this
+// package's error-loudly design is meant to avoid, just triggered by the
+// hand parser mangling input that was never actually malformed.
 //
 // This package only reads rules/. Nothing here writes: rule *proposal*
 // generation from review-queue corrections (rules.Distill) is a later
@@ -17,11 +25,12 @@
 package rules
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Scope names the component a rule applies to. A rule's scope determines
@@ -157,12 +166,12 @@ func parseRule(filename, contents string) (rule Rule, ok bool, err error) {
 		return Rule{}, false, err
 	}
 
-	scope, err := parseScope(filename, fields["scope"])
+	scope, err := parseScope(filename, fields.Scope)
 	if err != nil {
 		return Rule{}, false, err
 	}
 
-	confidence, err := parseConfidence(filename, fields["confidence"])
+	confidence, err := parseConfidence(filename, fields.Confidence)
 	if err != nil {
 		return Rule{}, false, err
 	}
@@ -173,38 +182,37 @@ func parseRule(filename, contents string) (rule Rule, ok bool, err error) {
 		Name:       name,
 		Scope:      scope,
 		Confidence: confidence,
-		Learned:    fields["learned"],
-		Source:     fields["source"],
+		Learned:    fields.Learned,
+		Source:     fields.Source,
 		Body:       body,
 	}, true, nil
 }
 
-// parseFrontmatterFields parses a fixed set of "key: value" lines (blank
-// lines ignored) into a map. Any key outside the four the format declares
-// (scope, confidence, learned, source) is accepted and ignored rather than
-// rejected, so a future field can be added to rules/README.md's format
-// without every existing file needing a code change first; the four keys
-// this package actually reads are validated individually by their own
-// callers (parseScope, parseConfidence).
-func parseFrontmatterFields(filename string, lines []string) (map[string]string, error) {
-	fields := make(map[string]string)
+// frontmatterFields is the YAML shape of a rule file's frontmatter block.
+// Learned is deliberately a string, not a time.Time — see Rule.Learned's
+// doc comment for why: yaml.v3 would otherwise parse an unquoted
+// `learned: 2026-07-16` into a time.Time, and this package wants that
+// scalar preserved exactly as written. Unknown keys are accepted and
+// ignored (plain yaml.Unmarshal into a struct already does this; do not add
+// yaml.KnownFields(true)), so a future field can be added to
+// rules/README.md's format without every existing file needing a code
+// change first; the four keys this package actually reads are validated
+// individually by their own callers (parseScope, parseConfidence).
+type frontmatterFields struct {
+	Scope      string `yaml:"scope"`
+	Confidence string `yaml:"confidence"`
+	Learned    string `yaml:"learned"`
+	Source     string `yaml:"source"`
+}
 
-	scanner := bufio.NewScanner(strings.NewReader(strings.Join(lines, "\n")))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
+// parseFrontmatterFields parses the YAML block between a rule file's ---
+// delimiters into a frontmatterFields. A malformed YAML block (e.g.
+// mismatched quotes, bad indentation) is a loud error naming the file.
+func parseFrontmatterFields(filename string, lines []string) (frontmatterFields, error) {
+	var fields frontmatterFields
 
-		key, value, found := strings.Cut(line, ":")
-		if !found {
-			return nil, fmt.Errorf("rules: %s: malformed frontmatter line %q: expected \"key: value\"", filename, line)
-		}
-
-		fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("rules: %s: scanning frontmatter: %w", filename, err)
+	if err := yaml.Unmarshal([]byte(strings.Join(lines, "\n")), &fields); err != nil {
+		return frontmatterFields{}, fmt.Errorf("rules: %s: parsing frontmatter: %w", filename, err)
 	}
 
 	return fields, nil

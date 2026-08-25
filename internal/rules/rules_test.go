@@ -31,7 +31,7 @@ func TestLoad_ParsesWellFormedRule(t *testing.T) {
 scope: correlator
 confidence: high
 learned: 2026-07-11
-source: review-queue correction on action #42
+source: "review-queue correction on action #42"
 ---
 
 Commits touching `+"`auth/`"+` belong to the SSO epic (PROJ-88), not new tickets.
@@ -120,6 +120,102 @@ Body text.
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "typo-confidence")
 	assert.Contains(t, err.Error(), "maybe")
+}
+
+func TestLoad_DoubleQuotedScalarParsesToBareValue(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "quoted-scope", `---
+scope: "correlator"
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Body text.
+`)
+
+	got, err := rules.Load(dir)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, rules.ScopeCorrelator, got[0].Scope, "double-quoted scalar must parse to the bare value, not the literal quotes")
+}
+
+func TestLoad_SingleQuotedScalarParsesToBareValue(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "quoted-scope", `---
+scope: 'correlator'
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Body text.
+`)
+
+	got, err := rules.Load(dir)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, rules.ScopeCorrelator, got[0].Scope, "single-quoted scalar must parse to the bare value, not the literal quotes")
+}
+
+func TestLoad_TrailingInlineCommentIsStripped(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "commented-scope", `---
+scope: correlator  # this is a comment
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Body text.
+`)
+
+	got, err := rules.Load(dir)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, rules.ScopeCorrelator, got[0].Scope, "a trailing inline comment must not become part of the value")
+}
+
+func TestLoad_QuotedHashInSourceIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "hash-source", `---
+scope: correlator
+confidence: high
+learned: 2026-07-16
+source: "review-queue correction on action #42"
+---
+
+Body text.
+`)
+
+	got, err := rules.Load(dir)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "review-queue correction on action #42", got[0].Source, "a quoted source containing a space-hash must round-trip to the literal value, not be truncated at the comment")
+}
+
+func TestLoad_UnquotedDateStaysString(t *testing.T) {
+	dir := t.TempDir()
+	writeRule(t, dir, "dated-rule", `---
+scope: correlator
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Body text.
+`)
+
+	got, err := rules.Load(dir)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.IsType(t, "", got[0].Learned)
+	assert.Equal(t, "2026-07-16", got[0].Learned, "an unquoted YAML date-shaped scalar must still land as the string it was written as")
 }
 
 func TestLoad_MalformedFrontmatterNoClosingDelimiterErrors(t *testing.T) {
