@@ -86,7 +86,14 @@ go-test:
 
 go-lint:
   FROM +go-deps
-  RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+  # Pinned (was @latest): Renovate now owns this version via the customManager
+  # in renovate.json, so CI won't silently drift for months behind a version
+  # nobody remembered to bump. The original reason for floating here --
+  # a stale local pin producing CI-only findings against a newer local
+  # golangci-lint -- no longer applies once something is actually keeping the
+  # pin current; Renovate's weekly schedule bounds the staleness to days, not
+  # months.
+  RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
   RUN golangci-lint run ./...
 
 go-modules-tidy:
