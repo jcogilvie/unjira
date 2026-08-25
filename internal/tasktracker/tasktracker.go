@@ -66,6 +66,23 @@ type TaskTracker interface {
 	// GitHub Issues only has open/closed.
 	SetStatus(key string, target StatusCategory) error
 
+	// AvailableStatusCategories reports which normalized status categories the
+	// issue can legally move to right now, per the live backend.
+	//
+	// Normalized categories rather than backend-native transition identifiers,
+	// for the same reason SetStatus takes a category: Jira's named,
+	// admin-configurable transitions have no counterpart in GitHub Issues'
+	// open/closed model, and callers only need to know whether a target is
+	// reachable.
+	//
+	// This must be a live per-issue read, not a lookup against a mined
+	// workflow.Graph. The graph is statistically observed changelog history, so
+	// HasEdge answers "has this ever been seen" — a proxy for legality, not
+	// ground truth (see internal/workflow's package doc on its three tiers).
+	// Proposing a transition the backend will refuse is the failure this
+	// prevents.
+	AvailableStatusCategories(key string) ([]StatusCategory, error)
+
 	// CreateIssue creates an issue and returns its key.
 	CreateIssue(projectOrRepo, summary, issueType, description string, labels []string) (string, error)
 }

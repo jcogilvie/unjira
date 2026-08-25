@@ -54,6 +54,11 @@ func (f *pipelineFakeTracker) CreateIssue(_, _, _, _ string, _ []string) (string
 	return "", nil
 }
 
+// Matching never proposes transitions, so legality is never consulted.
+func (f *pipelineFakeTracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
+	return nil, nil
+}
+
 var _ tasktracker.TaskTracker = (*pipelineFakeTracker)(nil)
 
 // pipelineFakeLLM is a fake llm.Client returning canned responses in call

@@ -55,6 +55,20 @@ func (t *Tracker) SetStatus(key string, target tasktracker.StatusCategory) error
 	return nil
 }
 
+// AvailableStatusCategories reports every category as reachable.
+//
+// The local backend is a test/offline double with no workflow restrictions —
+// SetStatus accepts any target — so reporting everything reachable is the
+// honest answer, not a stub. A narrower answer would make offline tests
+// disagree with the backend's actual behaviour.
+func (t *Tracker) AvailableStatusCategories(_ string) ([]tasktracker.StatusCategory, error) {
+	return []tasktracker.StatusCategory{
+		tasktracker.StatusTodo,
+		tasktracker.StatusInProgress,
+		tasktracker.StatusDone,
+	}, nil
+}
+
 // GetIssue resolves key to its current normalized state.
 func (t *Tracker) GetIssue(key string) (tasktracker.Issue, error) {
 	issue, err := t.store.GetLocalIssue(key)

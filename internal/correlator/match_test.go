@@ -57,6 +57,11 @@ func (f *fakeTracker) CreateIssue(_, _, _, _ string, _ []string) (string, error)
 	return "", nil
 }
 
+// Matching never proposes transitions, so legality is never consulted.
+func (f *fakeTracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
+	return nil, nil
+}
+
 var _ tasktracker.TaskTracker = (*fakeTracker)(nil)
 
 // matchStore opens a fresh temp-file store for a Match test.
