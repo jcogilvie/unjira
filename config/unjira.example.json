@@ -45,5 +45,8 @@
     "max_candidates_per_narrative": 10,
     "confidence_floor": 0.7
   },
+  "rules": {
+    "dir": "rules"
+  },
   "db_path": "data/unjira.db"
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -43,6 +44,7 @@ type MatchResult struct {
 // knob is needed.
 type matchOptions struct {
 	linkExclusions []*regexp.Regexp
+	rules          []rules.Rule
 }
 
 // MatchOption configures an optional Match behaviour.
@@ -55,6 +57,17 @@ type MatchOption func(*matchOptions)
 func WithLinkExclusions(compiled []*regexp.Regexp) MatchOption {
 	return func(o *matchOptions) {
 		o.linkExclusions = compiled
+	}
+}
+
+// WithRules supplies rules/ entries already filtered to
+// rules.ScopeCorrelator (see rules.ForScope) so Match can append them to its
+// classification system prompt. Like WithLinkExclusions, Match only ever
+// sees what the caller (internal/pipeline) already read from config and
+// resolved — it does not load or filter rules itself.
+func WithRules(learnedRules []rules.Rule) MatchOption {
+	return func(o *matchOptions) {
+		o.rules = learnedRules
 	}
 }
 
@@ -167,7 +180,7 @@ func Match(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := matchOne(ctx, s, tracker, client, n, o.linkExclusions, limit, cfg)
+		result, oneStats, err := matchOne(ctx, s, tracker, client, n, o.linkExclusions, limit, cfg, o.rules)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -191,6 +204,7 @@ func matchOne(
 	linkExclusions []*regexp.Regexp,
 	limit int,
 	cfg config.MatchConfig,
+	learnedRules []rules.Rule,
 ) (MatchResult, Stats, error) {
 	result := MatchResult{NarrativeID: narrative.ID}
 
@@ -222,7 +236,7 @@ func matchOne(
 		return result, Stats{}, nil
 	}
 
-	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, verified)
+	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, verified, learnedRules)
 	if err != nil {
 		return result, stats, fmt.Errorf("classifying candidates for narrative %d: %w", narrative.ID, err)
 	}
@@ -280,6 +294,7 @@ func resolveVerified(
 	client llm.Client,
 	narrative store.NarrativeRow,
 	verified []verifiedCandidate,
+	learnedRules []rules.Rule,
 ) (links []store.NarrativeIssue, primaryKey string, primaryConfidence float64, rationale string, stats Stats, err error) {
 	if len(verified) == 1 {
 		v := verified[0]
@@ -295,7 +310,7 @@ func resolveVerified(
 
 	n := Narrative{ID: narrative.ID, Title: narrative.Title, Summary: narrative.Summary}
 
-	verdicts, callStats, callErr := classifyCandidates(ctx, client, n, verified)
+	verdicts, callStats, callErr := classifyCandidates(ctx, client, n, verified, learnedRules)
 	if callErr != nil {
 		return nil, "", 0, "", callStats, callErr
 	}
@@ -411,7 +426,8 @@ Return ONLY a bare JSON array, no prose, no markdown fences:
 
 // classifyCandidates asks client to assign a role to each of candidates,
 // following clusterSystemPrompt/buildClusterPrompt's style: a fixed system
-// prompt plus a rendered user prompt, parsed by the existing
+// prompt (plus, when learnedRules is non-empty, a rendered rules section —
+// see rules.Render) plus a rendered user prompt, parsed by the existing
 // parseMatchResponse (which strips a markdown fence models add despite the
 // system prompt forbidding it — see stripJSONFence's doc comment).
 func classifyCandidates(
@@ -419,12 +435,18 @@ func classifyCandidates(
 	client llm.Client,
 	n Narrative,
 	candidates []verifiedCandidate,
+	learnedRules []rules.Rule,
 ) ([]matchVerdict, Stats, error) {
 	userPrompt := buildMatchPrompt(n, candidates)
 
+	systemPrompt := classifySystemPrompt
+	if rendered := rules.Render(learnedRules); rendered != "" {
+		systemPrompt += "\n\n" + rendered
+	}
+
 	var stats Stats
 
-	raw, usage, err := client.Complete(ctx, classifySystemPrompt, userPrompt)
+	raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
 		return nil, stats, fmt.Errorf("classifying candidates for narrative %d: %w", n.ID, err)
 	}

@@ -104,8 +104,14 @@ func RunNarrate(
 	}
 	result.ContextNarratives = len(existing)
 
+	correlatorRules, err := loadCorrelatorRules(cfg)
+	if err != nil {
+		return NarrateResult{}, err
+	}
+
 	clustered, clusterStats, err := correlator.Cluster(
-		ctx, candidates, existing, client, window, cfg.LLM.ContextWindowTokens)
+		ctx, candidates, existing, client, window, cfg.LLM.ContextWindowTokens,
+		correlator.WithClusterRules(correlatorRules))
 	result.Stats.Add(clusterStats)
 	if err != nil {
 		return NarrateResult{}, fmt.Errorf("clustering: %w", err)

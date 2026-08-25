@@ -248,7 +248,38 @@ type Config struct {
 	LLM                LLMConfig        `json:"llm"`
 	Correlator         CorrelatorConfig `json:"correlator"`
 	Match              MatchConfig      `json:"match"`
+	Rules              RulesConfig      `json:"rules"`
 	DBPath             string           `json:"db_path"`
+}
+
+// DefaultRulesDir is where RulesDir looks when Rules.Dir is unset — matching
+// how DefaultConfigPath is the default when Load's own path argument is
+// empty: a working-directory-relative default rather than one baked into
+// the binary as an absolute path.
+const DefaultRulesDir = "rules"
+
+// RulesConfig configures where internal/rules.Load reads human-curated
+// markdown rule files from. A separate struct (rather than a bare top-level
+// string field) for the same reason as TrackerConfig/LLMConfig: room to grow
+// (e.g. a later per-scope override) without adding another top-level Config
+// field alongside it.
+type RulesConfig struct {
+	// Dir is the rules directory, relative to the working directory unless
+	// absolute. Empty means DefaultRulesDir.
+	Dir string `json:"dir"`
+}
+
+// RulesDir returns the configured rules directory, defaulting to
+// DefaultRulesDir when unset — the same working-directory-relative default
+// DefaultConfigPath uses, so a fresh clone with no rules.dir configuration
+// still resolves to the repo's seeded rules/ directory when run from the
+// repo root.
+func (c Config) RulesDir() string {
+	if c.Rules.Dir == "" {
+		return DefaultRulesDir
+	}
+
+	return c.Rules.Dir
 }
 
 // JiraConnectionForProject finds the connection whose ProjectKeys contains

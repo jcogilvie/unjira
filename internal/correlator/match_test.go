@@ -19,6 +19,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -203,6 +204,52 @@ func TestMatch_MultipleCandidatesClassifiedByLLM(t *testing.T) {
 
 	require.Contains(t, byKey, "NOPE-3")
 	assert.Equal(t, store.Role("mentioned"), byKey["NOPE-3"].Role)
+}
+
+func TestMatch_RulesReachTheClassificationSystemPrompt(t *testing.T) {
+	s := matchStore(t)
+	seedNarrative(t, s, "Feature + change task", "engineering plus change management",
+		claudeEvent(t, "s1", "feature/PAAS-1", "SUMO-2"))
+
+	tracker := &fakeTracker{issues: map[string]tasktracker.Issue{
+		"PAAS-1": {Key: "PAAS-1", Summary: "Feature work", StatusName: "In Progress"},
+		"SUMO-2": {Key: "SUMO-2", Summary: "Change task", StatusName: "To Do"},
+	}}
+	llmFake := &fakeLLM{responses: []string{
+		`[{"issue_key":"PAAS-1","role":"primary","confidence":0.9,"rationale":"r"},` +
+			`{"issue_key":"SUMO-2","role":"same_work","confidence":0.8,"rationale":"r"}]`,
+	}}
+	learnedRules := []rules.Rule{
+		{Name: "sumo-change-tasks", Scope: rules.ScopeCorrelator, Confidence: rules.ConfidenceHigh, Body: "Sentinel matching rule body."},
+	}
+
+	_, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg(), correlator.WithRules(learnedRules))
+	require.NoError(t, err)
+
+	require.Len(t, llmFake.systemPrompts, 1)
+	assert.Contains(t, llmFake.systemPrompts[0], "Sentinel matching rule body.")
+	assert.Contains(t, llmFake.systemPrompts[0], "sumo-change-tasks")
+}
+
+func TestMatch_NoRulesOptionLeavesClassificationSystemPromptUnchanged(t *testing.T) {
+	s := matchStore(t)
+	seedNarrative(t, s, "Feature + change task", "engineering plus change management",
+		claudeEvent(t, "s1", "feature/PAAS-1", "SUMO-2"))
+
+	tracker := &fakeTracker{issues: map[string]tasktracker.Issue{
+		"PAAS-1": {Key: "PAAS-1", Summary: "Feature work", StatusName: "In Progress"},
+		"SUMO-2": {Key: "SUMO-2", Summary: "Change task", StatusName: "To Do"},
+	}}
+	llmFake := &fakeLLM{responses: []string{
+		`[{"issue_key":"PAAS-1","role":"primary","confidence":0.9,"rationale":"r"},` +
+			`{"issue_key":"SUMO-2","role":"same_work","confidence":0.8,"rationale":"r"}]`,
+	}}
+
+	_, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
+	require.NoError(t, err)
+
+	require.Len(t, llmFake.systemPrompts, 1)
+	assert.Equal(t, correlator.ClassifySystemPromptForTest(), llmFake.systemPrompts[0])
 }
 
 func TestMatch_PromptCarriesSummaryAndDescription(t *testing.T) {

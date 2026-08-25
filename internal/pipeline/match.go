@@ -30,7 +30,8 @@ type MatchRunResult struct {
 // deliberate: Match takes patterns as a MatchOption and does not read
 // config at all, the same split RunCollect uses for the collectors'
 // exclusion patterns. Config parsing and compilation is pipeline's job;
-// correlator only ever sees compiled regexps.
+// correlator only ever sees compiled regexps. Loading rules/ (see
+// loadCorrelatorRules) follows the identical split.
 //
 // On a partial failure, RunMatch returns both the accumulated MatchRunResult
 // and a non-nil error: correlator.Match isolates failures per narrative, so
@@ -52,7 +53,14 @@ func RunMatch(
 		return MatchRunResult{}, fmt.Errorf("compiling link exclusions: %w", err)
 	}
 
-	matched, stats, err := correlator.Match(ctx, s, tracker, client, cfg.Match, correlator.WithLinkExclusions(compiled))
+	correlatorRules, err := loadCorrelatorRules(cfg)
+	if err != nil {
+		return MatchRunResult{}, err
+	}
+
+	matched, stats, err := correlator.Match(
+		ctx, s, tracker, client, cfg.Match,
+		correlator.WithLinkExclusions(compiled), correlator.WithRules(correlatorRules))
 	result := MatchRunResult{Matched: matched, Stats: stats}
 	if err != nil {
 		return result, fmt.Errorf("matching narratives: %w", err)

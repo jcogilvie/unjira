@@ -428,6 +428,30 @@ func TestJiraConnection_MaxIssuesDefaultsAndRejectsNegative(t *testing.T) {
 	}
 }
 
+func TestConfig_RulesDirDefaultsWhenUnset(t *testing.T) {
+	cfg := config.Config{}
+
+	assert.Equal(t, "rules", cfg.RulesDir())
+}
+
+func TestConfig_RulesDirHonorsConfigured(t *testing.T) {
+	cfg := config.Config{Rules: config.RulesConfig{Dir: "/etc/unjira/rules"}}
+
+	assert.Equal(t, "/etc/unjira/rules", cfg.RulesDir())
+}
+
+func TestLoad_ParsesRulesBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"rules": {"dir": "/etc/unjira/rules"}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, "/etc/unjira/rules", cfg.Rules.Dir)
+}
+
 func TestLoad_ParsesJiraQueries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "unjira.config.json")

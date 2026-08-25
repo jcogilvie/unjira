@@ -25,10 +25,18 @@ func ClusterSystemPromptForTest() string {
 }
 
 // BuildClusterPromptForTest renders the prompt pair Cluster would send for
-// these inputs, so a test can budget against the real thing rather than an
-// approximation of it.
+// these inputs (with no rules — budget-fitting tests care about the shape
+// of the base prompt, not any rules text), so a test can budget against the
+// real thing rather than an approximation of it.
 func BuildClusterPromptForTest(evts []Event, existing []Narrative) (systemPrompt, userPrompt string) {
-	return buildClusterPrompt(evts, existing)
+	return buildClusterPrompt(evts, existing, nil)
+}
+
+// ClassifySystemPromptForTest is the fixed system prompt Match's classifier
+// sends. Tests asserting "no rules means the prompt is unchanged" need the
+// real baseline to compare against.
+func ClassifySystemPromptForTest() string {
+	return classifySystemPrompt
 }
 
 // ParseRoleForTest and ParseMatchResponseForTest expose the response parsers to
