@@ -1,0 +1,79 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "dependencyDashboard": true,
+  "timezone": "Etc/UTC",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "packageRules": [
+    {
+      "description": "Group all Go module minor/patch updates into one PR per run; keep majors separate for real review.",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "go dependencies (minor/patch)",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Go module major bumps get their own PR, not grouped, since they may need code changes.",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "go dependencies (major)",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Group all GitHub Actions updates (SHA-pin bumps included) into one PR per run.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "EarthBuild release tracked via the customManager below; keep it grouped with other GitHub Actions churn so it doesn't add a separate PR.",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["EarthBuild/earthbuild"],
+      "groupName": "github actions",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "golangci-lint version pinned in the Earthfile; let it update on its own schedule alongside Go deps.",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["golangci/golangci-lint"],
+      "groupName": "go dependencies (minor/patch)",
+      "schedule": ["before 6am on monday"]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track EARTHBUILD_VERSION, a plain workflow env var that Renovate's github-actions manager cannot see on its own.",
+      "managerFilePatterns": [
+        "^\\.github/workflows/ci\\.yml$",
+        "^\\.github/workflows/release\\.yml$"
+      ],
+      "matchStrings": [
+        "EARTHBUILD_VERSION:\\s*(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "EarthBuild/earthbuild",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track golangci-lint's pinned version in the Earthfile's `go install ...@version` line.",
+      "managerFilePatterns": [
+        "^Earthfile$"
+      ],
+      "matchStrings": [
+        "go install github\\.com/golangci/golangci-lint/v2/cmd/golangci-lint@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "golangci/golangci-lint",
+      "versioningTemplate": "semver"
+    }
+  ]
+}
