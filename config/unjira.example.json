@@ -45,6 +45,10 @@
     "max_candidates_per_narrative": 10,
     "confidence_floor": 0.7
   },
+  "reconciler": {
+    "max_narratives_per_pass": 20,
+    "min_confidence_to_propose": 0.5
+  },
   "rules": {
     "dir": "rules"
   },
