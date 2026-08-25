@@ -154,12 +154,7 @@ linters:
       disable:
         - shadow
     interfacebloat:
-      # tasktracker.TaskTracker legitimately grew to 6: GetIssue, SearchIssues,
-      # AddComment, SetStatus, CreateIssue, and AvailableStatusCategories (the
-      # live transition-legality check the reconciler needs before proposing a
-      # transition). Each earns its place per that package's doc comments;
-      # bumping the ceiling by one rather than suppressing the signal.
-      max: 6
+      max: 5
     nolintlint:
       require-explanation: true
       require-specific: true

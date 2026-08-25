@@ -24,11 +24,15 @@ import (
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
-// fakeTracker satisfies tasktracker.TaskTracker without a network call.
+// fakeTracker satisfies tasktracker.TaskReader without a network call.
 //
 // issues is the set of keys that resolve; anything else returns a not-found
 // error, simulating a hallucinated or stale key. getErr forces a transport
 // failure for one key, to exercise per-narrative isolation.
+//
+// Reader-only on purpose: matching verifies candidates and never mutates a
+// tracker, so a fake that cannot write makes an accidental write a compile
+// error here rather than a surprise against real Jira.
 type fakeTracker struct {
 	issues   map[string]tasktracker.Issue
 	getErr   map[string]error
@@ -51,18 +55,13 @@ func (f *fakeTracker) GetIssue(key string) (tasktracker.Issue, error) {
 }
 
 func (f *fakeTracker) SearchIssues(string, int) ([]tasktracker.Issue, error) { return nil, nil }
-func (f *fakeTracker) AddComment(string, string) error                       { return nil }
-func (f *fakeTracker) SetStatus(string, tasktracker.StatusCategory) error    { return nil }
-func (f *fakeTracker) CreateIssue(_, _, _, _ string, _ []string) (string, error) {
-	return "", nil
-}
 
 // Matching never proposes transitions, so legality is never consulted.
 func (f *fakeTracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
 	return nil, nil
 }
 
-var _ tasktracker.TaskTracker = (*fakeTracker)(nil)
+var _ tasktracker.TaskReader = (*fakeTracker)(nil)
 
 // matchStore opens a fresh temp-file store for a Match test.
 func matchStore(t *testing.T) *store.Store {
