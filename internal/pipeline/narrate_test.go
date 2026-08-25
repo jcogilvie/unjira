@@ -7,6 +7,7 @@ package pipeline_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,13 +26,18 @@ import (
 
 // narrateLLM is a fake llm.Client returning canned responses in call order.
 type narrateLLM struct {
-	responses    []string
-	prompts      []string
-	usagePerCall llm.Usage
+	responses []string
+	prompts   []string
+	// systemPrompts mirrors prompts for the system half, so a test can
+	// assert rules text loaded from config.Config.RulesDir reached the
+	// actual system prompt Cluster sends, not merely that Load succeeded.
+	systemPrompts []string
+	usagePerCall  llm.Usage
 }
 
-func (f *narrateLLM) Complete(_ context.Context, _ string, userPrompt string) (string, llm.Usage, error) {
+func (f *narrateLLM) Complete(_ context.Context, systemPrompt, userPrompt string) (string, llm.Usage, error) {
 	f.prompts = append(f.prompts, userPrompt)
+	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	idx := len(f.prompts) - 1
 	if idx >= len(f.responses) {
 		idx = len(f.responses) - 1
@@ -90,6 +96,57 @@ func TestRunNarrate_PersistsNewNarrative(t *testing.T) {
 	linked, err := s.NarrativeEventCount(got.Narratives[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, 2, linked)
+}
+
+func TestRunNarrate_LoadsRulesAndAppendsThemToClustersSystemPrompt(t *testing.T) {
+	s := narrateStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	seedNarrateEvent(t, s, "e1", "started the work", base)
+
+	rulesDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "sentinel.md"), []byte(`---
+scope: correlator
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Sentinel narrate-time rule body.
+`), 0o600))
+
+	client := &narrateLLM{
+		responses: []string{`[{"kind":"new","title":"Did work","summary":"s","event_indices":[0]}]`},
+	}
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	cfg := narrateConfig()
+	cfg.Rules = config.RulesConfig{Dir: rulesDir}
+
+	_, err := pipeline.RunNarrate(t.Context(), s, client, cfg, window, pipeline.NarrateOptions{})
+
+	require.NoError(t, err)
+	require.NotEmpty(t, client.systemPrompts)
+	assert.Contains(t, client.systemPrompts[0], "Sentinel narrate-time rule body.")
+	assert.Contains(t, client.systemPrompts[0], "sentinel")
+}
+
+func TestRunNarrate_MissingRulesDirIsANoOpNotAnError(t *testing.T) {
+	s := narrateStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	seedNarrateEvent(t, s, "e1", "started the work", base)
+
+	client := &narrateLLM{
+		responses: []string{`[{"kind":"new","title":"Did work","summary":"s","event_indices":[0]}]`},
+	}
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	cfg := narrateConfig()
+	cfg.Rules = config.RulesConfig{Dir: filepath.Join(t.TempDir(), "does-not-exist")}
+
+	got, err := pipeline.RunNarrate(t.Context(), s, client, cfg, window, pipeline.NarrateOptions{})
+
+	require.NoError(t, err)
+	require.Len(t, got.Narratives, 1)
 }
 
 func TestRunNarrate_DryRunPersistsNothingButReportsWhatItWould(t *testing.T) {

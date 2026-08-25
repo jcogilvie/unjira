@@ -25,6 +25,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -129,6 +130,28 @@ func (s *Stats) addUsage(u llm.Usage) {
 	s.CompletionTokens += u.CompletionTokens
 }
 
+// clusterOptions holds Cluster's optional configuration, threaded through
+// ClusterOption so Cluster's positional signature doesn't grow every time a
+// new knob is needed — the same pattern Match uses for matchOptions.
+type clusterOptions struct {
+	rules []rules.Rule
+}
+
+// ClusterOption configures an optional Cluster behaviour.
+type ClusterOption func(*clusterOptions)
+
+// WithClusterRules supplies rules/ entries already filtered to
+// rules.ScopeCorrelator (see rules.ForScope) so Cluster can append them to
+// its system prompt. Cluster does not load or filter rules itself — like
+// Match's WithLinkExclusions, it only ever sees what the caller (internal/
+// pipeline) already read from config and resolved; the correlator package
+// takes its dependencies as parameters and never reads config on its own.
+func WithClusterRules(learnedRules []rules.Rule) ClusterOption {
+	return func(o *clusterOptions) {
+		o.rules = learnedRules
+	}
+}
+
 // Cluster groups evts (filtered to window) plus any Narrative in existing
 // whose window overlaps or is adjacent to window, into narratives — each
 // tagged new or extending an existing row. Pure compute: no store access.
@@ -139,17 +162,23 @@ func Cluster(
 	client llm.Client,
 	window TimeRange,
 	contextWindowTokens int,
+	opts ...ClusterOption,
 ) ([]ClusterResult, Stats, error) {
+	var o clusterOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	filtered := filterEventsInWindow(evts, window)
 	relevant := filterAdjacentOrOverlapping(existing, window)
 
-	systemPrompt, userPrompt := buildClusterPrompt(filtered, relevant)
+	systemPrompt, userPrompt := buildClusterPrompt(filtered, relevant, o.rules)
 
 	var stats Stats
 	estimated := estimateTokens(systemPrompt + userPrompt)
 	stats.EstimatedTokens = estimated
 	if estimated > contextWindowTokens {
-		return clusterWithSplit(ctx, evts, existing, client, window, contextWindowTokens, filtered, stats)
+		return clusterWithSplit(ctx, evts, existing, client, window, contextWindowTokens, filtered, stats, opts...)
 	}
 
 	raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
@@ -224,13 +253,18 @@ func estimateTokens(text string) int {
 	return (len(text) + charsPerTokenEstimate - 1) / charsPerTokenEstimate
 }
 
-// buildClusterPrompt renders the fixed system prompt and a two-section user
-// prompt: the in-window events to cluster (numbered 0..N-1, assignable via
-// event_indices), then the overlapping/adjacent narratives as CONTEXT ONLY
-// (their events carry no index, so the model structurally cannot reassign
-// them). See docs/superpowers/specs/2026-08-12-correlator-hydrated-context-rework.md.
-func buildClusterPrompt(evts []Event, existing []Narrative) (systemPrompt, userPrompt string) {
+// buildClusterPrompt renders the system prompt (the fixed clusterSystemPrompt
+// plus, when learnedRules is non-empty, a rendered rules section — see
+// rules.Render) and a two-section user prompt: the in-window events to
+// cluster (numbered 0..N-1, assignable via event_indices), then the
+// overlapping/adjacent narratives as CONTEXT ONLY (their events carry no
+// index, so the model structurally cannot reassign them). See
+// docs/superpowers/specs/2026-08-12-correlator-hydrated-context-rework.md.
+func buildClusterPrompt(evts []Event, existing []Narrative, learnedRules []rules.Rule) (systemPrompt, userPrompt string) {
 	systemPrompt = clusterSystemPrompt
+	if rendered := rules.Render(learnedRules); rendered != "" {
+		systemPrompt += "\n\n" + rendered
+	}
 
 	var b strings.Builder
 	b.WriteString("Events to cluster:\n")
@@ -366,6 +400,7 @@ func clusterWithSplit(
 	contextWindowTokens int,
 	filtered []Event,
 	stats Stats,
+	opts ...ClusterOption,
 ) ([]ClusterResult, Stats, error) {
 	if len(filtered) <= 1 {
 		return nil, stats, irreducibleUnitError(window, filtered)
@@ -387,13 +422,13 @@ func clusterWithSplit(
 
 	stats.Splits++
 
-	firstResults, firstStats, err := Cluster(ctx, evts, existing, client, firstHalf, contextWindowTokens)
+	firstResults, firstStats, err := Cluster(ctx, evts, existing, client, firstHalf, contextWindowTokens, opts...)
 	stats.Add(firstStats)
 	if err != nil {
 		return nil, stats, err
 	}
 
-	secondResults, secondStats, err := Cluster(ctx, evts, existing, client, secondHalf, contextWindowTokens)
+	secondResults, secondStats, err := Cluster(ctx, evts, existing, client, secondHalf, contextWindowTokens, opts...)
 	stats.Add(secondStats)
 	if err != nil {
 		return nil, stats, err

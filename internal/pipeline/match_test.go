@@ -10,6 +10,7 @@ package pipeline_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -62,10 +63,16 @@ var _ tasktracker.TaskTracker = (*pipelineFakeTracker)(nil)
 type pipelineFakeLLM struct {
 	responses []string
 	prompts   []string
+	// systemPrompts mirrors prompts for the system half, so a test can
+	// assert rules text loaded from config.Config.RulesDir reached the
+	// actual classification system prompt Match sends, not merely that
+	// Load succeeded.
+	systemPrompts []string
 }
 
-func (f *pipelineFakeLLM) Complete(_ context.Context, _, userPrompt string) (string, llm.Usage, error) {
+func (f *pipelineFakeLLM) Complete(_ context.Context, systemPrompt, userPrompt string) (string, llm.Usage, error) {
 	f.prompts = append(f.prompts, userPrompt)
+	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	if len(f.responses) == 0 {
 		return "[]", llm.Usage{}, nil
 	}
@@ -134,6 +141,73 @@ func TestRunMatch_ReturnsRenderableResult(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.Matched, 1)
 	assert.Equal(t, id, got.Matched[0].NarrativeID)
+	assert.Equal(t, "PROJ-42", got.Matched[0].Primary)
+}
+
+func TestRunMatch_LoadsRulesAndAppendsThemToClassificationSystemPrompt(t *testing.T) {
+	s := matchPipelineStore(t)
+
+	e := events.NewEvent("claude_code", "s1",
+		time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC), "session summary")
+	e.Artifacts["git_branch"] = "feature/PAAS-1"
+	e.Artifacts["ticket_keys"] = []any{"SUMO-2"}
+
+	seedMatchNarrative(t, s, "Feature + change task", "engineering plus change management", e)
+
+	tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+		"PAAS-1": {Key: "PAAS-1", Summary: "Feature work", StatusName: "In Progress"},
+		"SUMO-2": {Key: "SUMO-2", Summary: "Change task", StatusName: "To Do"},
+	}}
+	llmFake := &pipelineFakeLLM{responses: []string{
+		`[{"issue_key":"PAAS-1","role":"primary","confidence":0.9,"rationale":"r"},` +
+			`{"issue_key":"SUMO-2","role":"same_work","confidence":0.8,"rationale":"r"}]`,
+	}}
+
+	rulesDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "sentinel.md"), []byte(`---
+scope: correlator
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Sentinel match-time rule body.
+`), 0o600))
+
+	cfg := config.Config{
+		Match: config.MatchConfig{MaxCandidatesPerNarrative: 10, ConfidenceFloor: 0.5},
+		Rules: config.RulesConfig{Dir: rulesDir},
+	}
+
+	_, err := pipeline.RunMatch(t.Context(), s, tracker, llmFake, cfg)
+
+	require.NoError(t, err)
+	require.NotEmpty(t, llmFake.systemPrompts)
+	assert.Contains(t, llmFake.systemPrompts[0], "Sentinel match-time rule body.")
+	assert.Contains(t, llmFake.systemPrompts[0], "sentinel")
+}
+
+func TestRunMatch_MissingRulesDirIsANoOpNotAnError(t *testing.T) {
+	s := matchPipelineStore(t)
+
+	e := events.NewEvent("claude_code", "s1",
+		time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC), "session summary")
+	e.Artifacts["git_branch"] = "feature/PROJ-42"
+	seedMatchNarrative(t, s, "Implement feature", "did the feature work", e)
+
+	tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+		"PROJ-42": {Key: "PROJ-42", Summary: "Feature work", StatusName: "In Progress"},
+	}}
+	llmFake := &pipelineFakeLLM{}
+	cfg := config.Config{
+		Match: config.MatchConfig{MaxCandidatesPerNarrative: 10, ConfidenceFloor: 0.5},
+		Rules: config.RulesConfig{Dir: filepath.Join(t.TempDir(), "does-not-exist")},
+	}
+
+	got, err := pipeline.RunMatch(t.Context(), s, tracker, llmFake, cfg)
+
+	require.NoError(t, err)
+	require.Len(t, got.Matched, 1)
 	assert.Equal(t, "PROJ-42", got.Matched[0].Primary)
 }
 

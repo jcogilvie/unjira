@@ -22,6 +22,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -89,6 +90,46 @@ func TestCluster_EmptyEventsReturnsEmptyResult(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Empty(t, results)
+}
+
+func TestCluster_RulesReachTheSystemPrompt(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "did a thing", base),
+	}
+	llmFake := &fakeLLM{responses: []string{
+		`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+	}}
+	learnedRules := []rules.Rule{
+		{Name: "sentinel-rule", Scope: rules.ScopeCorrelator, Confidence: rules.ConfidenceHigh, Body: "Sentinel rule body text."},
+	}
+
+	_, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+		Start: base, End: base.Add(time.Hour),
+	}, 128000, correlator.WithClusterRules(learnedRules))
+
+	require.NoError(t, err)
+	require.Len(t, llmFake.systemPrompts, 1)
+	assert.Contains(t, llmFake.systemPrompts[0], "Sentinel rule body text.")
+	assert.Contains(t, llmFake.systemPrompts[0], "sentinel-rule")
+}
+
+func TestCluster_NoRulesOptionLeavesSystemPromptUnchanged(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "did a thing", base),
+	}
+	llmFake := &fakeLLM{responses: []string{
+		`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+	}}
+
+	_, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+		Start: base, End: base.Add(time.Hour),
+	}, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, llmFake.systemPrompts, 1)
+	assert.Equal(t, correlator.ClusterSystemPromptForTest(), llmFake.systemPrompts[0])
 }
 
 func mustEvent(t *testing.T, source, externalID, summary string, occurredAt time.Time) correlator.Event {
