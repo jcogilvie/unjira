@@ -13,9 +13,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 )
 
@@ -133,51 +131,65 @@ func JSONArrayPayload(raw string) string {
 // joinConcatenatedObjects turns a run of back-to-back JSON objects into one
 // array, reporting false if the input is anything else.
 //
-// Observed live: asked for an array of match verdicts, the model answered with
-// one object per line and no brackets or commas, and the parse died at "invalid
-// character '{' after top-level value" — losing a whole matching pass whose every
-// individual verdict was well-formed.
+// Two live shapes motivate it, both from prompts demanding an array:
 //
-// Decoded as a stream rather than split on newlines, because nothing guarantees
-// one object per line: a model may pretty-print across several lines, or put two
-// on one. json.Decoder consumes exactly one value per call regardless of
-// whitespace, which is the same reason it is the right tool for real NDJSON.
+//	{"issue_key":"A-1",...}
+//	{"issue_key":"B-2",...}      → "invalid character '{' after top-level value"
 //
-// Requires EVERY value to be a complete object and the input to end cleanly. A
-// trailing truncated object, a stray scalar, or interleaved prose all yield false
-// so the caller reports the model's actual output rather than something this
-// function assembled — the same boundary the single-object path draws.
+//	{"issue_key":"A-1",...},{"issue_key":"B-2",...}
+//	                             → "invalid character ',' after top-level value"
+//
+// Neither bracketing alone nor stream-decoding alone handles both, and the reason
+// is worth recording because both shortcuts look right:
+//
+//   - Bracketing `[` + s + `]` fixes the comma form but NOT the newline form:
+//     JSON requires a comma between array elements, so `[{...}\n{...}]` is
+//     invalid ("Expecting ',' delimiter"). Whitespace is only ignored *around*
+//     separators, not *instead of* them.
+//   - json.Decoder in a loop fixes the newline form but NOT the comma form: it
+//     reads a stream of top-level values and rejects the separators outright
+//     ("invalid character ',' looking for beginning of value").
+//
+// So: split into values with a Decoder, skipping the commas a stream does not
+// expect, then rejoin with the commas an array requires. A reply mixing both
+// separators works as a consequence rather than a special case.
+//
+// Requires EVERY value to be a complete object. A trailing comma, a truncated
+// final object, a stray scalar, or interleaved prose all yield false, so the
+// caller reports the model's real output instead of something assembled here —
+// the same boundary the single-object path draws.
 func joinConcatenatedObjects(s string) (string, bool) {
-	decoder := json.NewDecoder(strings.NewReader(s))
-
 	var objects []string
 
-	for {
-		var raw json.RawMessage
+	// Commas between top-level values are not valid in a JSON stream, so strip
+	// them before decoding and re-add them when rejoining. Only separators are
+	// affected: commas inside an object live within a value the Decoder consumes
+	// whole.
+	remaining := strings.TrimSpace(s)
 
-		err := decoder.Decode(&raw)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
+	for remaining != "" {
+		decoder := json.NewDecoder(strings.NewReader(remaining))
+
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
 			return "", false
 		}
 
-		// Only objects. A scalar or nested array here means the response was
-		// not a list of records, and guessing at intent would manufacture
-		// something that parses while meaning nothing.
-		if trimmed := strings.TrimSpace(string(raw)); strings.HasPrefix(trimmed, "{") {
-			objects = append(objects, trimmed)
-
-			continue
+		trimmed := strings.TrimSpace(string(raw))
+		if !strings.HasPrefix(trimmed, "{") {
+			// Not a record. Guessing at intent here would manufacture something
+			// that parses while meaning nothing.
+			return "", false
 		}
+		objects = append(objects, trimmed)
 
-		return "", false
+		// Advance past the value just consumed, then past any separator.
+		remaining = strings.TrimSpace(remaining[decoder.InputOffset():])
+		remaining = strings.TrimSpace(strings.TrimPrefix(remaining, ","))
 	}
 
-	// One object would already have been handled by the caller's json.Valid
-	// check, so reaching here with fewer than two means there was nothing to
-	// join and the input was malformed in some other way.
+	// A single object is the caller's other path; fewer than two here means
+	// there was nothing to join and the input was malformed some other way.
 	if len(objects) < 2 {
 		return "", false
 	}

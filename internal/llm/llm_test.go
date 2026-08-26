@@ -169,3 +169,41 @@ func TestJSONArrayPayload_DoesNotJoinWhenAnyLineIsMalformed(t *testing.T) {
 			"partially-malformed NDJSON %q must not be silently repaired", raw)
 	}
 }
+
+// TestJSONArrayPayload_JoinsCommaSeparatedObjects is the fourth live shape, and
+// the one that shows why the fix should be general rather than another special
+// case: the model emitted `{...},{...},{...}` — an array with its brackets
+// missing — and json.Decoder rejects the commas ("invalid character ','
+// looking for beginning of value") just as json.Unmarshal rejects the second
+// object without them.
+//
+// Bracketing the whole run covers both this and the NDJSON form, since JSON
+// ignores whitespace between elements: once wrapped, `{}\n{}` and `{},{}` differ
+// only in a separator the array syntax supplies either way.
+func TestJSONArrayPayload_JoinsCommaSeparatedObjects(t *testing.T) {
+	raw := `{"issue_key":"A-1","role":"mentioned"},{"issue_key":"B-2","role":"primary"}`
+
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items),
+		"an array missing only its brackets must parse")
+	require.Len(t, items, 2)
+	assert.Equal(t, "B-2", items[1]["issue_key"])
+}
+
+func TestJSONArrayPayload_JoinsMixedSeparators(t *testing.T) {
+	// Real replies are not consistent: this one uses a comma between the first
+	// pair and a bare newline between the second.
+	raw := "{\"a\":1},\n{\"a\":2}\n{\"a\":3}"
+
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items))
+	assert.Len(t, items, 3)
+}
+
+func TestJSONArrayPayload_DoesNotJoinATrailingComma(t *testing.T) {
+	// A trailing comma means something was cut off mid-response. Bracketing it
+	// would produce `[{"a":1},]`, which fails anyway — but the caller's error
+	// should name the model's output, so leave it alone.
+	var items []map[string]any
+	assert.Error(t, json.Unmarshal([]byte(llm.JSONArrayPayload(`{"a":1},`)), &items))
+}
