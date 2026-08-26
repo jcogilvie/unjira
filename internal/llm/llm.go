@@ -13,6 +13,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -114,4 +115,37 @@ func JSONArrayPayload(raw string) string {
 	}
 
 	return "[" + trimmed + "]"
+}
+
+// CredentialSource yields the bearer credential for one completion.
+//
+// A source rather than a string because a credential can expire mid-run. This
+// environment's LLM gateway issues short-lived OIDC tokens, and a client that
+// captured one at construction failed partway through a pass — after already
+// spending money on earlier stages. See
+// docs/superpowers/specs/2026-08-26-llm-credential-helper-design.md.
+//
+// Implementations must be safe for concurrent use: `watch` will plausibly run
+// completions in parallel, and two callers racing to refresh must not each
+// perform the refresh.
+type CredentialSource interface {
+	Credential(ctx context.Context) (string, error)
+}
+
+// StaticCredential is a CredentialSource that never changes — what a plain
+// UNJIRA_LLM_API_KEY becomes.
+//
+// Exists so the static path is a special case of the general one rather than a
+// parallel branch through the client: there is exactly one way a credential
+// reaches a request, whether or not it can expire.
+type StaticCredential string
+
+// Credential returns the fixed value. Never errors, and ignores ctx — there is
+// nothing to cancel.
+func (s StaticCredential) Credential(context.Context) (string, error) {
+	if s == "" {
+		return "", fmt.Errorf("llm credential is empty")
+	}
+
+	return string(s), nil
 }
