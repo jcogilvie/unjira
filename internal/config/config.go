@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -154,6 +155,52 @@ type LLMConfig struct {
 	// send none. openai.Complete errors loudly if a response is truncated, so
 	// an unset cap degrades to a clear failure rather than silent data loss.
 	MaxOutputTokens int `json:"max_output_tokens"`
+	// APIKeyHelper is a command whose stdout is the LLM credential. When set it
+	// takes precedence over UNJIRA_LLM_API_KEY, and is run again whenever the
+	// credential needs refreshing.
+	//
+	// A path belongs in config even though a credential never does: this is not
+	// itself a secret, any more than BaseURL is. The rule it must not break is
+	// that the *credential* never appears in a config file — and it does not,
+	// only the means of obtaining one. Same shape as Claude Code's own
+	// apiKeyHelper.
+	//
+	// Exists because a static key cannot survive a long pass against a gateway
+	// issuing short-lived tokens: slice 4's verification died at its final stage
+	// on a 401, having already paid for every earlier stage. See
+	// docs/superpowers/specs/2026-08-26-llm-credential-helper-design.md.
+	//
+	// A leading ~ expands to the user's home directory, since that is how such a
+	// path is conventionally written and silently failing on it would be a poor
+	// surprise.
+	APIKeyHelper string `json:"api_key_helper"`
+}
+
+// ResolvedAPIKeyHelper returns APIKeyHelper with a leading ~ expanded to the
+// user's home directory, and "" when no helper is configured.
+//
+// Expansion happens here rather than at the exec site so every caller agrees on
+// what the configured string means. An unexpandable ~ is an error rather than a
+// silent pass-through: `sh` would fail to find a literal "~/..." path and report
+// only "no such file", which sends the operator looking at their helper instead
+// of at their config.
+func (c LLMConfig) ResolvedAPIKeyHelper() (string, error) {
+	if c.APIKeyHelper == "" {
+		return "", nil
+	}
+
+	if !strings.HasPrefix(c.APIKeyHelper, "~/") {
+		return c.APIKeyHelper, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf(
+			"expanding ~ in llm.api_key_helper %q: %w", c.APIKeyHelper, err,
+		)
+	}
+
+	return filepath.Join(home, strings.TrimPrefix(c.APIKeyHelper, "~/")), nil
 }
 
 // Validate reports whether Model and ContextWindowTokens are both set to

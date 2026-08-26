@@ -382,6 +382,53 @@ func TestLoad_ParsesMatchBlock(t *testing.T) {
 	assert.InDelta(t, 0.8, cfg.Match.ConfidenceFloor, 1e-9)
 }
 
+func TestLLMConfig_ResolvedAPIKeyHelper(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	t.Run("empty stays empty", func(t *testing.T) {
+		got, err := config.LLMConfig{}.ResolvedAPIKeyHelper()
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+
+	t.Run("absolute path passes through", func(t *testing.T) {
+		got, err := config.LLMConfig{APIKeyHelper: "/usr/local/bin/get-key"}.ResolvedAPIKeyHelper()
+		require.NoError(t, err)
+		assert.Equal(t, "/usr/local/bin/get-key", got)
+	})
+
+	t.Run("leading tilde expands", func(t *testing.T) {
+		// The conventional way to write such a path; leaving it literal would
+		// make sh report only "no such file" and send the operator hunting
+		// their helper rather than their config.
+		got, err := config.LLMConfig{APIKeyHelper: "~/.local/bin/get-key"}.ResolvedAPIKeyHelper()
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(home, ".local/bin/get-key"), got)
+	})
+
+	t.Run("bare tilde is not expanded", func(t *testing.T) {
+		// Only the "~/" prefix is a home reference. A path merely containing a
+		// tilde ("~backup/bin/x", a username-style form) must be left alone
+		// rather than mangled into something that silently resolves elsewhere.
+		got, err := config.LLMConfig{APIKeyHelper: "~backup/bin/get-key"}.ResolvedAPIKeyHelper()
+		require.NoError(t, err)
+		assert.Equal(t, "~backup/bin/get-key", got)
+	})
+}
+
+func TestLoad_ParsesAPIKeyHelper(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"llm":{"model":"m","context_window_tokens":1,"api_key_helper":"~/bin/k"}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, "~/bin/k", cfg.LLM.APIKeyHelper, "stored verbatim; expansion is a read-time concern")
+}
+
 func TestReconcilerConfig_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
