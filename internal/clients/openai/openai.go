@@ -5,16 +5,18 @@
 // API. See docs/superpowers/specs/2026-08-11-phase1-correlator-design.md
 // for why this shape was chosen over Anthropic's.
 //
-// Every client is constructed with an explicit base URL and API key —
-// never the SDK's own default OPENAI_API_KEY/OPENAI_BASE_URL env-var
-// loading — so unjira's own config is always what's used, matching the
-// "our own explicit config, never reused ambient credentials" precedent
+// Every client is constructed with an explicit base URL and credential
+// source — never the SDK's own default OPENAI_API_KEY/OPENAI_BASE_URL
+// env-var loading — so unjira's own config is always what's used, matching
+// the "our own explicit config, never reused ambient credentials" precedent
 // set by UNJIRA_JIRA_CREDENTIALS.
 package openai
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -25,6 +27,7 @@ import (
 // Client is a facade over openai-go, exposing only the surface unjira needs.
 type Client struct {
 	upstream        openai.Client
+	credential      llm.CredentialSource
 	model           string
 	maxOutputTokens int
 }
@@ -32,8 +35,18 @@ type Client struct {
 // Compile-time proof the facade satisfies the contract the correlator uses.
 var _ llm.Client = (*Client)(nil)
 
-// New constructs a Client pointed at baseURL, authenticating with apiKey,
-// making every completion call against model.
+// New constructs a Client pointed at baseURL, authenticating with whatever
+// credential yields at the moment of each request, making every completion call
+// against model.
+//
+// The credential is resolved per request rather than baked in at construction,
+// via the SDK's middleware hook rather than option.WithAPIKey. That is what lets
+// a short-lived token be refreshed mid-run: this environment's gateway issues
+// OIDC tokens whose lifetime is not reliably longer than one pass, and a client
+// holding one from startup failed partway through — after earlier stages had
+// already spent money. Verified against openai-go v1.12.0 that a middleware
+// setting Authorization REPLACES the header rather than appending a second one,
+// so no stale value can be sent alongside the fresh one.
 //
 // maxOutputTokens caps the response length. Zero sends no cap, letting the
 // backend choose — kept possible because some gateways reject an explicit cap
@@ -42,13 +55,30 @@ var _ llm.Client = (*Client)(nil)
 // advertising max_output_tokens=128000, truncating a clustering response
 // mid-JSON. Setting this explicitly is strongly preferred; see Complete's
 // truncation check for why an unnoticed cap is dangerous.
-func New(baseURL, apiKey, model string, maxOutputTokens int) *Client {
-	upstream := openai.NewClient(
+func New(baseURL string, credential llm.CredentialSource, model string, maxOutputTokens int) *Client {
+	c := &Client{credential: credential, model: model, maxOutputTokens: maxOutputTokens}
+
+	c.upstream = openai.NewClient(
 		option.WithBaseURL(baseURL),
-		option.WithAPIKey(apiKey),
+		// Deliberately no option.WithAPIKey: the header is set per request
+		// below, and a static key here would be dead weight at best and a
+		// stale fallback at worst.
+		option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+			token, err := credential.Credential(r.Context())
+			if err != nil {
+				// Returning the error aborts the request rather than sending
+				// it unauthenticated, which would surface as a confusing 401
+				// instead of the real cause (a helper that failed, timed out,
+				// or needs an interactive login).
+				return nil, fmt.Errorf("resolving llm credential: %w", err)
+			}
+			r.Header.Set("Authorization", "Bearer "+token)
+
+			return next(r)
+		}),
 	)
 
-	return &Client{upstream: upstream, model: model, maxOutputTokens: maxOutputTokens}
+	return c
 }
 
 // Complete sends one non-streaming, single-turn chat completion request and
@@ -75,6 +105,13 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	}
 
 	resp, err := c.upstream.Chat.Completions.New(ctx, params)
+	if err != nil && c.shouldRefreshAndRetry(err) {
+		// The credential died between resolution and use. Discard it and try
+		// once more with a fresh one — see shouldRefreshAndRetry for why this
+		// is exactly one retry, and why usage from the failed attempt is
+		// deliberately dropped rather than folded in.
+		resp, err = c.upstream.Chat.Completions.New(ctx, params)
+	}
 	if err != nil {
 		return "", llm.Usage{}, fmt.Errorf("completing chat prompt: %w", err)
 	}
@@ -112,4 +149,45 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	}
 
 	return resp.Choices[0].Message.Content, usage, nil
+}
+
+// shouldRefreshAndRetry reports whether err is a 401 that a fresh credential
+// might fix, and if so discards the cached one so the retry picks up a new value.
+//
+// This is the reactive half of credential refresh. An opaque (non-JWT) token
+// carries no expiry a CredentialSource can judge for itself, so a 401 from the
+// server is the only evidence it has died — and losing a whole pass to that is
+// expensive, since earlier stages have already paid for their completions.
+//
+// Three deliberate narrowings:
+//
+//   - Only 401. The SDK already retries 408/409/429/5xx itself
+//     (requestconfig.shouldRetry), and 401 is deliberately absent from that list,
+//     so handling it here neither duplicates nor fights the SDK.
+//   - Only when the source can actually change its answer. A StaticCredential
+//     would hand back the identical dead token, so retrying would just spend a
+//     second large request to fail identically. The Invalidator assertion is the
+//     test for "can this change?".
+//   - Exactly once, enforced by the caller doing a single re-issue rather than
+//     looping. A loop against a genuinely-bad credential would hammer the
+//     gateway and present as a hang instead of the misconfiguration it is.
+//
+// Usage from the failed attempt is dropped on purpose: it consumed nothing the
+// caller should be charged for, and a gateway that reports usage alongside a 401
+// would otherwise corrupt the server-side accounting that estimateTokens is
+// validated against (see correlator.Stats.AddUsage).
+func (c *Client) shouldRefreshAndRetry(err error) bool {
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+
+	invalidator, ok := c.credential.(llm.Invalidator)
+	if !ok {
+		return false
+	}
+
+	invalidator.Invalidate()
+
+	return true
 }

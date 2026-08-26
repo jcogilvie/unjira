@@ -111,8 +111,12 @@ func (a *appContext) projectKey(flag string) (string, error) {
 // credential first so a misconfiguration fails before any collector runs or
 // any lease is taken.
 //
-// The key comes from the environment (UNJIRA_LLM_API_KEY), never a config
-// file — the same rule UNJIRA_JIRA_CREDENTIALS follows.
+// The credential itself never comes from a config file — the same rule
+// UNJIRA_JIRA_CREDENTIALS follows. It is either UNJIRA_LLM_API_KEY, or the
+// stdout of llm.api_key_helper, which is a path rather than a secret.
+//
+// Precedence is helper-first: it is the more specific instruction, and it is the
+// only one of the two that can outlive a token expiring mid-pass.
 func (a *appContext) llmClient() (llm.Client, error) {
 	if err := a.config.LLM.Validate(); err != nil {
 		return nil, err
@@ -125,12 +129,40 @@ func (a *appContext) llmClient() (llm.Client, error) {
 	if a.config.LLM.BaseURL == "" {
 		return nil, fmt.Errorf("llm.base_url is required: refusing to fall back to the SDK's default endpoint")
 	}
-	if a.llmAPIKey == "" {
-		return nil, fmt.Errorf("UNJIRA_LLM_API_KEY is not set: the LLM backend needs a credential")
+	credential, err := a.llmCredential()
+	if err != nil {
+		return nil, err
 	}
 
-	return openai.New(a.config.LLM.BaseURL, a.llmAPIKey, a.config.LLM.Model,
-		a.config.LLM.MaxOutputTokens), nil
+	return openai.New(a.config.LLM.BaseURL, credential,
+		a.config.LLM.Model, a.config.LLM.MaxOutputTokens), nil
+}
+
+// llmCredential resolves the configured credential source: the helper if one is
+// configured, else the static environment key.
+//
+// Note what is deliberately NOT done here: the helper is not executed to prove
+// it works. Doing so would double every invocation's cost on the common path,
+// and the helper is run before the first completion anyway — so a broken helper
+// still fails before any real work, just one step later.
+func (a *appContext) llmCredential() (llm.CredentialSource, error) {
+	helper, err := a.config.LLM.ResolvedAPIKeyHelper()
+	if err != nil {
+		return nil, err
+	}
+
+	if helper != "" {
+		return llm.NewHelperCredential(helper), nil
+	}
+
+	if a.llmAPIKey == "" {
+		return nil, fmt.Errorf(
+			"no LLM credential: set UNJIRA_LLM_API_KEY, or llm.api_key_helper in config " +
+				"if the backend issues short-lived tokens",
+		)
+	}
+
+	return llm.StaticCredential(a.llmAPIKey), nil
 }
 
 type collectCmd struct{}

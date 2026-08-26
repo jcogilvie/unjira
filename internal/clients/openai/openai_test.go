@@ -6,7 +6,9 @@
 package openai_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/jcogilvie/unjira/internal/clients/openai"
+	"github.com/jcogilvie/unjira/internal/llm"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) *openai.Client {
@@ -32,7 +35,7 @@ func newTestClientWithMaxTokens(t *testing.T, maxOutputTokens int, handler http.
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	return openai.New(server.URL, "test-key", "gpt-5-2", maxOutputTokens)
+	return openai.New(server.URL, llm.StaticCredential("test-key"), "gpt-5-2", maxOutputTokens)
 }
 
 func TestNew_ReturnsUsableClient(t *testing.T) {
@@ -284,4 +287,250 @@ func TestComplete_OmitsMaxOutputTokensWhenZero(t *testing.T) {
 
 	assert.NotContains(t, body, "max_completion_tokens")
 	assert.NotContains(t, body, "max_tokens")
+}
+
+// rotatingCredential yields a different token on each call, so a test can prove
+// the header is resolved per request rather than captured at construction.
+type rotatingCredential struct {
+	calls int
+}
+
+func (r *rotatingCredential) Credential(context.Context) (string, error) {
+	r.calls++
+
+	return fmt.Sprintf("token-%d", r.calls), nil
+}
+
+// TestComplete_ResolvesTheCredentialPerRequest is the whole point of taking a
+// CredentialSource instead of a string: a short-lived token must be re-read for
+// every call, or a long pass dies partway through when the one captured at
+// startup expires. That is a real observed failure, not a hypothetical.
+func TestComplete_ResolvesTheCredentialPerRequest(t *testing.T) {
+	var seen []string
+	cred := &rotatingCredential{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id": "c", "object": "chat.completion", "model": "gpt-5-2",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, cred, "gpt-5-2", 0)
+
+	for range 2 {
+		_, _, err := client.Complete(t.Context(), "sys", "user")
+		require.NoError(t, err)
+	}
+
+	require.Len(t, seen, 2)
+	assert.Equal(t, []string{"Bearer token-1", "Bearer token-2"}, seen,
+		"each request must carry a freshly-resolved credential")
+}
+
+// TestComplete_SendsExactlyOneAuthorizationHeader guards the specific hazard of
+// setting auth in middleware: if the SDK also set its own, the proxy would see
+// two values and could pick the stale one. Verified against openai-go v1.12.0
+// that Header.Set in middleware replaces rather than appends — asserted here so
+// an SDK upgrade that changes it fails loudly.
+func TestComplete_SendsExactlyOneAuthorizationHeader(t *testing.T) {
+	var values []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values = r.Header.Values("Authorization")
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id": "c", "object": "chat.completion", "model": "gpt-5-2",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, llm.StaticCredential("only-this"), "gpt-5-2", 0)
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+
+	require.Len(t, values, 1, "two Authorization values let a gateway choose the stale one")
+	assert.Equal(t, "Bearer only-this", values[0])
+}
+
+// failingCredential stands in for a helper that could not produce a token.
+type failingCredential struct{}
+
+func (failingCredential) Credential(context.Context) (string, error) {
+	return "", fmt.Errorf("helper exited 1")
+}
+
+// TestComplete_CredentialFailureAbortsWithoutSendingTheRequest: an
+// unauthenticated request would come back 401 and send the operator hunting a
+// credential problem at the proxy, when the real cause was local. So the
+// request is never sent, and the underlying reason survives in the message.
+func TestComplete_CredentialFailureAbortsWithoutSendingTheRequest(t *testing.T) {
+	var reached bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, failingCredential{}, "gpt-5-2", 0)
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "helper exited 1", "the real cause must survive")
+	assert.False(t, reached, "no request may be sent without a credential")
+}
+
+// invalidatingCredential records Invalidate calls and rotates its token, so a
+// test can prove the 401 path both discarded the dead credential and sent a
+// different one on the retry.
+type invalidatingCredential struct {
+	fetches     int
+	invalidated int
+}
+
+func (c *invalidatingCredential) Credential(context.Context) (string, error) {
+	c.fetches++
+
+	return fmt.Sprintf("token-%d", c.fetches), nil
+}
+
+func (c *invalidatingCredential) Invalidate() { c.invalidated++ }
+
+// chatCompletionBody is the minimal successful response shape, with the usage
+// numbers a test wants to assert on.
+func chatCompletionBody(promptTokens, completionTokens int) map[string]any {
+	return map[string]any{
+		"id": "c", "object": "chat.completion", "model": "gpt-5-2",
+		"choices": []map[string]any{{
+			"index":         0,
+			"message":       map[string]any{"role": "assistant", "content": "ok"},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]any{
+			"prompt_tokens": promptTokens, "completion_tokens": completionTokens,
+		},
+	}
+}
+
+// TestComplete_RetriesOnceAfterA401 is the reactive half of credential refresh.
+// An opaque token carries no expiry a CredentialSource can judge, so a 401 is
+// the only evidence it has died — and a pass that has already paid for earlier
+// stages must not be lost to it.
+func TestComplete_RetriesOnceAfterA401(t *testing.T) {
+	var sent []string
+	cred := &invalidatingCredential{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent = append(sent, r.Header.Get("Authorization"))
+		if len(sent) == 1 {
+			writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+				"error": map[string]any{"message": "token expired"},
+			})
+
+			return
+		}
+		writeJSON(t, w, http.StatusOK, chatCompletionBody(10, 5))
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, cred, "gpt-5-2", 0)
+
+	text, usage, err := client.Complete(t.Context(), "sys", "user")
+
+	require.NoError(t, err, "a recoverable 401 must not fail the call")
+	assert.Equal(t, "ok", text)
+	assert.Equal(t, 1, cred.invalidated, "the dead credential must be discarded, not reused")
+	require.Len(t, sent, 2)
+	assert.NotEqual(t, sent[0], sent[1], "the retry must carry a different credential")
+	assert.EqualValues(t, 5, usage.CompletionTokens)
+}
+
+// TestComplete_DoesNotRetryA401Twice pins "exactly once". Looping on a
+// genuinely-bad credential would hammer the gateway and present as a hang rather
+// than the misconfiguration it is.
+func TestComplete_DoesNotRetryA401Twice(t *testing.T) {
+	var attempts int
+	cred := &invalidatingCredential{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+			"error": map[string]any{"message": "nope"},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, cred, "gpt-5-2", 0)
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+
+	require.Error(t, err)
+	assert.Equal(t, 2, attempts, "one original attempt plus exactly one retry — never a third")
+}
+
+// TestComplete_DoesNotDoubleCountUsageAcrossA401Retry: the failed attempt
+// consumed nothing, and folding a phantom usage in would corrupt the server-side
+// accounting that estimateTokens is validated against (see Stats.AddUsage).
+func TestComplete_DoesNotDoubleCountUsageAcrossA401Retry(t *testing.T) {
+	var attempts int
+	cred := &invalidatingCredential{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			// A gateway may report usage even on a 401. It must not be counted.
+			writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+				"error": map[string]any{"message": "expired"},
+				"usage": map[string]any{"prompt_tokens": 999, "completion_tokens": 999},
+			})
+
+			return
+		}
+		writeJSON(t, w, http.StatusOK, chatCompletionBody(10, 5))
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, cred, "gpt-5-2", 0)
+
+	_, usage, err := client.Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 10, usage.PromptTokens, "only the successful attempt's usage counts")
+	assert.EqualValues(t, 5, usage.CompletionTokens)
+}
+
+// TestComplete_DoesNotRetryA401WithoutAnInvalidator: a StaticCredential cannot
+// produce a different token, so retrying would send the identical dead value and
+// waste a request — these prompts run to tens of thousands of tokens.
+func TestComplete_DoesNotRetryA401WithoutAnInvalidator(t *testing.T) {
+	var attempts int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+			"error": map[string]any{"message": "bad key"},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, llm.StaticCredential("static"), "gpt-5-2", 0)
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+
+	require.Error(t, err)
+	assert.Equal(t, 1, attempts,
+		"a credential that cannot change must not be retried with the same value")
 }
