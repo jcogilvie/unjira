@@ -176,6 +176,24 @@ Four break-it drills, on the behaviours where silent failure is plausible:
 Live tier: seed an issue, propose against it, confirm `GetTransitions` gates a transition the
 workflow does not offer. Compiles and skips without credentials.
 
+### Break-it drill results (run 2026-08-25)
+
+All four drills produced a failure, so every guard is covered. Each change was reverted and the suite
+confirmed green afterwards.
+
+| Drill | Guard removed | Test that failed | Failure observed |
+| --- | --- | --- | --- |
+| 1 | `dropSelfAuthored` returns `evts` unchanged | `TestReconcileDropsSelfAuthoredEventsBeforeComputingTheDelta` | FAIL — a Jira comment unjira itself posted re-entered the delta |
+| 2 | `floorConfidence`'s legality gate | `TestDraftFloorsConfidenceForAnIllegalTransition` | `Should be zero, but was 0.95` |
+| 3 | `reconcileOne`'s `len(delta) == 0` early return | `TestReconcileSkipsWhenTheDeltaIsEmpty` | FAIL — `SkippedNoDelta` false and the LLM was called |
+| 4 | `verifyLinks`, building `verified` straight from `actionable` | `TestReconcileDropsAnUnverifiableLinkWithoutFailingTheNarrative` | FAIL — nonexistent `PROJ-404` reached drafting |
+
+Two notes for whoever repeats these. Drill 2 must remove *only* the
+`slices.Contains(v.AvailableStatus, …)` check: replacing the whole function body with
+`return action.Confidence` drops the `[0,1]` clamp too and leaves `slices` unused, so the package
+fails to *compile* — a build error is not evidence about the guard. Drill 4 has the same hazard with
+the `tracker` parameter. A drill that breaks the build proves nothing; it has to break the behaviour.
+
 ## What this slice does NOT do
 
 - **Apply anything.** It writes `status=proposed` and stops. No Jira writes.
