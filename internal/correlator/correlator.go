@@ -316,11 +316,12 @@ type clusterResponseItem struct {
 // kind — is a loud error including the raw response, never a partial or
 // best-effort result.
 //
-// raw is run through llm.StripJSONFence first — see that function's doc
-// comment for why every parser in this package does this.
+// raw is run through llm.JSONArrayPayload first, which strips a markdown fence
+// and wraps a lone object into a one-element array — see that function for why
+// each is treated as a property of the interface, not a prompt bug.
 func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, error) {
 	var items []clusterResponseItem
-	if err := json.Unmarshal([]byte(llm.StripJSONFence(raw)), &items); err != nil {
+	if err := json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items); err != nil {
 		return nil, fmt.Errorf("parsing cluster response %q: %w", raw, err)
 	}
 

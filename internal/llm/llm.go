@@ -12,6 +12,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 )
 
@@ -72,4 +73,45 @@ func StripJSONFence(raw string) string {
 	}
 
 	return strings.TrimSpace(trimmed)
+}
+
+// JSONArrayPayload normalizes a model reply that should be a JSON array,
+// stripping a Markdown fence and wrapping a lone object into a one-element
+// array. Anything else is returned unchanged.
+//
+// Every array-shaped prompt in this repo says "return ONLY a JSON array", and
+// models still answer a single-item batch with a bare object — observed live
+// when a clustering pass had exactly one story left to report:
+//
+//	{"kind":"extends","narrative_id":9,...}
+//
+// which failed with `cannot unmarshal object into Go value of type
+// []clusterResponseItem`. That is the same class as the markdown fences
+// StripJSONFence absorbs: a property of the interface, not a prompt bug. The
+// cost of not tolerating it is losing a narrative the model identified
+// correctly, so the parsers absorb it rather than failing a whole pass over
+// punctuation.
+//
+// Tolerance stops at shape. Malformed JSON is returned untouched so the
+// caller's own json.Unmarshal still fails loudly naming the raw response, and
+// a scalar or null is NOT wrapped — `42` is not a plausible one-element
+// response, and turning it into `[42]` would manufacture something that parses
+// while meaning nothing.
+func JSONArrayPayload(raw string) string {
+	unfenced := StripJSONFence(raw)
+
+	trimmed := strings.TrimSpace(unfenced)
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return unfenced
+	}
+
+	// Confirm it really is one well-formed object before wrapping. Without
+	// this, a truncated `{"kind":"new"` would become `[{"kind":"new"]` — still
+	// an error, but one whose message points at the wrapper rather than at the
+	// model's actual output.
+	if !json.Valid([]byte(trimmed)) {
+		return unfenced
+	}
+
+	return "[" + trimmed + "]"
 }

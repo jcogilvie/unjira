@@ -155,10 +155,13 @@ func floorConfidence(action ProposedAction, v verifiedLink) float64 {
 	return 0
 }
 
-// parseDraftResponse decodes the model's JSON array, tolerating a markdown
-// fence the model may add despite the system prompt forbidding it.
+// parseDraftResponse decodes the model's JSON array, tolerating both a markdown
+// fence and a lone object where an array was requested — see
+// llm.JSONArrayPayload for why each counts as a property of the interface rather
+// than a prompt bug. A narrative with exactly one actionable link is precisely
+// the case that provokes the unwrapped form, and that is the common case here.
 func parseDraftResponse(raw string) ([]draftVerdict, error) {
-	cleaned := llm.StripJSONFence(raw)
+	cleaned := llm.JSONArrayPayload(raw)
 
 	var verdicts []draftVerdict
 	if err := json.Unmarshal([]byte(cleaned), &verdicts); err != nil {
