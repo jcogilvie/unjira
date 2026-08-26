@@ -10,7 +10,11 @@
 // importing a competing provider's package to report its own token counts.
 package llm
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"strings"
+)
 
 // Client is the narrow capability the correlator needs from any LLM backend:
 // one non-streaming, single-turn completion. Deliberately minimal — anything
@@ -32,4 +36,82 @@ type Usage struct {
 	// Model is what the server reported serving, which can differ from the
 	// model requested when a gateway (litellm, OpenRouter) remaps it.
 	Model string
+}
+
+// StripJSONFence removes a Markdown code fence wrapping an LLM's JSON reply,
+// returning the payload unchanged when there is no fence.
+//
+// Both system prompts say "no markdown fences", and models emit them anyway —
+// a live litellm-fronted Claude model returned "```json\n[]\n```" for a
+// prompt that forbade exactly that. Fencing is a property of the interface,
+// not a prompt bug, so the parsers tolerate it rather than failing a pass over
+// formatting. Everything past the fence stays strict: malformed JSON inside
+// one is still a loud error naming the raw response.
+//
+// Lives here, not in internal/correlator, because internal/reconciler also
+// parses fenced JSON responses from the same kind of model and needs the
+// same tolerance — moved rather than duplicated once a second consumer
+// appeared.
+func StripJSONFence(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "```") {
+		return raw
+	}
+
+	// Drop the opening fence and its optional language tag ("```json"), which
+	// runs to the end of that first line.
+	if newline := strings.IndexByte(trimmed, '\n'); newline >= 0 {
+		trimmed = trimmed[newline+1:]
+	} else {
+		// A fence with no newline carries no payload to parse; let the caller
+		// report the original text rather than inventing a valid-looking one.
+		return raw
+	}
+
+	if closing := strings.LastIndex(trimmed, "```"); closing >= 0 {
+		trimmed = trimmed[:closing]
+	}
+
+	return strings.TrimSpace(trimmed)
+}
+
+// JSONArrayPayload normalizes a model reply that should be a JSON array,
+// stripping a Markdown fence and wrapping a lone object into a one-element
+// array. Anything else is returned unchanged.
+//
+// Every array-shaped prompt in this repo says "return ONLY a JSON array", and
+// models still answer a single-item batch with a bare object — observed live
+// when a clustering pass had exactly one story left to report:
+//
+//	{"kind":"extends","narrative_id":9,...}
+//
+// which failed with `cannot unmarshal object into Go value of type
+// []clusterResponseItem`. That is the same class as the markdown fences
+// StripJSONFence absorbs: a property of the interface, not a prompt bug. The
+// cost of not tolerating it is losing a narrative the model identified
+// correctly, so the parsers absorb it rather than failing a whole pass over
+// punctuation.
+//
+// Tolerance stops at shape. Malformed JSON is returned untouched so the
+// caller's own json.Unmarshal still fails loudly naming the raw response, and
+// a scalar or null is NOT wrapped — `42` is not a plausible one-element
+// response, and turning it into `[42]` would manufacture something that parses
+// while meaning nothing.
+func JSONArrayPayload(raw string) string {
+	unfenced := StripJSONFence(raw)
+
+	trimmed := strings.TrimSpace(unfenced)
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return unfenced
+	}
+
+	// Confirm it really is one well-formed object before wrapping. Without
+	// this, a truncated `{"kind":"new"` would become `[{"kind":"new"]` — still
+	// an error, but one whose message points at the wrapper rather than at the
+	// model's actual output.
+	if !json.Valid([]byte(trimmed)) {
+		return unfenced
+	}
+
+	return "[" + trimmed + "]"
 }

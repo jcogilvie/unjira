@@ -218,6 +218,29 @@ func TestLLMConfig_Validate(t *testing.T) {
 			name: "passes with model and context window",
 			cfg:  config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 128000},
 		},
+		{
+			// Zero is "send no cap", not invalid — some gateways reject a cap
+			// above their own ceiling, so unjira must be able to send none.
+			name: "zero max output tokens is valid",
+			cfg: config.LLMConfig{
+				Model: "gpt-5-2", ContextWindowTokens: 128000, MaxOutputTokens: 0,
+			},
+		},
+		{
+			name: "explicit max output tokens is valid",
+			cfg: config.LLMConfig{
+				Model: "gpt-5-2", ContextWindowTokens: 128000, MaxOutputTokens: 32000,
+			},
+		},
+		{
+			// Negative most likely means someone reaching for "unlimited",
+			// which this does not offer.
+			name: "rejects negative max output tokens",
+			cfg: config.LLMConfig{
+				Model: "gpt-5-2", ContextWindowTokens: 128000, MaxOutputTokens: -1,
+			},
+			wantErrText: "max_output_tokens",
+		},
 	}
 
 	for _, tt := range tests {
@@ -357,6 +380,71 @@ func TestLoad_ParsesMatchBlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 7, cfg.Match.MaxCandidatesPerNarrative)
 	assert.InDelta(t, 0.8, cfg.Match.ConfidenceFloor, 1e-9)
+}
+
+func TestReconcilerConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.ReconcilerConfig
+		wantErr string // substring; "" means no error expected
+	}{
+		{name: "zero max means default", cfg: config.ReconcilerConfig{MinConfidenceToPropose: 0.5}},
+		{
+			name: "explicit max",
+			cfg:  config.ReconcilerConfig{MaxNarrativesPerPass: 5, MinConfidenceToPropose: 0.5},
+		},
+		{name: "threshold zero is valid", cfg: config.ReconcilerConfig{MinConfidenceToPropose: 0}},
+		{name: "threshold one is valid", cfg: config.ReconcilerConfig{MinConfidenceToPropose: 1}},
+		{
+			name:    "negative max",
+			cfg:     config.ReconcilerConfig{MaxNarrativesPerPass: -1, MinConfidenceToPropose: 0.5},
+			wantErr: "max_narratives_per_pass",
+		},
+		{
+			name:    "threshold above one suppresses every proposal",
+			cfg:     config.ReconcilerConfig{MaxNarrativesPerPass: 10, MinConfidenceToPropose: 1.5},
+			wantErr: "min_confidence_to_propose",
+		},
+		{
+			name:    "negative threshold",
+			cfg:     config.ReconcilerConfig{MaxNarrativesPerPass: 10, MinConfidenceToPropose: -0.1},
+			wantErr: "min_confidence_to_propose",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr,
+				"the message must name the JSON key so an operator can find it")
+		})
+	}
+}
+
+func TestReconcilerConfig_NarrativeLimitDefaults(t *testing.T) {
+	assert.Equal(t, config.DefaultMaxNarrativesPerPass,
+		config.ReconcilerConfig{}.NarrativeLimit())
+	assert.Equal(t, 5, config.ReconcilerConfig{MaxNarrativesPerPass: 5}.NarrativeLimit())
+}
+
+func TestLoad_ParsesReconcilerBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"reconciler":{"max_narratives_per_pass":7,"min_confidence_to_propose":0.8}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, 7, cfg.Reconciler.MaxNarrativesPerPass)
+	assert.InDelta(t, 0.8, cfg.Reconciler.MinConfidenceToPropose, 1e-9)
 }
 
 func TestDefaultConfig_HasClaudeCodeEnabledByDefault(t *testing.T) {

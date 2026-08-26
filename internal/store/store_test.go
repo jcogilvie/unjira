@@ -907,6 +907,76 @@ func TestNarrativesForIssue_FindsEveryNarrativeAcrossRoles(t *testing.T) {
 	assert.Equal(t, store.Role("primary"), roles[second])
 }
 
+func TestNarrativesWithActionableLinks_ExcludesMentionedOnlyAndUnlinked(t *testing.T) {
+	// The reconciler's backlog selection: only narratives with a
+	// narrative_issues row in an actionable role (primary/same_work here)
+	// are returned. A mentioned-only narrative and a wholly unlinked one
+	// must both be excluded — the former by role, the latter by having no
+	// row at all.
+	s := openStore(t)
+
+	actionable := insertNarrativeForTest(t, s, "actionable work")
+	mentionedOnly := insertNarrativeForTest(t, s, "mentioned only")
+	insertNarrativeForTest(t, s, "unlinked work")
+
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		if err := tx.AddNarrativeIssues(actionable, []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+		}); err != nil {
+			return err
+		}
+
+		return tx.AddNarrativeIssues(mentionedOnly, []store.NarrativeIssue{
+			{IssueKey: "PROJ-2", Role: "mentioned", Provenance: "prose_later", Confidence: 0.2},
+		})
+	}))
+
+	got, err := s.NarrativesWithActionableLinks(10, []store.Role{store.Role("primary"), store.Role("same_work")})
+
+	require.NoError(t, err)
+	ids := make([]int64, 0, len(got))
+	for _, n := range got {
+		ids = append(ids, n.ID)
+	}
+	assert.Equal(t, []int64{actionable}, ids,
+		"a mentioned-only or unlinked narrative must not be selected as reconciler input")
+}
+
+func TestNarrativesWithActionableLinks_RespectsLimit(t *testing.T) {
+	s := openStore(t)
+	for i := range 5 {
+		id := insertNarrativeForTest(t, s, fmt.Sprintf("narrative %d", i))
+		require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+			return tx.AddNarrativeIssues(id, []store.NarrativeIssue{
+				{IssueKey: fmt.Sprintf("PROJ-%d", i), Role: "primary", Provenance: "branch", Confidence: 0.9},
+			})
+		}))
+	}
+
+	got, err := s.NarrativesWithActionableLinks(3, []store.Role{store.Role("primary"), store.Role("same_work")})
+
+	require.NoError(t, err)
+	assert.Len(t, got, 3)
+}
+
+func TestNarrativesWithActionableLinks_EmptyRolesReturnsEmpty(t *testing.T) {
+	// Deliberately not an error: an empty roles slice means "nothing is
+	// actionable", which is a valid (if unusual) caller configuration, not a
+	// malformed query.
+	s := openStore(t)
+	id := insertNarrativeForTest(t, s, "work")
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(id, []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+		})
+	}))
+
+	got, err := s.NarrativesWithActionableLinks(10, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
 func TestAllNarrativeEvents_IncludesPreCompactionBoundaryEvents(t *testing.T) {
 	// THE most important test in this task. NarrativeEventsForContext
 	// deliberately excludes events at or before the compaction boundary;
@@ -950,4 +1020,236 @@ func TestAllNarrativeEvents_IncludesPreCompactionBoundaryEvents(t *testing.T) {
 	assert.Equal(t, "early-event", all[0].ExternalID)
 	assert.Equal(t, "feature/PROJ-42", all[0].Artifacts["git_branch"],
 		"the branch artifact is the strongest provenance signal and lives on the oldest event")
+}
+
+// -- reconciler delta (narrative_events.linked_at, DeltaEvents) -------------
+
+// TestDeltaEventsIsEmptyWhenAnActionAlreadyCoversEveryEvent is the
+// duplicate-suppression guarantee: a second reconcile pass over an unchanged
+// narrative must find nothing to propose.
+func TestDeltaEventsIsEmptyWhenAnActionAlreadyCoversEveryEvent(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	_, err = s.InsertEvent(makeEvent("e1"))
+	require.NoError(t, err)
+	eid, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+
+	// No action yet: the whole narrative is the delta.
+	delta, err := s.DeltaEvents(nid)
+	require.NoError(t, err)
+	require.Len(t, delta, 1, "with no prior action every linked event is new")
+
+	_, err = s.InsertAction(store.ActionRow{
+		NarrativeID: nid,
+		Type:        "comment",
+		IssueKey:    "PROJ-1",
+		Payload:     `{"body":"x"}`,
+		Confidence:  0.9,
+		Status:      "proposed",
+	})
+	require.NoError(t, err)
+
+	delta, err = s.DeltaEvents(nid)
+	require.NoError(t, err)
+	assert.Empty(t, delta,
+		"every event predates the action, so a re-run must propose nothing")
+}
+
+// TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction pins the
+// precision decision. At whole-second granularity this event is invisible
+// forever: the action's created_at never advances, so `linked_at > created_at`
+// stays false on every future pass. Measured on modernc.org/sqlite v1.56.0.
+//
+// The sleep below is deliberate, not a smell: %f gives millisecond precision,
+// and on a fast machine the action insert and the immediately-following event
+// link can land in the same millisecond (measured empirically: roughly 1 in 5
+// runs without the sleep). That's the exact same class of collision the
+// design already accepted at whole-second granularity, just with a much
+// smaller window. A few milliseconds' separation keeps the test deterministic
+// about crossing a millisecond boundary while still landing well within the
+// same wall-clock second, which is what this test needs to demonstrate.
+func TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	_, err = s.InsertEvent(makeEvent("old"))
+	require.NoError(t, err)
+	old, err := s.EventIDByExternalID("claude_code", "old")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(nid, []int64{old}))
+
+	_, err = s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	// Linked a millisecond later but still inside the same wall-clock second,
+	// which is the case under test. See this test's doc comment for why the
+	// separation is needed and why removing it flakes.
+	time.Sleep(5 * time.Millisecond)
+	_, err = s.InsertEvent(makeEvent("fresh"))
+	require.NoError(t, err)
+	fresh, err := s.EventIDByExternalID("claude_code", "fresh")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(nid, []int64{fresh}))
+
+	delta, err := s.DeltaEvents(nid)
+	require.NoError(t, err)
+
+	require.Len(t, delta, 1,
+		"an event linked in the same second as the action must still be in the delta; "+
+			"at whole-second precision it would be lost permanently")
+	assert.Equal(t, "fresh", delta[0].ExternalID)
+}
+
+// TestLinkedAtAndActionCreatedAtUseTheSameFormat guards the lexical-comparison
+// trap: these are TEXT columns, so mixing %S and %f inverts the ordering
+// ("...10.597Z" < "...10Z" because '.' is 0x2E and 'Z' is 0x5A). A later event
+// would compare as earlier and silently drop out of the delta.
+//
+// This file is package store_test (external test package), so it cannot read
+// s.db directly. NarrativeEventLinkedAt is a small test-support introspection
+// accessor added for exactly this — the same precedent as NarrativeEventCount
+// — rather than reaching into the database from outside the package.
+// actions.created_at is already observable via ActionsForNarrative, so no
+// second accessor is needed for that half of the comparison.
+func TestLinkedAtAndActionCreatedAtUseTheSameFormat(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	_, err = s.InsertEvent(makeEvent("e1"))
+	require.NoError(t, err)
+	eid, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	_, err = s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	linkedAt, err := s.NarrativeEventLinkedAt(nid, eid)
+	require.NoError(t, err)
+
+	actions, err := s.ActionsForNarrative(nid)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	createdAt := actions[0].CreatedAt
+
+	assert.Contains(t, linkedAt, ".", "linked_at must carry sub-second precision")
+	assert.Contains(t, createdAt, ".",
+		"actions.created_at must use the SAME sub-second format as linked_at, or the "+
+			"lexical TEXT comparison in DeltaEvents inverts")
+	assert.Len(t, createdAt, len(linkedAt),
+		"identical format strings produce identical lengths")
+}
+
+// -- actions ---------------------------------------------------------------
+
+func TestInsertActionRoundTripsEveryField(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid,
+		Type:        "comment",
+		IssueKey:    "PROJ-1",
+		Payload:     `{"body":"drafted text"}`,
+		Confidence:  0.75,
+		Rationale:   "delta shows the work landed",
+		Status:      "proposed",
+	})
+	require.NoError(t, err)
+	require.NotZero(t, id)
+
+	got, err := s.ActionsForNarrative(nid)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	assert.Equal(t, id, got[0].ID)
+	assert.Equal(t, nid, got[0].NarrativeID)
+	assert.Equal(t, "comment", got[0].Type)
+	assert.Equal(t, "PROJ-1", got[0].IssueKey)
+	assert.JSONEq(t, `{"body":"drafted text"}`, got[0].Payload)
+	assert.InDelta(t, 0.75, got[0].Confidence, 0.0001)
+	assert.Equal(t, "delta shows the work landed", got[0].Rationale)
+	assert.Equal(t, "proposed", got[0].Status)
+	assert.NotEmpty(t, got[0].CreatedAt, "created_at must come back populated")
+	assert.Empty(t, got[0].Feedback, "feedback is unwritten until slice 6")
+}
+
+func TestActionsByStatusFiltersAndLatestActionPicksMostRecent(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	first, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"first"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+	second, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "transition", IssueKey: "PROJ-1",
+		Payload: `{"target":"done"}`, Status: "approved",
+	})
+	require.NoError(t, err)
+
+	proposed, err := s.ActionsByStatus("proposed")
+	require.NoError(t, err)
+	require.Len(t, proposed, 1)
+	assert.Equal(t, first, proposed[0].ID)
+
+	latest, found, err := s.LatestActionForNarrative(nid)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, second, latest.ID,
+		"ties on created_at break by id, so the later insert wins")
+
+	_, found, err = s.LatestActionForNarrative(nid + 999)
+	require.NoError(t, err)
+	assert.False(t, found, "a narrative with no actions reports found=false, not an error")
+}
+
+func TestUpdateActionStatusSetsDecidedAndExecutedTimestamps(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpdateActionStatus(id, "approved"))
+	got, err := s.ActionsForNarrative(nid)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "approved", got[0].Status)
+	require.NotNil(t, got[0].DecidedAt, "a human ruling sets decided_at")
+	assert.Nil(t, got[0].ExecutedAt, "approval is not execution")
+
+	require.NoError(t, s.UpdateActionStatus(id, "applied"))
+	got, err = s.ActionsForNarrative(nid)
+	require.NoError(t, err)
+	assert.Equal(t, "applied", got[0].Status)
+	require.NotNil(t, got[0].ExecutedAt, "applying sets executed_at")
 }

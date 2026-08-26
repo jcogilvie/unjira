@@ -28,9 +28,12 @@ import (
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
-// pipelineFakeTracker satisfies tasktracker.TaskTracker without a network
+// pipelineFakeTracker satisfies tasktracker.TaskReader without a network
 // call. Named distinctly from internal/correlator's file-scoped fakeTracker,
 // which is unexported and not visible from this package.
+//
+// Reader-only on purpose: RunMatch only ever reads, so a fake that cannot
+// write turns an accidental write into a compile error.
 type pipelineFakeTracker struct {
 	issues   map[string]tasktracker.Issue
 	getCalls []string
@@ -48,13 +51,13 @@ func (f *pipelineFakeTracker) GetIssue(key string) (tasktracker.Issue, error) {
 }
 
 func (f *pipelineFakeTracker) SearchIssues(string, int) ([]tasktracker.Issue, error) { return nil, nil }
-func (f *pipelineFakeTracker) AddComment(string, string) error                       { return nil }
-func (f *pipelineFakeTracker) SetStatus(string, tasktracker.StatusCategory) error    { return nil }
-func (f *pipelineFakeTracker) CreateIssue(_, _, _, _ string, _ []string) (string, error) {
-	return "", nil
+
+// Matching never proposes transitions, so legality is never consulted.
+func (f *pipelineFakeTracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
+	return nil, nil
 }
 
-var _ tasktracker.TaskTracker = (*pipelineFakeTracker)(nil)
+var _ tasktracker.TaskReader = (*pipelineFakeTracker)(nil)
 
 // pipelineFakeLLM is a fake llm.Client returning canned responses in call
 // order, falling back to an empty classification once exhausted. Named

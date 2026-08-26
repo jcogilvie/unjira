@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -149,11 +150,12 @@ type rawVerdict struct {
 // error naming a column, not the model's mistake. Catching it here produces
 // a diagnosable message instead.
 //
-// raw is run through stripJSONFence first — see that function's doc comment
-// for why every parser in this package does this.
+// raw is run through llm.JSONArrayPayload first, which strips a markdown fence
+// and wraps a lone object into a one-element array — see that function for why
+// each is treated as a property of the interface, not a prompt bug.
 func parseMatchResponse(raw string) ([]matchVerdict, error) {
 	var items []rawVerdict
-	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &items); err != nil {
+	if err := json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items); err != nil {
 		return nil, fmt.Errorf("parsing match response %q: %w", raw, err)
 	}
 

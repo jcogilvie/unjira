@@ -139,6 +139,21 @@ type LLMConfig struct {
 	Model               string `json:"model"`
 	BaseURL             string `json:"base_url"`
 	ContextWindowTokens int    `json:"context_window_tokens"`
+	// MaxOutputTokens caps each response's length. Zero sends no cap and lets
+	// the gateway impose its own, which is a documented hazard rather than a
+	// neutral default: a litellm-fronted claude-sonnet-5 silently capped output
+	// at 4096 while advertising max_output_tokens=128000, truncating a
+	// clustering reply mid-JSON. Every phase-1 prompt asks for JSON, and a
+	// truncated reply that happens to parse would silently drop narratives,
+	// matches, or proposed actions.
+	//
+	// Not defaulted, for the same reason ContextWindowTokens is not: the right
+	// ceiling is model- and gateway-specific, and a stale built-in table would
+	// fail silently wrong. Left optional rather than required only because some
+	// gateways reject a cap above their own ceiling, so unjira must be able to
+	// send none. openai.Complete errors loudly if a response is truncated, so
+	// an unset cap degrades to a clear failure rather than silent data loss.
+	MaxOutputTokens int `json:"max_output_tokens"`
 }
 
 // Validate reports whether Model and ContextWindowTokens are both set to
@@ -149,6 +164,15 @@ func (c LLMConfig) Validate() error {
 	}
 	if c.ContextWindowTokens <= 0 {
 		return fmt.Errorf("llm.context_window_tokens must be a positive number of tokens")
+	}
+	// Negative is rejected while zero is allowed: zero means "send no cap"
+	// (see MaxOutputTokens), but a negative value is always a mistake, most
+	// likely someone reaching for "unlimited" — which this does not offer.
+	if c.MaxOutputTokens < 0 {
+		return fmt.Errorf(
+			"llm.max_output_tokens is %d: must be positive, or omitted to send no cap",
+			c.MaxOutputTokens,
+		)
 	}
 
 	return nil
@@ -234,6 +258,60 @@ func (c MatchConfig) Validate() error {
 	return nil
 }
 
+// DefaultMaxNarrativesPerPass bounds how many narratives one reconcile pass
+// examines. A limit is required rather than optional: each narrative costs at
+// least one GetIssue per link plus one LLM drafting call, so an unbounded pass
+// is unbounded spend.
+const DefaultMaxNarrativesPerPass = 20
+
+// ReconcilerConfig tunes proposal drafting. See
+// docs/superpowers/specs/2026-08-25-reconciler-design.md.
+type ReconcilerConfig struct {
+	// MaxNarrativesPerPass caps narratives examined per pass. Zero means
+	// DefaultMaxNarrativesPerPass. Reaching the cap is logged, never silent —
+	// a silent cap presents as a clean pass that quietly ignored work.
+	MaxNarrativesPerPass int `json:"max_narratives_per_pass"`
+	// MinConfidenceToPropose governs what unjira *asserts*, not what it
+	// *records*: below it the action is still written, carrying its low score.
+	// Slice 6's triage must be able to see weak proposals in order to judge
+	// them, and a dropped proposal is indistinguishable from "nothing to do."
+	// Same reasoning as MatchConfig.ConfidenceFloor.
+	MinConfidenceToPropose float64 `json:"min_confidence_to_propose"`
+}
+
+// NarrativeLimit returns the effective per-pass narrative cap.
+func (c ReconcilerConfig) NarrativeLimit() int {
+	if c.MaxNarrativesPerPass == 0 {
+		return DefaultMaxNarrativesPerPass
+	}
+
+	return c.MaxNarrativesPerPass
+}
+
+// Validate rejects configurations that would fail silently at runtime.
+//
+// A MinConfidenceToPropose above 1 is the important case: confidence is a 0..1
+// score, so every proposal would land below the threshold and the reconciler
+// would look broken rather than misconfigured.
+func (c ReconcilerConfig) Validate() error {
+	if c.MaxNarrativesPerPass < 0 {
+		return fmt.Errorf(
+			"reconciler.max_narratives_per_pass is %d: must be positive, or omitted for the default of %d",
+			c.MaxNarrativesPerPass, DefaultMaxNarrativesPerPass,
+		)
+	}
+
+	if c.MinConfidenceToPropose < 0 || c.MinConfidenceToPropose > 1 {
+		return fmt.Errorf(
+			"reconciler.min_confidence_to_propose is %v: must be within [0, 1] — confidence is a "+
+				"0..1 score, so a threshold above 1 would suppress every proposal",
+			c.MinConfidenceToPropose,
+		)
+	}
+
+	return nil
+}
+
 // Config is unjira's top-level configuration.
 type Config struct {
 	Jira       []JiraConnection          `json:"jira"`
@@ -248,6 +326,7 @@ type Config struct {
 	LLM                LLMConfig        `json:"llm"`
 	Correlator         CorrelatorConfig `json:"correlator"`
 	Match              MatchConfig      `json:"match"`
+	Reconciler         ReconcilerConfig `json:"reconciler"`
 	Rules              RulesConfig      `json:"rules"`
 	DBPath             string           `json:"db_path"`
 }

@@ -138,6 +138,19 @@ func TestLocalGetIssue_CarriesDescription(t *testing.T) {
 		"store.LocalIssue.Description already exists; it was only dropped at the tasktracker boundary")
 }
 
+func TestTracker_AvailableStatusCategories_ReportsEveryCategory(t *testing.T) {
+	tracker := openTracker(t)
+
+	got, err := tracker.AvailableStatusCategories("anything")
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []tasktracker.StatusCategory{
+		tasktracker.StatusTodo,
+		tasktracker.StatusInProgress,
+		tasktracker.StatusDone,
+	}, got, "the local backend imposes no workflow, and SetStatus accepts any target")
+}
+
 func TestTracker_WorkflowGraph_ReturnsStaticThreeCategoryGraph(t *testing.T) {
 	tr := openTracker(t)
 

@@ -156,7 +156,7 @@ func IsTransportError(err error) bool {
 func Match(
 	ctx context.Context,
 	s *store.Store,
-	tracker tasktracker.TaskTracker,
+	tracker tasktracker.TaskReader,
 	client llm.Client,
 	cfg config.MatchConfig,
 	opts ...MatchOption,
@@ -198,7 +198,7 @@ func Match(
 func matchOne(
 	ctx context.Context,
 	s *store.Store,
-	tracker tasktracker.TaskTracker,
+	tracker tasktracker.TaskReader,
 	client llm.Client,
 	narrative store.NarrativeRow,
 	linkExclusions []*regexp.Regexp,
@@ -261,7 +261,7 @@ func matchOne(
 // the next pass retries it rather than recording a wrong conclusion drawn
 // from an unreachable tracker.
 func verifyCandidates(
-	tracker tasktracker.TaskTracker,
+	tracker tasktracker.TaskReader,
 	narrativeID int64,
 	candidates []Candidate,
 ) (verified []verifiedCandidate, unresolved []string, err error) {
@@ -450,7 +450,7 @@ func classifyCandidates(
 	if err != nil {
 		return nil, stats, fmt.Errorf("classifying candidates for narrative %d: %w", n.ID, err)
 	}
-	stats.addUsage(usage)
+	stats.AddUsage(usage)
 
 	verdicts, err := parseMatchResponse(raw)
 	if err != nil {

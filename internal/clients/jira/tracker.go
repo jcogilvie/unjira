@@ -166,6 +166,40 @@ func (t *Tracker) SetStatus(key string, target tasktracker.StatusCategory) error
 	return fmt.Errorf("no available transition for jira issue %s lands in status category %q", key, target)
 }
 
+// AvailableStatusCategories maps the issue's currently-legal transitions to
+// normalized categories, deduplicated (several named transitions routinely
+// land in the same category).
+func (t *Tracker) AvailableStatusCategories(key string) ([]tasktracker.StatusCategory, error) {
+	transitions, err := t.client.GetTransitions(key)
+	if err != nil {
+		return nil, fmt.Errorf("fetching transitions for jira issue %s: %w", key, err)
+	}
+
+	seen := make(map[tasktracker.StatusCategory]bool, len(transitions))
+	var out []tasktracker.StatusCategory
+
+	for _, transition := range transitions {
+		to, ok := transition["to"].(map[string]any)
+		if !ok {
+			continue
+		}
+		category, ok := to["statusCategory"].(map[string]any)
+		if !ok {
+			continue
+		}
+		categoryKey, _ := category["key"].(string)
+
+		normalized := normalizedStatusCategory(categoryKey)
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+
+	return out, nil
+}
+
 // CreateIssue creates an issue and returns its key.
 func (t *Tracker) CreateIssue(projectOrRepo, summary, issueType, description string, labels []string) (string, error) {
 	key, err := t.client.CreateIssue(projectOrRepo, summary, issueType, description, labels)

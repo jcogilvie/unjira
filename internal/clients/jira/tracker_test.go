@@ -188,6 +188,62 @@ func TestTracker_SetStatus_NoMatchingTransitionReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "P-1")
 }
 
+func TestTracker_AvailableStatusCategories_NormalizesLiveTransitions(t *testing.T) {
+	// Two legal transitions: one landing in an in-progress status, one in done.
+	// "new" is deliberately absent — the point of this method is that the
+	// reconciler learns Todo is NOT reachable from here.
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"transitions": []map[string]any{
+				{"id": "11", "to": map[string]any{
+					"name":           "In Progress",
+					"statusCategory": map[string]any{"key": "indeterminate"},
+				}},
+				{"id": "31", "to": map[string]any{
+					"name":           "Done",
+					"statusCategory": map[string]any{"key": "done"},
+				}},
+			},
+		})
+	})
+	tr := jira.NewTracker(client)
+
+	got, err := tr.AvailableStatusCategories("PROJ-1")
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t,
+		[]tasktracker.StatusCategory{tasktracker.StatusInProgress, tasktracker.StatusDone},
+		got)
+	assert.NotContains(t, got, tasktracker.StatusTodo,
+		"no transition lands in a 'new' status, so Todo must not be reported reachable")
+}
+
+func TestTracker_AvailableStatusCategories_DeduplicatesSameCategory(t *testing.T) {
+	// Several named Jira transitions routinely land in the same category
+	// (e.g. "Resolve" and "Close" both landing in "done"). This must not
+	// produce duplicate entries.
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"transitions": []map[string]any{
+				{"id": "41", "to": map[string]any{
+					"name":           "Resolve",
+					"statusCategory": map[string]any{"key": "done"},
+				}},
+				{"id": "51", "to": map[string]any{
+					"name":           "Close",
+					"statusCategory": map[string]any{"key": "done"},
+				}},
+			},
+		})
+	})
+	tr := jira.NewTracker(client)
+
+	got, err := tr.AvailableStatusCategories("PROJ-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, []tasktracker.StatusCategory{tasktracker.StatusDone}, got)
+}
+
 func TestTracker_WorkflowGraph_DelegatesToMineProject(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

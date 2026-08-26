@@ -40,7 +40,7 @@ type MatchRunResult struct {
 func RunMatch(
 	ctx context.Context,
 	s *store.Store,
-	tracker tasktracker.TaskTracker,
+	tracker tasktracker.TaskReader,
 	client llm.Client,
 	cfg config.Config,
 ) (MatchRunResult, error) {
