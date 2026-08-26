@@ -14,6 +14,7 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -104,6 +105,13 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	}
 
 	resp, err := c.upstream.Chat.Completions.New(ctx, params)
+	if err != nil && c.shouldRefreshAndRetry(err) {
+		// The credential died between resolution and use. Discard it and try
+		// once more with a fresh one — see shouldRefreshAndRetry for why this
+		// is exactly one retry, and why usage from the failed attempt is
+		// deliberately dropped rather than folded in.
+		resp, err = c.upstream.Chat.Completions.New(ctx, params)
+	}
 	if err != nil {
 		return "", llm.Usage{}, fmt.Errorf("completing chat prompt: %w", err)
 	}
@@ -141,4 +149,45 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 	}
 
 	return resp.Choices[0].Message.Content, usage, nil
+}
+
+// shouldRefreshAndRetry reports whether err is a 401 that a fresh credential
+// might fix, and if so discards the cached one so the retry picks up a new value.
+//
+// This is the reactive half of credential refresh. An opaque (non-JWT) token
+// carries no expiry a CredentialSource can judge for itself, so a 401 from the
+// server is the only evidence it has died — and losing a whole pass to that is
+// expensive, since earlier stages have already paid for their completions.
+//
+// Three deliberate narrowings:
+//
+//   - Only 401. The SDK already retries 408/409/429/5xx itself
+//     (requestconfig.shouldRetry), and 401 is deliberately absent from that list,
+//     so handling it here neither duplicates nor fights the SDK.
+//   - Only when the source can actually change its answer. A StaticCredential
+//     would hand back the identical dead token, so retrying would just spend a
+//     second large request to fail identically. The Invalidator assertion is the
+//     test for "can this change?".
+//   - Exactly once, enforced by the caller doing a single re-issue rather than
+//     looping. A loop against a genuinely-bad credential would hammer the
+//     gateway and present as a hang instead of the misconfiguration it is.
+//
+// Usage from the failed attempt is dropped on purpose: it consumed nothing the
+// caller should be charged for, and a gateway that reports usage alongside a 401
+// would otherwise corrupt the server-side accounting that estimateTokens is
+// validated against (see correlator.Stats.AddUsage).
+func (c *Client) shouldRefreshAndRetry(err error) bool {
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+
+	invalidator, ok := c.credential.(llm.Invalidator)
+	if !ok {
+		return false
+	}
+
+	invalidator.Invalidate()
+
+	return true
 }

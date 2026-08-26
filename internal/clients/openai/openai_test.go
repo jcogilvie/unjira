@@ -392,3 +392,145 @@ func TestComplete_CredentialFailureAbortsWithoutSendingTheRequest(t *testing.T) 
 	assert.Contains(t, err.Error(), "helper exited 1", "the real cause must survive")
 	assert.False(t, reached, "no request may be sent without a credential")
 }
+
+// invalidatingCredential records Invalidate calls and rotates its token, so a
+// test can prove the 401 path both discarded the dead credential and sent a
+// different one on the retry.
+type invalidatingCredential struct {
+	fetches     int
+	invalidated int
+}
+
+func (c *invalidatingCredential) Credential(context.Context) (string, error) {
+	c.fetches++
+
+	return fmt.Sprintf("token-%d", c.fetches), nil
+}
+
+func (c *invalidatingCredential) Invalidate() { c.invalidated++ }
+
+// chatCompletionBody is the minimal successful response shape, with the usage
+// numbers a test wants to assert on.
+func chatCompletionBody(promptTokens, completionTokens int) map[string]any {
+	return map[string]any{
+		"id": "c", "object": "chat.completion", "model": "gpt-5-2",
+		"choices": []map[string]any{{
+			"index":         0,
+			"message":       map[string]any{"role": "assistant", "content": "ok"},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]any{
+			"prompt_tokens": promptTokens, "completion_tokens": completionTokens,
+		},
+	}
+}
+
+// TestComplete_RetriesOnceAfterA401 is the reactive half of credential refresh.
+// An opaque token carries no expiry a CredentialSource can judge, so a 401 is
+// the only evidence it has died — and a pass that has already paid for earlier
+// stages must not be lost to it.
+func TestComplete_RetriesOnceAfterA401(t *testing.T) {
+	var sent []string
+	cred := &invalidatingCredential{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent = append(sent, r.Header.Get("Authorization"))
+		if len(sent) == 1 {
+			writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+				"error": map[string]any{"message": "token expired"},
+			})
+
+			return
+		}
+		writeJSON(t, w, http.StatusOK, chatCompletionBody(10, 5))
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, cred, "gpt-5-2", 0)
+
+	text, usage, err := client.Complete(t.Context(), "sys", "user")
+
+	require.NoError(t, err, "a recoverable 401 must not fail the call")
+	assert.Equal(t, "ok", text)
+	assert.Equal(t, 1, cred.invalidated, "the dead credential must be discarded, not reused")
+	require.Len(t, sent, 2)
+	assert.NotEqual(t, sent[0], sent[1], "the retry must carry a different credential")
+	assert.EqualValues(t, 5, usage.CompletionTokens)
+}
+
+// TestComplete_DoesNotRetryA401Twice pins "exactly once". Looping on a
+// genuinely-bad credential would hammer the gateway and present as a hang rather
+// than the misconfiguration it is.
+func TestComplete_DoesNotRetryA401Twice(t *testing.T) {
+	var attempts int
+	cred := &invalidatingCredential{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+			"error": map[string]any{"message": "nope"},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, cred, "gpt-5-2", 0)
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+
+	require.Error(t, err)
+	assert.Equal(t, 2, attempts, "one original attempt plus exactly one retry — never a third")
+}
+
+// TestComplete_DoesNotDoubleCountUsageAcrossA401Retry: the failed attempt
+// consumed nothing, and folding a phantom usage in would corrupt the server-side
+// accounting that estimateTokens is validated against (see Stats.AddUsage).
+func TestComplete_DoesNotDoubleCountUsageAcrossA401Retry(t *testing.T) {
+	var attempts int
+	cred := &invalidatingCredential{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			// A gateway may report usage even on a 401. It must not be counted.
+			writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+				"error": map[string]any{"message": "expired"},
+				"usage": map[string]any{"prompt_tokens": 999, "completion_tokens": 999},
+			})
+
+			return
+		}
+		writeJSON(t, w, http.StatusOK, chatCompletionBody(10, 5))
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, cred, "gpt-5-2", 0)
+
+	_, usage, err := client.Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 10, usage.PromptTokens, "only the successful attempt's usage counts")
+	assert.EqualValues(t, 5, usage.CompletionTokens)
+}
+
+// TestComplete_DoesNotRetryA401WithoutAnInvalidator: a StaticCredential cannot
+// produce a different token, so retrying would send the identical dead value and
+// waste a request — these prompts run to tens of thousands of tokens.
+func TestComplete_DoesNotRetryA401WithoutAnInvalidator(t *testing.T) {
+	var attempts int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		writeJSON(t, w, http.StatusUnauthorized, map[string]any{
+			"error": map[string]any{"message": "bad key"},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client := openai.New(server.URL, llm.StaticCredential("static"), "gpt-5-2", 0)
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+
+	require.Error(t, err)
+	assert.Equal(t, 1, attempts,
+		"a credential that cannot change must not be retried with the same value")
+}

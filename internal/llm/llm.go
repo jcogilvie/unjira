@@ -149,3 +149,19 @@ func (s StaticCredential) Credential(context.Context) (string, error) {
 
 	return string(s), nil
 }
+
+// Invalidator is the optional capability of a CredentialSource that caches: it
+// discards whatever it holds so the next Credential call fetches afresh.
+//
+// Optional rather than part of CredentialSource because StaticCredential has
+// nothing to invalidate, and forcing it to implement a no-op would make callers
+// believe an invalidation had an effect. Consumers type-assert for it — the same
+// pattern workflow.GraphProvider uses, and for the same reason: not every
+// implementation should be made to have an opinion.
+//
+// Its caller is a 401-handling path. An opaque (non-JWT) token has no expiry a
+// source can judge for itself, so a 401 from the server is the only evidence
+// that the cached credential is dead.
+type Invalidator interface {
+	Invalidate()
+}
