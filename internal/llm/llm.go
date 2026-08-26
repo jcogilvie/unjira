@@ -13,7 +13,9 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -76,9 +78,14 @@ func StripJSONFence(raw string) string {
 	return strings.TrimSpace(trimmed)
 }
 
-// JSONArrayPayload normalizes a model reply that should be a JSON array,
-// stripping a Markdown fence and wrapping a lone object into a one-element
-// array. Anything else is returned unchanged.
+// JSONArrayPayload normalizes a model reply that should be a JSON array: it
+// strips a Markdown fence, wraps a lone object into a one-element array, and
+// joins a run of concatenated objects (NDJSON) into one. Anything else is
+// returned unchanged.
+//
+// Three tolerances, each added only after a live model produced that shape for a
+// prompt that forbade it. They compose, because nothing stops one reply doing all
+// three.
 //
 // Every array-shaped prompt in this repo says "return ONLY a JSON array", and
 // models still answer a single-item batch with a bare object — observed live
@@ -111,10 +118,71 @@ func JSONArrayPayload(raw string) string {
 	// an error, but one whose message points at the wrapper rather than at the
 	// model's actual output.
 	if !json.Valid([]byte(trimmed)) {
+		// Not a single object — but it may be several concatenated, the NDJSON
+		// shape a model produces when it reasons a line at a time.
+		if joined, ok := joinConcatenatedObjects(trimmed); ok {
+			return joined
+		}
+
 		return unfenced
 	}
 
 	return "[" + trimmed + "]"
+}
+
+// joinConcatenatedObjects turns a run of back-to-back JSON objects into one
+// array, reporting false if the input is anything else.
+//
+// Observed live: asked for an array of match verdicts, the model answered with
+// one object per line and no brackets or commas, and the parse died at "invalid
+// character '{' after top-level value" — losing a whole matching pass whose every
+// individual verdict was well-formed.
+//
+// Decoded as a stream rather than split on newlines, because nothing guarantees
+// one object per line: a model may pretty-print across several lines, or put two
+// on one. json.Decoder consumes exactly one value per call regardless of
+// whitespace, which is the same reason it is the right tool for real NDJSON.
+//
+// Requires EVERY value to be a complete object and the input to end cleanly. A
+// trailing truncated object, a stray scalar, or interleaved prose all yield false
+// so the caller reports the model's actual output rather than something this
+// function assembled — the same boundary the single-object path draws.
+func joinConcatenatedObjects(s string) (string, bool) {
+	decoder := json.NewDecoder(strings.NewReader(s))
+
+	var objects []string
+
+	for {
+		var raw json.RawMessage
+
+		err := decoder.Decode(&raw)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", false
+		}
+
+		// Only objects. A scalar or nested array here means the response was
+		// not a list of records, and guessing at intent would manufacture
+		// something that parses while meaning nothing.
+		if trimmed := strings.TrimSpace(string(raw)); strings.HasPrefix(trimmed, "{") {
+			objects = append(objects, trimmed)
+
+			continue
+		}
+
+		return "", false
+	}
+
+	// One object would already have been handled by the caller's json.Valid
+	// check, so reaching here with fewer than two means there was nothing to
+	// join and the input was malformed in some other way.
+	if len(objects) < 2 {
+		return "", false
+	}
+
+	return "[" + strings.Join(objects, ",") + "]", true
 }
 
 // CredentialSource yields the bearer credential for one completion.

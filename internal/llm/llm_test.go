@@ -123,3 +123,49 @@ func TestJSONArrayPayload_NullYieldsNoItems(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(llm.JSONArrayPayload(`null`)), &items))
 	assert.Empty(t, items, "null must read as nothing to report, never as one phantom item")
 }
+
+// TestJSONArrayPayload_JoinsNewlineDelimitedObjects is the third live instance of
+// the same class: asked for a JSON array of match verdicts, the model returned
+// NDJSON — one object per line, no brackets, no commas — and json.Unmarshal
+// stopped at "invalid character '{' after top-level value".
+//
+// Concatenated JSON values are a real thing models emit (it is what a streaming
+// or line-oriented mental model produces), so this is interface reality like
+// fences and lone objects, not a prompt bug. Losing a whole matching pass to
+// missing punctuation is the wrong trade when every verdict is individually
+// well-formed.
+func TestJSONArrayPayload_JoinsNewlineDelimitedObjects(t *testing.T) {
+	raw := `{"issue_key":"A-1","role":"mentioned"}
+{"issue_key":"B-2","role":"primary"}
+{"issue_key":"C-3","role":"mentioned"}`
+
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items),
+		"newline-delimited objects must read as an array")
+	require.Len(t, items, 3)
+	assert.Equal(t, "B-2", items[1]["issue_key"], "order must be preserved")
+}
+
+func TestJSONArrayPayload_JoinsNDJSONInsideAFence(t *testing.T) {
+	// All three tolerances composed. Nothing stops a model doing every one.
+	raw := "```json\n{\"a\":1}\n{\"a\":2}\n```"
+
+	var items []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items))
+	assert.Len(t, items, 2)
+}
+
+func TestJSONArrayPayload_DoesNotJoinWhenAnyLineIsMalformed(t *testing.T) {
+	// Tolerance still stops at shape. If any line is not a complete object the
+	// whole thing is left alone, so the caller's error names the model's real
+	// output rather than something this function assembled.
+	for _, raw := range []string{
+		"{\"a\":1}\n{\"a\":2",   // last object truncated
+		"{\"a\":1}\nnot json\n", // prose line
+		"{\"a\":1}\n42\n",       // scalar line
+	} {
+		var items []map[string]any
+		assert.Error(t, json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items),
+			"partially-malformed NDJSON %q must not be silently repaired", raw)
+	}
+}
