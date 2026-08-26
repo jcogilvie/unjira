@@ -3,8 +3,46 @@
 `llm.api_key_helper`: let unjira obtain its LLM credential by *running a command* rather than reading
 a string once at startup, so a short-lived token can be refreshed mid-run.
 
-Status: design, not yet implemented. Prompted by two real failures during slice 4's end-to-end
-verification (2026-08-26).
+## Status: landed 2026-08-26
+
+`llm.CredentialSource` + `StaticCredential`, per-request resolution in
+`internal/clients/openai` via SDK middleware, `llm.HelperCredential`, the single-401 retry, and
+`llm.api_key_helper` config. `earthly +reviewable` green.
+
+**Verified end to end against the real gateway**: `UNJIRA_LLM_API_KEY` removed from `.env` entirely,
+`api_key_helper` pointed at `~/.local/bin/get-litellm-key`, and a full `dev narrate` pass completed —
+16 narratives, 24 proposed actions, every LLM call authenticated by the helper. A second pass reported
+"no new events since the last proposal" for unchanged narratives and drafted two new comments where new
+Jira activity had appeared.
+
+Three findings from doing it, each recorded where the code lives:
+
+1. **The timeout did not work on Linux.** `exec.CommandContext` kills the shell at the deadline, but
+   with `Stdout` an `io.Writer` Go copies through an `os.Pipe`, and `Wait` blocks until every process
+   holding the write end exits. Measured under a 100ms timeout: `sleep 2` returned after 2.001s on
+   linux/amd64 versus 102ms on darwin/arm64, and a backgrounded `sleep 5 &` took 5.002s. `cmd.WaitDelay`
+   bounds it. This is exactly the stall the timeout exists to prevent, and every local run masked it —
+   the timeout test can only fail in the container.
+2. **Two more model response shapes**, both found by running the pipeline rather than by reading it:
+   newline-delimited objects and comma-separated objects where an array was demanded. Both are now
+   absorbed by `llm.JSONArrayPayload`, bringing it to four tolerances. Note the trap: bracketing fixes
+   commas but not newlines (JSON needs a comma *between* elements — whitespace is ignored around
+   separators, not instead of them), while a `json.Decoder` loop fixes newlines but not commas. Both
+   are needed.
+3. **No deviation from the design's substance.** Scope stayed LLM-only, refresh is exp-based with a 401
+   backstop, and the four hazards (never log stdout, bounded timeout, single-flight, don't cache a
+   failure) were each implemented and tested as specified.
+
+Two API details worth knowing: `llm.Invalidator` is an *optional* interface rather than a
+`CredentialSource` method, since `StaticCredential` has nothing to invalidate and a no-op would let
+callers believe an invalidation had an effect. And `WithHelperTimeout` exists as a functional option
+because a hardcoded default would make the timeout test itself slow.
+
+Still not done: **`watch` does not exist yet**, so the thing this unblocks remains unbuilt. And the
+helper's own refresh has not been observed firing mid-pass — the token stayed valid throughout, so
+proactive `exp` refresh and the 401 retry are proven by unit test, not by a live expiry.
+
+Originally prompted by two real failures during slice 4's end-to-end verification (2026-08-26).
 
 ## The problem, as observed
 
