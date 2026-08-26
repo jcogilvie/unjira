@@ -604,3 +604,108 @@ func TestLoad_ParsesJiraQueries(t *testing.T) {
 	assert.Equal(t, "assignee = currentUser()", cfg.Jira[0].Queries[0].JQL)
 	assert.Equal(t, 50, cfg.Jira[0].MaxIssuesPerQuery)
 }
+
+// TestConfig_AutoCommitDefaultsToQueueEverything is the safety property the
+// whole auto-commit gate rests on: a zero-value Config — no auto_commit block
+// at all, exactly what an untouched unjira.config.json produces — must queue
+// every action type rather than apply any of them, no matter how high its
+// confidence. Go's zero value for AutoCommitRule.Graduated (false) gives this
+// for free, but the property is worth asserting explicitly because a future
+// "sensible defaults" refactor could silently break it.
+func TestConfig_AutoCommitDefaultsToQueueEverything(t *testing.T) {
+	var cfg config.Config
+
+	for _, actionType := range []string{"comment", "transition", "create"} {
+		rule := cfg.AutoCommit[actionType]
+		assert.False(t, rule.Graduated,
+			"action type %q must default to Graduated=false: an unconfigured "+
+				"action type must never auto-apply", actionType)
+	}
+}
+
+// TestConfig_AutoCommitUnknownActionTypeDefaultsToZeroRule covers the same
+// property for a type that isn't even in the closed comment/transition/create
+// set — a map lookup miss returns the zero AutoCommitRule regardless of key,
+// so this is really the same guarantee as the test above from a different
+// angle: absence from config, by any name, never grants apply authority.
+func TestConfig_AutoCommitUnknownActionTypeDefaultsToZeroRule(t *testing.T) {
+	cfg := config.Config{
+		AutoCommit: map[string]config.AutoCommitRule{
+			"comment": {ConfidenceFloor: 0.5, Graduated: true},
+		},
+	}
+
+	rule := cfg.AutoCommit["estimate"]
+
+	assert.False(t, rule.Graduated)
+	assert.Zero(t, rule.ConfidenceFloor)
+}
+
+func TestAutoCommitRule_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		rule    config.AutoCommitRule
+		wantErr string // substring; "" means no error expected
+	}{
+		{name: "floor zero is valid", rule: config.AutoCommitRule{ConfidenceFloor: 0}},
+		{name: "floor one is valid", rule: config.AutoCommitRule{ConfidenceFloor: 1}},
+		{
+			name:    "floor above one",
+			rule:    config.AutoCommitRule{ConfidenceFloor: 1.5},
+			wantErr: "confidence_floor",
+		},
+		{
+			name:    "negative floor",
+			rule:    config.AutoCommitRule{ConfidenceFloor: -0.1},
+			wantErr: "confidence_floor",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.rule.Validate()
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr,
+				"the message must name the JSON key so an operator can find it")
+		})
+	}
+}
+
+func TestLoad_ParsesAutoCommitBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"auto_commit":{"comment":{"confidence_floor":0.9,"graduated":true},
+	  "transition":{"confidence_floor":0.95,"graduated":false}}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	require.Contains(t, cfg.AutoCommit, "comment")
+	assert.InDelta(t, 0.9, cfg.AutoCommit["comment"].ConfidenceFloor, 1e-9)
+	assert.True(t, cfg.AutoCommit["comment"].Graduated)
+	require.Contains(t, cfg.AutoCommit, "transition")
+	assert.InDelta(t, 0.95, cfg.AutoCommit["transition"].ConfidenceFloor, 1e-9)
+	assert.False(t, cfg.AutoCommit["transition"].Graduated)
+}
+
+// TestLoad_MissingAutoCommitBlockDefaultsToNilMap exercises the exact shape a
+// pre-slice-5 config file has: no auto_commit key at all. Load must not
+// synthesize any entries — a nil map, matching the zero-value safety property
+// above.
+func TestLoad_MissingAutoCommitBlockDefaultsToNilMap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{}`), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Nil(t, cfg.AutoCommit)
+}
