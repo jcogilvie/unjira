@@ -30,6 +30,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
@@ -541,4 +542,70 @@ func TestLiveUnresolvableKeyIsNotTransport(t *testing.T) {
 	assert.False(t, correlator.IsTransportError(err),
 		"a 404 must classify as not-found: misread as transport, a stale branch name would fail "+
 			"its narrative on every pass instead of being reported unresolved")
+}
+
+// TestLiveAvailableStatusCategoriesReflectsTheRealWorkflow is why
+// AvailableStatusCategories exists. The offline fakes assert what we BELIEVE
+// Jira reports as legal; only a live call establishes that a freshly-created
+// issue genuinely cannot reach every category, which is what makes
+// floorConfidence's transition check meaningful rather than vacuous.
+//
+// Asserted as a property, not against a hardcoded category list: a Jira
+// project's workflow is admin-configurable, so pinning "a new Task cannot go
+// straight to Done" would be pinning this instance's configuration rather than
+// the behaviour under test.
+func TestLiveAvailableStatusCategoriesReflectsTheRealWorkflow(t *testing.T) {
+	client := testClient(t)
+	tracker := jira.NewTracker(client)
+
+	key, err := client.CreateIssue(
+		testProject(),
+		"[seed] live transition gating probe",
+		"Task",
+		"Created by internal/live; deleted by this test's cleanup.",
+		[]string{jira.SeedLabel},
+	)
+	require.NoError(t, err)
+	// Deletes exactly the key this test created. Never query-driven cleanup
+	// against the shared sandbox — a JQL sweep can delete issues this test did
+	// not create.
+	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+
+	categories, err := tracker.AvailableStatusCategories(key)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, categories,
+		"a new issue must offer at least one legal transition, or every transition proposal "+
+			"would be floored to zero and this check would be vacuous")
+
+	// Cross-check against the raw API: every category reported must trace back
+	// to a real transition Jira offers. This is what catches a normalization
+	// bug that invented a category.
+	raw, err := client.GetTransitions(key)
+	require.NoError(t, err)
+
+	rawCategories := make(map[string]bool, len(raw))
+	for _, transition := range raw {
+		to, ok := transition["to"].(map[string]any)
+		require.True(t, ok, "a transition with no 'to' object: %v", transition)
+		category, ok := to["statusCategory"].(map[string]any)
+		if !ok {
+			continue
+		}
+		categoryKey, _ := category["key"].(string)
+		rawCategories[categoryKey] = true
+	}
+
+	require.NotEmpty(t, rawCategories,
+		"GetTransitions returned transitions but none carried a statusCategory — the shape "+
+			"AvailableStatusCategories depends on has changed")
+
+	for _, c := range categories {
+		assert.Contains(t, []tasktracker.StatusCategory{
+			tasktracker.StatusTodo, tasktracker.StatusInProgress, tasktracker.StatusDone,
+		}, c, "normalization produced a category outside the closed set")
+	}
+
+	assert.LessOrEqual(t, len(categories), len(rawCategories),
+		"categories are deduplicated from raw transitions, so there cannot be more of them")
 }
