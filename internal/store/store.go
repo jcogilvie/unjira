@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
@@ -1027,6 +1028,63 @@ func (s *Store) NarrativesWithoutIssueKey(limit int) ([]NarrativeRow, error) {
 		row, err := scanNarrativeRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scanning unmatched narrative row: %w", err)
+		}
+		out = append(out, row)
+	}
+
+	return out, rows.Err()
+}
+
+// NarrativesWithActionableLinks returns up to limit narratives having at
+// least one narrative_issues link whose role is in roles, ordered by
+// (window_start, id) — the reconciler's input backlog.
+//
+// Deliberately NOT keyed on the denormalized narratives.issue_key, which
+// MatchConfig.ConfidenceFloor only promotes above the floor: a real but
+// low-confidence primary has narrative_issues rows and a NULL issue_key, and
+// selecting on issue_key would leave the reconciler permanently blind to it
+// — exactly the class of bug behind the 08-21 discovery that
+// narratives.issue_key was never written at all. Roles are passed in rather
+// than hardcoded so the caller (reconciler.actionableLinks) stays the single
+// definition of "actionable" — this package must not import
+// internal/correlator.
+//
+// An empty roles slice returns an empty result (not an error): "nothing is
+// actionable" is a valid caller configuration, not a malformed query.
+func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]NarrativeRow, error) {
+	if len(roles) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(roles))
+	args := make([]any, 0, len(roles)+1)
+	for i, r := range roles {
+		placeholders[i] = "?"
+		args = append(args, string(r))
+	}
+	args = append(args, limit)
+
+	query := `SELECT n.id, n.window_start, n.window_end, n.title, n.summary, n.issue_key,
+	                 n.confidence, n.status, n.compaction_boundary, n.compaction_boundary_event_id
+	          FROM narratives n
+	          WHERE EXISTS (
+	              SELECT 1 FROM narrative_issues ni
+	              WHERE ni.narrative_id = n.id AND ni.role IN (` + strings.Join(placeholders, ",") + `)
+	          )
+	          ORDER BY n.window_start, n.id
+	          LIMIT ?`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying narratives with actionable links: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []NarrativeRow
+	for rows.Next() {
+		row, err := scanNarrativeRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning actionable-linked narrative row: %w", err)
 		}
 		out = append(out, row)
 	}

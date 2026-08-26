@@ -907,6 +907,76 @@ func TestNarrativesForIssue_FindsEveryNarrativeAcrossRoles(t *testing.T) {
 	assert.Equal(t, store.Role("primary"), roles[second])
 }
 
+func TestNarrativesWithActionableLinks_ExcludesMentionedOnlyAndUnlinked(t *testing.T) {
+	// The reconciler's backlog selection: only narratives with a
+	// narrative_issues row in an actionable role (primary/same_work here)
+	// are returned. A mentioned-only narrative and a wholly unlinked one
+	// must both be excluded — the former by role, the latter by having no
+	// row at all.
+	s := openStore(t)
+
+	actionable := insertNarrativeForTest(t, s, "actionable work")
+	mentionedOnly := insertNarrativeForTest(t, s, "mentioned only")
+	insertNarrativeForTest(t, s, "unlinked work")
+
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		if err := tx.AddNarrativeIssues(actionable, []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+		}); err != nil {
+			return err
+		}
+
+		return tx.AddNarrativeIssues(mentionedOnly, []store.NarrativeIssue{
+			{IssueKey: "PROJ-2", Role: "mentioned", Provenance: "prose_later", Confidence: 0.2},
+		})
+	}))
+
+	got, err := s.NarrativesWithActionableLinks(10, []store.Role{store.Role("primary"), store.Role("same_work")})
+
+	require.NoError(t, err)
+	ids := make([]int64, 0, len(got))
+	for _, n := range got {
+		ids = append(ids, n.ID)
+	}
+	assert.Equal(t, []int64{actionable}, ids,
+		"a mentioned-only or unlinked narrative must not be selected as reconciler input")
+}
+
+func TestNarrativesWithActionableLinks_RespectsLimit(t *testing.T) {
+	s := openStore(t)
+	for i := range 5 {
+		id := insertNarrativeForTest(t, s, fmt.Sprintf("narrative %d", i))
+		require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+			return tx.AddNarrativeIssues(id, []store.NarrativeIssue{
+				{IssueKey: fmt.Sprintf("PROJ-%d", i), Role: "primary", Provenance: "branch", Confidence: 0.9},
+			})
+		}))
+	}
+
+	got, err := s.NarrativesWithActionableLinks(3, []store.Role{store.Role("primary"), store.Role("same_work")})
+
+	require.NoError(t, err)
+	assert.Len(t, got, 3)
+}
+
+func TestNarrativesWithActionableLinks_EmptyRolesReturnsEmpty(t *testing.T) {
+	// Deliberately not an error: an empty roles slice means "nothing is
+	// actionable", which is a valid (if unusual) caller configuration, not a
+	// malformed query.
+	s := openStore(t)
+	id := insertNarrativeForTest(t, s, "work")
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(id, []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: "primary", Provenance: "branch", Confidence: 0.9},
+		})
+	}))
+
+	got, err := s.NarrativesWithActionableLinks(10, nil)
+
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
 func TestAllNarrativeEvents_IncludesPreCompactionBoundaryEvents(t *testing.T) {
 	// THE most important test in this task. NarrativeEventsForContext
 	// deliberately excludes events at or before the compaction boundary;
