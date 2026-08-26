@@ -294,13 +294,7 @@ func TestReconcileFailsTheNarrativeOnATransportError(t *testing.T) {
 // MinConfidenceToPropose's semantics. Dropping the action would make a weak
 // proposal indistinguishable from "nothing to do", and slice 6's triage needs
 // to see it in order to judge it.
-//
-// Skipped in this task: draft is stubbed to return no proposals until Task 6
-// implements the LLM call, so there is nothing here yet for this test to
-// observe. Task 6 un-skips it.
 func TestReconcileRecordsButDoesNotDropALowConfidenceProposal(t *testing.T) {
-	t.Skip("Task 6 implements draft; this asserts drafted-proposal behavior")
-
 	s := reconcileStore(t)
 	tracker := &fakeTracker{
 		issues: map[string]tasktracker.Issue{

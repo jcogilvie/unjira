@@ -450,7 +450,7 @@ func classifyCandidates(
 	if err != nil {
 		return nil, stats, fmt.Errorf("classifying candidates for narrative %d: %w", n.ID, err)
 	}
-	stats.addUsage(usage)
+	stats.AddUsage(usage)
 
 	verdicts, err := parseMatchResponse(raw)
 	if err != nil {

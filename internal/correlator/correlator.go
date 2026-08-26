@@ -121,10 +121,10 @@ func (s *Stats) Add(other Stats) {
 	s.EstimatedTokens += other.EstimatedTokens
 }
 
-// addUsage folds one completion's server-reported usage into s and counts the
-// call. Unexported: only this package makes completions, so nothing outside it
-// has a Usage to fold.
-func (s *Stats) addUsage(u llm.Usage) {
+// AddUsage folds one completion's server-reported usage into s and counts the
+// call. Exported because internal/reconciler also makes completions and
+// folds their usage into the same Stats type.
+func (s *Stats) AddUsage(u llm.Usage) {
 	s.Calls++
 	s.PromptTokens += u.PromptTokens
 	s.CompletionTokens += u.CompletionTokens
@@ -185,7 +185,7 @@ func Cluster(
 	if err != nil {
 		return nil, stats, fmt.Errorf("clustering events in window [%s, %s): %w", window.Start, window.End, err)
 	}
-	stats.addUsage(usage)
+	stats.AddUsage(usage)
 
 	results, err := parseClusterResponse(raw, filtered)
 	if err != nil {
@@ -315,41 +315,12 @@ type clusterResponseItem struct {
 // Any malformed shape — invalid JSON, an out-of-range index, an unknown
 // kind — is a loud error including the raw response, never a partial or
 // best-effort result.
-// stripJSONFence removes a Markdown code fence wrapping an LLM's JSON reply,
-// returning the payload unchanged when there is no fence.
 //
-// Both system prompts say "no markdown fences", and models emit them anyway —
-// a live litellm-fronted Claude model returned "```json\n[]\n```" for a
-// prompt that forbade exactly that. Fencing is a property of the interface,
-// not a prompt bug, so the parsers tolerate it rather than failing a pass over
-// formatting. Everything past the fence stays strict: malformed JSON inside
-// one is still a loud error naming the raw response.
-func stripJSONFence(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if !strings.HasPrefix(trimmed, "```") {
-		return raw
-	}
-
-	// Drop the opening fence and its optional language tag ("```json"), which
-	// runs to the end of that first line.
-	if newline := strings.IndexByte(trimmed, '\n'); newline >= 0 {
-		trimmed = trimmed[newline+1:]
-	} else {
-		// A fence with no newline carries no payload to parse; let the caller
-		// report the original text rather than inventing a valid-looking one.
-		return raw
-	}
-
-	if closing := strings.LastIndex(trimmed, "```"); closing >= 0 {
-		trimmed = trimmed[:closing]
-	}
-
-	return strings.TrimSpace(trimmed)
-}
-
+// raw is run through llm.StripJSONFence first — see that function's doc
+// comment for why every parser in this package does this.
 func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, error) {
 	var items []clusterResponseItem
-	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &items); err != nil {
+	if err := json.Unmarshal([]byte(llm.StripJSONFence(raw)), &items); err != nil {
 		return nil, fmt.Errorf("parsing cluster response %q: %w", raw, err)
 	}
 
@@ -576,10 +547,10 @@ func checkSameStory(ctx context.Context, client llm.Client, a, b ClusterResult) 
 	if err != nil {
 		return false, ClusterResult{}, stats, fmt.Errorf("checking same-story merge for split boundary: %w", err)
 	}
-	stats.addUsage(usage)
+	stats.AddUsage(usage)
 
 	var resp sameStoryResponse
-	if err := json.Unmarshal([]byte(stripJSONFence(raw)), &resp); err != nil {
+	if err := json.Unmarshal([]byte(llm.StripJSONFence(raw)), &resp); err != nil {
 		return false, ClusterResult{}, stats, fmt.Errorf("parsing same-story response %q: %w", raw, err)
 	}
 
@@ -958,7 +929,7 @@ func compactNarrativeTail(
 		return "", time.Time{}, 0, Stats{}, fmt.Errorf("compacting narrative %d tail: %w", narrativeID, err)
 	}
 	stats.Compactions = 1
-	stats.addUsage(usage)
+	stats.AddUsage(usage)
 
 	log.Printf("correlator: compacted narrative %d — folded %d event(s) up to %s (event id %d) into recap",
 		narrativeID, len(toCompact), boundary.Format(time.RFC3339), boundaryEventID)
