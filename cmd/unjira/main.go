@@ -129,7 +129,8 @@ func (a *appContext) llmClient() (llm.Client, error) {
 		return nil, fmt.Errorf("UNJIRA_LLM_API_KEY is not set: the LLM backend needs a credential")
 	}
 
-	return openai.New(a.config.LLM.BaseURL, a.llmAPIKey, a.config.LLM.Model), nil
+	return openai.New(a.config.LLM.BaseURL, a.llmAPIKey, a.config.LLM.Model,
+		a.config.LLM.MaxOutputTokens), nil
 }
 
 type collectCmd struct{}

@@ -21,10 +21,18 @@ import (
 func newTestClient(t *testing.T, handler http.HandlerFunc) *openai.Client {
 	t.Helper()
 
+	return newTestClientWithMaxTokens(t, 0, handler)
+}
+
+// newTestClientWithMaxTokens is newTestClient with an explicit output cap.
+// Zero means "send no cap", which is what newTestClient uses.
+func newTestClientWithMaxTokens(t *testing.T, maxOutputTokens int, handler http.HandlerFunc) *openai.Client {
+	t.Helper()
+
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	return openai.New(server.URL, "test-key", "gpt-5-2")
+	return openai.New(server.URL, "test-key", "gpt-5-2", maxOutputTokens)
 }
 
 func TestNew_ReturnsUsableClient(t *testing.T) {
@@ -178,4 +186,102 @@ func TestComplete_MissingUsageIsZeroNotAnError(t *testing.T) {
 	assert.Equal(t, "ok", text)
 	assert.Zero(t, usage.PromptTokens)
 	assert.Zero(t, usage.CompletionTokens)
+}
+
+// TestComplete_LengthTruncationIsAnError is the regression test for a bug that
+// manual end-to-end verification found and every offline test had missed: the
+// facade returned a truncated body as though it were complete.
+//
+// Observed against a real litellm-fronted claude-sonnet-5, which caps output at
+// 4096 tokens by default despite advertising max_output_tokens=128000: the model
+// emitted well-formed JSON, was cut off mid-string, and the caller reported
+// "unexpected end of JSON input" — a parse error blaming the model for what was
+// really a silently-dropped half of the response.
+//
+// Erroring here rather than at the parser matters because a parse failure is the
+// LUCKY case. A truncation landing on a syntactically-valid boundary parses
+// cleanly and silently discards whatever came after it, which for this pipeline
+// means dropped narratives, matches, or proposed actions — the failure mode
+// CLAUDE.md calls the hardest class of bug to notice.
+func TestComplete_LengthTruncationIsAnError(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":     "chatcmpl-3",
+			"object": "chat.completion",
+			"model":  "gpt-5-2",
+			"choices": []map[string]any{{
+				"index": 0,
+				// Valid JSON prefix, cut off mid-array — exactly the shape the
+				// live failure produced.
+				"message":       map[string]any{"role": "assistant", "content": `[{"kind":"new","title":"trunc`},
+				"finish_reason": "length",
+			}},
+			"usage": map[string]any{"prompt_tokens": 13395, "completion_tokens": 4096},
+		})
+	})
+
+	text, usage, err := client.Complete(t.Context(), "sys", "user")
+
+	require.Error(t, err,
+		"a length-truncated response must fail loudly here, not reach a parser as if whole")
+	assert.Contains(t, err.Error(), "truncated",
+		"the message must name truncation, or the operator debugs the wrong layer")
+	assert.Contains(t, err.Error(), "max_output_tokens",
+		"and must name the config knob that fixes it")
+	assert.Empty(t, text,
+		"returning the partial text invites a caller to use it anyway")
+	assert.Equal(t, int64(4096), usage.CompletionTokens,
+		"usage is still returned: the call cost real tokens even though it failed")
+}
+
+func TestComplete_SendsMaxOutputTokensWhenConfigured(t *testing.T) {
+	var body map[string]any
+	client := newTestClientWithMaxTokens(t, 8192, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":     "chatcmpl-4",
+			"object": "chat.completion",
+			"model":  "gpt-5-2",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+		})
+	})
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+
+	// max_completion_tokens, not the deprecated max_tokens: the SDK marks the
+	// latter deprecated and incompatible with reasoning models. Verified both
+	// are honoured by the litellm proxy in use, so the current one wins.
+	assert.EqualValues(t, 8192, body["max_completion_tokens"],
+		"an unset cap is what let the proxy silently impose its own 4096 default")
+	assert.NotContains(t, body, "max_tokens", "the deprecated field must not be sent")
+}
+
+func TestComplete_OmitsMaxOutputTokensWhenZero(t *testing.T) {
+	// Zero means "let the backend decide" — some gateways reject an explicit
+	// cap above their own ceiling, so unjira must be able to say nothing.
+	var body map[string]any
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":     "chatcmpl-5",
+			"object": "chat.completion",
+			"model":  "gpt-5-2",
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+		})
+	})
+
+	_, _, err := client.Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+
+	assert.NotContains(t, body, "max_completion_tokens")
+	assert.NotContains(t, body, "max_tokens")
 }

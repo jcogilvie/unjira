@@ -139,6 +139,21 @@ type LLMConfig struct {
 	Model               string `json:"model"`
 	BaseURL             string `json:"base_url"`
 	ContextWindowTokens int    `json:"context_window_tokens"`
+	// MaxOutputTokens caps each response's length. Zero sends no cap and lets
+	// the gateway impose its own, which is a documented hazard rather than a
+	// neutral default: a litellm-fronted claude-sonnet-5 silently capped output
+	// at 4096 while advertising max_output_tokens=128000, truncating a
+	// clustering reply mid-JSON. Every phase-1 prompt asks for JSON, and a
+	// truncated reply that happens to parse would silently drop narratives,
+	// matches, or proposed actions.
+	//
+	// Not defaulted, for the same reason ContextWindowTokens is not: the right
+	// ceiling is model- and gateway-specific, and a stale built-in table would
+	// fail silently wrong. Left optional rather than required only because some
+	// gateways reject a cap above their own ceiling, so unjira must be able to
+	// send none. openai.Complete errors loudly if a response is truncated, so
+	// an unset cap degrades to a clear failure rather than silent data loss.
+	MaxOutputTokens int `json:"max_output_tokens"`
 }
 
 // Validate reports whether Model and ContextWindowTokens are both set to
@@ -149,6 +164,15 @@ func (c LLMConfig) Validate() error {
 	}
 	if c.ContextWindowTokens <= 0 {
 		return fmt.Errorf("llm.context_window_tokens must be a positive number of tokens")
+	}
+	// Negative is rejected while zero is allowed: zero means "send no cap"
+	// (see MaxOutputTokens), but a negative value is always a mistake, most
+	// likely someone reaching for "unlimited" — which this does not offer.
+	if c.MaxOutputTokens < 0 {
+		return fmt.Errorf(
+			"llm.max_output_tokens is %d: must be positive, or omitted to send no cap",
+			c.MaxOutputTokens,
+		)
 	}
 
 	return nil

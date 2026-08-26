@@ -218,6 +218,29 @@ func TestLLMConfig_Validate(t *testing.T) {
 			name: "passes with model and context window",
 			cfg:  config.LLMConfig{Model: "gpt-5-2", ContextWindowTokens: 128000},
 		},
+		{
+			// Zero is "send no cap", not invalid — some gateways reject a cap
+			// above their own ceiling, so unjira must be able to send none.
+			name: "zero max output tokens is valid",
+			cfg: config.LLMConfig{
+				Model: "gpt-5-2", ContextWindowTokens: 128000, MaxOutputTokens: 0,
+			},
+		},
+		{
+			name: "explicit max output tokens is valid",
+			cfg: config.LLMConfig{
+				Model: "gpt-5-2", ContextWindowTokens: 128000, MaxOutputTokens: 32000,
+			},
+		},
+		{
+			// Negative most likely means someone reaching for "unlimited",
+			// which this does not offer.
+			name: "rejects negative max output tokens",
+			cfg: config.LLMConfig{
+				Model: "gpt-5-2", ContextWindowTokens: 128000, MaxOutputTokens: -1,
+			},
+			wantErrText: "max_output_tokens",
+		},
 	}
 
 	for _, tt := range tests {
