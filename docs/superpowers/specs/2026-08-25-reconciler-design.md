@@ -7,6 +7,44 @@ all; every slice before it only observed and correlated.
 Phase-1 slice 4. Unblocked by the narrative→issue matching slice, which made
 `narratives.issue_key` a column something writes.
 
+## Status: landed 2026-08-25
+
+`internal/reconciler` (`Reconcile`, `draft`, `Persist`), `pipeline.RunReconcile` +
+`RenderReconcileResult`, and `dev narrate` wiring. `earthly +reviewable` green (lint 0 issues, full
+offline suite passing).
+
+Five deviations from this spec as written, each forced by something the spec assumed:
+
+1. **`narrative_events.linked_at` and `actions.created_at` use sub-second (`%f`) timestamps.** The
+   delta was not implementable at the whole-second granularity every other table uses: an event
+   linked in the same second as the bounding action is invisible *forever* under `>`, because that
+   action's `created_at` never advances. Both columns must share the identical format — they are
+   `TEXT` compared lexically, and mixing `%f` with `%S` inverts the comparison (`.` 0x2E sorts before
+   `Z` 0x5A), so a genuinely-later event reads as earlier.
+2. **`tasktracker.AvailableStatusCategories` was added.** This spec said legality is checked against
+   the live issue, citing `SetStatus` as precedent — but `GetTransitions` existed only on
+   `*jira.Client`, not on the interface the reconciler talks to, and the local backend had no
+   equivalent. Real added scope, not a detail.
+3. **The interface was split into `TaskReader` + `TaskWriter`** (`TaskTracker` is now their
+   composite), and the reconciler takes a `TaskReader`. This spec stated propose-never-apply as a
+   rule; the split makes it a compile error. Verified by drill: calling `AddComment` from
+   `verifyCandidates` fails with *"type tasktracker.TaskReader has no field or method AddComment"*.
+4. **The backlog accessor is `store.NarrativesWithActionableLinks(limit, roles)`, not
+   `NarrativesWithIssueKey`.** Selecting on the denormalized `narratives.issue_key` would have made
+   the reconciler permanently blind to exactly the narratives it most needs: `MatchConfig.
+   ConfidenceFloor` only *promotes* `issue_key` above the floor, while `narrative_issues` rows are
+   written regardless — so a real but low-confidence primary has links and a NULL `issue_key`. This
+   is the same class of gap as the original discovery that `issue_key` was never written at all.
+5. **`correlator.Stats.addUsage` became exported `AddUsage`.** Its doc comment justified being
+   unexported with "only this package makes completions" — no longer true once the reconciler makes
+   them.
+
+Not done, and not attempted: **manual end-to-end verification.** It needs a real
+`unjira.config.json` and an LLM key, neither present in the environment this landed in. So the
+duplicate-suppression guarantee is proven by unit test and by drill 3, *not* against real data —
+which is the more valuable check and remains outstanding. Likewise the live-tier transition-gating
+test compiles and is gated to skip, but has never run.
+
 ## What the spec already fixed, and what it left open
 
 `docs/superpowers/specs/2026-08-11-phase1-correlator-design.md` specifies the shape:

@@ -358,8 +358,16 @@ slice starts — this is not a fixed waterfall plan.
      The command lives under `dev` rather than as a top-level verb: this spec commits to two verbs
      (`watch`, `triage`) and treats narration as a stage inside `watch`, so a top-level `narrate`
      would be scaffolding awaiting deletion.
-4. **`internal/reconciler`** (compute + persist) — delta computation, verification via
-   `TaskTracker`, action drafting. Unit-tested with fake trackers.
+4. **`internal/reconciler`** (compute + persist) — ✅ landed. Delta computation
+   (`store.DeltaEvents`), mandatory live verification before drafting, one LLM call per narrative
+   with confidence floored by deterministic facts, and an all-or-nothing `Persist`. Wired into
+   `dev narrate` after matching, behind `--dry-run`. Unit-tested with a recording fake tracker, plus
+   four break-it drills. See `docs/superpowers/specs/2026-08-25-reconciler-design.md`.
+
+   The interface it verifies against is **`tasktracker.TaskReader`, not `TaskTracker`** — the
+   interface was split (`TaskReader` + `TaskWriter`, with `TaskTracker` the composite) so that this
+   slice's propose-never-apply rule is enforced by the compiler rather than by convention. Calling
+   `AddComment` from the reconciler is a build error, not a code-review catch.
 5. **Auto-commit gate + `watch`** — wires collect → correlator → reconciler → gate into one
    command, `--dry-run` support.
 6. **`actions`/`rules` primitives + `triage`** — the human-facing surface, built on the
