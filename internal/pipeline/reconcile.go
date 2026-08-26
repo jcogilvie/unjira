@@ -1,0 +1,76 @@
+package pipeline
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/correlator"
+	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/reconciler"
+	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
+)
+
+// ReconcileOptions configures one reconcile pass.
+type ReconcileOptions struct {
+	// DryRun runs the full pass — including the real LLM calls — but skips
+	// Persist, matching NarrateOptions.DryRun's treatment.
+	DryRun bool
+}
+
+// ReconcileRunResult is one reconcile pass, shaped for rendering.
+type ReconcileRunResult struct {
+	Results []reconciler.ReconcileResult
+	Stats   correlator.Stats
+	DryRun  bool
+}
+
+// RunReconcile runs one reconcile pass: validate cfg.Reconciler, draft
+// proposals, and (unless DryRun) persist them.
+//
+// tracker is a tasktracker.TaskReader, not a TaskTracker: reconciler.Reconcile
+// already takes only a reader (the reconciler proposes and never applies), and
+// widening the type here would discard that guarantee at the very layer meant
+// to carry it up to the CLI. Nothing in this function's call graph can write
+// to the tracker.
+//
+// Acquires no lease, for the same reason RunNarrate and RunMatch do not: the
+// scope differs per caller, and taking one here would make `watch` contend with
+// itself.
+//
+// On partial failure this returns both the accumulated result AND a non-nil
+// error, because Reconcile isolates failures per narrative — the narratives that
+// drafted cleanly are still worth showing. Note the asymmetry with Persist: a
+// partial pass still persists whatever it produced, since each narrative's
+// proposals are internally consistent even when a sibling narrative failed.
+// That is not a contradiction of Persist's own all-or-nothing guarantee:
+// Persist is atomic over the set it's handed, but Reconcile is what decides
+// what makes it into that set — a narrative that failed never contributes any
+// ProposedAction to results in the first place, so Persist's transaction never
+// sees its half-drafted state.
+func RunReconcile(
+	ctx context.Context,
+	s *store.Store,
+	tracker tasktracker.TaskReader,
+	client llm.Client,
+	cfg config.Config,
+	opts ReconcileOptions,
+) (ReconcileRunResult, error) {
+	if err := cfg.Reconciler.Validate(); err != nil {
+		return ReconcileRunResult{}, fmt.Errorf("invalid reconciler config: %w", err)
+	}
+
+	results, stats, reconcileErr := reconciler.Reconcile(ctx, s, tracker, client, cfg.Reconciler)
+	result := ReconcileRunResult{Results: results, Stats: stats, DryRun: opts.DryRun}
+
+	if opts.DryRun {
+		return result, reconcileErr
+	}
+
+	if err := reconciler.Persist(s, results); err != nil {
+		return result, fmt.Errorf("persisting proposed actions: %w", err)
+	}
+
+	return result, reconcileErr
+}

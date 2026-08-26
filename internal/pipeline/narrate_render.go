@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/correlator"
+	"github.com/jcogilvie/unjira/internal/reconciler"
 )
 
 // RenderNarrateResult formats one pass for a human deciding whether the
@@ -198,4 +199,87 @@ func writeExcludedAndUnresolved(b *strings.Builder, m correlator.MatchResult) {
 	if len(m.Unresolved) > 0 {
 		fmt.Fprintf(b, "  unresolved: %s\n", strings.Join(m.Unresolved, ", "))
 	}
+}
+
+// RenderReconcileResult formats a reconcile pass for a terminal.
+//
+// Every narrative appears, including ones that produced nothing: an unchanged
+// narrative, an unresolvable link, and a suppressed duplicate are all
+// legitimate outcomes, and omitting them would make "nothing proposed"
+// indistinguishable from "nothing considered".
+func RenderReconcileResult(r ReconcileRunResult) string {
+	var b strings.Builder
+
+	b.WriteString("\nreconcile\n")
+	if r.DryRun {
+		b.WriteString("  (dry run — nothing persisted)\n")
+	}
+	fmt.Fprintf(&b, "  llm calls: %d  tokens: %d prompt / %d completion\n",
+		r.Stats.Calls, r.Stats.PromptTokens, r.Stats.CompletionTokens)
+
+	if len(r.Results) == 0 {
+		b.WriteString("\nno linked narratives to reconcile\n")
+
+		return b.String()
+	}
+
+	for _, result := range r.Results {
+		writeReconciledNarrative(&b, result)
+	}
+
+	return b.String()
+}
+
+// writeReconciledNarrative writes one narrative's header line and every
+// outcome it carries — proposed actions, an empty delta, unverified links,
+// suppressed duplicates, and low-confidence flags — since a narrative can
+// legitimately carry any combination of these at once.
+func writeReconciledNarrative(b *strings.Builder, result reconciler.ReconcileResult) {
+	fmt.Fprintf(b, "\nnarrative %d\n", result.NarrativeID)
+
+	for _, a := range result.Proposed {
+		writeProposedAction(b, a)
+	}
+
+	if result.SkippedNoDelta {
+		b.WriteString("  no new events since the last proposal\n")
+	}
+
+	for _, key := range result.Unverified {
+		fmt.Fprintf(b, "  unverified: %s (not found on the tracker)\n", key)
+	}
+
+	for _, reason := range result.Suppressed {
+		fmt.Fprintf(b, "  suppressed: %s\n", reason)
+	}
+
+	for _, note := range result.LowConfidence {
+		fmt.Fprintf(b, "  low confidence: %s\n", note)
+	}
+}
+
+// writeProposedAction writes one drafted action's type, target issue,
+// confidence, and (when set) its comment body or transition target.
+func writeProposedAction(b *strings.Builder, a reconciler.ProposedAction) {
+	fmt.Fprintf(b, "  propose %s", a.Type)
+	if a.IssueKey != "" {
+		fmt.Fprintf(b, " on %s", a.IssueKey)
+	}
+	fmt.Fprintf(b, " (confidence %.2g)\n", a.Confidence)
+	if a.Body != "" {
+		fmt.Fprintf(b, "    %s\n", firstLine(a.Body))
+	}
+	if a.TargetStatus != "" {
+		fmt.Fprintf(b, "    -> %s\n", a.TargetStatus)
+	}
+}
+
+// firstLine returns s up to its first newline, so a multi-paragraph comment
+// body renders as one scannable line.
+func firstLine(s string) string {
+	if before, _, found := strings.Cut(s, "\n"); found {
+		return before + " …"
+	}
+
+	return s
 }
