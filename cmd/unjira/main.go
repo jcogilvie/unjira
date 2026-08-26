@@ -321,6 +321,11 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	if err := app.config.Correlator.Validate(); err != nil {
 		return err
 	}
+	// Validated here rather than inside RunReconcile alone, so a bad reconciler
+	// config fails before any collector work rather than after it.
+	if err := app.config.Reconciler.Validate(); err != nil {
+		return err
+	}
 
 	linkExclusions, err := app.config.CompiledLinkExclusions()
 	if err != nil {
@@ -354,8 +359,10 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 		// Matching writes narrative_issues rows and may set
 		// narratives.issue_key, so it has no dry-run mode: skipping is
 		// stated rather than silent, or the operator is left wondering why
-		// nothing matched.
+		// nothing matched. Reconcile is skipped with it, since it has nothing
+		// to work from until matching has linked something.
 		fmt.Println("matching skipped (--dry-run)")
+		fmt.Println("reconcile skipped (--dry-run)")
 
 		return nil
 	}
@@ -388,6 +395,25 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 		return fmt.Errorf("matching narratives to issues: %w", matchErr)
 	}
 
+	// Reconcile only after a clean matching pass: it reconciles against
+	// matching's link set, so running it after a failed pass would draft
+	// against a half-updated one.
+	//
+	// It reuses the tracker matching resolved, so the single-tracker
+	// limitation described above applies identically here — a link whose
+	// Connection differs from this one is verified against the wrong site.
+	reconcileResult, reconcileErr := pipeline.RunReconcile(
+		ctx, app.store, tracker, client, app.config, pipeline.ReconcileOptions{})
+
+	// Render before returning the error, matching the matching stage above:
+	// Reconcile isolates failures per narrative, so healthy narratives produced
+	// proposals the operator should see alongside whatever failed.
+	fmt.Print(pipeline.RenderReconcileResult(reconcileResult))
+
+	if reconcileErr != nil {
+		return fmt.Errorf("reconciling narratives: %w", reconcileErr)
+	}
+
 	return nil
 }
 
@@ -418,7 +444,7 @@ type devCmd struct {
 	Seed     devSeedCmd     `cmd:"" help:"Create labeled test issues and generate changelog history."`
 	Reset    devResetCmd    `cmd:"" help:"Delete every seed-labeled issue in the project."`
 	Workflow devWorkflowCmd `cmd:"" help:"Mine and print the observed workflow graph for a project."`
-	Narrate  devNarrateCmd  `cmd:"" help:"Run one collect+cluster+persist pass and print the narratives."`
+	Narrate  devNarrateCmd  `cmd:"" help:"Run one collect+narrate+match+reconcile pass and print what it found and proposed."`
 }
 
 var cli struct {
