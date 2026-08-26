@@ -166,6 +166,30 @@ func (h *HelperCredential) runHelper(ctx context.Context) (string, error) {
 
 	cmd := exec.CommandContext(runCtx, "sh", "-c", h.command)
 
+	// WaitDelay is what makes the timeout real on Linux. CommandContext kills
+	// `sh` at the deadline, but because Stdout/Stderr are io.Writers rather than
+	// *os.File, Go copies output through an os.Pipe — and Wait blocks until that
+	// pipe closes, which happens only once every process holding its write end
+	// has exited.
+	//
+	// Measured under a 100ms timeout, same code both platforms:
+	//
+	//	                       linux/amd64   darwin/arm64
+	//	`sleep 2`, no WaitDelay      2.001s          102ms
+	//	`sleep 5 &` + `sleep 2`      5.002s          102ms
+	//	either, WaitDelay=100ms        202ms          102ms
+	//
+	// So Linux waits out the longest-lived process holding the pipe — including a
+	// backgrounded grandchild the helper never waited for — while darwin returns
+	// at the deadline regardless. That asymmetry is why this surfaced only in CI:
+	// every local run masked it.
+	//
+	// The production consequence is a `watch` loop stalling for as long as an
+	// abandoned interactive login stays open, which is precisely what this
+	// timeout exists to prevent. WaitDelay bounds it: once the context is done,
+	// Wait gives the pipe this long and then returns regardless.
+	cmd.WaitDelay = 100 * time.Millisecond
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	cmd.Stdout = &stdoutBuf

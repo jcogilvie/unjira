@@ -226,9 +226,24 @@ exit 7
 		"error must never contain the helper's stdout, even a partially-written token")
 }
 
+// TestHelperCredential_Timeout pins the bound that stops a hung helper from
+// stalling a watch loop.
+//
+// The helper backgrounds a child that outlives it and inherits its stdout —
+// get-litellm-key's shape when it launches a browser. On Linux that makes Wait
+// block on the pipe until the *grandchild* exits (5s here), well past the 100ms
+// deadline; cmd.WaitDelay is what cuts it short.
+//
+// HONEST LIMITATION: this test cannot fail on darwin, which returns at the
+// deadline whether or not WaitDelay is set (measured 102ms in all four
+// combinations — see runHelper's table). So a local green run proves nothing
+// about this behaviour; only the containerised `earthly +reviewable` or CI does.
+// Kept as a regression guard for the platform where it bites rather than
+// weakened into something that passes everywhere for the wrong reason.
 func TestHelperCredential_Timeout(t *testing.T) {
 	dir := t.TempDir()
-	script := writeScript(t, dir, "helper.sh", "#!/bin/sh\nsleep 2\necho should-not-see-this\n")
+	script := writeScript(t, dir, "helper.sh",
+		"#!/bin/sh\nsleep 5 &\nsleep 2\necho should-not-see-this\n")
 
 	cred := llm.NewHelperCredential(script, llm.WithHelperTimeout(100*time.Millisecond))
 
@@ -240,7 +255,8 @@ func TestHelperCredential_Timeout(t *testing.T) {
 	assert.Contains(t, strings.ToLower(err.Error()), "timeout",
 		"a hung helper must produce an error explicitly naming the timeout")
 	assert.Contains(t, err.Error(), "run", "error should tell the operator to run the helper by hand once")
-	assert.Less(t, elapsed, 1*time.Second, "Credential must return well before the helper's own sleep completes")
+	assert.Less(t, elapsed, 1*time.Second,
+		"Credential must return promptly after the deadline, not wait out a backgrounded child")
 }
 
 func TestHelperCredential_ConcurrentCallersSingleFlight(t *testing.T) {
