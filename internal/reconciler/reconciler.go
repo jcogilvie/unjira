@@ -33,7 +33,12 @@ var selectionRoles = []store.Role{
 }
 
 // Reconcile drafts proposed actions for narratives with at least one
-// actionable issue link and at least one event newer than their last action.
+// narrative_issues link of any role. A mentioned-only narrative is still
+// selected (see selectionRoles) so it gets a ReconcileResult documenting
+// "considered, nothing to do" rather than silently vanishing; reconcileOne's
+// actionableLinks then narrows to primary/same_work before anything is
+// drafted. A narrative with no link at all is excluded — that is matching's
+// backlog, not the reconciler's.
 //
 // Acquires no lease; the caller holds one, matching RunNarrate's convention
 // for Cluster/Persist/Match. Failures are per narrative via errors.Join: one
