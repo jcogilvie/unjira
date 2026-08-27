@@ -61,21 +61,20 @@ func TestPersistWritesEveryProposedActionAsProposed(t *testing.T) {
 // a later action's failure.
 //
 // The plan's original version of this test forced the mid-transaction
-// failure via the actions.narrative_id foreign key. That does not work here:
-// internal/store never issues `PRAGMA foreign_keys = ON` (verified by
-// grep — see persist.go's doc comment), and modernc.org/sqlite defaults FK
-// enforcement OFF, so an insert naming a nonexistent narrative_id silently
-// succeeds instead of erroring. Enabling the pragma would be a repo-wide
-// behavior change — every INSERT across every table gets FK-checked, not
-// just this one — with unknown blast radius across a schema that has never
-// had it on, and connection-pool nuance (modernc.org/sqlite needs it set
-// per-connection, e.g. via the DSN, since a naive one-shot Exec only touches
-// whichever pooled connection happens to run it). That is out of scope for
-// this task, so instead this test forces the same kind of failure — an error
-// returned partway through the loop inside Persist's transaction — by giving
-// the second action an ActionType actionPayload does not recognize. That
-// exercises the exact error path Persist actually has, without touching
-// schema-wide behavior.
+// failure via the actions.narrative_id foreign key. That did not work at the
+// time: internal/store never issued `PRAGMA foreign_keys = ON`, and
+// modernc.org/sqlite defaults FK enforcement OFF, so an insert naming a
+// nonexistent narrative_id silently succeeded instead of erroring.
+//
+// internal/store now enables foreign-key enforcement (store.sqliteDSN sets
+// `_pragma=foreign_keys(1)` in the DSN, since the pragma is per-connection
+// and a naive one-shot Exec only reaches whichever pooled connection happens
+// to run it — see store.sqliteDSN's doc comment), so a bogus narrative_id
+// would fail the same way now. This test still forces the failure via an
+// unrecognized ActionType rather than switching to that, though, so it keeps
+// exercising Persist's own error path (actionPayload's default case)
+// directly instead of depending on a schema-level constraint to fail in the
+// right place inside the loop.
 func TestPersistWritesNothingWhenOneActionFails(t *testing.T) {
 	s := reconcileStore(t)
 	nid := seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), codeEvent("e1", "did work"))

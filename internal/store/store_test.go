@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -1252,4 +1253,77 @@ func TestUpdateActionStatusSetsDecidedAndExecutedTimestamps(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "applied", got[0].Status)
 	require.NotNil(t, got[0].ExecutedAt, "applying sets executed_at")
+}
+
+// -- foreign key enforcement -----------------------------------------------
+//
+// SQLite does not enforce declared REFERENCES clauses unless
+// `PRAGMA foreign_keys = ON` is set, and that pragma is per-connection, not
+// per-database — a naive one-shot db.Exec only touches whichever pooled
+// connection happens to run it, leaving every other connection in the pool
+// unenforced. Open must therefore set the pragma in the DSN itself, so
+// every connection SQLite hands out (including ones opened well after
+// Open returns, e.g. under concurrent load) gets it. These tests prove that
+// by forcing genuinely separate pooled connections (via concurrent
+// goroutines, since idle connections are otherwise reused) and checking each
+// one individually.
+
+// TestInsertAction_RejectsDanglingNarrativeID is the minimum bar: a single
+// connection must reject a child row naming a narrative_id that does not
+// exist. Before this change this insert silently succeeded — see
+// internal/reconciler/persist_test.go's TestPersistWritesNothingWhenOneActionFails,
+// which had to work around exactly this to force its rollback.
+func TestInsertAction_RejectsDanglingNarrativeID(t *testing.T) {
+	s := openStore(t)
+
+	_, err := s.InsertAction(store.ActionRow{
+		NarrativeID: 999999, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.Error(t, err, "inserting an action against a nonexistent narrative must fail now that foreign keys are enforced")
+}
+
+// TestForeignKeys_EnforcedOnEveryPooledConnection is the stronger bar the
+// task calls for: proving enforcement holds on a *second*, genuinely
+// distinct pooled connection, not just whichever connection happened to
+// serve the first query. A single db.Exec("PRAGMA foreign_keys = ON") would
+// pass TestInsertAction_RejectsDanglingNarrativeID (it always reuses the one
+// connection database/sql opens for a single-threaded test) while still
+// leaving a second pooled connection unenforced — the exact failure mode
+// the task description warns is otherwise invisible.
+//
+// SetMaxOpenConns keeps the pool below the count so most goroutines are
+// forced to wait for a connection than to open a fresh one, but with the
+// default (unlimited) pool and genuinely concurrent callers all blocked on
+// a held transaction, database/sql has no idle connection to hand out and
+// must open new ones. Every one of those, from the DSN pragma, needs
+// enforcement — not just connection #1.
+func TestForeignKeys_EnforcedOnEveryPooledConnection(t *testing.T) {
+	s := openStore(t)
+
+	const n = 5
+	var (
+		wg      sync.WaitGroup
+		results = make([]error, n)
+	)
+
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// InsertAction opens/uses its own connection from the pool;
+			// running n of these concurrently forces database/sql to hand
+			// out more than one real connection.
+			_, err := s.InsertAction(store.ActionRow{
+				NarrativeID: 999999 + int64(i), Type: "comment", IssueKey: "PROJ-1",
+				Payload: `{"body":"x"}`, Status: "proposed",
+			})
+			results[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range results {
+		assert.Error(t, err, "connection serving goroutine %d must enforce the foreign key too", i)
+	}
 }

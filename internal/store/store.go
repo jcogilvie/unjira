@@ -248,7 +248,7 @@ func Open(dbPath string) (*Store, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
 	}
@@ -259,6 +259,44 @@ func Open(dbPath string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+// sqliteDSN turns a plain filesystem path into a modernc.org/sqlite DSN that
+// turns on foreign-key enforcement.
+//
+// With this driver, `PRAGMA foreign_keys = ON` is per-connection, and
+// database/sql maintains a *pool* of connections — a one-shot
+// db.Exec("PRAGMA foreign_keys = ON") only reaches whichever single
+// connection happens to run it, leaving every other pooled connection
+// (including ones opened later, under concurrent load) unenforced. That is
+// silent and asymmetric with the failure it's meant to catch: a single-
+// threaded test would pass while production, which opens more than one
+// connection, would not enforce the constraint at all. The fix is to put
+// the pragma in the DSN itself (`_pragma=foreign_keys(1)`), which
+// modernc.org/sqlite applies to every connection it opens, not just the
+// first.
+//
+// The `_pragma` query parameter is only honored in the `file:` URI form of
+// the DSN — a bare path with a `?` appended is ambiguous, because
+// modernc.org/sqlite's DSN parser only treats everything after the first
+// literal '?' as query parameters when the DSN starts with "file:"; for a
+// bare path it strips the '?' suffix from the database filename first and
+// then reparses it as the query string, so any literal '?' or '#' already
+// inside the path (however unlikely for a config-supplied db_path) would
+// silently mis-split the path from the pragma. Always going through
+// file: with the path's own '%', '?', and '#' percent-encoded sidesteps
+// that ambiguity entirely rather than assuming dbPath is "normal enough."
+// '/' is deliberately left unescaped (including on the "./relative/path"
+// and bare "relative/path" forms confirmed by hand — see the DSN scratch
+// tests referenced in the commit) so the DSN still reads as a normal-
+// looking path.
+func sqliteDSN(dbPath string) string {
+	p := filepath.ToSlash(dbPath)
+	p = strings.ReplaceAll(p, "%", "%25")
+	p = strings.ReplaceAll(p, "?", "%3f")
+	p = strings.ReplaceAll(p, "#", "%23")
+
+	return "file:" + p + "?_pragma=foreign_keys(1)"
 }
 
 // Close closes the underlying database connection.

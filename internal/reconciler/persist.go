@@ -28,11 +28,12 @@ import (
 //
 // TestPersistWritesNothingWhenOneActionFails proves the rollback by forcing
 // an in-loop error via an unrecognized ActionType (actionPayload's default
-// case), not via a foreign-key violation: internal/store never issues
-// `PRAGMA foreign_keys = ON`, and modernc.org/sqlite defaults FK enforcement
-// off, so an insert naming a nonexistent narrative_id would silently succeed
-// rather than fail the transaction. See that test's comment for the full
-// reasoning.
+// case), not via a foreign-key violation. That test predates
+// internal/store enforcing foreign keys (store.sqliteDSN now sets
+// `_pragma=foreign_keys(1)` in the DSN — see its doc comment); it forces the
+// failure this other way to exercise Persist's own error path in isolation,
+// decoupled from schema-level FK behavior. See that test's comment for the
+// full reasoning.
 func Persist(s *store.Store, results []ReconcileResult) ([]store.ActionRow, error) {
 	var persisted []store.ActionRow
 
