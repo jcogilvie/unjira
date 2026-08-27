@@ -14,7 +14,7 @@ func TestPersistWritesEveryProposedActionAsProposed(t *testing.T) {
 	s := reconcileStore(t)
 	nid := seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), codeEvent("e1", "did work"))
 
-	err := Persist(s, []ReconcileResult{{
+	persisted, err := Persist(s, []ReconcileResult{{
 		NarrativeID: nid,
 		Proposed: []ProposedAction{
 			{
@@ -44,6 +44,16 @@ func TestPersistWritesEveryProposedActionAsProposed(t *testing.T) {
 	assert.JSONEq(t, `{"body":"the work landed"}`, got[0].Payload)
 	assert.Equal(t, "transition", got[1].Type)
 	assert.JSONEq(t, `{"target_status":"done"}`, got[1].Payload)
+
+	// Persist's return value is watch's auto-commit seam: the exact rows THIS
+	// call wrote, with real ids, so a caller need not re-derive "which actions
+	// are freshly proposed" via a status query that would also catch actions
+	// from earlier passes a human has not yet triaged.
+	require.Len(t, persisted, 2, "Persist must return exactly the rows it wrote")
+	assert.ElementsMatch(t, []int64{got[0].ID, got[1].ID},
+		[]int64{persisted[0].ID, persisted[1].ID})
+	assert.Equal(t, "proposed", persisted[0].Status)
+	assert.Equal(t, "proposed", persisted[1].Status)
 }
 
 // TestPersistWritesNothingWhenOneActionFails proves the whole-pass
@@ -70,7 +80,7 @@ func TestPersistWritesNothingWhenOneActionFails(t *testing.T) {
 	s := reconcileStore(t)
 	nid := seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), codeEvent("e1", "did work"))
 
-	err := Persist(s, []ReconcileResult{
+	persisted, err := Persist(s, []ReconcileResult{
 		{NarrativeID: nid, Proposed: []ProposedAction{
 			{Type: ActionComment, IssueKey: "PROJ-1", Body: "would be fine", Confidence: 0.8},
 		}},
@@ -79,6 +89,7 @@ func TestPersistWritesNothingWhenOneActionFails(t *testing.T) {
 		}},
 	})
 	require.Error(t, err)
+	assert.Empty(t, persisted, "a failed Persist must return no rows: nothing to auto-commit")
 
 	got, err := s.ActionsForNarrative(nid)
 	require.NoError(t, err)
@@ -91,9 +102,11 @@ func TestPersistIsANoOpForResultsWithNoProposals(t *testing.T) {
 	s := reconcileStore(t)
 	nid := seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), codeEvent("e1", "did work"))
 
-	require.NoError(t, Persist(s, []ReconcileResult{
+	persisted, err := Persist(s, []ReconcileResult{
 		{NarrativeID: nid, SkippedNoDelta: true},
-	}))
+	})
+	require.NoError(t, err)
+	assert.Empty(t, persisted)
 
 	got, err := s.ActionsForNarrative(nid)
 	require.NoError(t, err)

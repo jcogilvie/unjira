@@ -1,4 +1,4 @@
-// Package main implements the unjira CLI: collect | digest | status | dev.
+// Package main implements the unjira CLI: collect | digest | status | watch | dev.
 package main
 
 import (
@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -23,6 +25,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/devtools"
 	"github.com/jcogilvie/unjira/internal/envfile"
+	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
@@ -31,12 +34,18 @@ import (
 )
 
 const (
-	// narrateLeaseTTL bounds how long a crashed narration pass can hold the
-	// pipeline lock before another run may steal it. Generous relative to a
-	// pass (minutes), since stealing a live lease is worse than waiting.
-	narrateLeaseTTL = 30 * time.Minute
-	// narrateLeasePoll is how often a blocked Acquire retries.
-	narrateLeasePoll = 2 * time.Second
+	// pipelineLeaseTTL bounds how long a crashed pass (dev narrate or watch)
+	// can hold the pipeline lock before another run may steal it. Generous
+	// relative to a pass (minutes), since stealing a live lease is worse
+	// than waiting.
+	//
+	// Named pipelineLease*, not narrateLease*: originally sized for
+	// devNarrateCmd's single manual pass, this now also bounds each of
+	// watch's looped passes (collect+narrate+match+reconcile+auto-commit)
+	// under one lease per tick — see acquirePipelineLease's doc comment.
+	pipelineLeaseTTL = 30 * time.Minute
+	// pipelineLeasePoll is how often a blocked Acquire retries.
+	pipelineLeasePoll = 2 * time.Second
 )
 
 // registry maps collector names to factories, mirroring
@@ -369,10 +378,10 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	defer stop()
 
 	runID := fmt.Sprintf("dev-narrate-%d", os.Getpid())
-	if err := app.acquireNarrateLease(ctx, runID); err != nil {
+	if err := app.acquirePipelineLease(ctx, runID); err != nil {
 		return err
 	}
-	defer app.releaseNarrateLease(runID)
+	defer app.releasePipelineLease(runID)
 
 	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set()); err != nil {
 		return err
@@ -457,17 +466,23 @@ func (c *devNarrateCmd) window() correlator.TimeRange {
 	return correlator.TimeRange{Start: now.Add(-c.Since.Duration()), End: now}
 }
 
-// acquireNarrateLease blocks until the pipeline lock is free, so a
+// acquirePipelineLease blocks until the pipeline lock is free, so a
 // concurrent pass waits rather than fails.
-func (a *appContext) acquireNarrateLease(ctx context.Context, runID string) error {
-	return a.store.Acquire(ctx, runID, time.Now, narrateLeaseTTL, narrateLeasePoll)
+//
+// Shared by devNarrateCmd (one pass, one lease for the whole command) and
+// watchCmd (one lease PER loop iteration — see watchLoop/runWatchPass): both
+// callers span collect+narrate+match+reconcile under a single lease, which
+// is exactly why RunNarrate/RunMatch/RunReconcile each deliberately take no
+// lease of their own.
+func (a *appContext) acquirePipelineLease(ctx context.Context, runID string) error {
+	return a.store.Acquire(ctx, runID, time.Now, pipelineLeaseTTL, pipelineLeasePoll)
 }
 
-// releaseNarrateLease releases the pipeline lock, logging any error rather
+// releasePipelineLease releases the pipeline lock, logging any error rather
 // than returning it — a release failure must never mask a real failure from
 // the pass itself, which by this point has already returned (or is about
 // to).
-func (a *appContext) releaseNarrateLease(runID string) {
+func (a *appContext) releasePipelineLease(runID string) {
 	if err := a.store.ReleaseLock(runID); err != nil {
 		log.Printf("releasing pipeline lock: %v", err)
 	}
@@ -480,6 +495,247 @@ type devCmd struct {
 	Narrate  devNarrateCmd  `cmd:"" help:"Run one collect+narrate+match+reconcile pass and print what it found and proposed."`
 }
 
+// watchCmd is unjira's headline phase-1 command: the long-running loop that
+// makes unjira a thing that runs rather than a thing you run. Per the
+// phase-1 spec's command surface
+// (docs/superpowers/specs/2026-08-11-phase1-correlator-design.md): interval-
+// driven, no human runs it directly — cron/launchd/a cloud scheduler calls
+// this repeatedly (with --once), or it loops on its own --interval.
+//
+// It composes exactly the stages devNarrateCmd was prototyping —
+// collect -> narrate -> match -> reconcile — plus the one thing dev narrate
+// deliberately never did: the auto-commit gate (internal/gate). Dev narrate
+// exists to inspect a pass; watch exists to act on one unattended, which is
+// why the gate belongs here and nowhere earlier. See
+// docs/superpowers/specs/2026-08-26-watch-autocommit-design.md.
+type watchCmd struct {
+	Interval config.Span `default:"5m" help:"How often to run a pass (e.g. 30s, 5m, 1h)."`
+	// Since is deliberately independent of Interval, not derived from it: a
+	// generous margin tolerates a missed tick (a slow pass, a restart)
+	// without narrating anything twice — UnlinkedEventsInRange excludes
+	// every event already linked to a narrative regardless of how wide the
+	// window is, so widening Since is always safe, never duplicative. A
+	// cursor-based "since last successful run" watermark (per the phase-1
+	// spec's "Watermarks" section) would be tighter, but is deliberately
+	// left for a later slice — this fixed lookback is simpler and the
+	// dedup-by-window-membership property above is what makes it safe to
+	// ship as-is rather than a placeholder that must be revisited.
+	Since  config.Span `default:"1h" help:"How far back each pass narrates (e.g. 1h, 24h)."`
+	Once   bool        `help:"Run a single pass and exit, instead of looping. Makes the loop testable and cron-friendly without a supervisor."`
+	DryRun bool        `help:"Run every stage's real work, including LLM calls, but skip Persist and the auto-commit gate. Never writes to the store or a real tracker."`
+}
+
+// Run validates configuration once, up front — before the first lease, let
+// alone the first pass — because an error that will recur forever (invalid
+// config, a missing LLM credential) must fail fast rather than retrying on
+// every tick for no reason. A transient failure (a Jira 503, an expired
+// token) is exactly what the per-pass handling in watchLoop exists to
+// survive instead; see watchLoop and runWatchPass for that split.
+func (c *watchCmd) Run(app *appContext) error {
+	client, err := app.llmClient()
+	if err != nil {
+		return err
+	}
+	if err := app.config.Correlator.Validate(); err != nil {
+		return err
+	}
+	if err := app.config.Reconciler.Validate(); err != nil {
+		return err
+	}
+	if err := app.config.Match.Validate(); err != nil {
+		return err
+	}
+	// AutoCommitRule.Validate is otherwise only ever invoked implicitly via
+	// gate.Decide's map lookup, which never rejects a malformed rule — it
+	// just mis-gates silently (see AutoCommitRule.Validate's own doc
+	// comment on why a floor outside [0,1] is a config error rather than a
+	// value gate.Decide can operate on "safely"). Validating here is the
+	// only place this ever actually happens before a real pass runs.
+	for actionType, rule := range app.config.AutoCommit {
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("auto_commit rule for %q: %w", actionType, err)
+		}
+	}
+
+	linkExclusions, err := app.config.CompiledLinkExclusions()
+	if err != nil {
+		return err
+	}
+
+	// Matching/reconciling/applying all use ONE tracker, resolved from the
+	// default project — the same multi-connection limitation
+	// devNarrateCmd.Run's own doc comment names, unchanged here.
+	project, err := app.projectKey("")
+	if err != nil {
+		return err
+	}
+
+	tracker, err := app.taskTracker(project)
+	if err != nil {
+		return err
+	}
+
+	applier := gate.NewApplier(app.store, tracker, app.config.Tracker.DefaultProject)
+
+	// ctx governs the LOOP — whether to acquire another lease, whether to
+	// keep waiting out the interval — but deliberately does NOT govern an
+	// in-flight PASS: watchLoop derives a non-cancelable context per pass via
+	// context.WithoutCancel, so a SIGINT/SIGTERM lets the current pass finish
+	// (an in-flight LLM call or tracker write completes) rather than
+	// aborting it partway. That is the "graceful" half of graceful shutdown;
+	// killing the process outright is separately safe regardless (the lease
+	// is TTL-bounded and Persist is transactional), per the design doc.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	since := c.Since.Duration()
+
+	return app.watchLoop(ctx, c.Interval.Duration(), c.Once, func(passCtx context.Context, _ string) error {
+		return app.runWatchPass(passCtx, client, tracker, applier, linkExclusions, since, c.DryRun)
+	})
+}
+
+// watchLoop owns the interval loop's mechanics — per-tick lease acquisition,
+// --once's single-pass exit, graceful shutdown, and "a pass failure must not
+// exit the loop" — independent of what a pass actually does. Kept separate
+// from watchCmd.Run and runWatchPass so a test can exercise the LOOP with a
+// fake runOnePass, and exercise a real pass's pipeline composition
+// separately, without needing both working at once.
+//
+// Each tick acquires its OWN lease (a fresh runID), rather than one lease
+// held for the loop's entire lifetime: RunNarrate/RunMatch/RunReconcile each
+// deliberately take no lease so a caller can span them under ONE PASS's
+// lease — not under watch's entire, potentially-unbounded runtime. Holding a
+// single lease across the whole process would also mean a crashed watch
+// process leaves the lock held for the full pipelineLeaseTTL regardless of
+// how long it had actually been idle between ticks, defeating the TTL's
+// purpose (bounding a CRASHED PASS, not a long-running watch).
+func (a *appContext) watchLoop(
+	ctx context.Context,
+	interval time.Duration,
+	once bool,
+	runOnePass func(ctx context.Context, runID string) error,
+) error {
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		runID := fmt.Sprintf("watch-%d-%d", os.Getpid(), time.Now().UnixNano())
+
+		if err := a.acquirePipelineLease(ctx, runID); err != nil {
+			if ctx.Err() != nil {
+				// Canceled while blocked waiting for a contended lease: this
+				// is shutdown, not a pass failure to log-and-retry.
+				return nil
+			}
+			// Any other acquire failure (a transient SQLite error) is logged
+			// and retried next tick — the same treatment as a pass failure
+			// below, since a lease that cannot be acquired right now is
+			// exactly the kind of transient condition watch exists to
+			// survive rather than exit over.
+			log.Printf("watch: acquiring pipeline lease: %v", err)
+		} else {
+			passErr := runOnePass(context.WithoutCancel(ctx), runID)
+			a.releasePipelineLease(runID)
+
+			if passErr != nil {
+				log.Printf("watch: pass failed: %v", passErr)
+			}
+		}
+
+		if once {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(interval):
+		}
+	}
+}
+
+// runWatchPass runs one collect -> narrate -> match -> reconcile ->
+// auto-commit pass, under the lease watchLoop already holds for this tick.
+//
+// --dry-run stops after narrate and SAYS so on every stage it skips: narrate's
+// own DryRun option already skips its Persist, but matching writes
+// narrative_issues rows (and may set narratives.issue_key) and reconcile
+// drafts against matching's link set — neither has a dry-run mode of its
+// own, so running them under --dry-run would either write for real or draft
+// against a link set that was never persisted. Silence here would leave an
+// operator wondering why nothing happened past narration; devNarrateCmd sets
+// this same precedent for matching+reconcile, and this adds auto-commit to
+// the list of things named as skipped.
+//
+// Auto-commit runs ONLY when reconcileErr == nil — never merely because
+// reconcileResult.Persisted is non-empty. RunReconcile isolates failures per
+// narrative and can return a non-nil error alongside a perfectly usable
+// partial result: the narratives that drafted cleanly still persisted their
+// proposals (see RunReconcile's own doc comment on that asymmetry with
+// Persist). Gating on "were there any rows" instead of "did the whole pass
+// finish cleanly" is exactly the trap the phase-1 spec's all-or-nothing
+// property exists to close — a withheld pass's actions are NOT lost, they
+// sit at status=proposed for a human in triage; this only withholds the
+// SEPARATE decision to apply any of them without review.
+func (a *appContext) runWatchPass(
+	ctx context.Context,
+	client llm.Client,
+	tracker tasktracker.TaskTracker,
+	applier *gate.Applier,
+	linkExclusions []*regexp.Regexp,
+	since time.Duration,
+	dryRun bool,
+) error {
+	if _, err := pipeline.RunCollect(a.config, a.store, registry, linkExclusions, a.jiraCredentials.Set()); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	window := correlator.TimeRange{Start: now.Add(-since), End: now}
+
+	narrateResult, err := pipeline.RunNarrate(ctx, a.store, client, a.config, window,
+		pipeline.NarrateOptions{DryRun: dryRun})
+	if err != nil {
+		return err
+	}
+	fmt.Print(pipeline.RenderNarrateResult(narrateResult))
+
+	if dryRun {
+		fmt.Println("matching skipped (--dry-run)")
+		fmt.Println("reconcile skipped (--dry-run)")
+		fmt.Println("auto-commit skipped (--dry-run)")
+
+		return nil
+	}
+
+	matchResult, matchErr := pipeline.RunMatch(ctx, a.store, tracker, client, a.config)
+	fmt.Print(pipeline.RenderMatchResult(matchResult))
+
+	if matchErr != nil {
+		return fmt.Errorf("matching narratives to issues: %w", matchErr)
+	}
+
+	reconcileResult, reconcileErr := pipeline.RunReconcile(
+		ctx, a.store, tracker, client, a.config, pipeline.ReconcileOptions{})
+	fmt.Print(pipeline.RenderReconcileResult(reconcileResult))
+
+	if reconcileErr != nil {
+		fmt.Println("auto-commit skipped (this pass did not reconcile cleanly)")
+
+		return fmt.Errorf("reconciling narratives: %w", reconcileErr)
+	}
+
+	autoCommitResult, autoCommitErr := pipeline.RunAutoCommit(reconcileResult.Persisted, pipeline.AutoCommitOptions{
+		Rules:   a.config.AutoCommit,
+		Applier: applier,
+	})
+	fmt.Print(pipeline.RenderAutoCommitResult(autoCommitResult))
+
+	return autoCommitErr
+}
+
 var cli struct {
 	Config          string              `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
 	JiraCredentials credentials.JSONSet `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
@@ -488,6 +744,7 @@ var cli struct {
 	Collect collectCmd `cmd:"" help:"Run every enabled collector and persist new events."`
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
 	Status  statusCmd  `cmd:"" help:"Event counts and collector cursor freshness."`
+	Watch   watchCmd   `cmd:"" help:"Interval loop: collect -> narrate -> match -> reconcile -> auto-commit gate."`
 	Dev     devCmd     `cmd:"" help:"Tools for the dev Jira instance (seed/reset test data, inspect workflows)."`
 }
 
