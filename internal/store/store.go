@@ -276,20 +276,36 @@ func Open(dbPath string) (*Store, error) {
 // modernc.org/sqlite applies to every connection it opens, not just the
 // first.
 //
-// The `_pragma` query parameter is only honored in the `file:` URI form of
-// the DSN — a bare path with a `?` appended is ambiguous, because
-// modernc.org/sqlite's DSN parser only treats everything after the first
-// literal '?' as query parameters when the DSN starts with "file:"; for a
-// bare path it strips the '?' suffix from the database filename first and
-// then reparses it as the query string, so any literal '?' or '#' already
-// inside the path (however unlikely for a config-supplied db_path) would
-// silently mis-split the path from the pragma. Always going through
-// file: with the path's own '%', '?', and '#' percent-encoded sidesteps
-// that ambiguity entirely rather than assuming dbPath is "normal enough."
-// '/' is deliberately left unescaped (including on the "./relative/path"
-// and bare "relative/path" forms confirmed by hand — see the DSN scratch
-// tests referenced in the commit) so the DSN still reads as a normal-
-// looking path.
+// The `_pragma` query parameter is only honored in the `file:` URI form, so
+// the path has to be escaped for exactly the three characters that are
+// structural in a DSN — and for nothing else. Each replacement was confirmed
+// by opening real databases with an unescaped `file:`+path DSN:
+//
+//	wi?rd.db     →  wrote to "wi",       foreign_keys OFF
+//	wi#rd.db     →  wrote to "wi",       foreign_keys on
+//	wi%3frd.db   →  wrote to "wi?rd.db", foreign_keys on
+//
+// '?' splits path from query, so both the filename and the pragma are lost —
+// silently disabling the very enforcement this function exists to guarantee.
+// '#' truncates the path as a fragment. '%' must be escaped FIRST (as it is)
+// because the other two introduce percent-escapes: without it, a db_path
+// already containing "%3f" round-trips into a literal '?' and unjira writes
+// to a file the operator never named.
+//
+// Do NOT replace this with a general URL encoder — both obvious candidates
+// are wrong here, because they don't know '/' is load-bearing and '?' is not:
+//
+//   - net/url's url.URL renders a *relative* Path with a "//" authority
+//     prefix: `file://data/unjira.db`, which makes "data" the URL authority
+//     rather than a directory. That fails at the first Exec with
+//     "SQL logic error: out of memory (1)". config/unjira.example.json ships
+//     db_path "data/unjira.db", so this breaks the default configuration.
+//   - url.PathEscape escapes '/' too, collapsing the path into one filename
+//     component.
+//
+// So '/' stays unescaped deliberately, and absolute, "./relative", and bare
+// "relative" forms were each verified to open the intended file with
+// foreign_keys on.
 func sqliteDSN(dbPath string) string {
 	p := filepath.ToSlash(dbPath)
 	p = strings.ReplaceAll(p, "%", "%25")

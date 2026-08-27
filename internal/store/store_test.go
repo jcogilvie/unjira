@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -1281,6 +1282,95 @@ func TestInsertAction_RejectsDanglingNarrativeID(t *testing.T) {
 		Payload: `{"body":"x"}`, Status: "proposed",
 	})
 	require.Error(t, err, "inserting an action against a nonexistent narrative must fail now that foreign keys are enforced")
+}
+
+// TestOpen_PathsWithDSNMetacharacters pins the escaping in sqliteDSN by
+// asserting the two things that actually matter to an operator, through the
+// public API rather than the DSN string: the database lands at exactly the
+// path they configured, and foreign keys are enforced there.
+//
+// Each case is a character that is structural in a DSN. Verified by hand that
+// dropping the corresponding replacement breaks it — an unescaped `file:`+path
+// DSN gives:
+//
+//	wi?rd.db     →  wrote to "wi",       foreign_keys OFF
+//	wi#rd.db     →  wrote to "wi",       foreign_keys on
+//	wi%3frd.db   →  wrote to "wi?rd.db", foreign_keys on
+//
+// The '?' row is the dangerous one: silently the wrong file AND silently
+// unenforced, which is the exact failure this whole change exists to prevent.
+// The last row is why '%' must be escaped first — otherwise a path already
+// containing a percent-escape round-trips into a different filename.
+func TestOpen_PathsWithDSNMetacharacters(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+	}{
+		{"question mark splits path from query", "wi?rd.db"},
+		{"hash truncates path as a fragment", "wi#rd.db"},
+		{"literal percent", "wi%rd.db"},
+		{"path already containing a percent-escape", "wi%3frd.db"},
+		{"space", "with space.db"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, tc.base)
+
+			s, err := store.Open(dbPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = s.Close() })
+
+			// Force a write so the file is definitely created.
+			_, err = s.InsertAction(store.ActionRow{
+				NarrativeID: 999999, Type: "comment", IssueKey: "PROJ-1",
+				Payload: `{"body":"x"}`, Status: "proposed",
+			})
+			require.Error(t, err,
+				"foreign keys must be enforced regardless of metacharacters in the path")
+
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+
+			names := make([]string, 0, len(entries))
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			assert.Contains(t, names, tc.base,
+				"the database must land at the exact configured filename, not a mis-split prefix")
+		})
+	}
+}
+
+// TestOpen_RelativePath is the case that rules out net/url as a "just encode
+// the whole thing" replacement for sqliteDSN's targeted escaping.
+//
+// url.URL{Scheme: "file", Path: "data/unjira.db"}.String() emits
+// `file://data/unjira.db`, where the "//" makes "data" the URL *authority*
+// rather than a directory; that DSN fails at the first statement with
+// "SQL logic error: out of memory (1)". config/unjira.example.json ships
+// db_path "data/unjira.db", so a general encoder would break the default
+// configuration. url.PathEscape is no better — it escapes '/' too.
+func TestOpen_RelativePath(t *testing.T) {
+	for _, rel := range []string{"data/unjira.db", "./data/unjira.db"} {
+		t.Run(rel, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+
+			s, err := store.Open(rel)
+			require.NoError(t, err, "a relative db_path must open (this is what the example config ships)")
+			t.Cleanup(func() { _ = s.Close() })
+
+			_, err = s.InsertAction(store.ActionRow{
+				NarrativeID: 999999, Type: "comment", IssueKey: "PROJ-1",
+				Payload: `{"body":"x"}`, Status: "proposed",
+			})
+			require.Error(t, err, "foreign keys must be enforced on a relative path too")
+
+			_, err = os.Stat(filepath.Join("data", "unjira.db"))
+			assert.NoError(t, err, "the database must land under the relative directory named")
+		})
+	}
 }
 
 // TestForeignKeys_EnforcedOnEveryPooledConnection is the stronger bar the
