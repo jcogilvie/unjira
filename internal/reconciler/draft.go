@@ -12,6 +12,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -52,18 +53,31 @@ type draftVerdict struct {
 // One call rather than one per link is deliberate: the same_work case requires
 // each draft to be written in awareness of the others (so the two audiences get
 // genuinely different text), which a per-link call cannot do.
+//
+// learnedRules is appended to the system prompt when non-empty (see
+// rules.Render), following internal/correlator's classifyCandidates pattern
+// exactly: draft trusts that its caller (Reconcile, ultimately internal/
+// pipeline) already filtered to rules.ScopeReconciler via rules.ForScope —
+// it does not filter or re-check scope itself, the same way classifyCandidates
+// does not re-check rules.ScopeCorrelator on what WithRules handed it.
 func draft(
 	ctx context.Context,
 	client llm.Client,
 	narrative store.NarrativeRow,
 	delta []events.Event,
 	verified []verifiedLink,
+	learnedRules []rules.Rule,
 ) ([]ProposedAction, correlator.Stats, error) {
 	var stats correlator.Stats
 
 	prompt := buildDraftPrompt(narrative, delta, verified)
 
-	raw, usage, err := client.Complete(ctx, draftSystemPrompt, prompt)
+	systemPrompt := draftSystemPrompt
+	if rendered := rules.Render(learnedRules); rendered != "" {
+		systemPrompt += "\n\n" + rendered
+	}
+
+	raw, usage, err := client.Complete(ctx, systemPrompt, prompt)
 	if err != nil {
 		return nil, stats, fmt.Errorf("drafting actions for narrative %d: %w", narrative.ID, err)
 	}

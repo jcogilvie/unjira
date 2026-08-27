@@ -2,9 +2,36 @@
 
 A `failed` action currently records *that* it failed and not *why*. This closes that.
 
-Status: design. Stacked on slice 6's first half (`unjira actions`, PR #20), whose own body flags
-this as its known gap. Prompted by the user directly: *"i do not like unattended failures with no
-reasons; we should figure out how to capture/report the failure reason."*
+## Status: landed 2026-08-27 (PR #21)
+
+553 tests, 0 skipped; `earthly +reviewable` green. Verified end-to-end rather than by unit test
+alone: a fresh database from the real binary has the column, and a reason written to it survives a
+close/reopen from disk and returns through `ActionsByStatus` — the same accessor the CLI uses.
+
+```
+$ unjira actions list --status failed
+#1  narrative=1  comment  PAAS-1  confidence=0.90 status=failed \
+    error="posting comment to PAAS-1: 403 Forbidden (user lacks Add Comments permission)"
+```
+
+Two tests drilled: making `Apply` pass `nil` on success (leaving a stale reason) fails
+`TestApplier_RetryAfterFailure_ClearsTheStaleReason`; dropping `Err` from the `FailedAction` append
+fails `TestRunAutoCommit_TwoFailuresAttributeTheRightReasonToEachID` — per-id, because a single
+joined error would satisfy a weaker assertion.
+
+**Then proven against real Jira** in PR #22: the reason recorded for a genuine 404 (issue deleted
+between propose and apply — the exact scenario `Applier.Apply` cites as its reason not to retry) was
+`posting comment to DEVSBX-35: adding comment to jira issue DEVSBX-35: Jira API 404: - Issue does
+not exist or you do not have permission to see it.`
+
+One correction to the note below: the migration boundary is a **release**, not the first applied
+action. The user's condition — "we can keep deleting the sqlite db until we make a *release*" —
+matches commit `9b54490`'s original wording. The "graduation and migration are now coupled" claim
+below was over-conservative; left in place with this correction rather than rewritten.
+
+Stacked on slice 6's first half (`unjira actions`, PR #20), whose own body flags this as its known
+gap. Prompted by the user directly: *"i do not like unattended failures with no reasons; we should
+figure out how to capture/report the failure reason."*
 
 ## The gap, traced
 
