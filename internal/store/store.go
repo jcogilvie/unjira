@@ -254,7 +254,7 @@ func Open(dbPath string) (*Store, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
 	}
@@ -265,6 +265,60 @@ func Open(dbPath string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+// sqliteDSN turns a plain filesystem path into a modernc.org/sqlite DSN that
+// turns on foreign-key enforcement.
+//
+// With this driver, `PRAGMA foreign_keys = ON` is per-connection, and
+// database/sql maintains a *pool* of connections — a one-shot
+// db.Exec("PRAGMA foreign_keys = ON") only reaches whichever single
+// connection happens to run it, leaving every other pooled connection
+// (including ones opened later, under concurrent load) unenforced. That is
+// silent and asymmetric with the failure it's meant to catch: a single-
+// threaded test would pass while production, which opens more than one
+// connection, would not enforce the constraint at all. The fix is to put
+// the pragma in the DSN itself (`_pragma=foreign_keys(1)`), which
+// modernc.org/sqlite applies to every connection it opens, not just the
+// first.
+//
+// The `_pragma` query parameter is only honored in the `file:` URI form, so
+// the path has to be escaped for exactly the three characters that are
+// structural in a DSN — and for nothing else. Each replacement was confirmed
+// by opening real databases with an unescaped `file:`+path DSN:
+//
+//	wi?rd.db     →  wrote to "wi",       foreign_keys OFF
+//	wi#rd.db     →  wrote to "wi",       foreign_keys on
+//	wi%3frd.db   →  wrote to "wi?rd.db", foreign_keys on
+//
+// '?' splits path from query, so both the filename and the pragma are lost —
+// silently disabling the very enforcement this function exists to guarantee.
+// '#' truncates the path as a fragment. '%' must be escaped FIRST (as it is)
+// because the other two introduce percent-escapes: without it, a db_path
+// already containing "%3f" round-trips into a literal '?' and unjira writes
+// to a file the operator never named.
+//
+// Do NOT replace this with a general URL encoder — both obvious candidates
+// are wrong here, because they don't know '/' is load-bearing and '?' is not:
+//
+//   - net/url's url.URL renders a *relative* Path with a "//" authority
+//     prefix: `file://data/unjira.db`, which makes "data" the URL authority
+//     rather than a directory. That fails at the first Exec with
+//     "SQL logic error: out of memory (1)". config/unjira.example.json ships
+//     db_path "data/unjira.db", so this breaks the default configuration.
+//   - url.PathEscape escapes '/' too, collapsing the path into one filename
+//     component.
+//
+// So '/' stays unescaped deliberately, and absolute, "./relative", and bare
+// "relative" forms were each verified to open the intended file with
+// foreign_keys on.
+func sqliteDSN(dbPath string) string {
+	p := filepath.ToSlash(dbPath)
+	p = strings.ReplaceAll(p, "%", "%25")
+	p = strings.ReplaceAll(p, "?", "%3f")
+	p = strings.ReplaceAll(p, "#", "%23")
+
+	return "file:" + p + "?_pragma=foreign_keys(1)"
 }
 
 // Close closes the underlying database connection.
