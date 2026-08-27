@@ -40,17 +40,36 @@ func (t *Tracker) WorkflowGraph(projectKey string) (*workflow.Graph, error) {
 }
 
 // jiraStatusCategories map Jira's statusCategory.key values to unjira's
-// normalized StatusCategory. Any unrecognized key (including "unknown", the
-// Client's own fallback for a missing category) maps to StatusTodo, the
-// least presumptive bucket.
+// normalized StatusCategory. Jira Cloud defines only these three keys today,
+// but team-managed projects, marketplace apps, or a future API version could
+// introduce more — callers must decide for themselves how to treat a key
+// this map doesn't recognize (see normalizedStatusCategory and
+// mustNormalizeStatusCategory below).
 var jiraStatusCategories = map[string]tasktracker.StatusCategory{
 	"new":           tasktracker.StatusTodo,
 	"indeterminate": tasktracker.StatusInProgress,
 	"done":          tasktracker.StatusDone,
 }
 
-func normalizedStatusCategory(key string) tasktracker.StatusCategory {
-	if category, ok := jiraStatusCategories[key]; ok {
+// normalizedStatusCategory maps key to its normalized bucket, reporting
+// whether key was recognized. Legality-facing callers (SetStatus,
+// AvailableStatusCategories) must check ok themselves rather than fold an
+// unrecognized key into some bucket: doing so would let unjira report a
+// category reachable — or, in SetStatus, actually execute a transition into
+// one — that Jira never actually offered.
+func normalizedStatusCategory(key string) (tasktracker.StatusCategory, bool) {
+	category, ok := jiraStatusCategories[key]
+
+	return category, ok
+}
+
+// mustNormalizeStatusCategory is normalizedStatusCategory for the read path
+// (normalizeIssue), where an unrecognized key (including "unknown", the
+// Client's own fallback for a missing category) deliberately degrades to
+// StatusTodo, the least presumptive bucket, rather than erroring — Issue is
+// a best-effort snapshot, not a gate on a write.
+func mustNormalizeStatusCategory(key string) tasktracker.StatusCategory {
+	if category, ok := normalizedStatusCategory(key); ok {
 		return category
 	}
 
@@ -80,7 +99,7 @@ func normalizeIssue(raw map[string]any) tasktracker.Issue {
 		issue.StatusName, _ = status["name"].(string)
 		if category, ok := status["statusCategory"].(map[string]any); ok {
 			categoryKey, _ := category["key"].(string)
-			issue.StatusCategory = normalizedStatusCategory(categoryKey)
+			issue.StatusCategory = mustNormalizeStatusCategory(categoryKey)
 		}
 	}
 
@@ -134,7 +153,11 @@ func (t *Tracker) AddComment(key, text string) error {
 
 // SetStatus resolves target to a legal transition (one landing in that
 // status category) and executes it. Errors loudly if no available
-// transition lands in the target category, rather than guessing.
+// transition lands in the target category, rather than guessing. A
+// transition into a status category Jira reports but this package doesn't
+// recognize never matches any target, StatusTodo included — an unrecognized
+// category must never be treated as equivalent to a caller's request, since
+// that would execute a transition unjira never actually verified.
 func (t *Tracker) SetStatus(key string, target tasktracker.StatusCategory) error {
 	transitions, err := t.client.GetTransitions(key)
 	if err != nil {
@@ -151,7 +174,9 @@ func (t *Tracker) SetStatus(key string, target tasktracker.StatusCategory) error
 			continue
 		}
 		categoryKey, _ := category["key"].(string)
-		if normalizedStatusCategory(categoryKey) != target {
+
+		normalized, ok := normalizedStatusCategory(categoryKey)
+		if !ok || normalized != target {
 			continue
 		}
 
@@ -168,7 +193,11 @@ func (t *Tracker) SetStatus(key string, target tasktracker.StatusCategory) error
 
 // AvailableStatusCategories maps the issue's currently-legal transitions to
 // normalized categories, deduplicated (several named transitions routinely
-// land in the same category).
+// land in the same category). A transition into a status category this
+// package doesn't recognize is dropped rather than folded into StatusTodo:
+// this method's whole purpose is telling the reconciler which categories
+// are actually reachable, and reporting one that was never verified would
+// be a false positive licensing an unverified write.
 func (t *Tracker) AvailableStatusCategories(key string) ([]tasktracker.StatusCategory, error) {
 	transitions, err := t.client.GetTransitions(key)
 	if err != nil {
@@ -189,8 +218,8 @@ func (t *Tracker) AvailableStatusCategories(key string) ([]tasktracker.StatusCat
 		}
 		categoryKey, _ := category["key"].(string)
 
-		normalized := normalizedStatusCategory(categoryKey)
-		if seen[normalized] {
+		normalized, ok := normalizedStatusCategory(categoryKey)
+		if !ok || seen[normalized] {
 			continue
 		}
 		seen[normalized] = true
