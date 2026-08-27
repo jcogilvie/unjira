@@ -745,6 +745,7 @@ var cli struct {
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
 	Status  statusCmd  `cmd:"" help:"Event counts and collector cursor freshness."`
 	Watch   watchCmd   `cmd:"" help:"Interval loop: collect -> narrate -> match -> reconcile -> auto-commit gate."`
+	Actions actionsCmd `cmd:"" help:"Machine-facing primitives over the review queue: list and decide on proposed actions."`
 	Dev     devCmd     `cmd:"" help:"Tools for the dev Jira instance (seed/reset test data, inspect workflows)."`
 }
 

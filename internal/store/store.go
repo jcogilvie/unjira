@@ -32,6 +32,12 @@ var ErrLocalIssueNotFound = errors.New("local issue not found")
 // ErrNarrativeNotFound is returned by GetNarrative when no row matches.
 var ErrNarrativeNotFound = errors.New("narrative not found")
 
+// ErrActionNotFound is returned by GetAction when no row matches — `unjira
+// actions decide` needs to distinguish "no such action" from every other
+// failure mode, since the former is a user-facing error (a typo'd id), not
+// a store bug.
+var ErrActionNotFound = errors.New("action not found")
+
 // ErrEventNotFound is returned by EventIDByExternalID when no event matches
 // the given (source, external_id).
 var ErrEventNotFound = errors.New("event not found")
@@ -1399,19 +1405,24 @@ func nullable(s string) any {
 // distinct from any timestamp. They stay strings rather than time.Time to
 // match how the rest of this package stores timestamps (SQLite TEXT), and
 // because nothing orders by them.
+// JSON tags mirror the actions table's own column names (snake_case), not
+// Go's default CamelCase field names — `unjira actions list --json` is a
+// machine-facing surface built for scripting/jq, and a reader piping this
+// output should see the same names they'd see in a `sqlite3` query, not a
+// second, Go-flavored vocabulary for the same columns.
 type ActionRow struct {
-	ID          int64
-	NarrativeID int64
-	Type        string // comment | transition | create | estimate
-	IssueKey    string
-	Payload     string // JSON; shape depends on Type
-	Confidence  float64
-	Rationale   string
-	Status      string // proposed | approved | edited | rejected | applied | failed
-	Feedback    string
-	DecidedAt   *string
-	ExecutedAt  *string
-	CreatedAt   string
+	ID          int64   `json:"id"`
+	NarrativeID int64   `json:"narrative_id"`
+	Type        string  `json:"type"` // comment | transition | create | estimate
+	IssueKey    string  `json:"issue_key"`
+	Payload     string  `json:"payload"` // JSON; shape depends on Type
+	Confidence  float64 `json:"confidence"`
+	Rationale   string  `json:"rationale"`
+	Status      string  `json:"status"` // proposed | approved | edited | rejected | applied | failed
+	Feedback    string  `json:"feedback"`
+	DecidedAt   *string `json:"decided_at"`
+	ExecutedAt  *string `json:"executed_at"`
+	CreatedAt   string  `json:"created_at"`
 }
 
 // InsertAction writes one proposed action and returns its id. created_at
@@ -1471,6 +1482,33 @@ func (s *Store) ActionsByStatus(status string) ([]ActionRow, error) {
 	return scanActions(rows)
 }
 
+// GetAction returns the action with the given id, or ErrActionNotFound.
+//
+// `unjira actions decide` is the first caller: it is handed a bare id on the
+// command line and must load the full row (status, for the double-post
+// guard; type/issue_key/payload, for Applier.Apply) before it can act on it
+// at all. ActionsForNarrative/ActionsByStatus both require already knowing
+// something else about the row (its narrative, its status) — this is the
+// first accessor that takes only an id, matching how a human refers to a
+// row in this table (they see an id in `actions list`, not a narrative id).
+func (s *Store) GetAction(id int64) (ActionRow, error) {
+	rows, err := s.db.Query(actionSelect+` WHERE id = ?`, id)
+	if err != nil {
+		return ActionRow{}, fmt.Errorf("querying action %d: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	found, err := scanActions(rows)
+	if err != nil {
+		return ActionRow{}, err
+	}
+	if len(found) == 0 {
+		return ActionRow{}, fmt.Errorf("getting action %d: %w", id, ErrActionNotFound)
+	}
+
+	return found[0], nil
+}
+
 // LatestActionForNarrative returns the most recent action for a narrative.
 //
 // "Most recent" is by (created_at, id): created_at alone cannot order two
@@ -1506,9 +1544,39 @@ func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, er
 // semantics: any human ruling sets decided_at; only a write that actually
 // reached the tracker sets executed_at.
 func (s *Store) UpdateActionStatus(id int64, status string) error {
+	return updateActionStatusImpl(s.db, id, status, nil)
+}
+
+// UpdateActionStatusAndFeedback moves an action to a new workflow state
+// while persisting the reviewer's free-text feedback in the SAME statement
+// as the status change — `unjira actions decide --edit` needs both to land
+// atomically, not as two separate writes a caller could half-apply (e.g. by
+// forgetting the second call, or hitting an error between the two).
+//
+// feedback is written as-is: it is free prose from a human, and quoting or
+// escaping it here would just be a second, easier-to-forget place for the
+// exact payload-encoding bug class slice 4 already hit once. The driver's
+// placeholder binding is what actually protects this from SQL injection or
+// truncation, not any transformation of this function's own.
+func (s *Store) UpdateActionStatusAndFeedback(id int64, status, feedback string) error {
+	return updateActionStatusImpl(s.db, id, status, &feedback)
+}
+
+// updateActionStatusImpl backs both UpdateActionStatus and
+// UpdateActionStatusAndFeedback so the decided_at/executed_at stamping rules
+// live in exactly one place regardless of whether a caller also wants to set
+// feedback in the same statement.
+func updateActionStatusImpl(c dbConn, id int64, status string, feedback *string) error {
 	const ts = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
 
 	query := `UPDATE actions SET status = ?`
+	args := []any{status}
+
+	if feedback != nil {
+		query += `, feedback = ?`
+		args = append(args, *feedback)
+	}
+
 	switch status {
 	case "approved", "edited", "rejected":
 		query += `, decided_at = COALESCE(decided_at, ` + ts + `)`
@@ -1519,8 +1587,9 @@ func (s *Store) UpdateActionStatus(id int64, status string) error {
 		query += `, decided_at = COALESCE(decided_at, ` + ts + `), executed_at = ` + ts
 	}
 	query += ` WHERE id = ?`
+	args = append(args, id)
 
-	res, err := s.db.Exec(query, status, id)
+	res, err := c.Exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("updating action %d to status %q: %w", id, status, err)
 	}
