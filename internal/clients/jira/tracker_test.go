@@ -188,6 +188,64 @@ func TestTracker_SetStatus_NoMatchingTransitionReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "P-1")
 }
 
+func TestTracker_SetStatus_RefusesUnknownCategoryTransition(t *testing.T) {
+	// Only an unmapped ("cosmic") category is offered. Folding that into
+	// StatusTodo (the read path's fallback) would let SetStatus execute an
+	// exotic transition when asked for Todo — an unintended state change.
+	// It must instead report no legal transition, and critically, never
+	// reach the transition endpoint to do so.
+	var sawPost bool
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"transitions": []map[string]any{
+					{"id": "91", "to": map[string]any{"statusCategory": map[string]any{"key": "cosmic"}}},
+				},
+			})
+			return
+		}
+
+		sawPost = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	tr := jira.NewTracker(client)
+
+	err := tr.SetStatus("P-1", tasktracker.StatusTodo)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "P-1")
+	assert.False(t, sawPost, "SetStatus must not execute a transition landing in an unrecognized category")
+}
+
+func TestTracker_AvailableStatusCategories_DropsUnknownCategory(t *testing.T) {
+	// A transition into an unmapped Jira category ("cosmic") must be
+	// dropped, not folded into StatusTodo — reporting Todo reachable when
+	// it isn't is the exact false positive this method exists to prevent.
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"transitions": []map[string]any{
+				{"id": "31", "to": map[string]any{
+					"name":           "In Progress",
+					"statusCategory": map[string]any{"key": "indeterminate"},
+				}},
+				{"id": "91", "to": map[string]any{
+					"name":           "Weird",
+					"statusCategory": map[string]any{"key": "cosmic"},
+				}},
+			},
+		})
+	})
+	tr := jira.NewTracker(client)
+
+	got, err := tr.AvailableStatusCategories("PROJ-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, []tasktracker.StatusCategory{tasktracker.StatusInProgress}, got)
+	assert.NotContains(t, got, tasktracker.StatusTodo,
+		"an unrecognized category must be dropped, not folded into Todo")
+}
+
 func TestTracker_AvailableStatusCategories_NormalizesLiveTransitions(t *testing.T) {
 	// Two legal transitions: one landing in an in-progress status, one in done.
 	// "new" is deliberately absent — the point of this method is that the
