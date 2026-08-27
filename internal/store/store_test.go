@@ -1253,3 +1253,71 @@ func TestUpdateActionStatusSetsDecidedAndExecutedTimestamps(t *testing.T) {
 	assert.Equal(t, "applied", got[0].Status)
 	require.NotNil(t, got[0].ExecutedAt, "applying sets executed_at")
 }
+
+func TestGetActionReturnsTheRowByID(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Confidence: 0.8, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	got, err := s.GetAction(id)
+
+	require.NoError(t, err)
+	assert.Equal(t, id, got.ID)
+	assert.Equal(t, "comment", got.Type)
+	assert.Equal(t, "PROJ-1", got.IssueKey)
+	assert.Equal(t, "proposed", got.Status)
+}
+
+func TestGetActionOnMissingIDReturnsErrActionNotFound(t *testing.T) {
+	s := openStore(t)
+
+	_, err := s.GetAction(999999)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrActionNotFound)
+}
+
+// TestUpdateActionStatusAndFeedbackPersistsFeedbackVerbatim is the test the
+// design doc calls out by name: reviewer free-text routinely carries quotes
+// and newlines (the same payload-encoding bug class slice 4 hit), and this
+// column is read later by both the in-triage rework loop and
+// rules.Distill — a corrupted round-trip here would feed both wrong.
+func TestUpdateActionStatusAndFeedbackPersistsFeedbackVerbatim(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	feedback := "actually this should say \"landed in prod\"\nand mention PROJ-2 too"
+
+	require.NoError(t, s.UpdateActionStatusAndFeedback(id, "edited", feedback))
+
+	got, err := s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, "edited", got.Status)
+	assert.Equal(t, feedback, got.Feedback, "feedback must round-trip verbatim, quotes and newlines included")
+	require.NotNil(t, got.DecidedAt, "edited is a human ruling: decided_at must be stamped")
+	assert.Nil(t, got.ExecutedAt, "editing is not execution")
+}
+
+func TestUpdateActionStatusAndFeedbackOnMissingIDErrors(t *testing.T) {
+	s := openStore(t)
+
+	err := s.UpdateActionStatusAndFeedback(999999, "edited", "some feedback")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no such action")
+}
