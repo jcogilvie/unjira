@@ -24,6 +24,20 @@ type ReconcileRunResult struct {
 	Results []reconciler.ReconcileResult
 	Stats   correlator.Stats
 	DryRun  bool
+	// Persisted is exactly what reconciler.Persist wrote THIS call — empty
+	// under DryRun (Persist never ran) or after a Persist failure. This is
+	// watch's auto-commit seam: it identifies "freshly proposed this pass" by
+	// construction, which store.ActionsByStatus("proposed") cannot do (that
+	// accessor returns every action still sitting at that status, including
+	// ones from earlier passes a human has not yet triaged — see Persist's
+	// own doc comment for why auto-committing those would be wrong).
+	//
+	// Populated even when the returned error is non-nil: Reconcile isolates
+	// failures per narrative, so a partial pass still persists whatever it
+	// drafted cleanly (see RunReconcile's doc comment). Callers that gate
+	// auto-commit on a clean pass must check the returned error themselves —
+	// Persisted being non-empty is NOT evidence the pass succeeded.
+	Persisted []store.ActionRow
 }
 
 // RunReconcile runs one reconcile pass: validate cfg.Reconciler, draft
@@ -68,9 +82,11 @@ func RunReconcile(
 		return result, reconcileErr
 	}
 
-	if err := reconciler.Persist(s, results); err != nil {
+	persisted, err := reconciler.Persist(s, results)
+	if err != nil {
 		return result, fmt.Errorf("persisting proposed actions: %w", err)
 	}
+	result.Persisted = persisted
 
 	return result, reconcileErr
 }

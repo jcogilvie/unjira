@@ -359,6 +359,53 @@ func (c ReconcilerConfig) Validate() error {
 	return nil
 }
 
+// AutoCommitRule governs whether watch's auto-commit gate applies one action
+// type immediately or leaves it for triage. See internal/gate.Decide, which
+// is this rule's only reader: `Confidence >= ConfidenceFloor && Graduated`.
+//
+// Per the phase-1 spec (docs/superpowers/specs/2026-08-11-phase1-correlator-design.md,
+// "Auto-commit gate"): the floor comparison is inclusive (>=), so a proposal
+// scoring exactly at the floor applies.
+type AutoCommitRule struct {
+	ConfidenceFloor float64 `json:"confidence_floor"`
+	// Graduated is set only by explicit human action — a config edit, or
+	// (once triage exists) answering a graduation prompt it surfaces. Nothing
+	// in unjira may ever write this field: there is no setter, no
+	// with-Graduated-flipped copy constructor, nothing. The obvious future
+	// feature this forbids is "auto-graduate an action type after N clean
+	// approvals" — the phase-1 spec is explicit that this must never happen
+	// "even once approval history looks clean," because the moment unjira can
+	// decide for itself that it has earned more write authority, a human is
+	// no longer the one deciding it has.
+	//
+	// Defaults to false, including for every action type absent from
+	// config entirely: Config.AutoCommit is a map, and Go's zero value for a
+	// missing key is a zero-valued AutoCommitRule, so an unconfigured action
+	// type is structurally unable to auto-apply without unjira doing
+	// anything to guarantee it. See
+	// TestConfig_AutoCommitDefaultsToQueueEverything, which asserts this
+	// property directly because everything else in the gate rests on it.
+	Graduated bool `json:"graduated"`
+}
+
+// Validate rejects a ConfidenceFloor outside [0, 1], following
+// MatchConfig.Validate's reasoning: confidence is a 0..1 score, so a floor
+// outside that range would either never gate anything (above 1) or always let
+// everything through once Graduated (below 0) — either way, the gate would
+// look broken rather than misconfigured.
+func (r AutoCommitRule) Validate() error {
+	if r.ConfidenceFloor < 0 || r.ConfidenceFloor > 1 {
+		return fmt.Errorf(
+			"auto_commit confidence_floor is %v: must be within [0, 1] — confidence is a 0..1 "+
+				"score, so a floor outside that range would make the gate look broken rather than "+
+				"misconfigured",
+			r.ConfidenceFloor,
+		)
+	}
+
+	return nil
+}
+
 // Config is unjira's top-level configuration.
 type Config struct {
 	Jira       []JiraConnection          `json:"jira"`
@@ -374,8 +421,14 @@ type Config struct {
 	Correlator         CorrelatorConfig `json:"correlator"`
 	Match              MatchConfig      `json:"match"`
 	Reconciler         ReconcilerConfig `json:"reconciler"`
-	Rules              RulesConfig      `json:"rules"`
-	DBPath             string           `json:"db_path"`
+	// AutoCommit keys the auto-commit gate's rules by actions.type
+	// ("comment" | "transition" | "create"). Absent from config entirely
+	// (nil map) is the common case and the safe default: every action type
+	// queues for triage rather than auto-applying. See AutoCommitRule's doc
+	// comment for the safety property this rests on.
+	AutoCommit map[string]AutoCommitRule `json:"auto_commit"`
+	Rules      RulesConfig               `json:"rules"`
+	DBPath     string                    `json:"db_path"`
 }
 
 // DefaultRulesDir is where RulesDir looks when Rules.Dir is unset — matching
