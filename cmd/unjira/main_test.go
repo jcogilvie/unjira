@@ -125,6 +125,52 @@ func TestTaskTracker_LocalBackendReturnsLocalTracker(t *testing.T) {
 	assert.IsType(t, &local.Tracker{}, tracker)
 }
 
+// watchTestLLMConfig is the minimal config.LLMConfig that satisfies
+// appContext.llmClient's own validation (Model, ContextWindowTokens, BaseURL,
+// and a credential) so a watchCmd.Run test can reach the write-scope
+// validation block that follows it without a real LLM backend.
+func watchTestLLMConfig() config.LLMConfig {
+	return config.LLMConfig{
+		Model:               "test-model",
+		ContextWindowTokens: 128000,
+		BaseURL:             "http://localhost:4000/v1",
+	}
+}
+
+// TestWatchCmd_UnwritableDefaultProjectFailsFast is test 6 from
+// docs/superpowers/specs/2026-08-27-write-scope-design.md's testing section:
+// tracker.default_project must be validated for writability at STARTUP
+// (before any pass, any lease, any tracker construction), not merely
+// discovered the first time a `create` action tries to fire. This exercises
+// the real watchCmd.Run — the actual wiring in cmd/unjira/main.go — not just
+// config.DefaultProjectConnection in isolation (internal/config/config_test.go
+// already covers that method directly).
+func TestWatchCmd_UnwritableDefaultProjectFailsFast(t *testing.T) {
+	app := &appContext{
+		config: config.Config{
+			LLM:        watchTestLLMConfig(),
+			Correlator: config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20},
+			Reconciler: config.ReconcilerConfig{MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5},
+			Tracker:    config.TrackerConfig{DefaultProject: "PAAS"},
+			Jira: []config.JiraConnection{
+				// PAAS is readable but deliberately not in WritableProjectKeys.
+				{Name: "dev", ProjectKeys: []string{"PAAS", "DEVSBX"}, WritableProjectKeys: []string{"DEVSBX"}},
+			},
+		},
+		llmAPIKey: "test-key",
+		// store is deliberately left nil: this test's whole point is that the
+		// error surfaces BEFORE anything reaches app.store (a lease
+		// acquisition, a tracker construction) — a nil-pointer panic here
+		// would itself be evidence the check runs too late.
+	}
+
+	err := (&watchCmd{}).Run(app)
+
+	require.Error(t, err, "an unwritable default_project must fail fast, before the first pass")
+	assert.Contains(t, err.Error(), "PAAS")
+	assert.Contains(t, err.Error(), "writable_project_keys")
+}
+
 func TestTaskTracker_UnknownBackendErrors(t *testing.T) {
 	app := &appContext{
 		config: config.Config{Tracker: config.TrackerConfig{Backend: "trello"}},

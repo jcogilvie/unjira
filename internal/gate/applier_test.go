@@ -9,10 +9,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
+
+// writableConnections is the test-default write scope: one jira connection
+// that both reads and writes project. Every existing test in this file
+// predates write scope and assumed an implicit "PROJ is always writable" —
+// this is that assumption made explicit and named, so a reader sees exactly
+// which project each test authorizes for writes.
+func writableConnections(project string) []config.JiraConnection {
+	return []config.JiraConnection{
+		{Name: "test", ProjectKeys: []string{project}, WritableProjectKeys: []string{project}},
+	}
+}
 
 // fakeWriter records every call made to it, so a test can assert the
 // applier made EXACTLY the expected tracker call and no others — the same
@@ -104,7 +116,7 @@ func TestApplier_Comment_CallsAddCommentAndMarksApplied(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.NoError(t, err)
@@ -125,7 +137,7 @@ func TestApplier_Transition_CallsSetStatusAndMarksApplied(t *testing.T) {
 		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"done"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.NoError(t, err)
@@ -143,7 +155,7 @@ func TestApplier_Create_CallsCreateIssueAndMarksApplied(t *testing.T) {
 		Type: "create", Payload: `{"summary":"New work","description":"a description"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.NoError(t, err)
@@ -161,7 +173,7 @@ func TestApplier_Create_WithNoDefaultProjectErrorsRatherThanGuessing(t *testing.
 		Type: "create", Payload: `{"summary":"New work"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "")
+	applier := gate.NewApplier(s, w, "", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -185,7 +197,7 @@ func TestApplier_WriteFailure_MarksFailedAndKeepsTheRow(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -213,7 +225,7 @@ func TestApplier_WriteFailure_PersistsTheReasonOnTheRow(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 	require.Error(t, err)
 
@@ -235,7 +247,7 @@ func TestApplier_Success_LeavesErrorEmpty(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	require.NoError(t, applier.Apply(action))
 
 	got, err := s.GetAction(action.ID)
@@ -261,7 +273,7 @@ func TestApplier_RetryAfterFailure_ClearsTheStaleReason(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	require.Error(t, applier.Apply(action))
 
 	got, err := s.GetAction(action.ID)
@@ -288,7 +300,7 @@ func TestApplier_MalformedPayload_ErrorsWithoutCallingTheTracker(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `not json at all`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -306,7 +318,7 @@ func TestApplier_UnrecognizedTargetStatus_ErrorsWithoutCallingTheTracker(t *test
 		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"blocked"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -323,7 +335,7 @@ func TestApplier_UnknownActionType_ErrorsRatherThanGuessing(t *testing.T) {
 		Type: "estimate", Payload: `{}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -341,9 +353,90 @@ func TestApplier_MissingIssueKeyOnComment_Errors(t *testing.T) {
 		Type: "comment", Payload: `{"body":"x"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ")
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
 	assert.Empty(t, w.calls)
+}
+
+// TestApplier_WriteScope_RefusesWriteOutsideWritableSet is test 1 from
+// docs/superpowers/specs/2026-08-27-write-scope-design.md's testing section:
+// IssueKey "PAAS-1" with a writable set of {DEVSBX} must be refused — the
+// fake sees NO calls (asserted on the recording fake, not merely "no error"),
+// status=failed, and the persisted error names both "PAAS" and
+// "writable_project_keys" so an operator reading `actions list --status
+// failed` tomorrow can find the config key to fix.
+func TestApplier_WriteScope_RefusesWriteOutsideWritableSet(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PAAS-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
+	})
+
+	conns := []config.JiraConnection{
+		{Name: "dev", ProjectKeys: []string{"PAAS", "DEVSBX"}, WritableProjectKeys: []string{"DEVSBX"}},
+	}
+	applier := gate.NewApplier(s, w, "DEVSBX", conns)
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.Empty(t, w.calls, "PAAS is not writable: the tracker must never be called")
+
+	got, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Error, "PAAS", "the persisted reason must name the refused project")
+	assert.Contains(t, got.Error, "writable_project_keys", "the persisted reason must name the config key to fix")
+}
+
+// TestApplier_WriteScope_EmptyWritableSetRefusesEvenAReadableProject is test 2:
+// an empty/absent WritableProjectKeys must refuse EVERYTHING, including a
+// project the connection can read via ProjectKeys — deny-by-default, not
+// "readable implies writable".
+func TestApplier_WriteScope_EmptyWritableSetRefusesEvenAReadableProject(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
+	})
+
+	conns := []config.JiraConnection{
+		{Name: "dev", ProjectKeys: []string{"PROJ"}}, // WritableProjectKeys deliberately unset
+	}
+	applier := gate.NewApplier(s, w, "PROJ", conns)
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.Empty(t, w.calls, "PROJ is readable but not writable, so the tracker must never be called")
+
+	got, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+}
+
+// TestApplier_WriteScope_CreateHonoursWritableSetNotJustProjectKeys is test 4:
+// a `create` action's target must be checked against writable_project_keys,
+// not merely resolved as covered by SOME connection's project_keys.
+func TestApplier_WriteScope_CreateHonoursWritableSetNotJustProjectKeys(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "create", Payload: `{"summary":"New work"}`, Confidence: 0.9,
+	})
+
+	conns := []config.JiraConnection{
+		// PAAS is readable (in project_keys) but not writable.
+		{Name: "dev", ProjectKeys: []string{"PAAS", "DEVSBX"}, WritableProjectKeys: []string{"DEVSBX"}},
+	}
+	applier := gate.NewApplier(s, w, "PAAS", conns)
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.Empty(t, w.calls, "PAAS is not writable: CreateIssue must never be called")
+
+	got, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Error, "PAAS")
 }

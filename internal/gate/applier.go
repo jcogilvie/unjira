@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -27,10 +28,28 @@ const defaultIssueType = "Task"
 // See tasktracker.TaskWriter's own doc comment: "Holding one of these is
 // authority to change the org's view of reality, so take it only in code
 // that runs after the review gate." Applier is that code.
+//
+// It is also, deliberately, the write-scope choke point (see
+// docs/superpowers/specs/2026-08-27-write-scope-design.md): every path that
+// can reach a.writer — RunAutoCommit's automatic route and
+// `actions decide --approve`'s human one — constructs an Applier and calls
+// Apply, and gate.Decide is NOT on the approve path at all. So a
+// writable-project check placed anywhere other than here would be a hole,
+// not a second layer.
 type Applier struct {
 	store          *store.Store
 	writer         tasktracker.TaskWriter
 	defaultProject string
+	// jiraConnections backs the write-scope check: which project a write
+	// targets is resolved per call (from action.IssueKey for comment/
+	// transition, or from defaultProject for create — see checkWritable),
+	// then checked against JiraConnection.IsProjectWritable. Held as the
+	// plain connection slice rather than a whole config.Config, matching
+	// defaultProject's own precedent as a plain runtime field: project
+	// writability is a runtime, data-dependent fact this same Applier must
+	// answer differently per call (see the design doc's "Not
+	// compiler-enforced, and that is deliberate").
+	jiraConnections []config.JiraConnection
 }
 
 // NewApplier constructs an Applier. defaultProject routes a `create` action,
@@ -40,8 +59,16 @@ type Applier struct {
 // here (Apply rejects it only when a `create` action actually needs it), so
 // a caller wiring only comment/transition auto-commit need not resolve a
 // default-project connection it will never use.
-func NewApplier(s *store.Store, writer tasktracker.TaskWriter, defaultProject string) *Applier {
-	return &Applier{store: s, writer: writer, defaultProject: defaultProject}
+//
+// jiraConnections is config.Config.Jira, unmodified — passed directly rather
+// than resolved down to a smaller shape, since Apply must resolve a
+// DIFFERENT project per call (see checkWritable) and JiraConnectionForProject
+// already knows how to do that lookup; duplicating it here would risk the
+// two falling out of sync.
+func NewApplier(
+	s *store.Store, writer tasktracker.TaskWriter, defaultProject string, jiraConnections []config.JiraConnection,
+) *Applier {
+	return &Applier{store: s, writer: writer, defaultProject: defaultProject, jiraConnections: jiraConnections}
 }
 
 // commentPayload/transitionPayload/createPayload mirror
@@ -142,6 +169,10 @@ func (a *Applier) applyComment(action store.ActionRow) error {
 		return fmt.Errorf("action %d: comment action has no issue_key", action.ID)
 	}
 
+	if err := a.checkWritable(action.IssueKey); err != nil {
+		return fmt.Errorf("action %d: %w", action.ID, err)
+	}
+
 	var p commentPayload
 	if err := json.Unmarshal([]byte(action.Payload), &p); err != nil {
 		return fmt.Errorf("action %d: decoding comment payload %q: %w", action.ID, action.Payload, err)
@@ -157,6 +188,10 @@ func (a *Applier) applyComment(action store.ActionRow) error {
 func (a *Applier) applyTransition(action store.ActionRow) error {
 	if action.IssueKey == "" {
 		return fmt.Errorf("action %d: transition action has no issue_key", action.ID)
+	}
+
+	if err := a.checkWritable(action.IssueKey); err != nil {
+		return fmt.Errorf("action %d: %w", action.ID, err)
 	}
 
 	var p transitionPayload
@@ -184,6 +219,10 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 		)
 	}
 
+	if err := a.checkProjectWritable(a.defaultProject); err != nil {
+		return fmt.Errorf("action %d: %w", action.ID, err)
+	}
+
 	var p createPayload
 	if err := json.Unmarshal([]byte(action.Payload), &p); err != nil {
 		return fmt.Errorf("action %d: decoding create payload %q: %w", action.ID, action.Payload, err)
@@ -191,6 +230,53 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 
 	if _, err := a.writer.CreateIssue(a.defaultProject, p.Summary, defaultIssueType, p.Description, nil); err != nil {
 		return fmt.Errorf("creating issue in %s: %w", a.defaultProject, err)
+	}
+
+	return nil
+}
+
+// checkWritable is applyComment/applyTransition's entry into the write-scope
+// choke point: it derives the project from issueKey via
+// tasktracker.ProjectFromIssueKey (the only place in the repo that parses one
+// — see that function's own doc comment) and defers to checkProjectWritable.
+// Neither comment nor transition has a project as an input field on its own
+// — only an issue key — so deriving it is this method's whole job.
+func (a *Applier) checkWritable(issueKey string) error {
+	project, err := tasktracker.ProjectFromIssueKey(issueKey)
+	if err != nil {
+		return fmt.Errorf("determining write scope for %s: %w", issueKey, err)
+	}
+
+	return a.checkProjectWritable(project)
+}
+
+// checkProjectWritable is the write-scope choke point itself: a project must
+// resolve to a configured jira connection AND that connection must list it in
+// writable_project_keys, or the write is refused with a message naming both
+// the project and the config key — per the design doc's required error shape
+// ("action N: project %q is not writable (jira[].writable_project_keys does
+// not include it for connection %q)"). This is the ONLY place in unjira that
+// makes this check; Apply calls it (via checkWritable/applyCreate) before
+// every AddComment/SetStatus/CreateIssue call, and there is no other
+// TaskWriter holder in the repo to route around it.
+//
+// An unresolvable project (no connection covers it at all) is reported as not
+// writable too, rather than as a different kind of error: from a write-
+// authorization standpoint "no connection says yes" and "a connection says no"
+// are the same outcome, and a caller checking for the write-scope message
+// shape should not need to distinguish them.
+func (a *Applier) checkProjectWritable(project string) error {
+	conn, ok := config.Config{Jira: a.jiraConnections}.JiraConnectionForProject(project)
+	if !ok || !conn.IsProjectWritable(project) {
+		name := "none"
+		if ok {
+			name = conn.Name
+		}
+
+		return fmt.Errorf(
+			"project %q is not writable (jira[].writable_project_keys does not include it "+
+				"for connection %q)", project, name,
+		)
 	}
 
 	return nil

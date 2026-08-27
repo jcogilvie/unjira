@@ -6,6 +6,11 @@
 // multiple producers and no single owning consumer.
 package tasktracker
 
+import (
+	"fmt"
+	"regexp"
+)
+
 // StatusCategory is a normalized status bucket every backend maps into.
 // Deliberately coarse: GitHub Issues has no named-status concept at all,
 // only open/closed, so a category-based target is the common denominator
@@ -115,4 +120,43 @@ type TaskWriter interface {
 type TaskTracker interface {
 	TaskReader
 	TaskWriter
+}
+
+// issueKeyRE anchors the whole string to exactly one <PROJECT>-<NUMBER>
+// segment: an uppercase-alphanumeric project prefix starting with a letter
+// (matching how every backend that mints its own keys shapes them — see
+// internal/store.InsertLocalIssue's `fmt.Sprintf("%s-%d", project, n)` and the
+// same convention on a real Jira site), a literal hyphen, and a numeric
+// suffix. Anchored (not internal/events.TicketKeyRegexp's unanchored
+// scan-for-candidates pattern) because this validates one already-known key
+// rather than searching free text for candidates — an extra "-2" segment
+// (e.g. a stray "PROJ-1-2") must be rejected, not silently truncated to its
+// first match.
+var issueKeyRE = regexp.MustCompile(`^([A-Z][A-Z0-9]*)-(\d+)$`)
+
+// ProjectFromIssueKey extracts the project key from an issue key of the form
+// <PROJECT>-<NUMBER> (e.g. "PAAS-4036" -> "PAAS").
+//
+// A backend-shape fact, not gate business logic — every backend unjira talks
+// to (Jira, the local tracker) mints keys in this shape, so this lives here
+// rather than in internal/gate. Nothing in the repo parsed this before write
+// scope needed it (internal/correlator/refs.go's regex is for owner/repo#N PR
+// references, a different syntax entirely).
+//
+// Errors, naming the offending key, on anything that doesn't match — per
+// CLAUDE.md's "don't guess" convention. A malformed key here means a caller
+// handed this an issue key that was never valid for any backend this package
+// knows about; returning a truncated or empty guess would let a
+// write-authorization check silently pass or fail on data that was already
+// wrong.
+func ProjectFromIssueKey(key string) (string, error) {
+	m := issueKeyRE.FindStringSubmatch(key)
+	if m == nil {
+		return "", fmt.Errorf(
+			"issue key %q does not match the <PROJECT>-<NUMBER> shape every tasktracker backend uses",
+			key,
+		)
+	}
+
+	return m[1], nil
 }

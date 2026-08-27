@@ -183,7 +183,10 @@ func TestDefaultProjectConnection_SetAndCoveredReturnsConnection(t *testing.T) {
 	cfg := config.Config{
 		Tracker: config.TrackerConfig{DefaultProject: "PROJ"},
 		Jira: []config.JiraConnection{
-			{Name: "default", Site: "https://yourorg.atlassian.net", ProjectKeys: []string{"PROJ"}},
+			{
+				Name: "default", Site: "https://yourorg.atlassian.net",
+				ProjectKeys: []string{"PROJ"}, WritableProjectKeys: []string{"PROJ"},
+			},
 		},
 	}
 
@@ -708,4 +711,159 @@ func TestLoad_MissingAutoCommitBlockDefaultsToNilMap(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Nil(t, cfg.AutoCommit)
+}
+
+// TestJiraConnection_IsProjectWritable_EmptyWritableSetDeniesEverything is the
+// write-scope safety property, at the same level TestConfig_AutoCommitDefaultsToQueueEverything
+// asserts for AutoCommitRule.Graduated: absent/empty WritableProjectKeys must
+// deny EVERY project, including one the connection can read (ProjectKeys) —
+// per docs/superpowers/specs/2026-08-27-write-scope-design.md's rejection of
+// "inherit project_keys when unset".
+func TestJiraConnection_IsProjectWritable_EmptyWritableSetDeniesEverything(t *testing.T) {
+	conn := config.JiraConnection{
+		Name:        "dev",
+		ProjectKeys: []string{"PAAS", "DEVSBX"},
+		// WritableProjectKeys deliberately unset.
+	}
+
+	assert.False(t, conn.IsProjectWritable("PAAS"))
+	assert.False(t, conn.IsProjectWritable("DEVSBX"))
+}
+
+// TestJiraConnection_IsProjectWritable_OnlyListedProjectsAreWritable proves
+// the field is checked, not merely present: DEVSBX (listed) must be writable
+// and PAAS (readable but not listed) must not be — this is the exact shape of
+// the real unjira.config.json this design exists to fix.
+func TestJiraConnection_IsProjectWritable_OnlyListedProjectsAreWritable(t *testing.T) {
+	conn := config.JiraConnection{
+		Name:                "dev",
+		ProjectKeys:         []string{"PAAS", "DEVSBX"},
+		WritableProjectKeys: []string{"DEVSBX"},
+	}
+
+	assert.True(t, conn.IsProjectWritable("DEVSBX"))
+	assert.False(t, conn.IsProjectWritable("PAAS"))
+	assert.False(t, conn.IsProjectWritable("GHOST"), "a project this connection doesn't even read must not be writable")
+}
+
+// TestJiraConnection_ValidateWriteScope_SubsetIsValid is the happy path for
+// the startup check: every writable key also appears in project_keys.
+func TestJiraConnection_ValidateWriteScope_SubsetIsValid(t *testing.T) {
+	conn := config.JiraConnection{
+		Name:                "dev",
+		ProjectKeys:         []string{"PAAS", "DEVSBX"},
+		WritableProjectKeys: []string{"DEVSBX"},
+	}
+
+	assert.NoError(t, conn.ValidateWriteScope())
+}
+
+// TestJiraConnection_ValidateWriteScope_EmptyIsValid covers the deny-by-
+// default case explicitly: an absent WritableProjectKeys must not itself be a
+// validation error — it is the safe, expected default, not a misconfiguration.
+func TestJiraConnection_ValidateWriteScope_EmptyIsValid(t *testing.T) {
+	conn := config.JiraConnection{Name: "dev", ProjectKeys: []string{"PAAS"}}
+
+	assert.NoError(t, conn.ValidateWriteScope())
+}
+
+// TestJiraConnection_ValidateWriteScope_NotASubsetErrorsNamingBoth is test 5
+// from the design doc's test list: a writable project the connection cannot
+// even read is a loud, named config error at startup, not something that
+// loads silently and fails (or, worse, half-succeeds) at write time.
+func TestJiraConnection_ValidateWriteScope_NotASubsetErrorsNamingBoth(t *testing.T) {
+	conn := config.JiraConnection{
+		Name:                "dev",
+		ProjectKeys:         []string{"DEVSBX"},
+		WritableProjectKeys: []string{"DEVSBX", "PAAS"},
+	}
+
+	err := conn.ValidateWriteScope()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAAS", "must name the offending writable project")
+	assert.Contains(t, err.Error(), "dev", "must name the connection")
+	assert.Contains(t, err.Error(), "writable_project_keys")
+	assert.Contains(t, err.Error(), "project_keys")
+}
+
+func TestLoad_ParsesWritableProjectKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"jira":[{"name":"dev","site":"https://x.atlassian.net",
+	  "project_keys":["PAAS","DEVSBX"],"writable_project_keys":["DEVSBX"]}]}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.Jira, 1)
+	assert.Equal(t, []string{"DEVSBX"}, cfg.Jira[0].WritableProjectKeys)
+}
+
+// TestLoad_MissingWritableProjectKeysDefaultsToNil is the JSON-shape half of
+// the deny-by-default property: an omitted writable_project_keys key must
+// decode to a nil slice, not an empty-but-present one — both behave the same
+// under IsProjectWritable, but this pins the JSON round-trip explicitly since
+// it is the shape every pre-existing config file (including the real
+// unjira.config.json before this change) actually has.
+func TestLoad_MissingWritableProjectKeysDefaultsToNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"jira":[{"name":"dev","site":"https://x.atlassian.net","project_keys":["PAAS"]}]}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	require.Len(t, cfg.Jira, 1)
+	assert.Nil(t, cfg.Jira[0].WritableProjectKeys)
+	assert.False(t, cfg.Jira[0].IsProjectWritable("PAAS"),
+		"a project_keys-covered but unlisted-for-write project must not be writable")
+}
+
+// TestDefaultProjectConnection_UnwritableDefaultProjectErrors is test 6 from
+// the design doc: DefaultProjectConnection is where `create`'s target is
+// statically validated (tracker.default_project is config, not a per-action
+// runtime value), so an unwritable default project must be a startup error
+// here — the same function TestDefaultProjectConnection_SetButUncoveredErrors
+// already uses for the "uncovered" case, extended to also check writability.
+func TestDefaultProjectConnection_UnwritableDefaultProjectErrors(t *testing.T) {
+	cfg := config.Config{
+		Tracker: config.TrackerConfig{DefaultProject: "PAAS"},
+		Jira: []config.JiraConnection{
+			{
+				Name: "dev", Site: "https://x.atlassian.net",
+				ProjectKeys:         []string{"PAAS", "DEVSBX"},
+				WritableProjectKeys: []string{"DEVSBX"},
+			},
+		},
+	}
+
+	_, err := cfg.DefaultProjectConnection()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAAS")
+	assert.Contains(t, err.Error(), "writable_project_keys")
+}
+
+// TestDefaultProjectConnection_WritableDefaultProjectSucceeds is the
+// unwritable test's positive counterpart, proving the added check does not
+// regress the existing happy path.
+func TestDefaultProjectConnection_WritableDefaultProjectSucceeds(t *testing.T) {
+	cfg := config.Config{
+		Tracker: config.TrackerConfig{DefaultProject: "DEVSBX"},
+		Jira: []config.JiraConnection{
+			{
+				Name: "dev", Site: "https://x.atlassian.net",
+				ProjectKeys:         []string{"PAAS", "DEVSBX"},
+				WritableProjectKeys: []string{"DEVSBX"},
+			},
+		},
+	}
+
+	conn, err := cfg.DefaultProjectConnection()
+
+	require.NoError(t, err)
+	assert.Equal(t, "dev", conn.Name)
 }

@@ -96,6 +96,19 @@ func seedProposedComment(t *testing.T, s *store.Store, issueKey, body string, co
 	return got
 }
 
+// liveWritableConnections is the write-scope config this file's tests build
+// in-process: one connection covering testProject() for both read (ProjectKeys)
+// and write (WritableProjectKeys). Every test in this file predates write
+// scope and implicitly assumed testProject() was always writable — this
+// helper makes that assumption explicit, matching internal/gate/applier_test.go's
+// own writableConnections helper (unreachable from this package, since it's
+// unexported in gate_test).
+func liveWritableConnections() []config.JiraConnection {
+	return []config.JiraConnection{
+		{Name: "live", ProjectKeys: []string{testProject()}, WritableProjectKeys: []string{testProject()}},
+	}
+}
+
 // commentBodies returns every comment body on issueKey as plain text, so a
 // test can assert on what a human would actually see on the issue.
 func commentBodies(t *testing.T, client *jira.Client, issueKey string) []string {
@@ -158,7 +171,7 @@ func TestLiveAutoCommit_UngraduatedActionIsNotWrittenToJira(t *testing.T) {
 	key := liveThrowawayIssue(t, client, "ungraduated must not write")
 	action := seedProposedComment(t, s, key, "THIS BODY MUST NEVER APPEAR ON THE ISSUE", 0.99)
 
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject())
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableConnections())
 
 	// Graduated false at maximum confidence: the confidence floor is satisfied
 	// and the gate must still refuse. An empty rules map (the shipped default,
@@ -214,7 +227,7 @@ func TestLiveAutoCommit_GraduatedActionReachesJira(t *testing.T) {
 	// Confirm the pre-state rather than assuming a fresh issue is empty.
 	require.Empty(t, commentBodies(t, client, key), "a freshly created issue must start with no comments")
 
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject())
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableConnections())
 
 	result, err := pipeline.RunAutoCommit([]store.ActionRow{action}, pipeline.AutoCommitOptions{
 		Rules: map[string]config.AutoCommitRule{
@@ -270,7 +283,7 @@ func TestLiveAutoCommit_RealFailureRecordsARealReason(t *testing.T) {
 
 	require.NoError(t, client.DeleteIssue(key), "the issue must be gone before the apply")
 
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject())
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableConnections())
 
 	result, err := pipeline.RunAutoCommit([]store.ActionRow{action}, pipeline.AutoCommitOptions{
 		Rules: map[string]config.AutoCommitRule{
@@ -295,4 +308,75 @@ func TestLiveAutoCommit_RealFailureRecordsARealReason(t *testing.T) {
 	require.NotNil(t, got.ExecutedAt, "a failed attempt still attempted a write")
 
 	t.Logf("persisted failure reason: %s", got.Error)
+}
+
+// TestLiveWriteScope_GraduatedCommentStillReachesAWritableProject is test 7
+// from docs/superpowers/specs/2026-08-27-write-scope-design.md's testing
+// section — "the cheapest and most important drill, because a sign-flipped
+// safety check is worse than none." The connection shape here deliberately
+// mirrors the REAL unjira.config.json this design exists to fix: PAAS and
+// DEVSBX both readable (ProjectKeys), only DEVSBX writable
+// (WritableProjectKeys) — not a single-project config that could pass
+// vacuously regardless of which way the check points.
+//
+// This never creates or touches a PAAS issue: the point is proving DEVSBX
+// still applies in the PRESENCE of a PAAS-shaped-but-unwritable sibling, which
+// is exactly the shape a sign-flipped check ("block the FIRST/writable one,
+// allow the rest") would get backwards — it would look like it protects PAAS
+// while actually blocking DEVSBX and letting PAAS through. The offline suite
+// (internal/gate, internal/pipeline, cmd/unjira) already proves the PAAS-side
+// refusal in isolation; this test's job is only the live positive path,
+// against this exact multi-project connection shape.
+//
+// Drill (per the design doc, and to be performed manually — not run
+// automatically, since this test writes to real Jira): invert
+// checkProjectWritable's condition (e.g. `if ok && conn.IsProjectWritable(...)`
+// instead of `if !ok || !conn.IsProjectWritable(...)`) and this test must FAIL.
+func TestLiveWriteScope_GraduatedCommentStillReachesAWritableProject(t *testing.T) {
+	client := testClient(t)
+	s := liveAutoCommitStore(t)
+
+	key := liveThrowawayIssue(t, client, "write scope: DEVSBX must still write")
+
+	marker := fmt.Sprintf("unjira-live-writescope-%d", time.Now().UnixNano())
+	body := "Write scope live test. Marker: " + marker
+
+	action := seedProposedComment(t, s, key, body, 0.9)
+
+	require.Empty(t, commentBodies(t, client, key), "a freshly created issue must start with no comments")
+
+	// The production-shaped connection: PAAS readable but not writable,
+	// testProject() (DEVSBX in production) both readable and writable. Never
+	// used to target PAAS — only to prove its PRESENCE in the connection list
+	// does not block a write to the project that IS listed as writable.
+	conns := []config.JiraConnection{
+		{
+			Name:                "live",
+			ProjectKeys:         []string{"PAAS", testProject()},
+			WritableProjectKeys: []string{testProject()},
+		},
+	}
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), conns)
+
+	result, err := pipeline.RunAutoCommit([]store.ActionRow{action}, pipeline.AutoCommitOptions{
+		Rules: map[string]config.AutoCommitRule{
+			"comment": {ConfidenceFloor: 0.5, Graduated: true},
+		},
+		Applier: applier,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Applied, 1,
+		"a graduated action against the WRITABLE project must still apply, even with an "+
+			"unwritable sibling project in the same connection's project_keys")
+	assert.Empty(t, result.Failed)
+
+	bodies := commentBodies(t, client, key)
+	require.Len(t, bodies, 1)
+	assert.Contains(t, bodies[0], marker)
+
+	got, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "applied", got.Status)
+	require.NotNil(t, got.ExecutedAt)
+	assert.Empty(t, got.Error)
 }

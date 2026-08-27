@@ -44,7 +44,11 @@ func actionsTestApp(t *testing.T) (*appContext, *store.Store) {
 			// projectKey entirely — this connection exists only to satisfy
 			// that resolution step, matching watch_pass_test.go's own
 			// pattern for exercising the local backend under Approve.
-			Jira: []config.JiraConnection{{Name: "local", ProjectKeys: []string{"PROJ"}}},
+			// WritableProjectKeys makes PROJ writable: gate.Applier's
+			// write-scope choke point checks this regardless of tracker
+			// backend, so a local-backend test still needs an explicit grant
+			// (deny-by-default has no backend exception).
+			Jira: []config.JiraConnection{{Name: "local", ProjectKeys: []string{"PROJ"}, WritableProjectKeys: []string{"PROJ"}}},
 		},
 		store: s,
 	}, s
@@ -345,6 +349,46 @@ func TestActionsDecide_ApproveOnRejectedActionIsAllowed(t *testing.T) {
 	got, err := s.GetAction(id)
 	require.NoError(t, err)
 	assert.Equal(t, "applied", got.Status)
+}
+
+// TestActionsDecide_ApproveRefusesAnUnwritableProject is the `--approve`
+// half of test 3 from
+// docs/superpowers/specs/2026-08-27-write-scope-design.md's testing section
+// ("the hole test") — exercised through the REAL actionsDecideCmd.Run, not a
+// stand-in, since this package (unlike internal/pipeline) can reach it
+// directly. gate.Decide is never consulted on this path (approveAction calls
+// gate.NewApplier(...).Apply directly), so if the write-scope check lived
+// there instead of in Applier, this test would pass for the wrong reason —
+// see TestRunWatchPass_WriteScopeRefusesAnUnwritableProject in
+// watch_pass_test.go for the paired auto-commit-route half, against the
+// identically-shaped config.
+func TestActionsDecide_ApproveRefusesAnUnwritableProject(t *testing.T) {
+	app, s := actionsTestApp(t)
+	// Override actionsTestApp's default connection: PROJ is readable but NOT
+	// writable, and PROJ is also DefaultProject, so `create` OR `comment`
+	// against it must both be refused by this one connection.
+	app.config.Jira = []config.JiraConnection{{Name: "local", ProjectKeys: []string{"PROJ"}}}
+
+	issueKey, err := s.InsertLocalIssue("PROJ", "ticket", "Task", "", nil)
+	require.NoError(t, err)
+	id := seedAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: issueKey, Payload: `{"body":"the work landed"}`, Confidence: 0.9,
+	})
+
+	cmd := actionsDecideCmd{ID: id, Approve: true}
+	err = cmd.Run(app)
+
+	require.Error(t, err, "PROJ is not writable: --approve must be refused")
+
+	got, err := s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Error, "PROJ")
+	assert.Contains(t, got.Error, "writable_project_keys")
+
+	comments, err := s.LocalIssueComments(issueKey)
+	require.NoError(t, err)
+	assert.Empty(t, comments, "the tracker must never be called")
 }
 
 func TestActionsDecide_NonexistentIDErrorsForEveryVerb(t *testing.T) {

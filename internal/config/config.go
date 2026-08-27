@@ -49,12 +49,33 @@ type JiraQuery struct {
 // e.g. after a migration or an acquisition merges two orgs' Jiras — without
 // unjira assuming a single global site. Name identifies the connection for
 // credential lookup (see cmd/unjira's UNJIRA_JIRA_CREDENTIALS). ProjectKeys
-// routes a project key to this connection (for writes) and bounds what its
-// Queries may collect (for reads; see EffectiveJQL).
+// bounds what its Queries may collect (for reads; see EffectiveJQL) and which
+// projects JiraConnectionForProject resolves this connection's site/credential
+// for. WritableProjectKeys is the separate, narrower write authorization —
+// see its own doc comment.
 type JiraConnection struct {
 	Name        string   `json:"name"`
 	Site        string   `json:"site"`
 	ProjectKeys []string `json:"project_keys"`
+	// WritableProjectKeys is which of this connection's ProjectKeys unjira may
+	// actually WRITE to — the choke point gate.Applier consults before any
+	// AddComment/SetStatus/CreateIssue call. Declared independently of
+	// ProjectKeys, which only answers "read scope, and which connection's
+	// site/credential to use."
+	//
+	// Absent or empty means NOTHING on this connection is writable — deny by
+	// default, mirroring AutoCommitRule.Graduated's own zero-value safety
+	// property. Deliberately NOT "defaults to ProjectKeys when unset": that
+	// would mean every project unjira reads is armed for writes the moment a
+	// connection is configured at all, which is the exact bug write scope
+	// exists to fix rather than a safe default to fall back to. See
+	// docs/superpowers/specs/2026-08-27-write-scope-design.md.
+	//
+	// Must be a subset of ProjectKeys — ValidateWriteScope checks this at
+	// startup, since a writable project this connection cannot even read
+	// would leave JiraConnectionForProject unable to resolve a site for it at
+	// all.
+	WritableProjectKeys []string `json:"writable_project_keys"`
 	// Queries are the named JQL views the Jira collector reads. Empty means
 	// this connection is write-only: it routes project keys but collects
 	// nothing.
@@ -62,6 +83,37 @@ type JiraConnection struct {
 	// MaxIssuesPerQuery bounds one query's issue count per pass. Zero means
 	// DefaultMaxIssuesPerQuery.
 	MaxIssuesPerQuery int `json:"max_issues_per_query"`
+}
+
+// IsProjectWritable reports whether projectKey is in WritableProjectKeys —
+// the single question gate.Applier asks before every tracker write. An empty
+// or absent WritableProjectKeys answers false for every project, including
+// one this connection reads via ProjectKeys: see WritableProjectKeys' own doc
+// comment for why that is the deliberate default rather than a gap.
+func (c JiraConnection) IsProjectWritable(projectKey string) bool {
+	return slices.Contains(c.WritableProjectKeys, projectKey)
+}
+
+// ValidateWriteScope rejects a WritableProjectKeys entry this connection
+// cannot even read — the second of write scope's two layers (the first is
+// gate.Applier's per-action runtime check), catching a statically-checkable
+// misconfiguration at startup rather than leaving a writable-but-unreachable
+// project to fail in some stranger way whenever a write is actually
+// attempted. An empty or absent WritableProjectKeys is valid: it is the safe
+// default, not a misconfiguration to flag.
+func (c JiraConnection) ValidateWriteScope() error {
+	for _, writable := range c.WritableProjectKeys {
+		if !slices.Contains(c.ProjectKeys, writable) {
+			return fmt.Errorf(
+				"jira connection %q: writable_project_keys includes %q, which is not in "+
+					"project_keys — a project must be readable by this connection before it can "+
+					"be declared writable",
+				c.Name, writable,
+			)
+		}
+	}
+
+	return nil
 }
 
 // EffectiveJQL returns query's JQL scoped to this connection's ProjectKeys.
@@ -485,9 +537,16 @@ func (c Config) TrackerBackend() string {
 }
 
 // DefaultProjectConnection resolves Tracker.DefaultProject via
-// JiraConnectionForProject, erroring loudly if unset or unresolvable —
-// exactly the case a phase-2 create-action would hit with no routing logic
-// upstream of it yet.
+// JiraConnectionForProject, erroring loudly if unset, unresolvable, or not
+// writable — exactly the case a `create` action would hit with no routing
+// logic upstream of it yet.
+//
+// The writability check belongs here rather than only at gate.Applier's
+// per-action runtime check: tracker.default_project is static config, known
+// entirely at startup, so a misconfigured (unwritable) default project is a
+// statically-checkable error — the second of write scope's two layers. See
+// docs/superpowers/specs/2026-08-27-write-scope-design.md, "startup
+// validation is the second layer".
 func (c Config) DefaultProjectConnection() (JiraConnection, error) {
 	if c.Tracker.DefaultProject == "" {
 		return JiraConnection{}, fmt.Errorf("no tracker.default_project configured for new-issue creation")
@@ -498,6 +557,14 @@ func (c Config) DefaultProjectConnection() (JiraConnection, error) {
 		return JiraConnection{}, fmt.Errorf(
 			"tracker.default_project %q is not covered by any configured jira connection",
 			c.Tracker.DefaultProject,
+		)
+	}
+
+	if !conn.IsProjectWritable(c.Tracker.DefaultProject) {
+		return JiraConnection{}, fmt.Errorf(
+			"tracker.default_project %q is not writable: jira[].writable_project_keys does not "+
+				"include it for connection %q",
+			c.Tracker.DefaultProject, conn.Name,
 		)
 	}
 
