@@ -61,9 +61,22 @@ Two guards drilled rather than trusted:
 shipped default. Anyone graduating an action type before slice 6 lands is accepting that failures will
 be silent.
 
-Also unproven: **no action has ever actually been applied.** The apply path is covered by unit tests
-with a recording fake, never by a real write to a real tracker. Proving it means graduating an action
-type against DEVSBX, which is a real mutation and deliberately left for an explicit decision.
+~~Also unproven: **no action has ever actually been applied.**~~ **Resolved 2026-08-27** by
+`internal/live/autocommit_test.go`, on the user's explicit authorization. A graduated `comment`
+action posted to a real Jira issue in DEVSBX and the comment was read back off the issue; an
+ungraduated one at 0.99 confidence wrote nothing, verified against an issue whose entire comment
+history was known to be empty (a stronger bar than an unchanged `updated` timestamp). The failure
+path was exercised against a genuine 404 — the issue deleted between propose and apply, which is
+the exact scenario `Applier.Apply` cites as its reason not to retry — and the reason persisted:
+
+```
+posting comment to DEVSBX-35: adding comment to jira issue DEVSBX-35: Jira API 404:
+ - Issue does not exist or you do not have permission to see it.
+```
+
+Cleanup verified through the Atlassian MCP, a path independent of unjira's own client: DEVSBX is
+back to one issue, `DEVSBX-1`'s `updated` byte-identical to the pre-state, and no seed-labelled
+residue anywhere on the site.
 
 Unblocked by slice 4 (`internal/reconciler`, PR #15) and by `llm.api_key_helper` (PR #16) — a loop
 cannot run unattended against a gateway issuing short-lived tokens, so the credential work was a hard
