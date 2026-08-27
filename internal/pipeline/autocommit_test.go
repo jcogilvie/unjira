@@ -195,7 +195,8 @@ func TestRunAutoCommit_OneFailureDoesNotBlockTheRest(t *testing.T) {
 	require.Len(t, result.Applied, 1)
 	assert.Equal(t, succeeding.ID, result.Applied[0].ID)
 	require.Len(t, result.Failed, 1)
-	assert.Equal(t, failing.ID, result.Failed[0].ID)
+	assert.Equal(t, failing.ID, result.Failed[0].Action.ID)
+	require.ErrorIs(t, result.Failed[0].Err, writeErr, "the failed entry must carry its OWN error, not just the row")
 	assert.Empty(t, result.Queued)
 
 	// Both writer calls happened: the failing action's write was attempted
@@ -211,6 +212,55 @@ func TestRunAutoCommit_OneFailureDoesNotBlockTheRest(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gotSucceeding, 1)
 	assert.Equal(t, "applied", gotSucceeding[0].Status)
+}
+
+// TestRunAutoCommit_TwoFailuresAttributeTheRightReasonToEachID is the design
+// doc's per-id assertion: a single joined error string would pass a weaker
+// test (two failures happened), but this proves RunAutoCommit's result
+// attributes the CORRECT one of two distinct reasons to each id, not just
+// that both ids appear somewhere in result.Failed and some error was
+// returned.
+func TestRunAutoCommit_TwoFailuresAttributeTheRightReasonToEachID(t *testing.T) {
+	s := autoCommitStore(t)
+	firstErr := fmt.Errorf("jira: 403 Forbidden")
+	secondErr := fmt.Errorf("jira: 404 Not Found")
+	writer := &autoCommitFakeWriter{errs: map[string]error{
+		"AddComment:PROJ-1:first will fail":  firstErr,
+		"AddComment:PROJ-2:second will fail": secondErr,
+	}}
+	applier := gate.NewApplier(s, writer, "PROJ")
+
+	first := insertProposedAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"first will fail"}`, Confidence: 0.9,
+	})
+	second := insertProposedAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-2", Payload: `{"body":"second will fail"}`, Confidence: 0.9,
+	})
+
+	rules := map[string]config.AutoCommitRule{"comment": {ConfidenceFloor: 0.8, Graduated: true}}
+
+	result, err := pipeline.RunAutoCommit([]store.ActionRow{first, second}, pipeline.AutoCommitOptions{
+		Rules:   rules,
+		Applier: applier,
+	})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, firstErr)
+	require.ErrorIs(t, err, secondErr)
+
+	require.Len(t, result.Failed, 2)
+
+	byID := map[int64]error{
+		result.Failed[0].Action.ID: result.Failed[0].Err,
+		result.Failed[1].Action.ID: result.Failed[1].Err,
+	}
+
+	require.Contains(t, byID, first.ID)
+	require.Contains(t, byID, second.ID)
+	require.ErrorIs(t, byID[first.ID], firstErr, "the first action's own reason, not the second's")
+	require.ErrorIs(t, byID[second.ID], secondErr, "the second action's own reason, not the first's")
+	require.NotErrorIs(t, byID[first.ID], secondErr, "the reasons must not be swapped or merged")
+	require.NotErrorIs(t, byID[second.ID], firstErr, "the reasons must not be swapped or merged")
 }
 
 func TestRunAutoCommit_EmptyActionsIsANoOp(t *testing.T) {
@@ -234,7 +284,9 @@ func TestRenderAutoCommitResult_NamesEveryAction(t *testing.T) {
 	out := pipeline.RenderAutoCommitResult(pipeline.AutoCommitRunResult{
 		Applied: []store.ActionRow{{ID: 1, Type: "comment", IssueKey: "PROJ-1"}},
 		Queued:  []store.ActionRow{{ID: 2, Type: "transition", IssueKey: "PROJ-2", Confidence: 0.4}},
-		Failed:  []store.ActionRow{{ID: 3, Type: "comment", IssueKey: "PROJ-3"}},
+		Failed: []pipeline.FailedAction{
+			{Action: store.ActionRow{ID: 3, Type: "comment", IssueKey: "PROJ-3"}, Err: fmt.Errorf("jira: 403 Forbidden")},
+		},
 	})
 
 	assert.Contains(t, out, "applied: 1")
@@ -243,4 +295,5 @@ func TestRenderAutoCommitResult_NamesEveryAction(t *testing.T) {
 	assert.Contains(t, out, "PROJ-1")
 	assert.Contains(t, out, "PROJ-2")
 	assert.Contains(t, out, "PROJ-3")
+	assert.Contains(t, out, "403 Forbidden", "the renderer must show WHY an action failed, not just THAT it did")
 }

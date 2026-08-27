@@ -198,6 +198,86 @@ func TestApplier_WriteFailure_MarksFailedAndKeepsTheRow(t *testing.T) {
 	require.NotNil(t, got[0].ExecutedAt, "a failed write still stamps executed_at: the write was attempted")
 }
 
+// TestApplier_WriteFailure_PersistsTheReasonOnTheRow is the design doc's
+// headline assertion: a failed apply must persist WHY, not just THAT, on the
+// row itself — asserted via a fresh GetAction, not on the error Apply
+// returns, since the return path already worked before this change and
+// proves nothing new about persistence.
+func TestApplier_WriteFailure_PersistsTheReasonOnTheRow(t *testing.T) {
+	s := applierStore(t)
+	writeErr := fmt.Errorf("jira: 403 Forbidden")
+	w := &fakeWriter{errs: map[string]error{
+		"AddComment:PROJ-1:the work landed": writeErr,
+	}}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ")
+	err := applier.Apply(action)
+	require.Error(t, err)
+
+	got, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Contains(t, got.Error, "403 Forbidden", "the persisted row must carry the tracker's message, not just the fact of failure")
+}
+
+// TestApplier_Success_LeavesErrorEmpty is Apply's success half of the
+// design's contract: an applied action's error column must be empty, not
+// merely unset by omission — proven against a real row that started with no
+// error, so this only guards against a future change accidentally writing a
+// non-empty placeholder on the happy path.
+func TestApplier_Success_LeavesErrorEmpty(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ")
+	require.NoError(t, applier.Apply(action))
+
+	got, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "applied", got.Status)
+	assert.Empty(t, got.Error)
+}
+
+// TestApplier_RetryAfterFailure_ClearsTheStaleReason is the stale-reason test
+// at the Applier level (internal/store's own test covers the store method in
+// isolation; this proves Apply actually calls it with a clearing pointer on
+// the success path). A human fixes the underlying cause and re-approves via
+// `actions decide --approve` (cmd/unjira/actions.go's allowed failed->approve
+// transition) — the second Apply call must not leave the first failure's
+// reason sitting on the row now that it succeeded.
+func TestApplier_RetryAfterFailure_ClearsTheStaleReason(t *testing.T) {
+	s := applierStore(t)
+	writeErr := fmt.Errorf("jira: 503 service unavailable")
+	w := &fakeWriter{errs: map[string]error{
+		"AddComment:PROJ-1:the work landed": writeErr,
+	}}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ")
+	require.Error(t, applier.Apply(action))
+
+	got, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, got.Error, "sanity: the first attempt's reason landed")
+
+	// The underlying cause is now fixed (the fake no longer errors on retry).
+	delete(w.errs, "AddComment:PROJ-1:the work landed")
+	require.NoError(t, applier.Apply(got))
+
+	got, err = s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "applied", got.Status)
+	assert.Empty(t, got.Error, "a subsequent success must clear the stale reason from the earlier failure")
+}
+
 // TestApplier_MalformedPayload_ErrorsWithoutCallingTheTracker proves a
 // payload that does not match its declared type is a loud error, never a
 // guess at what the writer should do.

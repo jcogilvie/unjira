@@ -65,7 +65,13 @@ func (c *actionsListCmd) Run(app *appContext) error {
 // renderActionsList writes one scannable line per action: id, narrative,
 // type, issue key, confidence, status — the same fields the design doc
 // requires of both render forms, so a reviewer switching between --json and
-// plain text never loses information depending on which they picked.
+// plain text never loses information depending on which they picked. A
+// non-empty Error is appended to the line: this command's own doc comment
+// calls surfacing status=failed "half the point of building this now", and a
+// reason-less "status=failed" is exactly the gap
+// docs/superpowers/specs/2026-08-27-failure-reason-capture-design.md closes —
+// this is the surface that "still works tomorrow" (the design doc's words),
+// so it matters more than RenderAutoCommitResult's live-pass printout.
 func renderActionsList(rows []store.ActionRow, status string) {
 	if len(rows) == 0 {
 		fmt.Printf("no actions with status %q\n", status)
@@ -79,8 +85,14 @@ func renderActionsList(rows []store.ActionRow, status string) {
 			issueKey = "-"
 		}
 
-		fmt.Printf("#%-5d narrative=%-6d %-10s %-12s confidence=%.2f status=%s\n",
+		fmt.Printf("#%-5d narrative=%-6d %-10s %-12s confidence=%.2f status=%s",
 			a.ID, a.NarrativeID, a.Type, issueKey, a.Confidence, a.Status)
+
+		if a.Error != "" {
+			fmt.Printf(" error=%q", a.Error)
+		}
+
+		fmt.Println()
 	}
 }
 

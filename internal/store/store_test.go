@@ -1191,6 +1191,7 @@ func TestInsertActionRoundTripsEveryField(t *testing.T) {
 	assert.Equal(t, "proposed", got[0].Status)
 	assert.NotEmpty(t, got[0].CreatedAt, "created_at must come back populated")
 	assert.Empty(t, got[0].Feedback, "feedback is unwritten until slice 6")
+	assert.Empty(t, got[0].Error, "error is unwritten until gate.Applier.Apply runs")
 }
 
 func TestActionsByStatusFiltersAndLatestActionPicksMostRecent(t *testing.T) {
@@ -1320,4 +1321,165 @@ func TestUpdateActionStatusAndFeedbackOnMissingIDErrors(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no such action")
+}
+
+// TestUpdateActionStatusAndErrorPersistsTheTrackerMessage is the failure-reason
+// design doc's first assertion: Apply fails, status=failed, AND error contains
+// the tracker's message — asserted on the persisted row (via GetAction), not on
+// any returned error, since the return path already worked before this change.
+func TestUpdateActionStatusAndErrorPersistsTheTrackerMessage(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	reason := "posting comment to PROJ-1: 403 Forbidden"
+	require.NoError(t, s.UpdateActionStatusAndError(id, "failed", &reason))
+
+	got, err := s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	assert.Equal(t, reason, got.Error, "error must round-trip the tracker's message verbatim")
+	require.NotNil(t, got.ExecutedAt, "a failed write still stamps executed_at: the write was attempted")
+}
+
+// TestUpdateActionStatusAndErrorClearsAStaleReasonOnSubsequentSuccess is the
+// stale-reason test the design doc calls out by name: a failed action that a
+// human later retries and applies must not keep the old reason attached, or
+// `actions list` would report a lie about the current state of the row.
+func TestUpdateActionStatusAndErrorClearsAStaleReasonOnSubsequentSuccess(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	reason := "posting comment to PROJ-1: 403 Forbidden"
+	require.NoError(t, s.UpdateActionStatusAndError(id, "failed", &reason))
+
+	got, err := s.GetAction(id)
+	require.NoError(t, err)
+	require.Equal(t, reason, got.Error, "sanity: the reason landed before the retry")
+
+	// The human fixed the underlying cause and retried; this apply succeeds.
+	// Passing a pointer to an empty string clears the stale reason — distinct
+	// from passing nil, which would leave whatever is already there alone.
+	cleared := ""
+	require.NoError(t, s.UpdateActionStatusAndError(id, "applied", &cleared))
+
+	got, err = s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, "applied", got.Status)
+	assert.Empty(t, got.Error, "a subsequent success must clear the stale reason")
+}
+
+// TestUpdateActionStatusAndErrorNilLeavesErrorUntouched proves the nil/pointer
+// distinction actually holds: a status-only update (nil errText) must not
+// clobber a previously-written error, mirroring how UpdateActionStatus itself
+// (feedback=nil) never touches feedback.
+func TestUpdateActionStatusAndErrorNilLeavesErrorUntouched(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	reason := "posting comment to PROJ-1: 403 Forbidden"
+	require.NoError(t, s.UpdateActionStatusAndError(id, "failed", &reason))
+
+	// A caller that only wants to change status (nil errText) must not erase
+	// the existing reason.
+	require.NoError(t, s.UpdateActionStatusAndError(id, "failed", nil))
+
+	got, err := s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, reason, got.Error, "nil errText must leave a prior reason untouched")
+}
+
+// TestErrorAndFeedbackAreIndependentlyWritable is what protects
+// rules.Distill's input from ever being fed a machine-written tracker error:
+// setting one column must never clobber the other, in either direction.
+func TestErrorAndFeedbackAreIndependentlyWritable(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	feedback := "actually say \"landed in prod\""
+	require.NoError(t, s.UpdateActionStatusAndFeedback(id, "edited", feedback))
+
+	got, err := s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, feedback, got.Feedback)
+	assert.Empty(t, got.Error, "writing feedback must never populate error")
+
+	reason := "posting comment to PROJ-1: 403 Forbidden"
+	require.NoError(t, s.UpdateActionStatusAndError(id, "failed", &reason))
+
+	got, err = s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, reason, got.Error)
+	assert.Equal(t, feedback, got.Feedback, "writing error must never clobber the reviewer's feedback")
+}
+
+// TestUpdateActionStatusAndErrorOnMissingIDErrors mirrors
+// TestUpdateActionStatusAndFeedbackOnMissingIDErrors's precedent for the new
+// error-writing path.
+func TestUpdateActionStatusAndErrorOnMissingIDErrors(t *testing.T) {
+	s := openStore(t)
+
+	reason := "some reason"
+	err := s.UpdateActionStatusAndError(999999, "failed", &reason)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no such action")
+}
+
+// TestUpdateActionStatusAndErrorStampingMatchesPlainUpdateActionStatus proves
+// the shared-impl routing actually shares: decided_at/executed_at stamping
+// must be identical whether or not an error is written alongside the status
+// change, since both now funnel through updateActionStatusImpl.
+func TestUpdateActionStatusAndErrorStampingMatchesPlainUpdateActionStatus(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 27, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"x"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	reason := "posting comment to PROJ-1: 503 Service Unavailable"
+	require.NoError(t, s.UpdateActionStatusAndError(id, "failed", &reason))
+
+	got, err := s.GetAction(id)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got.Status)
+	require.NotNil(t, got.DecidedAt, "a failed action was necessarily decided")
+	require.NotNil(t, got.ExecutedAt, "a failed write still stamps executed_at: the write was attempted")
+	assert.Equal(t, reason, got.Error)
 }

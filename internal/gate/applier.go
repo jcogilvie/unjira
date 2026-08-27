@@ -65,11 +65,21 @@ type createPayload struct {
 }
 
 // Apply performs exactly one action's tracker write and records the outcome
-// via store.UpdateActionStatus — applied on success, failed on any error
-// (decode, routing, or the tracker call itself). Every path sets a terminal
-// status: this method never leaves action's row at status=proposed once
-// called, and never deletes it — a failure must stay visible for slice 6's
-// triage to surface, per the phase-1 spec ("never silently dropped").
+// via store.UpdateActionStatusAndError — applied on success, failed on any
+// error (decode, routing, or the tracker call itself). Every path sets a
+// terminal status: this method never leaves action's row at status=proposed
+// once called, and never deletes it — a failure must stay visible for slice
+// 6's triage to surface, per the phase-1 spec ("never silently dropped").
+//
+// The reason is persisted alongside the status, not just returned: a
+// gate.Decide-driven auto-commit failure is otherwise only ever seen once, in
+// a terminal nobody may be watching (see
+// docs/superpowers/specs/2026-08-27-failure-reason-capture-design.md's "the
+// gap, traced") — `actions list --status failed` is the surface that must be
+// able to answer WHY, not just THAT. A success clears any reason a previous
+// failed attempt left behind (a pointer to "", not nil): a human who fixes
+// the underlying cause and re-approves via `actions decide --approve` must
+// not have this row keep reporting the stale reason from before the fix.
 //
 // Not retried, on any path. A write that fails because the underlying issue
 // was deleted, or because the payload was never valid for its type, will
@@ -80,15 +90,17 @@ func (a *Applier) Apply(action store.ActionRow) error {
 	err := a.write(action)
 
 	status := "applied"
+	reason := ""
 	if err != nil {
 		status = "failed"
+		reason = err.Error()
 	}
 
-	// UpdateActionStatus stamps executed_at for both applied and failed
-	// (see its own doc comment: "only a write that actually reached the
-	// tracker sets executed_at") — a failed attempt still attempted a write,
-	// which is exactly the distinction that column exists to record.
-	if updateErr := a.store.UpdateActionStatus(action.ID, status); updateErr != nil {
+	// UpdateActionStatusAndError stamps executed_at for both applied and
+	// failed (see its own doc comment: "only a write that actually reached
+	// the tracker sets executed_at") — a failed attempt still attempted a
+	// write, which is exactly the distinction that column exists to record.
+	if updateErr := a.store.UpdateActionStatusAndError(action.ID, status, &reason); updateErr != nil {
 		if err != nil {
 			return fmt.Errorf("marking action %d failed (write error was %w): %w", action.ID, err, updateErr)
 		}
