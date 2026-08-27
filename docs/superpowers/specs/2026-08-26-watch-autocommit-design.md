@@ -8,9 +8,66 @@ action is applied immediately or left for `triage`.
 correlated, and proposed. That makes the review bar different in kind, not degree, and most of the
 decisions below exist to keep the blast radius small and legible.
 
-Status: design. Unblocked by slice 4 (`internal/reconciler`, PR #15) and by `llm.api_key_helper`
-(PR #16) — a loop cannot run unattended against a gateway issuing short-lived tokens, so the
-credential work was a hard prerequisite rather than a nicety.
+## Status: landed 2026-08-26
+
+`config.AutoCommit`, `internal/gate` (pure `Decide` + `TaskWriter` `Applier`), `pipeline.RunAutoCommit`,
+and the `watch` command. `earthly +reviewable` green, 416 tests, 0 skipped.
+
+**The safety default is verified against real data, not just asserted.** `watch --once --since 48h`
+against the live PAAS/DEVSBX setup with no `auto_commit` block in config:
+
+```
+auto-commit
+  applied: 0  queued: 2  failed: 0
+```
+
+Jira `updated` timestamps captured before and after via a separate API path — `PAAS-4036` 12:34:15,
+`PAAS-4037` 12:42:42, `DEVSBX-1` Aug 21 — all **unchanged**. 26 actions in the table, every one
+`status=proposed`, `executed_at` NULL on all of them. Nothing was written.
+
+Two guards drilled rather than trusted:
+
+- Removing the `Graduated` veto from `Decide` fails three tests, including the nil-config case.
+- Weakening the all-or-nothing precondition to `len(results) > 0` — the documented trap — fails
+  `TestRunWatchPass_PartialReconcileAutoCommitsNothing`.
+
+### Deviations worth knowing
+
+1. **`reconciler.Persist` now returns `([]store.ActionRow, error)`.** Identifying "freshly-proposed"
+   actions was the slice's sharpest correctness question, and the obvious accessor is *wrong*:
+   `store.ActionsByStatus("proposed")` returns every action still queued, including ones from earlier
+   passes a human has not triaged. Auto-committing those would apply decisions the operator was still
+   considering. So Persist returns exactly the rows it wrote this call, in-transaction, and `watch`
+   passes that slice — making "fresh this pass" structural rather than something a caller must
+   remember to narrow.
+2. **The all-or-nothing precondition lives in `watch`, not the gate.** `Decide`/`Apply` are pure and
+   per-action with no notion of which pass produced an action, so there is no lower layer that could
+   enforce it. Correctly argued by the implementer against this design's original placement.
+3. **`--since` is a fixed lookback, not a cursor watermark.** The phase-1 spec envisaged a `cursors`
+   entry for "since last run". A fixed window is safe here because narrative-membership dedup means
+   widening it never double-narrates, but it is simpler than specified and left for later.
+4. **The lease helpers were renamed** `narrateLease*` → `pipelineLease*`, since `watch` and
+   `dev narrate` now share them. Rename only; `dev narrate`'s behaviour is unchanged.
+5. **`config/unjira.example.json` deliberately has NO `auto_commit` block.** Every other block is
+   populated, so this breaks convention on purpose: any example containing `graduated: true` risks
+   being copy-pasted into a real deployment and arming the gate by accident. Omitting it means a fresh
+   clone gets the safe default (nil map ⇒ queue everything). The implementer made this call
+   independently and it is the right one.
+
+### Known consequence, stated plainly
+
+**`triage` does not exist yet**, so a `failed` auto-commit is invisible unless someone reads the
+`actions` table directly. That is acceptable only while `Graduated` is false everywhere — which is the
+shipped default. Anyone graduating an action type before slice 6 lands is accepting that failures will
+be silent.
+
+Also unproven: **no action has ever actually been applied.** The apply path is covered by unit tests
+with a recording fake, never by a real write to a real tracker. Proving it means graduating an action
+type against DEVSBX, which is a real mutation and deliberately left for an explicit decision.
+
+Unblocked by slice 4 (`internal/reconciler`, PR #15) and by `llm.api_key_helper` (PR #16) — a loop
+cannot run unattended against a gateway issuing short-lived tokens, so the credential work was a hard
+prerequisite rather than a nicety.
 
 ## Scope, decided with the user
 
