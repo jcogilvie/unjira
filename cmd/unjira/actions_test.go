@@ -129,6 +129,40 @@ func TestActionsList_EmptyResultSaysSoRatherThanPrintingNothing(t *testing.T) {
 	assert.Contains(t, out, `"failed"`)
 }
 
+// TestActionsList_ShowsFailureReasonInTextAndJSON is the design doc's
+// headline surface test: `actions list --status failed` is what still works
+// tomorrow (per the design doc, "the surface that still works tomorrow, so it
+// matters most"), and it must show WHY an action failed in both render
+// forms, not just THAT it failed.
+func TestActionsList_ShowsFailureReasonInTextAndJSON(t *testing.T) {
+	app, s := actionsTestApp(t)
+
+	issueKey, err := s.InsertLocalIssue("PROJ", "ticket", "Task", "", nil)
+	require.NoError(t, err)
+	id := seedAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: issueKey, Payload: `{"body":"x"}`, Confidence: 0.7, Status: "proposed",
+	})
+
+	reason := "posting comment to PROJ-1: 403 Forbidden"
+	require.NoError(t, s.UpdateActionStatusAndError(id, "failed", &reason))
+
+	textCmd := actionsListCmd{Status: "failed"}
+	textOut := captureStdout(t, func() {
+		require.NoError(t, textCmd.Run(app))
+	})
+	assert.Contains(t, textOut, "403 Forbidden", "the text renderer must show the failure reason")
+
+	jsonCmd := actionsListCmd{JSON: true, Status: "failed"}
+	jsonOut := captureStdout(t, func() {
+		require.NoError(t, jsonCmd.Run(app))
+	})
+
+	var rows []store.ActionRow
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, reason, rows[0].Error, "the json renderer must round-trip the failure reason")
+}
+
 // TestActionsList_JSONRoundTripsEveryField proves --json is a real,
 // scriptable encoding of every ActionRow column, not just the fields the
 // plain-text renderer happens to show.

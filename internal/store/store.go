@@ -138,6 +138,17 @@ CREATE TABLE IF NOT EXISTS actions (
     -- that slice does not need a second schema change (see the phase-1 spec's
     -- schema-additions section, where it was specified but never landed).
     feedback     TEXT,
+    -- Set by gate.Applier.Apply when status transitions to 'failed': the
+    -- tracker error's message (e.g. "posting comment to PAAS-1: 403
+    -- Forbidden"), so a human can see WHY without re-running the write.
+    -- Distinct from feedback above and deliberately kept in its own column:
+    -- feedback is a human reviewer's free-text correction, read by triage's
+    -- rework loop and rules.Distill (slice 7) as if a person wrote it. A
+    -- machine-written tracker error landing in that column would corrupt rule
+    -- distillation with 403s. Cleared (set back to '') on a subsequent
+    -- successful apply, so a retried-and-fixed action never reports a stale
+    -- reason.
+    error        TEXT,
     -- Same %f format as narrative_events.linked_at, and for the same reason:
     -- DeltaEvents compares these two TEXT columns lexically
     -- (linked_at > created_at), so both must share the identical format
@@ -1474,9 +1485,15 @@ type ActionRow struct {
 	Rationale   string  `json:"rationale"`
 	Status      string  `json:"status"` // proposed | approved | edited | rejected | applied | failed
 	Feedback    string  `json:"feedback"`
-	DecidedAt   *string `json:"decided_at"`
-	ExecutedAt  *string `json:"executed_at"`
-	CreatedAt   string  `json:"created_at"`
+	// Error is the tracker error's message when Status is "failed" — see the
+	// actions.error column comment in the schema string above for why this is
+	// a separate field from Feedback, never conflated. Empty for every other
+	// status, including a since-cleared failure that was later retried and
+	// applied (see UpdateActionStatusAndError).
+	Error      string  `json:"error"`
+	DecidedAt  *string `json:"decided_at"`
+	ExecutedAt *string `json:"executed_at"`
+	CreatedAt  string  `json:"created_at"`
 }
 
 // InsertAction writes one proposed action and returns its id. created_at
@@ -1598,7 +1615,7 @@ func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, er
 // semantics: any human ruling sets decided_at; only a write that actually
 // reached the tracker sets executed_at.
 func (s *Store) UpdateActionStatus(id int64, status string) error {
-	return updateActionStatusImpl(s.db, id, status, nil)
+	return updateActionStatusImpl(s.db, id, status, nil, nil)
 }
 
 // UpdateActionStatusAndFeedback moves an action to a new workflow state
@@ -1613,14 +1630,39 @@ func (s *Store) UpdateActionStatus(id int64, status string) error {
 // placeholder binding is what actually protects this from SQL injection or
 // truncation, not any transformation of this function's own.
 func (s *Store) UpdateActionStatusAndFeedback(id int64, status, feedback string) error {
-	return updateActionStatusImpl(s.db, id, status, &feedback)
+	return updateActionStatusImpl(s.db, id, status, &feedback, nil)
 }
 
-// updateActionStatusImpl backs both UpdateActionStatus and
-// UpdateActionStatusAndFeedback so the decided_at/executed_at stamping rules
-// live in exactly one place regardless of whether a caller also wants to set
-// feedback in the same statement.
-func updateActionStatusImpl(c dbConn, id int64, status string, feedback *string) error {
+// UpdateActionStatusAndError moves an action to a new workflow state while
+// persisting (or clearing) the machine-written tracker-failure reason in the
+// SAME statement as the status change — gate.Applier.Apply needs both to
+// land atomically, matching UpdateActionStatusAndFeedback's own rationale for
+// doing so.
+//
+// errText is *string, not string, because "leave the existing error alone"
+// and "clear it to empty" are both real, distinct callers need here and a
+// bare string cannot express the first: nil means leave whatever is already
+// in the column untouched (e.g. a caller only changing status for an
+// unrelated reason), while a non-nil pointer — including one pointing at ""
+// — overwrites it. Apply always passes a non-nil pointer: err.Error() on
+// failure, or a pointer to "" on success, because "a subsequent success must
+// clear a stale reason" is the design's own stale-reason requirement — a
+// retried-and-fixed action must never keep reporting the reason it failed
+// for last time.
+func (s *Store) UpdateActionStatusAndError(id int64, status string, errText *string) error {
+	return updateActionStatusImpl(s.db, id, status, nil, errText)
+}
+
+// updateActionStatusImpl backs UpdateActionStatus, UpdateActionStatusAndFeedback,
+// and UpdateActionStatusAndError so the decided_at/executed_at stamping rules
+// live in exactly one place regardless of which optional column (feedback,
+// error, neither) a caller also wants to set in the same statement. feedback
+// and errText are independent nil-checked pointers — a caller can set either,
+// both, or neither — so no code path can conflate a human's free-text
+// correction with a machine-written tracker error (see the actions.error
+// schema comment for why that conflation would be a real problem, not a
+// theoretical one).
+func updateActionStatusImpl(c dbConn, id int64, status string, feedback, errText *string) error {
 	const ts = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
 
 	query := `UPDATE actions SET status = ?`
@@ -1629,6 +1671,11 @@ func updateActionStatusImpl(c dbConn, id int64, status string, feedback *string)
 	if feedback != nil {
 		query += `, feedback = ?`
 		args = append(args, *feedback)
+	}
+
+	if errText != nil {
+		query += `, error = ?`
+		args = append(args, *errText)
 	}
 
 	switch status {
@@ -1662,22 +1709,22 @@ func updateActionStatusImpl(c dbConn, id int64, status string, feedback *string)
 // actionSelect is the column list every ActionRow query shares, so a new
 // column cannot be added to one query and forgotten in another.
 const actionSelect = `SELECT id, narrative_id, type, issue_key, payload, confidence,
-	rationale, status, feedback, decided_at, executed_at, created_at FROM actions`
+	rationale, status, feedback, error, decided_at, executed_at, created_at FROM actions`
 
 func scanActions(rows *sql.Rows) ([]ActionRow, error) {
 	var out []ActionRow
 
 	for rows.Next() {
 		var (
-			a                             ActionRow
-			issueKey, rationale, feedback sql.NullString
-			confidence                    sql.NullFloat64
-			decidedAt, executedAt         sql.NullString
+			a                                     ActionRow
+			issueKey, rationale, feedback, errCol sql.NullString
+			confidence                            sql.NullFloat64
+			decidedAt, executedAt                 sql.NullString
 		)
 
 		if err := rows.Scan(
 			&a.ID, &a.NarrativeID, &a.Type, &issueKey, &a.Payload, &confidence,
-			&rationale, &a.Status, &feedback, &decidedAt, &executedAt, &a.CreatedAt,
+			&rationale, &a.Status, &feedback, &errCol, &decidedAt, &executedAt, &a.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning action row: %w", err)
 		}
@@ -1685,6 +1732,7 @@ func scanActions(rows *sql.Rows) ([]ActionRow, error) {
 		a.IssueKey = issueKey.String
 		a.Rationale = rationale.String
 		a.Feedback = feedback.String
+		a.Error = errCol.String
 		a.Confidence = confidence.Float64
 		if decidedAt.Valid {
 			a.DecidedAt = &decidedAt.String

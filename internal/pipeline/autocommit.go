@@ -20,12 +20,25 @@ type AutoCommitOptions struct {
 	Applier *gate.Applier
 }
 
+// FailedAction pairs one failed action's row with the error ITS OWN apply
+// call produced. A plain []store.ActionRow (what this used to be) cannot
+// express this: gate.Applier.Apply already persists the same reason onto the
+// row's own error column (see internal/gate/applier.go), so this struct
+// exists for the in-process callers — RenderAutoCommitResult and any future
+// caller of RunAutoCommit — that need the error value itself (for
+// errors.Is/As, or to print it) without a second store round-trip.
+type FailedAction struct {
+	Action store.ActionRow
+	Err    error
+}
+
 // AutoCommitRunResult tallies one auto-commit pass, for rendering: which
-// actions applied, which queued for triage, and which failed on write.
+// actions applied, which queued for triage, and which failed on write (each
+// paired with why — see FailedAction).
 type AutoCommitRunResult struct {
 	Applied []store.ActionRow
 	Queued  []store.ActionRow
-	Failed  []store.ActionRow
+	Failed  []FailedAction
 }
 
 // RunAutoCommit is the auto-commit gate's orchestration half: for each of
@@ -61,7 +74,7 @@ func RunAutoCommit(actions []store.ActionRow, opts AutoCommitOptions) (AutoCommi
 		switch gate.Decide(action, opts.Rules) {
 		case gate.DecisionApply:
 			if err := opts.Applier.Apply(action); err != nil {
-				result.Failed = append(result.Failed, action)
+				result.Failed = append(result.Failed, FailedAction{Action: action, Err: err})
 				errs = errors.Join(errs, err)
 
 				continue
@@ -93,8 +106,9 @@ func RenderAutoCommitResult(r AutoCommitRunResult) string {
 	for _, a := range r.Queued {
 		fmt.Fprintf(&b, "  queued   %s action %d on %s (confidence %.2f)\n", a.Type, a.ID, a.IssueKey, a.Confidence)
 	}
-	for _, a := range r.Failed {
-		fmt.Fprintf(&b, "  failed   %s action %d on %s\n", a.Type, a.ID, a.IssueKey)
+	for _, f := range r.Failed {
+		fmt.Fprintf(&b, "  failed   %s action %d on %s: %s\n",
+			f.Action.Type, f.Action.ID, f.Action.IssueKey, f.Err)
 	}
 
 	return b.String()
