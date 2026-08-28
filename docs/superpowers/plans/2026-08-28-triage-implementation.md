@@ -1061,3 +1061,267 @@ a successful retarget having moved nothing.
 The *Tx variant exists so remove and add land atomically — a crash
 between them would leave a narrative with no primary at all."
 ```
+
+---
+
+### Task 5: `triage.Session` — the state machine that never touches a terminal
+
+The review session: walk the batch, collect one decision per action, apply **nothing**. `cmd/` implements `Prompter` against a terminal; tests implement it as a script. That seam is what makes the restructures in Task 6 testable at all.
+
+**Files:**
+- Create: `internal/triage/triage.go`
+- Create: `internal/triage/triage_test.go`
+
+> **Verified while writing this plan:** both files below were created, compiled, and run. Both tests pass as written. The prototype also found a real design bug — see Step 3.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `internal/triage/triage_test.go`:
+
+```go
+package triage_test
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/triage"
+)
+
+// scriptedPrompter answers with a fixed sequence, recording what it was shown.
+type scriptedPrompter struct {
+	answers []triage.Decision
+	shown   []triage.Item
+	confirm bool
+}
+
+func (p *scriptedPrompter) Ask(item triage.Item) (triage.Decision, error) {
+	p.shown = append(p.shown, item)
+	if len(p.answers) == 0 {
+		return triage.Decision{Verb: triage.VerbSkip}, nil
+	}
+	d := p.answers[0]
+	p.answers = p.answers[1:]
+
+	return d, nil
+}
+
+func (p *scriptedPrompter) Confirm(string) (bool, error) { return p.confirm, nil }
+
+func batchOf(ids ...int64) []store.ActionRow {
+	out := make([]store.ActionRow, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, store.ActionRow{
+			ID: id, NarrativeID: id, Type: "comment",
+			IssueKey: "PROJ-1", Payload: `{"body":"b"}`, Status: "proposed",
+		})
+	}
+
+	return out
+}
+
+func TestSession_CollectsOneDecisionPerActionAndAppliesNothing(t *testing.T) {
+	p := &scriptedPrompter{answers: []triage.Decision{
+		{Verb: triage.VerbApprove},
+		{Verb: triage.VerbReject, Text: "not worth posting"},
+		{Verb: triage.VerbApprove},
+	}}
+	s := triage.NewSession(batchOf(1, 2, 3), p)
+
+	require.NoError(t, s.Run())
+
+	require.Len(t, p.shown, 3)
+	assert.Equal(t, 1, p.shown[0].Position)
+	assert.Equal(t, 3, p.shown[0].Total)
+
+	approved := s.Approved()
+	require.Len(t, approved, 2, "only the two approvals")
+	assert.Equal(t, int64(1), approved[0].ID)
+	assert.Equal(t, int64(3), approved[1].ID)
+}
+
+func TestSession_QuitAbandonsWithoutApplying(t *testing.T) {
+	p := &scriptedPrompter{answers: []triage.Decision{
+		{Verb: triage.VerbApprove},
+		{Verb: triage.VerbQuit},
+	}}
+	s := triage.NewSession(batchOf(1, 2, 3), p)
+
+	err := s.Run()
+
+	require.ErrorIs(t, err, triage.ErrAbandoned)
+	assert.Empty(t, s.Approved(),
+		"quit must discard even decisions already recorded: nothing was applied, so nothing is owed")
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+```
+go test ./internal/triage/ -v 2>&1 | tail -20; echo "exit=$?"
+```
+
+Expected: the package does not exist yet — `no Go files in .../internal/triage`.
+
+- [ ] **Step 3: Implement**
+
+Create `internal/triage/triage.go`:
+
+```go
+// Package triage is the interactive review session over the actions queue.
+package triage
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/jcogilvie/unjira/internal/store"
+)
+
+// Verb is one disposition a reviewer chooses for one action.
+type Verb string
+
+const (
+	VerbApprove Verb = "approve"
+	VerbReject  Verb = "reject"
+	VerbEdit    Verb = "edit"
+	VerbMerge   Verb = "merge"
+	VerbSplit   Verb = "split"
+	VerbSkip    Verb = "skip"
+	VerbQuit    Verb = "quit"
+	VerbTarget  Verb = "target"
+)
+
+// Decision is a reviewer's answer for one presented action.
+type Decision struct {
+	Verb Verb
+	// Text carries reject/edit free-text, or the issue key for target.
+	Text string
+	// Positions carries merge/split's 1-based batch positions.
+	Positions []int
+}
+
+// Item is one action as presented for review.
+type Item struct {
+	Action   store.ActionRow
+	Position int
+	Total    int
+}
+
+// Prompter is how a Session asks a human. cmd/unjira implements it against a
+// terminal; tests implement it as a script. The Session never touches stdin.
+type Prompter interface {
+	Ask(item Item) (Decision, error)
+	Confirm(summary string) (bool, error)
+}
+
+// Session holds one review pass in memory.
+type Session struct {
+	batch     []store.ActionRow
+	decisions map[int64]Decision
+	prompter  Prompter
+}
+
+func NewSession(batch []store.ActionRow, p Prompter) *Session {
+	return &Session{
+		batch:     batch,
+		decisions: make(map[int64]Decision, len(batch)),
+		prompter:  p,
+	}
+}
+
+// Run walks the batch, collecting a decision per action. It applies nothing.
+func (s *Session) Run() error {
+	for i, a := range s.batch {
+		d, err := s.prompter.Ask(Item{Action: a, Position: i + 1, Total: len(s.batch)})
+		if err != nil {
+			return fmt.Errorf("prompting for action %d: %w", a.ID, err)
+		}
+		if d.Verb == VerbQuit {
+			// Discard every decision, not just this one. Nothing has been
+			// applied yet — that is the whole point of batch apply — so a
+			// reviewer who quits owes nothing and expects nothing to have
+			// happened. Keeping earlier approvals would make quit a partial
+			// commit, which is the surprise batch apply exists to avoid.
+			s.decisions = make(map[int64]Decision, len(s.batch))
+
+			return ErrAbandoned
+		}
+		s.decisions[a.ID] = d
+	}
+
+	return nil
+}
+
+// Approved returns the actions the reviewer approved, in batch order.
+func (s *Session) Approved() []store.ActionRow {
+	var out []store.ActionRow
+	for _, a := range s.batch {
+		if s.decisions[a.ID].Verb == VerbApprove {
+			out = append(out, a)
+		}
+	}
+
+	return out
+}
+
+// Summary renders the pending dispositions for the final confirmation.
+func (s *Session) Summary() string {
+	counts := map[Verb]int{}
+	for _, d := range s.decisions {
+		counts[d.Verb]++
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d approve, %d reject, %d edit, %d skip",
+		counts[VerbApprove], counts[VerbReject], counts[VerbEdit], counts[VerbSkip])
+
+	return b.String()
+}
+
+// ErrAbandoned is returned when the reviewer quits: nothing is applied.
+var ErrAbandoned = fmt.Errorf("triage abandoned by reviewer")
+```
+
+**The quit behaviour is a bug the prototype caught, not a nicety.** The first version returned `ErrAbandoned` without clearing `s.decisions`, so `Approved()` still returned the approval recorded *before* the quit. That makes quit a partial commit — precisely the surprise batch apply exists to prevent. `TestSession_QuitAbandonsWithoutApplying` failed with:
+
+```
+Should be empty, but was [{1 1 comment PROJ-1 {"body":"b"} 0  proposed   <nil> <nil> }]
+```
+
+- [ ] **Step 4: Run**
+
+```
+go test ./internal/triage/ -v 2>&1 | tail -12; echo "exit=$?"
+```
+
+Expected: both PASS.
+
+- [ ] **Step 5: Drill — quit must discard everything**
+
+Remove the `s.decisions = make(...)` line from the `VerbQuit` branch. Run:
+
+```
+go test ./internal/triage/ -run TestSession_QuitAbandons -v 2>&1 | tail -10; echo "exit=$?"
+```
+
+Expected: the failure quoted in Step 3. Restore.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/triage/
+git commit -m "triage: Session — collect dispositions, apply nothing
+
+The review pass as a state machine with a Prompter seam, so the session
+is drivable from a scripted test and never touches stdin. That is what
+makes Task 6's restructures testable without driving a terminal.
+
+Quit discards every decision, not just the one that quit. Nothing has been
+applied — the point of batch apply — so a reviewer who quits expects
+nothing to have happened; keeping earlier approvals would make quit a
+partial commit. Caught by the prototype rather than by review."
+```
