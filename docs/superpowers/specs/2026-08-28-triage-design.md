@@ -28,7 +28,8 @@ So merge/split is not the advanced feature to add later. It is the reason this c
 > that narrative's last committed action is frozen. Everything else is eligible for reshuffling at
 > commit time.**
 
-Committed work cannot be altered, because a posted comment cannot be unposted. But the watermark for
+Committed work cannot be altered: unjira cannot unpost a comment, un-transition a status, or
+un-create an issue. But the watermark for
 "the past" is the last commit, not the narrative's existence.
 
 Choosing the event link over the narrative is load-bearing. Consider a narrative holding one applied
@@ -44,14 +45,27 @@ would reject the correction because the correction is right.
 | mixed | committed events stay; events linked since are free to move |
 
 A merge in mixed state therefore *succeeds*: uncommitted events move out, committed ones stay, and
-the posted comment remains true about exactly what it described. No refusal, no warning, no
+the tracker mutation remains true about exactly what it described. No refusal, no warning, no
 inconsistency.
 
 ### Merge direction is determined, not chosen
 
-The committed narrative is the merge target. That follows from what "committed" means: a posted
-comment made that narrative the **workstream of record**, so any story it absorbs joins it rather
-than the reverse.
+The committed narrative is the merge target. That follows from what "committed" means: unjira has
+already mutated the tracker on that narrative's behalf, making it the **workstream of record**, so
+any story it absorbs joins it rather than the reverse.
+
+**"Committed" covers three kinds of mutation, and a comment is the mildest of them.** This design
+originally said "a posted comment" throughout, which understated the stakes:
+
+| action type | what a commit did | reversibility |
+|---|---|---|
+| `comment` | added prose to an issue | additive; a stale one is confusing but deletable |
+| `transition` | moved the issue to a new status | **destroyed the prior state** — Discovery → Done loses "it was in Discovery" outside the changelog |
+| `create` | opened a new issue | **a new object others now reference**; deleting breaks links, keeping it orphans a ticket |
+
+So the watermark argument is stronger than the comment framing implied, not weaker. A transition or a
+create is *less* recoverable than a comment, and both make the target narrative the record of work in
+a way that is visible to everyone else on the team.
 
 | merge(X, Y) | target |
 |---|---|
@@ -64,9 +78,10 @@ zero had committed ones** — uncommitted-to-uncommitted is what actually happen
 errors are visible before anything is posted.
 
 The last row is refused rather than supported, and the reason is that it barely exists: two
-*committed* workstreams means two issues in the tracker each already claiming this work. Merging
-them post-hoc would leave one issue's posted comment describing work now attributed to another, and
-unjira cannot retract a comment. That is an org-level decision about which ticket is real — not
+*committed* workstreams means unjira has already mutated two issues on behalf of this work —
+commented on both, or transitioned both, or created both. Merging
+them post-hoc would leave one issue's mutation describing work now attributed to another, and unjira
+cannot retract a comment, un-transition a status, or un-create an issue. That is an org-level decision about which ticket is real — not
 something a review loop should decide silently. Refuse, name both narratives and their applied
 actions, and let the human resolve it in Jira first.
 
