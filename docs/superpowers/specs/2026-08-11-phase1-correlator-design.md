@@ -393,7 +393,7 @@ slice starts — this is not a fixed waterfall plan.
    `comment` posted to a DEVSBX issue and was read back; an ungraduated one at 0.99 confidence wrote
    nothing; a real 404 recorded a real reason. Cleanup verified through a path independent of
    unjira's own client.
-6. **`actions`/`rules` primitives + `triage`** — 🚧 first half landed. `unjira actions list
+6. **`actions`/`rules` primitives + `triage`** — ✅ landed. `unjira actions list
    [--json] [--status]` and `actions decide <id> --approve|--reject|--edit` shipped, splitting the
    slice at the seam this spec already draws (`triage` is "built on the primitives above"), so the
    queue became viewable — and an auto-commit failure visible — before the interactive loop exists.
@@ -409,9 +409,25 @@ slice starts — this is not a fixed waterfall plan.
    surface built to make failures visible could only ever report "it failed." See
    `docs/superpowers/specs/2026-08-27-failure-reason-capture-design.md`.
 
-   Still open in this slice: **`triage`** (the interactive batch loop, in-session rework,
-   `--auto-approve`/`--refresh`/`--dry-run`) and **`unjira rules list|decide`**, which needs slice 7
-   to have anything to list.
+   **`triage` landed 2026-08-28** — the interactive loop with `--auto-approve`/`--refresh`/
+   `--dry-run`, batch apply (nothing reaches a tracker until one final confirmation), and merge as
+   the first restructure. See `docs/superpowers/specs/2026-08-28-triage-design.md`.
+
+   The slice's headline finding: the review surface is not primarily about checking wording. A clumsy
+   comment on the *right* ticket still closes the drift and a human fixes the prose in seconds; a
+   comment on the *wrong* ticket, or work split so each half gets a partial story, is unjira failing
+   at its purpose. And text errors are one-time while **structure errors compound**, since narratives
+   persist and every later pass extends whatever story exists. So re-clustering is the point of the
+   command, not an advanced feature.
+
+   That required deciding what may be restructured and when. The answer: **uncommitted work stays
+   reshufflable; anything a tracker mutation already describes does not move.** `watch` runs are
+   discrete, so floating work legitimately gets revised as later events arrive — refusing that would
+   make every early mis-clustering permanent until a human fixed it by hand.
+
+   Still open: **`[e]dit`, `[s]plit`, and `[t]arget`** report "not wired yet" (they need an LLM client
+   on the handler; `reconciler.Redraft` itself exists and is tested), and **`unjira rules
+   list|decide`**, which needs slice 7 to have anything to list.
 7. **`internal/rules` (Distill) + learn-interval surfacing in `triage`** — rule proposal
    generation and the keep/modify/reject write path. Not started.
 

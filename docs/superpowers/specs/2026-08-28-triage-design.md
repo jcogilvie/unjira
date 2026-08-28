@@ -3,7 +3,57 @@
 Phase-1 slice 6's second half: the interactive review surface over the actions queue, built on the
 `unjira actions list|decide` primitives from PR #20.
 
-Status: design, approved by the user 2026-08-28.
+## Status: landed 2026-08-28
+
+648 assertions (502 top-level + 146 subtests), 0 skipped; `earthly +reviewable` SUCCESS, lint
+`0 issues.` Verified end to end against a real store, not only by unit test:
+
+```
+reviewed 2 actions with full bodies, approved one, skipped one
+== 1 approve, 0 reject, 0 edit, 1 skip ==
+apply? [y/N] y  ->  applied comment on DEVSBX-9
+store: action status=applied; local_issue_comments holds the body
+```
+
+Both refusal paths write nothing: declining the confirmation leaves the action `proposed` with zero
+comments written, and quitting after an approve does the same.
+
+### Corrections this slice made to its own design
+
+Recorded rather than smoothed over, because each was found by running code and two were caught by
+the user:
+
+1. **`--auto-approve` bypasses more than the prompt.** The spec claimed graduated, writable-project,
+   and confidence-floor all still applied. In fact `gate.Applier` enforces only the writable-project
+   check; `Graduated` and `ConfidenceFloor` live in `gate.Decide`, which the approve path never
+   calls. The testing section had asked for a test asserting all three — which would have encoded a
+   safety property that does not exist.
+2. **Merge needed a store seam the spec said it did not.** "No new store mutations" was false:
+   `Persist`'s extend path uses `AddNarrativeEvents` (`INSERT OR IGNORE`), which adds a link and
+   never removes one, so a merge left events double-linked. Probed directly.
+3. **The watermark is per-narrative, so moving an event could launder it.** Relinking a frozen event
+   onto a never-committed narrative made it eligible again. Fixed by direction-by-commitment, which
+   makes the case structurally unreachable rather than merely forbidden.
+4. **"Watch is unaffected" was wrong, and then wrong in the other direction.** First draft wired
+   eligibility into `hydrateContextNarratives` claiming prior narratives normally have committed
+   actions — they do not, since `Graduated` ships false. A failing compaction test led me to
+   restrict `watch` entirely; the user pointed out that watch runs are discrete and floating work is
+   legitimately reshufflable until something commits. The failing test was reporting a broken
+   *mechanism* (`collectCompactions` counted only `n.Events` for V0 after hydration began splitting
+   the slices), not a broken policy.
+5. **`applied` vs `failed`.** `EligibleEventIDs` filtered on `executed_at IS NOT NULL`, which
+   matches failed writes, while `hasCommittedAction` filtered on `applied`. Resolved toward
+   `applied`: a failed write mutated nothing, so it has nothing to protect.
+
+### Shipped narrower than designed
+
+`[e]dit`, `[s]plit`, and `[t]arget` return explicit "not wired yet" errors. `Redraft` exists in
+`internal/reconciler` (with tests) but `StoreHandler` holds no LLM client; split and retarget need
+the same. Merge is complete. The verbs report themselves unavailable rather than silently no-oping,
+so a reviewer cannot believe a restructure happened when it did not.
+
+The live-tier test (`internal/live/triage_test.go`) **compiles but was not run** — it writes to real
+Jira and wants an explicit decision, the same handling PR #24's live test got.
 
 ## What this is for, and why clustering is the point
 
