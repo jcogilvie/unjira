@@ -1412,6 +1412,28 @@ func (s *Session) Summary() string {
 var ErrAbandoned = fmt.Errorf("triage abandoned by reviewer")
 ```
 
+**Self-review gap, fixed here rather than left for Task 6 to discover:** `Run` as written records every verb but only *acts* on approve/reject/skip/quit. Merge, split, target, and edit need somewhere to go. Add a `Handler` seam so `Session` stays free of correlator/reconciler knowledge and Task 6 has a defined place to plug in:
+
+```go
+// Handler performs the verbs that do more than record a disposition. Session
+// calls it and re-presents whatever comes back; it knows nothing about
+// clustering, drafting, or the store.
+//
+// Separate from Prompter because these are two different axes: Prompter is how
+// we ask a human, Handler is what happens when the answer requires work. A test
+// can script one and stub the other.
+type Handler interface {
+	// Redraft returns a replacement action for an edit.
+	Redraft(action store.ActionRow, feedback string) (store.ActionRow, error)
+	// Restructure performs a merge/split/retarget and returns the actions that
+	// replace the affected ones. Returning a slice (not one action) is why
+	// re-presentation exists: a split yields more actions than it consumed.
+	Restructure(d Decision, batch []store.ActionRow) ([]store.ActionRow, error)
+}
+```
+
+`Run` then dispatches: approve/reject/skip record and advance; edit and the three restructures call the Handler and splice the result into the batch for re-presentation. A nil Handler is valid — it makes those verbs return a "not available" error the prompt loop shows and re-prompts on, which is exactly what `--dry-run` wants.
+
 **The quit behaviour is a bug the prototype caught, not a nicety.** The first version returned `ErrAbandoned` without clearing `s.decisions`, so `Approved()` still returned the approval recorded *before* the quit. That makes quit a partial commit — precisely the surprise batch apply exists to prevent. `TestSession_QuitAbandonsWithoutApplying` failed with:
 
 ```
@@ -1780,3 +1802,620 @@ Drilled: reversing direction when only b is committed fails the
 argument-order-does-not-decide test, which is the laundering bug in its
 most direct form."
 ```
+
+---
+
+### Task 7: the terminal `Prompter` and the `triage` command
+
+`cmd/unjira/triage.go` is the I/O shell: reads a line, parses a verb, prints an action. It holds no logic — every decision belongs to `triage.Session`.
+
+**Files:**
+- Create: `cmd/unjira/triage.go`
+- Create: `cmd/unjira/triage_test.go`
+- Modify: `cmd/unjira/main.go` (the `cli` struct, alongside `Actions actionsCmd`)
+
+- [ ] **Step 1: Write the failing test for verb parsing**
+
+Verb parsing is the only real logic in this file, so it is the only thing worth unit-testing here. Create `cmd/unjira/triage_test.go`:
+
+```go
+func TestParseDecision(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		wantVerb  triage.Verb
+		wantText  string
+		wantPos   []int
+		wantErr   string
+	}{
+		{name: "approve", input: "a", wantVerb: triage.VerbApprove},
+		{name: "reject with reason", input: "r not worth posting", wantVerb: triage.VerbReject, wantText: "not worth posting"},
+		{name: "edit with correction", input: "e name the actual PR", wantVerb: triage.VerbEdit, wantText: "name the actual PR"},
+		{name: "skip", input: "k", wantVerb: triage.VerbSkip},
+		{name: "quit", input: "q", wantVerb: triage.VerbQuit},
+		{name: "merge two positions", input: "m 1 3", wantVerb: triage.VerbMerge, wantPos: []int{1, 3}},
+		{name: "split one position", input: "s 4", wantVerb: triage.VerbSplit, wantPos: []int{4}},
+		{name: "target an issue key", input: "t PAAS-4010", wantVerb: triage.VerbTarget, wantText: "PAAS-4010"},
+		{name: "whitespace tolerated", input: "  a  ", wantVerb: triage.VerbApprove},
+		{name: "unknown verb", input: "z", wantErr: "unknown"},
+		{name: "empty line", input: "", wantErr: "unknown"},
+		{
+			name:    "edit with no text is an error, not an empty correction",
+			input:   "e",
+			wantErr: "requires text",
+		},
+		{
+			name:    "merge with one position is an error",
+			input:   "m 1",
+			wantErr: "two positions",
+		},
+		{
+			name:    "merge with a non-numeric position",
+			input:   "m 1 x",
+			wantErr: "position",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDecision(tc.input)
+
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantVerb, got.Verb)
+			assert.Equal(t, tc.wantText, got.Text)
+			assert.Equal(t, tc.wantPos, got.Positions)
+		})
+	}
+}
+```
+
+**Note the `e` case.** An edit with no text must error rather than produce an empty correction, because `reconciler.Redraft` (Task 3) errors on empty feedback — catching it here gives the reviewer a retry prompt instead of a failed LLM round-trip.
+
+- [ ] **Step 2: Run to verify it fails**
+
+```
+go test ./cmd/unjira/ -run TestParseDecision -v 2>&1 | tail -12; echo "exit=$?"
+```
+
+Expected: `undefined: parseDecision`.
+
+- [ ] **Step 3: Implement the parser and the Prompter**
+
+Create `cmd/unjira/triage.go`:
+
+```go
+package main
+
+// triage.go is `unjira triage` — the interactive review surface. It is
+// deliberately thin: parse a keystroke, print an action, hand the answer to
+// internal/triage. Every decision (what a merge means, which narrative is the
+// target, what gets applied) lives in that package, so the session is testable
+// without a terminal. See
+// docs/superpowers/specs/2026-08-28-triage-design.md.
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/jcogilvie/unjira/internal/gate"
+	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/triage"
+)
+
+// triageCmd is `unjira triage`.
+type triageCmd struct {
+	AutoApprove bool `help:"Approve every action without prompting. Bypasses the prompt AND auto_commit.graduated (the approve path never consults gate.Decide) — only jira[].writable_project_keys still applies."`
+	Refresh     bool `help:"Block until any in-flight watch pass finishes, so the batch is not mid-change."`
+	DryRun      bool `help:"Walk the batch and show dispositions, but never write to the store or a tracker."`
+}
+
+// parseDecision turns one line of reviewer input into a triage.Decision.
+//
+// Single letters, all distinct: a r e m s k t q. `skip` takes k precisely
+// because s belongs to split — a collision here would make one disposition
+// unreachable.
+//
+// Verbs that need an argument error when it is missing rather than defaulting.
+// An `e` with no text would reach reconciler.Redraft, which errors on empty
+// feedback (by design — blank text means the correction was lost), so catching
+// it here turns a wasted LLM round-trip into an immediate re-prompt.
+func parseDecision(line string) (triage.Decision, error) {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) == 0 {
+		return triage.Decision{}, fmt.Errorf("unknown verb %q: expected one of a r e m s k t q", line)
+	}
+
+	verb, rest := fields[0], fields[1:]
+
+	switch verb {
+	case "a":
+		return triage.Decision{Verb: triage.VerbApprove}, nil
+	case "k":
+		return triage.Decision{Verb: triage.VerbSkip}, nil
+	case "q":
+		return triage.Decision{Verb: triage.VerbQuit}, nil
+	case "r":
+		// Reject takes optional free text: a reviewer may simply not want the
+		// action, with nothing to teach slice 7's rules.Distill.
+		return triage.Decision{Verb: triage.VerbReject, Text: strings.Join(rest, " ")}, nil
+	case "e":
+		if len(rest) == 0 {
+			return triage.Decision{}, fmt.Errorf("edit requires text: e <what to change>")
+		}
+
+		return triage.Decision{Verb: triage.VerbEdit, Text: strings.Join(rest, " ")}, nil
+	case "t":
+		if len(rest) != 1 {
+			return triage.Decision{}, fmt.Errorf("target requires exactly one issue key: t <KEY>")
+		}
+
+		return triage.Decision{Verb: triage.VerbTarget, Text: rest[0]}, nil
+	case "m":
+		if len(rest) != 2 {
+			return triage.Decision{}, fmt.Errorf("merge requires two positions: m <n> <n>")
+		}
+		positions, err := parsePositions(rest)
+		if err != nil {
+			return triage.Decision{}, err
+		}
+
+		return triage.Decision{Verb: triage.VerbMerge, Positions: positions}, nil
+	case "s":
+		if len(rest) != 1 {
+			return triage.Decision{}, fmt.Errorf("split requires one position: s <n>")
+		}
+		positions, err := parsePositions(rest)
+		if err != nil {
+			return triage.Decision{}, err
+		}
+
+		return triage.Decision{Verb: triage.VerbSplit, Positions: positions}, nil
+	default:
+		return triage.Decision{}, fmt.Errorf("unknown verb %q: expected one of a r e m s k t q", verb)
+	}
+}
+
+func parsePositions(fields []string) ([]int, error) {
+	out := make([]int, 0, len(fields))
+	for _, f := range fields {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			return nil, fmt.Errorf("position %q is not a number", f)
+		}
+		if n < 1 {
+			return nil, fmt.Errorf("position %d is not valid: batch positions start at 1", n)
+		}
+		out = append(out, n)
+	}
+
+	return out, nil
+}
+
+// terminalPrompter implements triage.Prompter against stdin/stdout. It is the
+// only thing in this slice that touches a terminal.
+type terminalPrompter struct {
+	in  *bufio.Scanner
+	out io.Writer
+}
+
+func newTerminalPrompter() *terminalPrompter {
+	return &terminalPrompter{in: bufio.NewScanner(os.Stdin), out: os.Stdout}
+}
+
+// Ask prints one action in full — body and rationale, never truncated — then
+// reads a disposition. Full bodies are deliberate: a reviewer must not approve
+// text they did not read, and real drafted bodies run past 200 characters, so a
+// one-line summary would invite exactly that.
+func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
+	a := item.Action
+
+	fmt.Fprintf(p.out, "\n[%d/%d] %s  %s  confidence %.2f\n",
+		item.Position, item.Total, a.Type, a.IssueKey, a.Confidence)
+	fmt.Fprintf(p.out, "%s\n", indent(bodyOf(a), "  "))
+	if a.Rationale != "" {
+		fmt.Fprintf(p.out, "\n  why: %s\n", a.Rationale)
+	}
+
+	for {
+		fmt.Fprint(p.out, "\n  [a]pprove [r]eject [e]dit [m]erge [s]plit s[k]ip [t]arget [q]uit > ")
+
+		if !p.in.Scan() {
+			if err := p.in.Err(); err != nil {
+				return triage.Decision{}, fmt.Errorf("reading disposition: %w", err)
+			}
+			// EOF (piped input exhausted, or Ctrl-D): treat as quit rather than
+			// looping forever on a closed stdin.
+			return triage.Decision{Verb: triage.VerbQuit}, nil
+		}
+
+		d, err := parseDecision(p.in.Text())
+		if err != nil {
+			// A typo re-prompts rather than aborting: losing a half-reviewed
+			// batch to a fat finger would be worse than the noise.
+			fmt.Fprintf(p.out, "  %v\n", err)
+
+			continue
+		}
+
+		return d, nil
+	}
+}
+
+// Confirm is the single gate before anything is written.
+func (p *terminalPrompter) Confirm(summary string) (bool, error) {
+	fmt.Fprintf(p.out, "\n== %s ==\napply? [y/N] ", summary)
+
+	if !p.in.Scan() {
+		return false, p.in.Err()
+	}
+
+	answer := strings.ToLower(strings.TrimSpace(p.in.Text()))
+
+	return answer == "y" || answer == "yes", nil
+}
+
+// bodyOf extracts the human-readable text from an action's JSON payload for
+// display. A payload that will not decode is shown raw rather than hidden: the
+// reviewer needs to see that it is malformed, since gate.Applier would fail on
+// it too.
+func bodyOf(a store.ActionRow) string {
+	var p struct {
+		Body    string `json:"body"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(a.Payload), &p); err != nil {
+		return a.Payload
+	}
+	if p.Body != "" {
+		return p.Body
+	}
+	if p.Summary != "" {
+		return p.Summary
+	}
+
+	return a.Payload
+}
+
+func indent(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+
+	return strings.Join(lines, "\n")
+}
+```
+
+**Add `encoding/json` and `io` to the imports** — `bodyOf` needs the first, `terminalPrompter.out` the second.
+
+- [ ] **Step 4: Run**
+
+```
+go test ./cmd/unjira/ -run TestParseDecision -v 2>&1 | tail -20; echo "exit=$?"
+```
+
+Expected: all subtests PASS.
+
+- [ ] **Step 5: Register the command**
+
+In `cmd/unjira/main.go`'s `cli` struct, after `Actions actionsCmd`:
+
+```go
+	Triage  triageCmd  `cmd:"" help:"Review the queue one action at a time: approve, reject, reword, re-cluster, retarget. Applies nothing until you confirm."`
+```
+
+- [ ] **Step 6: Implement `Run`, wiring Session to the store and Applier**
+
+`triageCmd.Run` loads `ActionsByStatus("proposed")`, builds the `Applier` exactly as `approveAction` does (`gate.NewApplier(a.store, writer, a.config.Tracker.DefaultProject, a.config.Jira)` — all four args), constructs the Session with a `terminalPrompter`, runs it, and on confirmation applies the approved set.
+
+`--refresh` calls `store.Acquire` (blocking) before loading the batch; release it after. `--dry-run` skips both `Persist` and the apply, and **says which stages it skipped** rather than going quiet — matching `watch --dry-run`'s discipline.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add cmd/unjira/triage.go cmd/unjira/triage_test.go cmd/unjira/main.go
+git commit -m "cmd: unjira triage — the terminal shell over triage.Session
+
+Thin by construction: parse a keystroke, print an action, hand the answer
+to internal/triage. Verb parsing is the only logic here, so it is the only
+thing unit-tested at this layer.
+
+Keys a r e m s k t q, all distinct — skip takes k because s belongs to
+split. Verbs needing an argument error when it is missing: an empty edit
+would reach reconciler.Redraft, which rejects empty feedback by design, so
+catching it here turns a wasted LLM round-trip into a re-prompt.
+
+A parse error re-prompts rather than aborting; losing a half-reviewed batch
+to a typo would be worse than the noise. EOF is treated as quit rather than
+looping on a closed stdin.
+
+Bodies print in full. Real drafted bodies run past 200 characters, and a
+truncated summary would invite approving text nobody read."
+```
+
+---
+
+### Task 8: `--auto-approve`, and what it does not bypass
+
+**Files:**
+- Modify: `cmd/unjira/triage.go`
+- Test: `cmd/unjira/triage_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+// TestTriage_AutoApproveRespectsWriteScope pins what --auto-approve actually
+// protects, and deliberately does NOT claim more.
+//
+// gate.Applier enforces exactly one gate: jira[].writable_project_keys.
+// Graduated and ConfidenceFloor live in gate.Decide, which the approve path
+// never calls — by design, since the auto-commit gate governs UNATTENDED
+// writes and a human passing this flag is attending. A test asserting all
+// three gates hold would encode a safety property that does not exist.
+func TestTriage_AutoApproveRespectsWriteScope(t *testing.T) {
+	s := triageTestStore(t)
+	paas := seedProposedAction(t, s, "PAAS-1")
+	devsbx := seedProposedAction(t, s, "DEVSBX-1")
+
+	writer := &recordingWriter{}
+	applier := gate.NewApplier(s, writer, "DEVSBX", []config.JiraConnection{{
+		Name:                "dev",
+		ProjectKeys:         []string{"PAAS", "DEVSBX"},
+		WritableProjectKeys: []string{"DEVSBX"},
+	}})
+
+	// Auto-approve both.
+	require.Error(t, applier.Apply(paas), "PAAS is not writable")
+	require.NoError(t, applier.Apply(devsbx), "DEVSBX is writable")
+
+	assert.Equal(t, []string{"AddComment:DEVSBX-1"}, writer.calls,
+		"only the writable-project action reached the tracker")
+
+	failed, err := s.GetAction(paas.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", failed.Status)
+	assert.Contains(t, failed.Error, "writable_project_keys",
+		"the refusal reason must name the config key, so an operator knows what to change")
+}
+```
+
+Reuse `recordingWriter` from `internal/gate`'s tests if it is exported for reuse; otherwise define a local one implementing `tasktracker.TaskWriter`'s three methods and recording call strings.
+
+- [ ] **Step 2: `--help` must not overstate the flag**
+
+The flag's help string (Task 7, Step 3) already says it bypasses `auto_commit.graduated`. Verify it renders:
+
+```
+go run ./cmd/unjira triage --help 2>&1 | grep -A 3 auto-approve; echo "exit=$?"
+```
+
+Expected: the text names both what it bypasses and what still applies. **This wording is the whole safety story for this flag** — a reviewer who believes `Graduated: false` protects them here would be wrong.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add cmd/unjira/triage.go cmd/unjira/triage_test.go
+git commit -m "cmd: --auto-approve, and an honest --help about it
+
+The flag skips the prompt for every action. It does NOT skip
+auto_commit.graduated or confidence_floor, because the approve path never
+consults gate.Decide — that gate governs unattended writes, and a human
+typing this flag is attending. Only jira[].writable_project_keys still
+stands between it and a write.
+
+The test asserts exactly that and no more: PAAS refused with the config key
+named in actions.error, DEVSBX applied, one tracker call. An earlier draft
+of the design doc claimed all three gates held here and asked for a test
+proving it — which would have encoded a safety property that does not
+exist."
+```
+
+---
+
+### Task 9: resolve the applied-vs-failed watermark inconsistency
+
+Task 6 flagged this and it must not survive into the merge. `EligibleEventIDs` (Task 1) filters on `executed_at IS NOT NULL`, which matches **both** `applied` and `failed`. `hasCommittedAction` (Task 6) filters on `status == "applied"`. So a narrative whose only write *failed* is "uncommitted" for merge direction but carries a *frozen* watermark.
+
+**Resolution: filter both on `applied`.** A failed write mutated nothing in the tracker — no comment posted, no status moved, no issue created — so it must not freeze events either. The alternative (a failed write might have partially landed) is not real for these three action types: `AddComment`, `SetStatus`, and `CreateIssue` are each a single API call that either happened or did not.
+
+**Files:**
+- Modify: `internal/store/eligibility.go`
+- Test: `internal/store/eligibility_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+```go
+// TestEligibleEventIDs_AFailedWriteDoesNotFreeze: executed_at is stamped for
+// both applied AND failed, because a failed attempt still attempted a write.
+// But a failed write changed nothing in the tracker, so it must not freeze
+// events — otherwise a narrative whose only write failed would be
+// unrestructurable forever, for no reason a human could act on.
+func TestEligibleEventIDs_AFailedWriteDoesNotFreeze(t *testing.T) {
+	s := openStore(t)
+	nid, ids := seedNarrativeWithEvents(t, s, 2)
+
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"never landed"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatus(id, "failed"))
+
+	got, err := s.EligibleEventIDs(nid)
+
+	require.NoError(t, err)
+	assert.ElementsMatch(t, ids, got,
+		"a failed write mutated nothing, so it must not freeze the narrative's events")
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+```
+go test ./internal/store/ -run TestEligibleEventIDs_AFailedWrite -v 2>&1 | tail -10; echo "exit=$?"
+```
+
+Expected: FAIL — the events come back empty, because `executed_at` is set.
+
+- [ ] **Step 3: Fix the query**
+
+In `internal/store/eligibility.go`, add `AND status = 'applied'` to **both** subqueries:
+
+```go
+		`SELECT ne.event_id
+		 FROM narrative_events ne
+		 WHERE ne.narrative_id = ?
+		   AND (
+		     (SELECT max(executed_at) FROM actions
+		       WHERE narrative_id = ? AND status = 'applied') IS NULL
+		     OR ne.linked_at > (SELECT max(executed_at) FROM actions
+		       WHERE narrative_id = ? AND status = 'applied')
+		   )
+		 ORDER BY ne.event_id`,
+```
+
+And extend the doc comment:
+
+```go
+// Only status='applied' counts, not merely executed_at being set.
+// UpdateActionStatus stamps executed_at for failed writes too — a failed
+// attempt still attempted one — but a failed write posted no comment, moved no
+// status, and created no issue, so there is nothing for the watermark to
+// protect. Freezing on failure would make a narrative whose only write failed
+// permanently unrestructurable, for a reason no human could act on. This
+// matches triage's hasCommittedAction, deliberately: the two disagreeing was a
+// real inconsistency caught while planning, not a subtlety.
+```
+
+- [ ] **Step 4: Run the full store suite**
+
+```
+go test ./internal/store/ 2>&1 | tail -4; echo "exit=$?"
+```
+
+Expected: the new test passes and every earlier eligibility test still does — `FullyCommittedIsFullyFrozen` uses `applied`, so it is unaffected.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/store/eligibility.go internal/store/eligibility_test.go
+git commit -m "store: only an APPLIED action freezes events, not a failed one
+
+EligibleEventIDs filtered on executed_at IS NOT NULL, which matches failed
+writes too, while triage's hasCommittedAction filtered on status='applied'.
+The two disagreed: a narrative whose only write failed was 'uncommitted'
+for merge direction but carried a frozen watermark.
+
+Resolved toward applied. A failed write posted no comment, moved no status,
+and created no issue, so the watermark has nothing to protect — and
+freezing on failure would leave that narrative permanently unrestructurable
+for a reason no human could act on."
+```
+
+---
+
+### Task 10: full offline gate
+
+- [ ] **Step 1: Run every check, recording real output**
+
+```
+go build ./... ; echo "exit=$?"
+go test ./... ; echo "exit=$?"
+go test -race ./... ; echo "exit=$?"
+go vet -tags=live ./... ; echo "exit=$?"
+~/.asdf/installs/golang/1.25.7/bin/golangci-lint run ./... ; echo "exit=$?"
+```
+
+Lint must print `0 issues.` — remember the asdf shim silently no-ops, so use the absolute path.
+
+- [ ] **Step 2: Count tests honestly**
+
+```
+go test -count=1 ./... -v 2>/dev/null | grep -c "^--- PASS"
+go test -count=1 ./... -v 2>/dev/null | grep -cE "^\s+--- PASS"
+go test -count=1 ./... -v 2>/dev/null | grep -cE "(^|\s)--- SKIP"
+```
+
+Baseline before this slice: 474 top-level + 128 subtests = 602, 0 skipped. Report the real new numbers; do not estimate.
+
+- [ ] **Step 3: `earthly +reviewable`**
+
+```
+earthly +reviewable
+```
+
+This is the authoritative gate — it must say SUCCESS. It also runs in a container, which is where `internal/llm`'s `WaitDelay` timeout test can actually fail (it cannot fail on darwin; see its doc comment).
+
+---
+
+### Task 11: live-tier test — compile it, do not run it
+
+**Files:**
+- Create or extend: `internal/live/triage_test.go`
+
+- [ ] **Step 1: Write a live test for the one thing fakes cannot prove**
+
+Follow `internal/live/autocommit_test.go` exactly: `//go:build live`, the `UNJIRA_LIVE=1` gate, config built **in-process** (never reading the real `unjira.config.json`), a throwaway issue created and deleted via `t.Cleanup`, and `WritableProjectKeys` set explicitly to `testProject()`.
+
+The valuable assertion is the retarget path end to end: create two throwaway issues, seed a narrative linked to the first, run retarget onto the second, and confirm via a fresh `GetIssue` that the comment landed on the **second** issue and not the first.
+
+- [ ] **Step 2: Compile it, do not run it**
+
+```
+go vet -tags=live ./internal/live/ ; echo "exit=$?"
+```
+
+**Do NOT run `UNJIRA_LIVE=1 go test -tags=live`.** It writes to real Jira. Say in the report that it compiles and is unrun, and let the operator decide — the same handling PR #24's live test got.
+
+---
+
+### Task 12: docs, in this PR
+
+Per `CLAUDE.md`'s "Keep the docs true in the PR that changes the code" — an audit on 2026-08-27 found the README claiming "Zero write risk" while the write path was live, and every instance traced to landing without touching the docs.
+
+- [ ] **Step 1: README**
+
+- Add `triage` to the CLI line in **Layout** (currently `collect | digest | status | watch | actions | dev`).
+- Add `internal/triage/` to the layout block with a one-line purpose.
+- In **Status**, note that the review surface now exists: `actions` is the machine-facing half, `triage` the human-facing one. Slice 6 moves from 🚧 to ✅.
+- In **Quickstart**, add `./unjira triage` after the `actions` examples, and say it applies nothing until you confirm.
+
+- [ ] **Step 2: The triage design spec**
+
+Move `Status: design, approved by the user 2026-08-28` to `## Status: landed <date>`, with:
+- the real test count from Task 10
+- the `--auto-approve` correction (it bypasses `Graduated`, not just the prompt)
+- the merge-needs-an-unlink correction
+- the applied-vs-failed resolution from Task 9
+- whether the live test was run
+
+Leave the original reasoning as written. Do not edit the design into looking like it predicted what shipped.
+
+- [ ] **Step 3: The phase-1 spec**
+
+Slice 6's entry currently says "🚧 first half landed" and names `triage` as remaining. Update to ✅ with what actually shipped, and note that `unjira rules list|decide` is still slice 7's.
+
+- [ ] **Step 4: `docs/design-notes.md` — one new numbered incident**
+
+This slice produced a genuine architectural lesson, which is the bar that file sets (it is why-we-are-shaped-this-way, not a changelog):
+
+**A per-entity watermark is defeated by moving the entity.** The commit watermark froze events per narrative; a merge could relink a frozen event onto a never-committed narrative and thaw it. Fixed not by guarding the move but by making direction determined — the committed narrative is always the target, so frozen events are never relinked. The general lesson: when a rule is keyed on an entity's *current* parent, any operation that reparents can launder it, and the durable fix is to make the unsafe reparenting inexpressible rather than checked.
+
+- [ ] **Step 5: Commit and open the PR**
+
+```bash
+git add README.md docs/
+git commit -m "docs: triage landed — README, specs, and a new design note"
+```
+
+PR body must state plainly: what was verified, what was drilled, the live test's unrun status, and the corrections this slice made to its own design doc.
