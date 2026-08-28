@@ -203,3 +203,18 @@ func (s *Session) spliceBatch(i int, replacements []store.ActionRow) {
 	out = append(out, s.batch[i+1:]...)
 	s.batch = out
 }
+
+// ApproveAll records approve for every action without prompting, for
+// --auto-approve.
+//
+// Still goes through the same Approved()/Commit path as an interactive session,
+// so the flag skips the PROMPT and nothing else. Note what that does and does
+// not mean: gate.Applier enforces writable_project_keys, but auto_commit's
+// Graduated and ConfidenceFloor live in gate.Decide, which the approve path
+// never consults — deliberately, since that gate governs unattended writes and
+// a human typing this flag is attending.
+func (s *Session) ApproveAll() {
+	for _, a := range s.batch {
+		s.decisions[a.ID] = Decision{Verb: VerbApprove}
+	}
+}

@@ -150,3 +150,49 @@ func (h *StoreHandler) ResolveMergeTarget(aID, bID int64) (target, source int64,
 		commitState{NarrativeID: bID, Committed: bCommitted},
 	)
 }
+
+// Redraft satisfies Handler. Not yet implemented: wiring it needs an llm.Client
+// and the narrative's verified links, which cmd/unjira has but this handler is
+// not yet given. Returns a clear error rather than a silent no-op so a reviewer
+// asking for an edit learns it is unavailable instead of believing it worked.
+func (h *StoreHandler) Redraft(_ store.ActionRow, _ string) (store.ActionRow, error) {
+	return store.ActionRow{}, fmt.Errorf(
+		"edit is not wired yet: reconciler.Redraft exists but this handler has no LLM client")
+}
+
+// Restructure satisfies Handler, dispatching merge/split/retarget.
+//
+// Only merge is implemented. Split and retarget report themselves unavailable
+// rather than silently doing nothing — a reviewer must not believe a
+// restructure happened when it did not.
+func (h *StoreHandler) Restructure(d Decision, batch []store.ActionRow) ([]store.ActionRow, error) {
+	if d.Verb != VerbMerge {
+		return nil, fmt.Errorf("%s is not wired yet", d.Verb)
+	}
+
+	if len(d.Positions) != 2 {
+		return nil, fmt.Errorf("merge needs two batch positions, got %d", len(d.Positions))
+	}
+
+	aIdx, bIdx := d.Positions[0]-1, d.Positions[1]-1
+	if aIdx < 0 || aIdx >= len(batch) || bIdx < 0 || bIdx >= len(batch) {
+		return nil, fmt.Errorf("merge positions must be within 1..%d", len(batch))
+	}
+
+	target, source, err := h.ResolveMergeTarget(batch[aIdx].NarrativeID, batch[bIdx].NarrativeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := h.MergeNarratives(target, source); err != nil {
+		return nil, err
+	}
+
+	// The merged narrative's actions are now stale: their delta changed. Return
+	// nothing, so the affected action is dropped from the batch and the next
+	// reconcile pass drafts fresh ones. Re-deriving here would need a
+	// reconciler with a live tracker, which this handler does not hold — and
+	// silently keeping the stale action would present text describing the wrong
+	// story.
+	return nil, nil
+}
