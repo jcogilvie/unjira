@@ -90,30 +90,7 @@ func draft(
 		return nil, stats, err
 	}
 
-	byKey := make(map[string]verifiedLink, len(verified))
-	for _, v := range verified {
-		byKey[v.Link.IssueKey] = v
-	}
-
-	var out []ProposedAction
-	for _, verdict := range verdicts {
-		v, ok := byKey[verdict.IssueKey]
-		if !ok {
-			// Not verified against the live tracker under this pass, so per
-			// rules/verify-correlations.md it is not trusted regardless of
-			// stated confidence. Log loudly and skip.
-			log.Printf(
-				"reconciler: narrative %d draft named unrecognized issue_key %q, ignoring",
-				narrative.ID, verdict.IssueKey,
-			)
-
-			continue
-		}
-
-		out = append(out, toProposedAction(verdict, v))
-	}
-
-	return out, stats, nil
+	return actionsFromVerdicts(narrative.ID, verdicts, verified, "draft"), stats, nil
 }
 
 // toProposedAction converts one verdict, flooring its confidence against
@@ -258,4 +235,103 @@ func buildDraftPrompt(narrative store.NarrativeRow, delta []events.Event, verifi
 	}
 
 	return b.String()
+}
+
+// Redraft re-runs drafting for one narrative with a reviewer's free-text
+// correction added to the prompt. It is `triage`'s [e]dit disposition.
+//
+// It deliberately reuses the caller's already-verified links rather than
+// re-verifying: live tracker state was confirmed earlier in this same pass, so
+// the "never propose without verifying" invariant (rules/intent-not-outcome.md)
+// still holds, and a second round-trip would cost a Jira call to learn what we
+// just learned. The tradeoff is a narrow staleness window — if the issue
+// changed in the seconds since verification, this redraft is against slightly
+// old state. That is the same window every action in the batch already has
+// between propose and apply, so Redraft introduces no new exposure.
+//
+// Empty feedback is an error, not a no-op: Redraft exists to carry a
+// correction, so blank text means the caller dropped the reviewer's words
+// somewhere upstream. Failing loudly beats spending an LLM call to regenerate
+// the draft the reviewer just rejected.
+func Redraft(
+	ctx context.Context,
+	client llm.Client,
+	narrative store.NarrativeRow,
+	delta []events.Event,
+	verified []verifiedLink,
+	learnedRules []rules.Rule,
+	feedback string,
+) ([]ProposedAction, correlator.Stats, error) {
+	if strings.TrimSpace(feedback) == "" {
+		return nil, correlator.Stats{}, fmt.Errorf(
+			"redrafting narrative %d: reviewer feedback is empty", narrative.ID)
+	}
+
+	var stats correlator.Stats
+
+	prompt := buildDraftPrompt(narrative, delta, verified) +
+		"\n\nThe reviewer rejected the previous draft with this correction. " +
+		"Address it directly:\n" + feedback
+
+	systemPrompt := draftSystemPrompt
+	if rendered := rules.Render(learnedRules); rendered != "" {
+		systemPrompt += "\n\n" + rendered
+	}
+
+	raw, usage, err := client.Complete(ctx, systemPrompt, prompt)
+	if err != nil {
+		return nil, stats, fmt.Errorf("redrafting narrative %d: %w", narrative.ID, err)
+	}
+	stats.AddUsage(usage)
+
+	verdicts, err := parseDraftResponse(raw)
+	if err != nil {
+		return nil, stats, fmt.Errorf("redrafting narrative %d: %w", narrative.ID, err)
+	}
+
+	// Same verdict->action mapping draft() uses, including the
+	// unrecognized-issue_key skip and toProposedAction's confidence flooring.
+	// Extract draft()'s loop into a shared helper and call it from both rather
+	// than copying it here — a divergence would mean triage's redrafts floor
+	// confidence differently from watch's drafts, which nothing would catch.
+	return actionsFromVerdicts(narrative.ID, verdicts, verified, "redraft"), stats, nil
+}
+
+// actionsFromVerdicts maps the model's verdicts onto ProposedActions, dropping
+// any that names an issue not verified against the live tracker under this pass.
+//
+// Shared by draft and Redraft deliberately. Both need the identical mapping,
+// including toProposedAction's confidence flooring, and two copies would drift
+// — a redraft flooring confidence differently from a draft is the kind of
+// divergence no test would notice until a graduated action applied at the wrong
+// confidence.
+//
+// An unrecognized issue_key is logged and skipped rather than failing the whole
+// narrative: per rules/verify-correlations.md it is not trusted regardless of
+// stated confidence, but one hallucinated key should not discard the verdicts
+// that were fine.
+func actionsFromVerdicts(
+	narrativeID int64, verdicts []draftVerdict, verified []verifiedLink, what string,
+) []ProposedAction {
+	byKey := make(map[string]verifiedLink, len(verified))
+	for _, v := range verified {
+		byKey[v.Link.IssueKey] = v
+	}
+
+	var out []ProposedAction
+	for _, verdict := range verdicts {
+		v, ok := byKey[verdict.IssueKey]
+		if !ok {
+			log.Printf(
+				"reconciler: narrative %d %s named unrecognized issue_key %q, ignoring",
+				narrativeID, what, verdict.IssueKey,
+			)
+
+			continue
+		}
+
+		out = append(out, toProposedAction(verdict, v))
+	}
+
+	return out
 }
