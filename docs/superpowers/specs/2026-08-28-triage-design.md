@@ -147,13 +147,15 @@ prevent.
   why: The delta is an investigation-only Claude Code session tied to a
        Slack-reported error on the related cse-gitops PR
 
-  [a]pprove [r]eject [e]dit [m]erge [s]plit [t]arget [s]kip [q]uit >
+  [a]pprove [r]eject [e]dit [m]erge [s]plit s[k]ip [t]arget [q]uit >
 ```
 
-`[s]kip` leaves an action at `proposed` for a later session — distinct from `[r]eject`, which is a
-ruling. Note `skip` and `split` collide on `s`; the implementation picks single letters that do not,
-and the final key bindings are the implementer's call as long as every disposition is reachable and
-none is ambiguous. `[q]uit` abandons the session without applying anything.
+The eight keys are `a r e m s k t q` — all distinct, which is a constraint on the binding rather
+than a suggestion. `skip` takes `k` precisely because `s` belongs to `split`.
+
+`k` (skip) leaves an action at `proposed` for a later session — distinct from `r` (reject), which is
+a ruling that gets recorded and read later by `rules.Distill`. `q` (quit) abandons the session
+without applying anything.
 
 ## Flags
 
