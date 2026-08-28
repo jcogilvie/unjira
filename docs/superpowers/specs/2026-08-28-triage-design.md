@@ -47,13 +47,36 @@ A merge in mixed state therefore *succeeds*: uncommitted events move out, commit
 the posted comment remains true about exactly what it described. No refusal, no warning, no
 inconsistency.
 
-### The invariant is self-undermining unless restructures respect it
+### Merge direction is determined, not chosen
 
-Found by experiment while planning, and it is the sharpest hazard in this design.
+The committed narrative is the merge target. That follows from what "committed" means: a posted
+comment made that narrative the **workstream of record**, so any story it absorbs joins it rather
+than the reverse.
+
+| merge(X, Y) | target |
+|---|---|
+| both uncommitted | either — the reviewer's `m 1 3` order, or the model's judgment |
+| exactly one committed | **the committed one**, always |
+| both committed | **refuse** |
+
+The common case is the first row. In the real 19-narrative backlog, **15 had proposed actions and
+zero had committed ones** — uncommitted-to-uncommitted is what actually happens, because clustering
+errors are visible before anything is posted.
+
+The last row is refused rather than supported, and the reason is that it barely exists: two
+*committed* workstreams means two issues in the tracker each already claiming this work. Merging
+them post-hoc would leave one issue's posted comment describing work now attributed to another, and
+unjira cannot retract a comment. That is an org-level decision about which ticket is real — not
+something a review loop should decide silently. Refuse, name both narratives and their applied
+actions, and let the human resolve it in Jira first.
+
+#### Why this also closes a laundering hazard
+
+Worth recording, because the naive implementation has a hole that nothing would surface.
 
 The watermark is **per narrative**: `EligibleEventIDs` compares an event's `linked_at` against
-*that narrative's* `max(executed_at)`. So relinking a frozen event onto a narrative that has never
-committed makes it eligible again — proven directly:
+*that narrative's* `max(executed_at)`. So relinking a frozen event onto a narrative that never
+committed makes it eligible again — proven directly while planning:
 
 ```
 BEFORE:                on A eligible=[]  (empty = frozen)
@@ -61,22 +84,17 @@ AFTER relink onto B:   on B eligible=[1]
 CONFIRMED: frozen on A, eligible on B — the watermark is PER-NARRATIVE
 ```
 
-**A merge could therefore launder a frozen event into an unfrozen one.** Not by deleting anything —
-`events` is append-only and untouched, and a `narrative_events` row is just
-`(narrative_id, event_id, linked_at)`, fully re-creatable. The damage is that the rule protecting
-committed work is defeated by the very operation it was meant to constrain, and nothing looks wrong:
-both narratives exist, the event exists, no error is raised. Every future pass then treats committed
-work as reshufflable, and A's posted comment describes work now attributed to B.
+A merge that moved events *away from* the committed narrative would therefore launder frozen events
+into unfrozen ones, defeating the rule protecting committed work with nothing looking wrong.
 
-**Resolution: a restructure only ever relinks eligible events. Frozen events stay where they are.**
-This makes the code match the invariant as already stated ("frozen events cannot move") rather than
-patching around it. A merge in mixed state moves the uncommitted half and leaves A holding exactly
-the events its comment described — which is what the table above already promises.
+Direction-by-commitment makes that **structurally unreachable** rather than merely forbidden: frozen
+events live on the committed narrative, the committed narrative is always the target, so frozen
+events never move at all. There is no case left in which a frozen event is relinked.
 
-Rejected: carrying `linked_at` across the relink (the destination's watermark is still NULL, so a
-preserved timestamp reads as eligible there anyway — it hides the laundering rather than preventing
-it), and making the watermark global across narratives (a stronger guarantee, but it would freeze
-events across unrelated narratives and is a bigger semantic change than this slice should make).
+Note what is *not* destroyed by any of this. A `narrative_events` row is
+`(narrative_id, event_id, linked_at)` — a join row. `events` is append-only and untouched, so the
+record of what happened survives every restructure and any link is re-creatable. The hazard was
+never data loss; it was the watermark being reset by the operation it was meant to constrain.
 
 **No schema change.** The watermark is
 `narrative_events.linked_at > max(actions.executed_at) for that narrative`. Both columns are written

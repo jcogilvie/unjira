@@ -917,7 +917,9 @@ CONFIRMED double-link: merge must unlink from A explicitly
 
 Without the unlink, a merged event stays attached to both narratives: the source looks alive, keeps feeding future `Cluster` calls as context, and the work is double-counted.
 
-**A second probe found the reason this seam is dangerous, and it constrains its use.** The watermark is per-narrative, so relinking a *frozen* event onto a narrative that never committed makes it eligible again:
+**Merge direction is determined by commitment, and that is what makes this seam safe to have.** The committed narrative is always the target — a posted comment made it the workstream of record. Both-committed is refused outright (two tracker issues each already claiming the work; that is an org decision, not a review-loop one). In the real 19-narrative backlog, 15 had proposed actions and **zero** had committed ones, so uncommitted-to-uncommitted is the case that actually happens.
+
+That rule closes a hazard the naive implementation has. The watermark is per-narrative, so relinking a *frozen* event onto a never-committed narrative makes it eligible again — probed directly:
 
 ```
 BEFORE:                on A eligible=[]  (empty = frozen)
@@ -925,7 +927,9 @@ AFTER relink onto B:   on B eligible=[1]
 CONFIRMED: frozen on A, eligible on B — the watermark is PER-NARRATIVE
 ```
 
-That is **laundering**: the rule protecting committed work defeated by the operation it was meant to constrain, with nothing looking wrong. Hence the rule Task 6 must enforce — **a restructure only ever unlinks eligible events; frozen ones stay put.** `UnlinkNarrativeEvents` therefore takes explicit event ids rather than "all of narrative N", so a caller cannot ask for the unsafe thing in one call.
+Moving events *away from* the committed narrative would launder frozen events into unfrozen ones. Direction-by-commitment makes that **structurally unreachable**: frozen events live on the committed narrative, which is always the target, so a frozen event is never relinked at all.
+
+`UnlinkNarrativeEvents` still takes explicit event ids rather than "all of narrative N", so a caller cannot ask for the unsafe thing in one call.
 
 **Files:**
 - Modify: `internal/store/store.go` (next to `AddNarrativeIssues`, ~line 1204)
