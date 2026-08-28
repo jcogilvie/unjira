@@ -171,7 +171,7 @@ func (a *appContext) approveAction(id int64) error {
 		return err
 	}
 
-	applier := gate.NewApplier(a.store, writer, a.config.Tracker.DefaultProject)
+	applier := gate.NewApplier(a.store, writer, a.config.Tracker.DefaultProject, a.config.Jira)
 
 	return applier.Apply(action)
 }

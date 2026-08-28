@@ -557,6 +557,32 @@ func (c *watchCmd) Run(app *appContext) error {
 		}
 	}
 
+	// Write scope's startup layer (see
+	// docs/superpowers/specs/2026-08-27-write-scope-design.md, "Choke point:
+	// gate.Applier, plus startup validation"): writable_project_keys must be
+	// a subset of project_keys for every connection — a writable-but-
+	// unreachable project would otherwise load silently and only surface
+	// whenever a write against it was actually attempted.
+	for _, conn := range app.config.Jira {
+		if err := conn.ValidateWriteScope(); err != nil {
+			return err
+		}
+	}
+	// The second half: tracker.default_project, since it's static config
+	// known entirely at startup, must ALSO be writable — not merely
+	// resolvable to a connection (JiraConnectionForProject) — or `watch`
+	// would run for however long it takes a `create` action to actually
+	// fire before this misconfiguration surfaces. Skipped when unset: an
+	// operator who never expects a `create` action need not configure a
+	// default project at all (the existing, unrelated "no
+	// tracker.default_project configured" error only matters once a
+	// `create` action is actually attempted — see Applier.applyCreate).
+	if app.config.Tracker.DefaultProject != "" {
+		if _, err := app.config.DefaultProjectConnection(); err != nil {
+			return err
+		}
+	}
+
 	linkExclusions, err := app.config.CompiledLinkExclusions()
 	if err != nil {
 		return err
@@ -575,7 +601,7 @@ func (c *watchCmd) Run(app *appContext) error {
 		return err
 	}
 
-	applier := gate.NewApplier(app.store, tracker, app.config.Tracker.DefaultProject)
+	applier := gate.NewApplier(app.store, tracker, app.config.Tracker.DefaultProject, app.config.Jira)
 
 	// ctx governs the LOOP — whether to acquire another lease, whether to
 	// keep waiting out the interval — but deliberately does NOT govern an

@@ -92,6 +92,14 @@ func watchPassConfig() config.Config {
 	}
 }
 
+// watchPassWritableConnections is the test-default write scope for this
+// file's tests, all of which write against the local "PROJ" project.
+func watchPassWritableConnections() []config.JiraConnection {
+	return []config.JiraConnection{
+		{Name: "test", ProjectKeys: []string{"PROJ"}, WritableProjectKeys: []string{"PROJ"}},
+	}
+}
+
 // seedReconcilableNarrative inserts a narrative with one linked event (a
 // non-empty delta for Reconcile to work from) and a `primary`
 // narrative_issues link to issueKey — the minimal shape Reconcile drafts
@@ -161,7 +169,7 @@ func TestRunWatchPass_HappyPathAppliesAGraduatedHighConfidenceComment(t *testing
 	cfg := watchPassConfig()
 	cfg.AutoCommit = map[string]config.AutoCommitRule{"comment": {ConfidenceFloor: 0.5, Graduated: true}}
 	app := &appContext{config: cfg, store: s}
-	applier := gate.NewApplier(s, tracker, "PROJ")
+	applier := gate.NewApplier(s, tracker, "PROJ", watchPassWritableConnections())
 
 	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, 24*time.Hour, false)
 	require.NoError(t, err)
@@ -175,6 +183,50 @@ func TestRunWatchPass_HappyPathAppliesAGraduatedHighConfidenceComment(t *testing
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
 	assert.Equal(t, "applied", actions[0].Status)
+}
+
+// TestRunWatchPass_WriteScopeRefusesAnUnwritableProject is the auto-commit
+// half of test 3 from
+// docs/superpowers/specs/2026-08-27-write-scope-design.md's testing section
+// ("the hole test") — a graduated, above-floor action against a project that
+// is readable but NOT in writable_project_keys must still be refused, through
+// runWatchPass's real composition. See
+// TestActionsDecide_ApproveRefusesAnUnwritableProject in actions_test.go for
+// the paired --approve-route half.
+func TestRunWatchPass_WriteScopeRefusesAnUnwritableProject(t *testing.T) {
+	s := watchPassStore(t)
+	tracker := local.New(s)
+
+	issueKey, err := s.InsertLocalIssue("PROJ", "the ticket", "Task", "", nil)
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	seedReconcilableNarrative(t, s, "e1", issueKey, now.Add(-time.Hour))
+
+	client := &watchLLM{responses: []string{
+		fmt.Sprintf(`[{"issue_key":%q,"type":"comment","body":"the work landed","confidence":0.9,"rationale":"delta shows it"}]`, issueKey),
+	}}
+
+	cfg := watchPassConfig()
+	cfg.AutoCommit = map[string]config.AutoCommitRule{"comment": {ConfidenceFloor: 0.5, Graduated: true}}
+	app := &appContext{config: cfg, store: s}
+	// PROJ is readable (in ProjectKeys, for JiraConnectionForProject to
+	// resolve) but deliberately not in WritableProjectKeys.
+	unwritable := []config.JiraConnection{{Name: "test", ProjectKeys: []string{"PROJ"}}}
+	applier := gate.NewApplier(s, tracker, "PROJ", unwritable)
+
+	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, 24*time.Hour, false)
+	require.Error(t, err, "PROJ is not writable: the pass must surface a refusal")
+
+	comments, err := s.LocalIssueComments(issueKey)
+	require.NoError(t, err)
+	assert.Empty(t, comments, "the tracker must never be called for an unwritable project")
+
+	actions, err := s.ActionsForNarrative(1)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	assert.Equal(t, "failed", actions[0].Status)
+	assert.Contains(t, actions[0].Error, "PROJ")
 }
 
 // TestRunWatchPass_DefaultConfigAutoCommitsNothing is the safety property
@@ -199,7 +251,7 @@ func TestRunWatchPass_DefaultConfigAutoCommitsNothing(t *testing.T) {
 
 	cfg := watchPassConfig() // AutoCommit is nil: the untouched default.
 	app := &appContext{config: cfg, store: s}
-	applier := gate.NewApplier(s, tracker, "PROJ")
+	applier := gate.NewApplier(s, tracker, "PROJ", watchPassWritableConnections())
 
 	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, 24*time.Hour, false)
 	require.NoError(t, err)
@@ -245,7 +297,7 @@ func TestRunWatchPass_PartialReconcileAutoCommitsNothing(t *testing.T) {
 	cfg := watchPassConfig()
 	cfg.AutoCommit = map[string]config.AutoCommitRule{"comment": {ConfidenceFloor: 0.5, Graduated: true}}
 	app := &appContext{config: cfg, store: s}
-	applier := gate.NewApplier(s, failing, "PROJ")
+	applier := gate.NewApplier(s, failing, "PROJ", watchPassWritableConnections())
 
 	err = app.runWatchPass(t.Context(), client, failing, applier, nil, 24*time.Hour, false)
 	require.Error(t, err, "the unreachable narrative's transport error must surface")
@@ -316,7 +368,7 @@ func TestRunWatchPass_OneApplyFailureDoesNotBlockTheOthers(t *testing.T) {
 	// The reader half (narrate/match/reconcile) uses the healthy tracker;
 	// only the applier's writer fails, and only for firstKey.
 	failingWriter := &writeFailingTracker{Tracker: baseTracker, failKey: firstKey}
-	applier := gate.NewApplier(s, failingWriter, "PROJ")
+	applier := gate.NewApplier(s, failingWriter, "PROJ", watchPassWritableConnections())
 
 	err = app.runWatchPass(t.Context(), client, baseTracker, applier, nil, 24*time.Hour, false)
 	require.Error(t, err, "one action's write failure is surfaced by the pass, not swallowed")
@@ -382,7 +434,7 @@ func TestRunWatchPass_DryRunSkipsMatchReconcileAndAutoCommit(t *testing.T) {
 	cfg := watchPassConfig()
 	cfg.AutoCommit = map[string]config.AutoCommitRule{"comment": {ConfidenceFloor: 0, Graduated: true}}
 	app := &appContext{config: cfg, store: s}
-	applier := gate.NewApplier(s, tracker, "PROJ")
+	applier := gate.NewApplier(s, tracker, "PROJ", watchPassWritableConnections())
 
 	var runErr error
 	out := captureStdout(t, func() {
