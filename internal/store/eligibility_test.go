@@ -129,3 +129,40 @@ func TestEligibleEventIDs_AFailedWriteDoesNotFreeze(t *testing.T) {
 	assert.ElementsMatch(t, ids, got,
 		"a failed write mutated nothing, so it must not freeze the narrative's events")
 }
+
+func TestUnlinkNarrativeEvents_RemovesOnlyTheNamedLinks(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+
+	a, err := s.InsertNarrative(base, base.Add(time.Hour), "A", "s")
+	require.NoError(t, err)
+
+	var ids []int64
+	for i, ext := range []string{"u:1", "u:2", "u:3"} {
+		e := events.NewEvent("claude_code", ext, base.Add(time.Duration(i)*time.Minute), "w")
+		_, err := s.InsertEvent(e)
+		require.NoError(t, err)
+		eid, err := s.EventIDByExternalID("claude_code", ext)
+		require.NoError(t, err)
+		require.NoError(t, s.AddNarrativeEvents(a, []int64{eid}))
+		ids = append(ids, eid)
+	}
+
+	require.NoError(t, s.UnlinkNarrativeEvents(a, []int64{ids[0], ids[2]}))
+
+	n, err := s.NarrativeEventCount(a)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the un-named link survives")
+}
+
+func TestUnlinkNarrativeEvents_MissingLinkErrors(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	a, err := s.InsertNarrative(base, base.Add(time.Hour), "A", "s")
+	require.NoError(t, err)
+
+	err = s.UnlinkNarrativeEvents(a, []int64{999999})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no such link")
+}

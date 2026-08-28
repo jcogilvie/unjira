@@ -67,3 +67,38 @@ func (s *Store) EligibleEventIDs(narrativeID int64) ([]int64, error) {
 
 	return out, rows.Err()
 }
+
+// UnlinkNarrativeEvents removes specific event links from a narrative.
+func (s *Store) UnlinkNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return unlinkNarrativeEventsImpl(s.db, narrativeID, eventIDs)
+}
+
+func (t *Tx) UnlinkNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return unlinkNarrativeEventsImpl(t.tx, narrativeID, eventIDs)
+}
+
+func unlinkNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+
+	for _, eventID := range eventIDs {
+		res, err := c.Exec(
+			`DELETE FROM narrative_events WHERE narrative_id = ? AND event_id = ?`,
+			narrativeID, eventID,
+		)
+		if err != nil {
+			return fmt.Errorf("unlinking event %d from narrative %d: %w", eventID, narrativeID, err)
+		}
+
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("checking rows affected unlinking event %d from narrative %d: %w", eventID, narrativeID, err)
+		}
+		if affected == 0 {
+			return fmt.Errorf("unlinking event %d from narrative %d: no such link", eventID, narrativeID)
+		}
+	}
+
+	return nil
+}
