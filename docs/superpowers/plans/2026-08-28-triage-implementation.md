@@ -1451,3 +1451,332 @@ applied — the point of batch apply — so a reviewer who quits expects
 nothing to have happened; keeping earlier approvals would make quit a
 partial commit. Caught by the prototype rather than by review."
 ```
+
+---
+
+### Task 6: the restructures — merge, split, retarget
+
+The point of the command. Merge and split ride on `correlator.Cluster` + `Persist`, unlocked by Task 2. Retarget uses Task 4's two removal seams.
+
+> **Verified while writing this plan:** the store-level merge flow below was implemented against a real store and passes, including the no-laundering guarantee.
+
+**Files:**
+- Create: `internal/triage/restructure.go`
+- Create: `internal/triage/restructure_test.go`
+- Test (store-level flow): `internal/store/eligibility_test.go`
+
+#### The rule this task enforces
+
+**Merge direction is determined by commitment**, not by the reviewer's argument order:
+
+| merge(X, Y) | target |
+|---|---|
+| both uncommitted | either — the common case (15 of 19 real narratives had proposed actions, **zero** had committed ones) |
+| exactly one committed | **the committed one**, always — unjira already mutated the tracker on its behalf, making it the workstream of record |
+| both committed | **refuse**, naming both narratives and their applied actions |
+
+Both-committed is refused because unjira cannot unpost a comment, un-transition a status, or un-create an issue. Two committed workstreams means two tracker issues each already claiming this work; deciding which is real is an org-level call, not a review-loop one.
+
+This rule also makes the laundering hazard **structurally unreachable**: frozen events live on the committed narrative, the committed narrative is always the target, so a frozen event is never relinked.
+
+- [ ] **Step 1: Write the store-level flow test first**
+
+This proves the mechanics before any LLM is involved. Append to `internal/store/eligibility_test.go`:
+
+```go
+func seedN(t *testing.T, s *store.Store, title string, extIDs ...string) (int64, []int64) {
+	t.Helper()
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), title, "s")
+	require.NoError(t, err)
+
+	var ids []int64
+	for i, ext := range extIDs {
+		e := events.NewEvent("claude_code", ext, base.Add(time.Duration(i)*time.Minute), "w:"+ext)
+		_, err := s.InsertEvent(e)
+		require.NoError(t, err)
+		eid, err := s.EventIDByExternalID("claude_code", ext)
+		require.NoError(t, err)
+		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		ids = append(ids, eid)
+	}
+
+	return nid, ids
+}
+
+func commitAgainst(t *testing.T, s *store.Store, nid int64) {
+	t.Helper()
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"posted"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatus(id, "applied"))
+}
+
+// TestMergeFlow_CommittedNarrativeIsTheTarget is the whole merge mechanic under
+// direction-by-commitment, proven without an LLM: A is committed, B is not, so A
+// is the target and B's events move onto A. A's frozen events never move, which
+// is what makes the per-narrative watermark safe under restructuring.
+func TestMergeFlow_CommittedNarrativeIsTheTarget(t *testing.T) {
+	s := openStore(t)
+
+	a, aEvents := seedN(t, s, "A committed", "m:a1", "m:a2")
+	commitAgainst(t, s, a)
+
+	// linked_at has millisecond precision, so sleep past the commit instant
+	// rather than racing it.
+	time.Sleep(5 * time.Millisecond)
+	b, bEvents := seedN(t, s, "B uncommitted", "m:b1")
+
+	eligibleOnB, err := s.EligibleEventIDs(b)
+	require.NoError(t, err)
+	require.ElementsMatch(t, bEvents, eligibleOnB, "B never committed: all of B is eligible")
+
+	eligibleOnA, err := s.EligibleEventIDs(a)
+	require.NoError(t, err)
+	require.Empty(t, eligibleOnA, "A's events predate its commit: frozen")
+
+	// Direction: A committed, B not => A is the target. Move only B's ELIGIBLE
+	// events onto A, then unlink them from B so nothing is double-linked.
+	require.NoError(t, s.AddNarrativeEvents(a, eligibleOnB))
+	require.NoError(t, s.UnlinkNarrativeEvents(b, eligibleOnB))
+
+	countA, err := s.NarrativeEventCount(a)
+	require.NoError(t, err)
+	countB, err := s.NarrativeEventCount(b)
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, countA, "A holds its own 2 frozen events plus B's 1")
+	assert.Equal(t, 0, countB, "B is emptied, not double-linked")
+
+	// Nothing laundered A's committed events into eligibility.
+	stillFrozen, err := s.EligibleEventIDs(a)
+	require.NoError(t, err)
+	assert.NotContains(t, stillFrozen, aEvents[0], "A's committed event must remain frozen")
+	assert.NotContains(t, stillFrozen, aEvents[1], "A's committed event must remain frozen")
+	assert.Contains(t, stillFrozen, bEvents[0], "the newly-moved event is eligible: linked after A's commit")
+}
+```
+
+Run it: `go test ./internal/store/ -run TestMergeFlow -v`. **Verified to pass as written.** Three assertions carry the weight: A ends with 3 events (its 2 frozen plus B's 1), B ends with **0** (not double-linked), and A's frozen events are *still frozen* afterward.
+
+- [ ] **Step 2: Drill the no-laundering guarantee**
+
+Swap the direction — make B (uncommitted) the target:
+
+```go
+	require.NoError(t, s.AddNarrativeEvents(b, eligibleOnA))   // WRONG DIRECTION
+	require.NoError(t, s.UnlinkNarrativeEvents(a, eligibleOnA))
+```
+
+`eligibleOnA` is empty (A is frozen), so this moves nothing and the count assertions fail. That failure **is** the guarantee: there is no way to express "move A's frozen events" through these seams. Record the output, restore.
+
+- [ ] **Step 3: `internal/triage/restructure.go` — direction resolution**
+
+Write the direction rule as its own pure function, because it is the part most worth testing in isolation:
+
+```go
+package triage
+
+import (
+	"fmt"
+
+	"github.com/jcogilvie/unjira/internal/store"
+)
+
+// commitState is whether unjira has already mutated the tracker for a
+// narrative. A struct rather than a bare bool pair so the both-committed case
+// gets named treatment instead of an inline `if a && b` a reader has to decode.
+type commitState struct {
+	NarrativeID int64
+	Committed   bool
+}
+
+// resolveMergeTarget applies direction-by-commitment: the committed narrative
+// absorbs the other, because unjira has already mutated the tracker on its
+// behalf and that makes it the workstream of record.
+//
+// "Mutated" covers three things, and a comment is the mildest of them. A
+// transition destroyed the prior status (Discovery -> Done loses "it was in
+// Discovery" outside the changelog), and a create produced an object other
+// people now reference. unjira can undo none of the three.
+//
+// Refuses both-committed for that reason: two committed workstreams means two
+// tracker issues already claim this work, and choosing which is authoritative
+// is an org-level decision, not one a review loop should make silently.
+//
+// This is also what keeps the per-narrative watermark sound under
+// restructuring. EligibleEventIDs compares against the narrative's OWN
+// max(executed_at), so relinking a frozen event onto a never-committed
+// narrative would make it eligible again — probed directly while designing
+// this: frozen on A, eligible on B. Because the committed narrative is always
+// the target, frozen events are never relinked at all, so that hazard is
+// unreachable rather than merely forbidden.
+func resolveMergeTarget(a, b commitState) (target, source int64, err error) {
+	switch {
+	case a.Committed && b.Committed:
+		return 0, 0, fmt.Errorf(
+			"cannot merge narratives %d and %d: both have committed actions, so two tracker "+
+				"issues already claim this work. unjira cannot retract a comment, un-transition a "+
+				"status, or un-create an issue — decide which issue is authoritative in the "+
+				"tracker first", a.NarrativeID, b.NarrativeID)
+	case a.Committed:
+		return a.NarrativeID, b.NarrativeID, nil
+	case b.Committed:
+		return b.NarrativeID, a.NarrativeID, nil
+	default:
+		// Neither committed: the reviewer's first-named narrative wins, keeping
+		// `m 1 3` predictable. Nothing is at stake either way, since no tracker
+		// mutation references either narrative yet.
+		return a.NarrativeID, b.NarrativeID, nil
+	}
+}
+
+// hasCommittedAction reports whether any action for this narrative actually
+// reached the tracker.
+//
+// Filters on status == "applied", NOT on executed_at being set:
+// UpdateActionStatus stamps executed_at for both applied AND failed, because a
+// failed attempt still attempted a write. But a failed write mutated nothing,
+// so it must not make a narrative the workstream of record.
+func hasCommittedAction(s *store.Store, narrativeID int64) (bool, error) {
+	actions, err := s.ActionsForNarrative(narrativeID)
+	if err != nil {
+		return false, fmt.Errorf("checking commit state of narrative %d: %w", narrativeID, err)
+	}
+
+	for _, a := range actions {
+		if a.Status == "applied" {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+```
+
+`ActionsForNarrative` exists and returns `[]store.ActionRow` (`store.go:1534`) — verified.
+
+> **An inconsistency to RESOLVE, not preserve.** `hasCommittedAction` treats only `applied` as committed, but Task 1's `EligibleEventIDs` SQL filters on `executed_at IS NOT NULL`, which also matches `failed`. So a narrative whose only write **failed** is "uncommitted" for merge direction but has a *frozen* watermark. That is incoherent, and it is my inconsistency, not a subtlety worth keeping. Pick one and make both agree:
+>
+> - **Filter the SQL on `status = 'applied'` too** (recommended): a failed write changed nothing in the tracker, so it should not freeze events either.
+> - Or keep the watermark conservative and document why, i.e. that a failed write may have partially landed and its events should not move until a human confirms.
+>
+> Whichever you choose, change both call sites and write the reason down. Do not leave them disagreeing.
+
+- [ ] **Step 4: Test direction resolution, table-driven**
+
+Create `internal/triage/restructure_test.go` (`package triage`, internal — it tests unexported functions):
+
+```go
+func TestResolveMergeTarget(t *testing.T) {
+	cases := []struct {
+		name          string
+		a, b          commitState
+		wantTarget    int64
+		wantSource    int64
+		wantErrPhrase string
+	}{
+		{
+			name: "neither committed: first named wins",
+			a:    commitState{NarrativeID: 7}, b: commitState{NarrativeID: 9},
+			wantTarget: 7, wantSource: 9,
+		},
+		{
+			name: "a committed: a absorbs b",
+			a:    commitState{NarrativeID: 7, Committed: true}, b: commitState{NarrativeID: 9},
+			wantTarget: 7, wantSource: 9,
+		},
+		{
+			name: "b committed: b absorbs a, IGNORING argument order",
+			a:    commitState{NarrativeID: 7}, b: commitState{NarrativeID: 9, Committed: true},
+			wantTarget: 9, wantSource: 7,
+		},
+		{
+			name:          "both committed: refused, naming both",
+			a:             commitState{NarrativeID: 7, Committed: true},
+			b:             commitState{NarrativeID: 9, Committed: true},
+			wantErrPhrase: "both have committed actions",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target, source, err := resolveMergeTarget(tc.a, tc.b)
+
+			if tc.wantErrPhrase != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrPhrase)
+				assert.Contains(t, err.Error(), "7")
+				assert.Contains(t, err.Error(), "9",
+					"the error must name BOTH narratives so a human can go look at them")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantTarget, target)
+			assert.Equal(t, tc.wantSource, source)
+		})
+	}
+}
+```
+
+The third case is the one that matters: it proves argument order does **not** decide direction when commitment does.
+
+- [ ] **Step 5: Drill direction resolution**
+
+Change `case b.Committed:` to return `(a.NarrativeID, b.NarrativeID)`. Expected: the third case fails with `expected: 9, actual: 7`. That is the laundering bug in its most direct form, so this test must catch it. Record, restore.
+
+- [ ] **Step 6: Wire merge into the Session**
+
+Merge is: resolve direction → gather the source's **eligible** events → `Cluster` with the reviewer's instruction → `Persist` → unlink the moved events from the source → invalidate both narratives' `proposed` actions → re-derive → re-present.
+
+**A constraint found while planning, absent from the design doc:** `reconciler.Reconcile` selects its own backlog via `NarrativesWithActionableLinks(limit, roles)` and **cannot be pointed at specific narratives**. So a restructure cannot simply "re-reconcile narratives 7 and 9." Three options — choose one and justify it in the doc comment:
+
+1. **Add a `WithNarratives([]int64)` option to `Reconcile`.** Mirrors the `WithRules` option pattern, keeps narrative selection inside the reconciler, smallest diff. **Recommended.**
+2. Export a per-narrative seam. `reconcileOne` is unexported, so this means a new exported function either way — more surface for the same result.
+3. Re-run the whole `Reconcile` and let the restructured narratives be picked up among others. Simplest to write, but re-drafts unrelated narratives and re-spends their LLM calls, which is exactly the cost `--dry-run`'s "including LLM calls" warning exists to make visible.
+
+Re-presentation, not silent replacement: the reviewer has not seen the new text, so freshly derived actions go back into the batch for disposition. Dispositions already recorded for *unaffected* actions survive — that is what batch apply buys.
+
+- [ ] **Step 7: Full gate**
+
+```
+go build ./... ; echo "exit=$?"
+go test ./... ; echo "exit=$?"
+go test -race ./... ; echo "exit=$?"
+go vet -tags=live ./... ; echo "exit=$?"
+~/.asdf/installs/golang/1.25.7/bin/golangci-lint run ./... ; echo "exit=$?"
+earthly +reviewable
+```
+
+Lint must report `0 issues.` and earthly must say SUCCESS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add internal/triage/ internal/store/
+git commit -m "triage: merge, split, and retarget
+
+Merge direction is determined by commitment, not by the reviewer's
+argument order: the committed narrative absorbs the other, because unjira
+already mutated the tracker on its behalf and that makes it the workstream
+of record. 'Mutated' covers comment, transition, and create — and unjira
+can undo none of them.
+
+Both-committed is refused, naming both narratives: two tracker issues
+already claim the work, and choosing which is authoritative is an
+org-level decision rather than one a review loop makes silently.
+
+The rule also makes a laundering hazard unreachable rather than forbidden.
+The watermark is per-narrative, so relinking a frozen event onto a
+never-committed narrative would thaw it (probed: frozen on A, eligible on
+B). Because the committed narrative is always the target, frozen events are
+never relinked.
+
+Drilled: reversing direction when only b is committed fails the
+argument-order-does-not-decide test, which is the laundering bug in its
+most direct form."
+```
