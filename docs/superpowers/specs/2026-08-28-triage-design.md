@@ -110,8 +110,17 @@ needing a refusal path. The spec predates merge/split being in scope.
 - **`[m]erge` / `[s]plit`** — the point of the command. Gather the eligible events of the named
   narratives, call `Cluster` with the reviewer's instruction, `Persist` the result (`ClusterExtends`
   for merge, `ClusterNew`s for split), invalidate the stale actions, re-reconcile. **No new
-  correlator operations and no new store mutations** — `Cluster` is already a re-clustering
-  primitive and `Persist` already handles both kinds.
+  correlator operations** — `Cluster` is already a re-clustering primitive and `Persist` already
+  handles both kinds.
+
+  **Correction, found by experiment while planning:** this section originally also claimed "no new
+  store mutations." That is false. `Persist`'s `ClusterExtends` path calls `AddNarrativeEvents`,
+  which is `INSERT OR IGNORE` — it adds the link to the target narrative but never removes the
+  source one. Probed directly: after moving an event from narrative A to B, **both** report one
+  event. So a merge without an explicit unlink leaves events double-linked, which would make the
+  source narrative look alive, keep feeding it to future `Cluster` calls as context, and double-count
+  the work. Merge therefore needs an `UnlinkNarrativeEvents` seam alongside retarget's
+  `RemoveNarrativeIssue`. Both are additions to `internal/store`, and neither existed.
 
   The reviewer names **batch positions**, not narrative IDs: `m 1 3` means "the stories behind items
   1 and 3 are one story." Narrative IDs are an implementation detail a reviewer should not have to
