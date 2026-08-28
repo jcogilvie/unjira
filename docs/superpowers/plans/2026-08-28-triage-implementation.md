@@ -693,3 +693,371 @@ being frozen.
 Drilled: adding n.Events to the assignable slice fails the
 frozen-must-not-be-assignable assertion."
 ```
+
+---
+
+### Task 3: `reconciler.Redraft` — redraft one action with reviewer feedback
+
+`[e]dit` reuses the verified links already computed this pass and re-runs **only** the drafting call, with the reviewer's feedback appended to the prompt. Live state was confirmed moments ago, so the reconciler's verify-before-proposing invariant holds without a second Jira round-trip.
+
+**Files:**
+- Modify: `internal/reconciler/draft.go`
+- Test: `internal/reconciler/draft_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `internal/reconciler/draft_test.go`. **Verified while writing this plan:** that file is `package reconciler` (internal), so it can construct the unexported `verifiedLink` and call `Redraft` unqualified. It already provides `fakeLLM` and `codeEvent(externalID, summary)` (the latter in `reconciler_test.go:172`). The existing `draft` tests build `narrative`/`verified` **inline** — there are no `draftTestNarrative`-style helpers, so these tests do the same:
+
+```go
+// TestRedraft_PutsReviewerFeedbackInThePrompt is the whole point of Redraft:
+// the reviewer's correction must reach the model, not merely be persisted.
+func TestRedraft_PutsReviewerFeedbackInThePrompt(t *testing.T) {
+	f := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"revised body","confidence":0.9,"rationale":"reworded per reviewer"}]`,
+	}}
+
+	narrative := store.NarrativeRow{ID: 1, Title: "retry logic", Summary: "added retries"}
+	verified := []verifiedLink{{
+		Link:  store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
+		Issue: tasktracker.Issue{Key: "PROJ-1", Summary: "add retries"},
+	}}
+
+	got, _, err := Redraft(t.Context(), f, narrative,
+		[]events.Event{codeEvent("e1", "added retry logic")}, verified,
+		nil, "too vague — name the actual PR")
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "revised body", got[0].Body)
+
+	require.Len(t, f.prompts, 1)
+	assert.Contains(t, f.prompts[0], "too vague — name the actual PR",
+		"the reviewer's feedback must appear in the user prompt the model actually receives")
+}
+
+// TestRedraft_EmptyFeedbackIsAnError: Redraft exists to carry a correction. An
+// empty one means the caller lost the reviewer's text somewhere, which should
+// fail loudly rather than silently spending an LLM call to reproduce the same
+// draft.
+func TestRedraft_EmptyFeedbackIsAnError(t *testing.T) {
+	f := &fakeLLM{responses: []string{`[]`}}
+
+	narrative := store.NarrativeRow{ID: 1, Title: "retry logic", Summary: "added retries"}
+	verified := []verifiedLink{{
+		Link:  store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
+		Issue: tasktracker.Issue{Key: "PROJ-1", Summary: "add retries"},
+	}}
+
+	_, _, err := Redraft(t.Context(), f, narrative,
+		[]events.Event{codeEvent("e1", "added retry logic")}, verified, nil, "   ")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "feedback")
+	assert.Empty(t, f.prompts, "no LLM call should be spent on an empty correction")
+}
+```
+
+**Verified while writing this plan:** `internal/reconciler/draft_test.go` is `package reconciler` (internal), so it can construct the unexported `verifiedLink` and call `Redraft` **directly**. Drop the `ForTest` suffix from the test above — call `reconciler.Redraft` as `Redraft(...)`, with no package qualifier — and skip the shim at the end of Step 3 entirely.
+
+- [ ] **Step 2: Run to verify it fails**
+
+```
+go test ./internal/reconciler/ -run TestRedraft -v 2>&1 | tail -15; echo "exit=$?"
+```
+
+Expected: compile failure — `undefined: Redraft`.
+
+- [ ] **Step 3: Implement**
+
+In `internal/reconciler/draft.go`, after `draft`:
+
+```go
+// Redraft re-runs drafting for one narrative with a reviewer's free-text
+// correction added to the prompt. It is `triage`'s [e]dit disposition.
+//
+// It deliberately reuses the caller's already-verified links rather than
+// re-verifying: live tracker state was confirmed earlier in this same pass, so
+// the "never propose without verifying" invariant (rules/intent-not-outcome.md)
+// still holds, and a second round-trip would cost a Jira call to learn what we
+// just learned. The tradeoff is a narrow staleness window — if the issue
+// changed in the seconds since verification, this redraft is against slightly
+// old state. That is the same window every action in the batch already has
+// between propose and apply, so Redraft introduces no new exposure.
+//
+// Empty feedback is an error, not a no-op: Redraft exists to carry a
+// correction, so blank text means the caller dropped the reviewer's words
+// somewhere upstream. Failing loudly beats spending an LLM call to regenerate
+// the draft the reviewer just rejected.
+func Redraft(
+	ctx context.Context,
+	client llm.Client,
+	narrative store.NarrativeRow,
+	delta []events.Event,
+	verified []verifiedLink,
+	learnedRules []rules.Rule,
+	feedback string,
+) ([]ProposedAction, correlator.Stats, error) {
+	if strings.TrimSpace(feedback) == "" {
+		return nil, correlator.Stats{}, fmt.Errorf(
+			"redrafting narrative %d: reviewer feedback is empty", narrative.ID)
+	}
+
+	var stats correlator.Stats
+
+	prompt := buildDraftPrompt(narrative, delta, verified) +
+		"\n\nThe reviewer rejected the previous draft with this correction. " +
+		"Address it directly:\n" + feedback
+
+	systemPrompt := draftSystemPrompt
+	if rendered := rules.Render(learnedRules); rendered != "" {
+		systemPrompt += "\n\n" + rendered
+	}
+
+	raw, usage, err := client.Complete(ctx, systemPrompt, prompt)
+	if err != nil {
+		return nil, stats, fmt.Errorf("redrafting narrative %d: %w", narrative.ID, err)
+	}
+	stats.AddUsage(usage)
+
+	verdicts, err := parseDraftResponse(raw)
+	if err != nil {
+		return nil, stats, fmt.Errorf("redrafting narrative %d: %w", narrative.ID, err)
+	}
+
+	// Same verdict->action mapping draft() uses, including the
+	// unrecognized-issue_key skip and toProposedAction's confidence flooring.
+	// Extract draft()'s loop into a shared helper and call it from both rather
+	// than copying it here — a divergence would mean triage's redrafts floor
+	// confidence differently from watch's drafts, which nothing would catch.
+	byKey := make(map[string]verifiedLink, len(verified))
+	for _, v := range verified {
+		byKey[v.Link.IssueKey] = v
+	}
+
+	var out []ProposedAction
+	for _, verdict := range verdicts {
+		v, ok := byKey[verdict.IssueKey]
+		if !ok {
+			log.Printf(
+				"reconciler: narrative %d redraft named unrecognized issue_key %q, ignoring",
+				narrative.ID, verdict.IssueKey,
+			)
+
+			continue
+		}
+
+		out = append(out, toProposedAction(verdict, v))
+	}
+
+	return out, stats, nil
+}
+```
+
+Add `"log"` to the imports if absent (it is already there — `draft` uses it for the same skip).
+
+**Verified while writing this plan:** the parser is `parseDraftResponse(raw string) ([]draftVerdict, error)` at `draft.go:177`, and `draft` maps verdicts inline (`draft.go:94-116`) via `toProposedAction(verdict, v)` at `draft.go:121`. There is **no** `actionsFromVerdicts` helper — the loop above reproduces `draft`'s real one. **Prefer extracting that loop into one shared function called by both** over leaving two copies: the copies would drift on confidence flooring, and no test would notice.
+
+Add `"strings"` to the imports if absent.
+
+- [ ] **Step 4: Run the tests**
+
+```
+go test ./internal/reconciler/ 2>&1 | tail -10; echo "exit=$?"
+```
+
+Expected: both new tests PASS, every existing reconciler test still PASSES.
+
+- [ ] **Step 5: Drill — the feedback must actually reach the prompt**
+
+Remove the `+ "\n\nThe reviewer rejected..."` concatenation so the prompt is just `buildDraftPrompt(...)`. Run:
+
+```
+go test ./internal/reconciler/ -run TestRedraft_PutsReviewerFeedbackInThePrompt -v 2>&1 | tail -12; echo "exit=$?"
+```
+
+Expected: FAILS on `"the reviewer's feedback must appear in the user prompt the model actually receives"`. Record it, restore.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/reconciler/draft.go internal/reconciler/draft_test.go
+git commit -m "reconciler: Redraft — redraft one action with reviewer feedback
+
+triage's [e]dit disposition. Reuses the links already verified this pass
+rather than re-verifying: live state was confirmed moments ago, so
+intent-not-outcome still holds and a second Jira round-trip would only
+re-learn what we know. The residual staleness window is the same one
+every batched action already has between propose and apply.
+
+Empty feedback errors rather than no-oping — blank text means the caller
+dropped the reviewer's words, and regenerating the draft they just
+rejected would spend an LLM call to produce the same thing.
+
+Drilled: dropping the feedback concatenation fails the
+does-it-reach-the-prompt assertion, which is the only thing that makes
+this function worth having."
+```
+
+---
+
+### Task 4: `store.RemoveNarrativeIssue` — the one genuinely new mutation
+
+`[t]arget` needs to *remove* a narrative→issue link. `AddNarrativeIssues` only upserts, and the partial unique index `one_primary_per_narrative` would reject a second `primary` — so retarget is impossible without a delete.
+
+**Files:**
+- Modify: `internal/store/store.go` (next to `AddNarrativeIssues`, ~line 1204)
+- Test: `internal/store/store_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `internal/store/store_test.go`:
+
+```go
+// TestRemoveNarrativeIssue_ThenAddPrimarySucceeds is the retarget path, and the
+// reason this method has to exist: one_primary_per_narrative is a partial
+// unique index, so adding a second primary fails while the first is present.
+// Retargeting is therefore remove-then-add, not upsert.
+func TestRemoveNarrativeIssue_ThenAddPrimarySucceeds(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	require.NoError(t, s.AddNarrativeIssues(nid, []store.NarrativeIssue{
+		{IssueKey: "PROJ-1", Role: store.Role("primary"), Provenance: "jira_event", Confidence: 0.9},
+	}))
+
+	// Prove the constraint is real before proving the fix: a second primary
+	// must fail while the first exists. Without this the test could pass for
+	// the wrong reason.
+	err = s.AddNarrativeIssues(nid, []store.NarrativeIssue{
+		{IssueKey: "PROJ-2", Role: store.Role("primary"), Provenance: "reviewer", Confidence: 1.0},
+	})
+	require.Error(t, err, "one_primary_per_narrative must reject a second primary")
+
+	require.NoError(t, s.RemoveNarrativeIssue(nid, "PROJ-1"))
+
+	require.NoError(t, s.AddNarrativeIssues(nid, []store.NarrativeIssue{
+		{IssueKey: "PROJ-2", Role: store.Role("primary"), Provenance: "reviewer", Confidence: 1.0},
+	}), "after removing the old primary the new one must be insertable")
+
+	links, err := s.NarrativeIssues(nid)
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, "PROJ-2", links[0].IssueKey)
+	assert.Equal(t, "reviewer", links[0].Provenance,
+		"a human's assertion is recorded as reviewer-provenance, not a model's inference")
+}
+
+// TestRemoveNarrativeIssue_MissingLinkErrors: silently succeeding would let a
+// retarget report success having changed nothing.
+func TestRemoveNarrativeIssue_MissingLinkErrors(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	err = s.RemoveNarrativeIssue(nid, "NOPE-1")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NOPE-1")
+}
+```
+
+**Verified while writing this plan:** `store.Role` is a bare `type Role string` with **no exported constants** — so `store.Role("primary")` above is correct and `store.RolePrimary` does not exist. The schema comment documents the three values as `primary | same_work | mentioned`.
+
+- [ ] **Step 2: Run to verify it fails**
+
+```
+go test ./internal/store/ -run TestRemoveNarrativeIssue -v 2>&1 | tail -12; echo "exit=$?"
+```
+
+Expected: `s.RemoveNarrativeIssue undefined`.
+
+- [ ] **Step 3: Implement**
+
+In `internal/store/store.go`, directly after `AddNarrativeIssues` and its `*Tx` variant:
+
+```go
+// RemoveNarrativeIssue deletes one narrative→issue link. It exists for
+// `triage`'s retarget disposition, and it has to exist because
+// AddNarrativeIssues only upserts: the partial unique index
+// one_primary_per_narrative rejects a second primary while the first is
+// present, so "this belongs on a different ticket" is remove-then-add rather
+// than an update.
+//
+// A missing link is an error, not a silent success. Retarget's caller uses the
+// error to abort before adding the replacement — otherwise a typo'd key would
+// report a successful retarget having changed nothing, and the reviewer would
+// believe an attribution moved when it did not.
+func (s *Store) RemoveNarrativeIssue(narrativeID int64, issueKey string) error {
+	return removeNarrativeIssueImpl(s.db, narrativeID, issueKey)
+}
+
+// RemoveNarrativeIssue is the *Tx-scoped variant of
+// (*Store).RemoveNarrativeIssue. Retarget uses it so the remove and the
+// replacing add land in one transaction: a crash between them would leave a
+// narrative with no primary at all.
+func (t *Tx) RemoveNarrativeIssue(narrativeID int64, issueKey string) error {
+	return removeNarrativeIssueImpl(t.tx, narrativeID, issueKey)
+}
+
+func removeNarrativeIssueImpl(c dbConn, narrativeID int64, issueKey string) error {
+	res, err := c.Exec(
+		`DELETE FROM narrative_issues WHERE narrative_id = ? AND issue_key = ?`,
+		narrativeID, issueKey,
+	)
+	if err != nil {
+		return fmt.Errorf("removing issue link %s from narrative %d: %w", issueKey, narrativeID, err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected removing %s from narrative %d: %w", issueKey, narrativeID, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("removing issue link %s from narrative %d: no such link", issueKey, narrativeID)
+	}
+
+	return nil
+}
+```
+
+- [ ] **Step 4: Run**
+
+```
+go test ./internal/store/ 2>&1 | tail -6; echo "exit=$?"
+```
+
+Expected: both new tests PASS, whole store package still PASSES.
+
+- [ ] **Step 5: Drill — a missing link must not silently succeed**
+
+Delete the `if affected == 0 { ... }` block. Run:
+
+```
+go test ./internal/store/ -run TestRemoveNarrativeIssue_MissingLinkErrors -v 2>&1 | tail -10; echo "exit=$?"
+```
+
+Expected: FAILS with "An error is expected but got nil". Record, restore.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/store/store.go internal/store/store_test.go
+git commit -m "store: RemoveNarrativeIssue — retarget needs a delete, not an upsert
+
+triage's [t]arget disposition moves a narrative to a different issue.
+AddNarrativeIssues only upserts, and one_primary_per_narrative is a
+partial unique index that rejects a second primary while the first
+exists — so retarget is remove-then-add. The test proves the constraint
+is real before proving the fix, so it cannot pass for the wrong reason.
+
+A missing link errors: silently succeeding would let a typo'd key report
+a successful retarget having moved nothing.
+
+The *Tx variant exists so remove and add land atomically — a crash
+between them would leave a narrative with no primary at all."
+```
