@@ -34,10 +34,10 @@ planned/simulated action in a transcript, read as real.
 issue (does `getIssue(key)` resolve, and does its summary/component match?) before it drives an
 action. Confidence scores don't save you — a hallucinated match can be high-confidence. Treat any
 ref whose timestamp is in the future, or that doesn't resolve, as a transcript artifact. Cheap API
-verification *before* the review queue keeps the queue signal-rich. This is why `correlator/refs.py`
+verification *before* the review queue keeps the queue signal-rich. This is why `internal/correlator/refs`
 produces *candidates* and the reconciler owns resolution.
 
-## 3. Logical-effort clustering is load-bearing (→ `rules/env-mirror-fanout.md`, `correlator/fanout.py`)
+## 3. Logical-effort clustering is load-bearing (→ `rules/env-mirror-fanout.md`, `internal/correlator/fanout`)
 
 Infra work fans out: one logical change ("switch the shared module to managed mode") becomes ~12
 near-identical PRs, one per region. Reviewing all 12 is **one** review effort, not 12. Tracking
@@ -48,9 +48,9 @@ them individually under-represents the single decision — and it inflates veloc
 range. The heuristic that worked: normalize titles by folding known region/environment tokens
 (after `for`/`in`/`switch` connectors, as a trailing `(region)`, or a `-region` suffix), then
 group by same-author + same-normalized-title + adjacent numbers. Implemented deterministically in
-`correlator/fanout.py`; the region set is configurable.
+`internal/correlator/fanout`; the region set is configurable.
 
-## 4. Dedup keys must be fully qualified and range-aware (→ `correlator/refs.py`)
+## 4. Dedup keys must be fully qualified and range-aware (→ `internal/correlator/refs`)
 
 Two real bugs:
 - **Bare-number ambiguity.** Once the scan went multi-org, `#382` was ambiguous
@@ -62,7 +62,7 @@ Two real bugs:
 
 The event store already dedupes on `(source, external_id)` at insert — the right layer for raw
 events. But the *narrative/correlation* layer has its own dedup, and that's where these bit us.
-`correlator/refs.py` handles both: fully-qualified keys and range expansion, with a `max_span`
+`internal/correlator/refs` handles both: fully-qualified keys and range expansion, with a `max_span`
 guard that errors loudly rather than expanding an absurd range (see #9).
 
 ## 5. Query scope silently creates permanent blind spots
@@ -113,7 +113,7 @@ silently truncate** when a single window can't fit. A subtle trap: when over bud
 *window* — losing data while appearing to succeed.
 
 **Consequence:** the batch correlator splits by time and merges narratives across sub-batches; it
-must never cope by quietly extracting less. This is also why `correlator/refs.py` raises on an
+must never cope by quietly extracting less. This is also why `internal/correlator/refs` raises on an
 over-`max_span` range instead of truncating: silent data loss is the enemy.
 
 ## 10. Ownership is a first-class dimension
@@ -127,7 +127,7 @@ only "done / not-done" mis-represents all of this.
 mine to act on" are different axes; assignee + review-state + who-pushed-last together determine
 which. This also decides what belongs in a given person's digest vs. merely tracked.
 
-## 11. Exclude the tool's own workspace (→ `collectors/claude_code.py` `exclude_cwds`)
+## 11. Exclude the tool's own workspace (→ `internal/collector/claudecode` `exclude_cwds`)
 
 The predecessor's scanner had to skip its own workspace, or it would ingest its own bookkeeping
 sessions as "work" and spiral. unjira's executor writes to Jira, which is itself an observed
@@ -153,8 +153,8 @@ hallucination is more dangerous than a flagged unknown.
   what the transcript says" (deterministic, cheap) with "judge what it means and whether it's done"
   (must verify against live state). Keeping collectors dumb and putting all verification in the
   reconciler encodes that separation.
-- **Deterministic pre-filters keep the LLM's queue clean.** `correlator/refs.py` and
-  `correlator/fanout.py` are pure, testable functions that run *before* any model, so the review
+- **Deterministic pre-filters keep the LLM's queue clean.** `internal/correlator/refs` and
+  `internal/correlator/fanout` are pure, testable functions that run *before* any model, so the review
   queue stays signal-rich and cheap API checks catch hallucinations early.
 - **Batch beats real-time** for the fan-out reason (#3): whole narratives need the whole batch.
   Real-time would fragment a 12-region change into 12 unrelated events.

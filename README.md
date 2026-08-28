@@ -11,32 +11,65 @@ record; "pushed a branch" never qualifies.
 ## Pipeline
 
 ```
-Claude Code    GitHub    Slack    Jira          (collectors: deterministic, pluggable)
-     \            |        |       /
-      +-----------+--------+------+
-                  |
-              event log                         (SQLite, append-only, normalized)
-                  |
-              correlator                        (LLM: clusters events into work narratives,
-                  |                              matches narratives to issues)
-              reconciler                        (LLM: diffs narrative vs ticket state,
-                  |                              proposes typed actions with confidence)
-             review queue                       (human gate: end-of-day approval;
-                  |                              corrections become learned rules)
-               executor                         (deterministic: Jira Cloud REST, bot account)
+Claude Code    Jira    (GitHub)   (Slack)       (collectors: deterministic, pluggable;
+     \           |        |          /            parenthesized = not built yet)
+      +----------+--------+---------+
+                 |
+             event log                          (SQLite, append-only, normalized)
+                 |
+             correlator                         (LLM: Cluster = events -> narratives,
+                 |                               Match = narratives -> issues)
+             reconciler                         (LLM: diffs narrative vs LIVE ticket state,
+                 |                               proposes typed actions with confidence.
+                 |                               Holds a TaskReader — cannot write)
+            review queue                        (the actions table: unjira actions list|decide;
+                 |                               corrections become learned rules)
+           auto-commit gate                     (three deny-by-default checks; the only code
+                 |                               holding a TaskWriter)
+                 v
+               Jira
 ```
 
-The executor's writes land in Jira, which is itself an observed stream — the loop closes and
-the next batch pass sees its own changes as part of reality.
+Writes land in Jira, which is itself an observed stream — the loop closes and the next pass sees
+its own changes as part of reality. There is no separate "executor" component: applying is
+`gate.Applier`, deliberately the single narrow choke point every write route converges on.
 
-## Status: phase 0 (observe only)
+## Status: phase 1, mostly landed — unjira can write, and does not by default
 
-Collectors, the event log, and a daily drift digest. Zero write risk. Every digest you
-mentally correct is labeled training data for phase 1, and this phase measures ticket-match
-accuracy before the agent is granted any write access.
+The whole loop runs: collectors → event log → correlator (cluster + match) → reconciler →
+review queue → apply. `unjira watch` executes it on an interval; `unjira actions` is the
+machine-facing surface over the queue.
 
-- **Phase 1 — propose and approve**: reconciler + review queue + executor for comments and
-  forward transitions.
+**unjira has written to a real Jira instance** (`internal/live/autocommit_test.go`, 2026-08-27).
+That makes the next paragraph the important one.
+
+### Three independent gates, all deny-by-default
+
+A write happens only if **all three** allow it. Any one of them refuses and the action stays
+queued or lands `failed` with a persisted reason:
+
+1. **`auto_commit.<type>.graduated`** — false for every action type, and nothing in unjira can
+   write this field. Autonomy is granted by a human editing config, never earned by the system.
+2. **`jira[].writable_project_keys`** — which projects may be written to, declared separately from
+   `project_keys` (what may be *read*). Absent means nothing on that connection is writable.
+3. **`auto_commit.<type>.confidence_floor`** — the action's own confidence must clear it.
+
+A fresh clone has none of these configured, so a fresh clone applies nothing. `config/unjira.example.json`
+deliberately omits `auto_commit` and `writable_project_keys` for exactly this reason: an example
+that grants write authority is one copy-paste from arming a real deployment.
+
+### What's done, per phase-1 slice
+
+| | |
+|---|---|
+| ✅ 1–4 | LLM client, `correlator.Cluster`, persistence + compaction, `internal/reconciler` |
+| ✅ 5 | auto-commit gate + `watch` |
+| 🚧 6 | `unjira actions list\|decide` landed; **`triage`** (interactive loop) not started |
+| ⬜ 7 | `rules.Distill` — rule *reading* works in both prompts; distilling new rules from reviewer feedback does not |
+
+See `docs/superpowers/specs/2026-08-11-phase1-correlator-design.md` for the slice list with the
+non-obvious corrections each one produced.
+
 - **Phase 2 — creation and estimation**: spin-off tickets with discovery links, the estimation
   ensemble, the `emergent` tag, the ancillary-work ledger.
 - **Phase 3 — productize**: autonomy graduation, Slack review mode, shared team memory,
@@ -47,18 +80,37 @@ accuracy before the agent is granted any write access.
 ```sh
 go build -o unjira ./cmd/unjira      # or: earthly +build
 cp config/unjira.example.json unjira.config.json
-cp .env.example .env                 # Jira credentials (gitignored; not needed in phase 0)
+cp .env.example .env                 # Jira + LLM credentials (gitignored)
+
 ./unjira collect        # ingest new events from enabled collectors
-./unjira digest         # print today's drift digest
-./unjira status         # event counts and collector cursors
+./unjira status         # event counts and collector cursor freshness
+./unjira digest         # print a day's drift digest
+
+./unjira watch --once --dry-run      # one full pass, persisting nothing
+./unjira watch --interval 1h         # the real loop; Ctrl-C finishes the pass in flight
+
+./unjira actions list                # the review queue
+./unjira actions list --status failed --json
+./unjira actions decide 42 --approve # applies via the same gate watch uses
 ```
+
+Start with `watch --once --dry-run`: it runs every stage and prints what it *would* do, skipping
+`Persist` and the gate, and says which stages it skipped rather than going quiet.
+
+Reads need Jira credentials (`UNJIRA_JIRA_CREDENTIALS`, a JSON object keyed by connection name)
+and an LLM — `UNJIRA_LLM_API_KEY`, or better, `llm.api_key_helper`, a command unjira runs to fetch
+a fresh token. A `watch` loop against a gateway issuing short-lived credentials needs the helper;
+a captured token expires mid-pass, after earlier stages have already cost money.
 
 Schedule the batch pass on macOS with the launchd template in `ops/` (see comments in the
 plist for install steps).
 
 Dev-instance tools (need credentials in `.env`): `unjira dev seed` creates labeled test
 issues and walks them through transitions to generate changelog history; `unjira dev reset`
-deletes exactly what seed created; `unjira dev workflow` prints the mined workflow graph.
+deletes exactly what seed created; `unjira dev workflow` prints the mined workflow graph;
+`unjira dev narrate` runs one collect+narrate+match+reconcile pass and prints what it found
+and proposed. It lives under `dev` rather than as a top-level verb because narration is a
+stage inside `watch`, so a top-level `narrate` would be scaffolding awaiting deletion.
 
 Testing: `go test ./...` runs the offline tiers and is what CI runs per-push (the `live`
 build tag excludes `internal/live` entirely — it won't even compile without it).
@@ -69,21 +121,40 @@ behind the `live-jira` environment.
 ## Layout
 
 ```
-cmd/unjira/             CLI entrypoint (Kong): collect | digest | status | dev
+cmd/unjira/             CLI entrypoint (Kong): collect | digest | status | watch |
+                        actions | dev
 internal/
   events/               normalized Event model — the contract every collector emits
-  store/                SQLite schema and access: events, cursors, narratives, actions,
-                        estimates, ledger
-  config/               config loading (unjira.config.json)
+  store/                SQLite schema and access: events, cursors, narratives,
+                        narrative_events, narrative_issues, actions, estimates, ledger,
+                        pipeline_lock
+  config/               config loading (unjira.config.json) and validation
+  credentials/          the JSON-blob credential set from UNJIRA_JIRA_CREDENTIALS
+  envfile/              .env loader with repo-root walk-up
   clients/
     jira/               Jira facade over go-jira/v2/cloud (reads + gated writes)
+    local/              local mimicked tracker — no real tracker reachable
+    openai/             OpenAI-shaped LLM facade (litellm, etc.)
+  llm/                  backend-agnostic LLM contract: Client, Usage, CredentialSource,
+                        and the model-response tolerances every parser shares
+  tasktracker/          TaskReader / TaskWriter / TaskTracker — the split that makes
+                        write authority visible in a signature
   collector/
     claudecode/         Claude Code session transcripts (~/.claude/projects/**/*.jsonl)
+    jira/               Jira issues and changelogs as an observed stream
   correlator/
     refs/               fully-qualified, range-aware PR/issue reference extraction
     fanout/             env-mirror fan-out clustering
+                        (correlator itself: Cluster = events -> narratives,
+                         Match = narratives -> issues)
+  reconciler/           delta vs live state, drafting, confidence flooring, Persist.
+                        Holds a TaskReader and therefore cannot write
+  gate/                 the auto-commit gate: pure Decide + an Applier holding a
+                        TaskWriter. The only code in unjira that writes to a tracker
+  rules/                load, scope-filter, and render rules/*.md into prompts
   workflow/             observed workflow graphs mined from changelogs; BFS path planning
-  pipeline/             run enabled collectors, persist events; render the phase-0 digest
+  pipeline/             stage orchestration: RunCollect / RunNarrate / RunMatch /
+                        RunReconcile / RunAutoCommit, plus the digest renderer
   devtools/             seed/reset labeled test data on the dev instance
   live/                 live-Jira integration tests (build tag "live")
 rules/                  learned rules as human-auditable markdown (see rules/README.md)
@@ -142,10 +213,21 @@ data/                   SQLite database lives here (gitignored)
 - **Corrections become rules.** Review-queue edits and rejections are distilled into markdown
   rules under `rules/`, fed forward into correlator and reconciler prompts. Approval history
   drives per-action-type autonomy graduation.
-- **Pluggable apply-target backend, decided before phase 1 needs it.** `internal/tasktracker`
-  defines a backend-agnostic `TaskTracker` interface (`GetIssue`, `SearchIssues`, `AddComment`,
-  `SetStatus`, `CreateIssue`); `clients/jira.Tracker` and `clients/local.Tracker` both implement
-  it today, config-selected via `tracker.backend`. The local backend lets unjira run with no real
+- **Write authority is visible in a type signature.** `internal/tasktracker` splits into
+  `TaskReader` (`GetIssue`, `SearchIssues`, `AvailableStatusCategories`) and `TaskWriter`
+  (`AddComment`, `SetStatus`, `CreateIssue`), with `TaskTracker` the composite. The reconciler
+  holds a `TaskReader` and therefore *cannot* write — calling `AddComment` from it is a build
+  error, not a code-review catch. `gate.Applier` holds a `TaskWriter` and does nothing else. Note
+  `AvailableStatusCategories` sits on the **reader** deliberately: it is a read that describes a
+  write, reporting what a write *could* do without performing one.
+- **Read scope and write scope are separate config.** `jira[].project_keys` is what unjira may
+  *read*; `jira[].writable_project_keys` (a subset) is what it may *write*. Absent means nothing
+  is writable. Learned the hard way: reusing the read list as the write surface meant a config
+  spanning a sandbox and a production project would, on graduation, have written to production.
+  The check lives in `gate.Applier` rather than the gate's `Decide`, because `actions decide
+  --approve` never calls `Decide` — a check there would have covered only the automatic path.
+- **Pluggable apply-target backend, decided before phase 1 needs it.** `clients/jira.Tracker` and
+  `clients/local.Tracker` both implement the interface, config-selected via `tracker.backend`. The local backend lets unjira run with no real
   tracker reachable (e.g. a hosted control plane with no Jira auth) while still deriving value
   from event clustering, persisting its own issue state locally. `SetStatus` is deliberately
   categorical (todo/in_progress/done), not Jira's named-transition model, since GitHub Issues —
