@@ -309,3 +309,387 @@ Drilled: inverting the comparison fails the mixed-state and
 fully-committed tests, which is the failure mode that matters — an
 inverted watermark looks protective while exposing committed work."
 ```
+
+---
+
+### Task 2: `Cluster` partitions existing narratives by eligibility
+
+Today `buildClusterPrompt` prints **every** existing narrative's events under `CONTEXT ONLY`, without indices, so the model structurally cannot reassign them. That is a blunt form of Task 1's invariant: *all* existing narratives frozen.
+
+This task refines it: a narrative's **eligible** events move into the numbered, assignable section; its **frozen** events stay in the context section. `watch`'s behaviour is unchanged in practice — by the time it runs, prior narratives normally have committed actions, so everything stays frozen — but that becomes a *consequence* of the invariant rather than a separate rule. And `triage` then needs no special re-clustering mode at all.
+
+**Files:**
+- Modify: `internal/correlator/correlator.go` (`Narrative` struct ~line 47; `buildClusterPrompt` ~line 263; `clusterSystemPrompt` ~line 300)
+- Modify: `internal/pipeline/narrate.go:199` (the single `correlator.Narrative{...}` construction site)
+- Test: `internal/correlator/correlator_test.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `internal/correlator/correlator_test.go`:
+
+```go
+// TestCluster_EligibleNarrativeEventsAreAssignable is the prompt-level half of
+// the commit watermark (store.EligibleEventIDs is the data half). A narrative's
+// eligible events must appear in the NUMBERED section the model may assign
+// from; its frozen events must stay in the context section without indices.
+//
+// This is the safety property, so it is asserted on prompt content rather than
+// on a return value: if a frozen event ever gained an index, the model could
+// reparent work a posted comment already described.
+func TestCluster_EligibleNarrativeEventsAreAssignable(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	existing := []correlator.Narrative{{
+		ID: 9, Title: "Cache rework", Summary: "Reworking the shared cache",
+		WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+		Events: []correlator.Event{
+			mustEvent(t, "github", "pr-412", "FROZEN committed work", base.Add(-2*time.Hour)),
+		},
+		EligibleEvents: []correlator.Event{
+			mustEvent(t, "github", "pr-500", "ELIGIBLE uncommitted work", base.Add(-1*time.Hour)),
+		},
+	}}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "in-window work", base.Add(5*time.Minute)),
+	}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+	require.NoError(t, err)
+	require.Len(t, llm.prompts, 1)
+
+	prompt := llm.prompts[0]
+	toCluster, context, found := strings.Cut(prompt, "Existing narratives (CONTEXT ONLY):")
+	require.True(t, found, "the prompt must still have both labeled sections")
+
+	assert.Contains(t, toCluster, "ELIGIBLE uncommitted work",
+		"an eligible narrative event must be numbered and assignable")
+	assert.NotContains(t, context, "ELIGIBLE uncommitted work",
+		"an eligible event must not ALSO appear as context — it would be listed twice")
+
+	assert.Contains(t, context, "FROZEN committed work",
+		"a frozen event stays in the context section")
+	assert.NotContains(t, toCluster, "FROZEN committed work",
+		"a frozen event must never be assignable: a posted comment already describes it")
+}
+
+// TestCluster_NoEligibleEventsMatchesTodaysBehaviour pins the compatibility
+// half: with EligibleEvents empty — every existing narrative fully committed,
+// which is watch's normal case — the prompt is exactly what it was before this
+// change. This is what makes "the invariant subsumes the old rule" a checked
+// claim rather than an assertion.
+func TestCluster_NoEligibleEventsMatchesTodaysBehaviour(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	existing := []correlator.Narrative{{
+		ID: 9, Title: "Cache rework", Summary: "Reworking the shared cache",
+		WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+		Events: []correlator.Event{
+			mustEvent(t, "github", "pr-412", "PR #412 add cache layer", base.Add(-2*time.Hour)),
+		},
+		// EligibleEvents deliberately nil.
+	}}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "debugging cache eviction", base.Add(5*time.Minute)),
+	}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+	require.NoError(t, err)
+
+	prompt := llm.prompts[0]
+	toCluster, _, _ := strings.Cut(prompt, "Existing narratives (CONTEXT ONLY):")
+	assert.NotContains(t, toCluster, "PR #412 add cache layer",
+		"with nothing eligible, no existing-narrative event is assignable")
+	assert.Contains(t, prompt, "CONTEXT ONLY")
+}
+```
+
+Add `"strings"` to that file's imports if it is not already there.
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```
+go test ./internal/correlator/ -run 'TestCluster_EligibleNarrativeEventsAreAssignable|TestCluster_NoEligibleEventsMatchesTodaysBehaviour' -v 2>&1 | tail -20; echo "exit=$?"
+```
+
+Expected: compile failure — `unknown field EligibleEvents in struct literal`.
+
+- [ ] **Step 3: Add the field to `Narrative`**
+
+In `internal/correlator/correlator.go`, inside `type Narrative struct`, directly after the `Events` field:
+
+```go
+	// EligibleEvents are this narrative's events that a reviewer-driven
+	// re-cluster may reassign: those linked after the narrative's last
+	// committed action (see store.EligibleEventIDs). They are rendered in the
+	// NUMBERED section alongside in-window events, so the model can move them;
+	// Events above stay context-only and cannot be reassigned.
+	//
+	// Empty for every routine watch pass, because by the time watch runs a
+	// prior narrative normally has a committed action. That is why this change
+	// refines the old "all existing narratives are frozen" rule rather than
+	// weakening it: the freeze now ends at each narrative's commit watermark
+	// instead of at its existence, and nothing about watch's behaviour moves.
+	//
+	// A caller must not put the same event in both slices. Doing so would list
+	// it twice in one prompt and invite the model to assign a frozen event by
+	// its index — see hydrateContextNarratives, which partitions rather than
+	// duplicating.
+	EligibleEvents []Event
+```
+
+- [ ] **Step 4: Render eligible events in the assignable section**
+
+In `buildClusterPrompt`, replace the "Events to cluster" loop and the context loop. The whole function becomes:
+
+```go
+func buildClusterPrompt(evts []Event, existing []Narrative, learnedRules []rules.Rule) (systemPrompt, userPrompt string) {
+	systemPrompt = clusterSystemPrompt
+	if rendered := rules.Render(learnedRules); rendered != "" {
+		systemPrompt += "\n\n" + rendered
+	}
+
+	// assignable is the in-window events plus every existing narrative's
+	// eligible events, sharing one index space: the model assigns by index and
+	// has no reason to care which bucket an event came from.
+	assignable := make([]Event, 0, len(evts))
+	assignable = append(assignable, evts...)
+	for _, n := range existing {
+		assignable = append(assignable, n.EligibleEvents...)
+	}
+
+	var b strings.Builder
+	b.WriteString("Events to cluster:\n")
+	for i, e := range assignable {
+		// %q on Summary (not %s): event summaries come from arbitrary
+		// upstream session/commit text, so an embedded newline or a
+		// fabricated "N. [source] ..." line could otherwise inject a
+		// spurious entry into this numbered list as the model reads it.
+		// Quoting escapes those, matching the %q already used for the
+		// narrative fields below.
+		fmt.Fprintf(&b, "%d. [%s] %q (occurred_at=%s)\n", i, e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+	}
+
+	b.WriteString("\nExisting narratives (CONTEXT ONLY):\n")
+	if len(existing) == 0 {
+		b.WriteString("(none)\n")
+	}
+	for _, n := range existing {
+		fmt.Fprintf(&b, "narrative_id=%d title=%q window=[%s, %s)\n",
+			n.ID, n.Title, n.WindowStart.Format(time.RFC3339), n.WindowEnd.Format(time.RFC3339))
+		fmt.Fprintf(&b, "  summary: %q\n", n.Summary)
+		if len(n.Events) > 0 {
+			b.WriteString("  events:\n")
+			for _, e := range n.Events {
+				fmt.Fprintf(&b, "    - [%s] %q (occurred_at=%s)\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+			}
+		}
+	}
+
+	return systemPrompt, b.String()
+}
+```
+
+- [ ] **Step 4b: Resolve indices against the SAME slice — the dangerous part**
+
+The prompt now numbers a *combined* slice, but `parseClusterResponse(raw, filtered)` at `correlator.go:190` resolves `event_indices` against `filtered` — the in-window events **only**. Verified by reading it: `if idx < 0 || idx >= len(evts) { ...out of range... }` then `evts[idx]`. So without this step an eligible event's index either errors as out-of-range or, worse, silently resolves to a *different* event.
+
+Build the combined slice once in `Cluster` and hand it to both. At `correlator.go:175`, replace:
+
+```go
+	systemPrompt, userPrompt := buildClusterPrompt(filtered, relevant, o.rules)
+```
+
+with:
+
+```go
+	// assignable shares one index space between the prompt and the parser:
+	// buildClusterPrompt numbers this exact slice, and parseClusterResponse
+	// resolves event_indices against it. They MUST be the same slice — passing
+	// `filtered` to the parser while the prompt numbered a longer slice would
+	// make an eligible event's index resolve to the wrong event, silently.
+	assignable := assignableEvents(filtered, relevant)
+	systemPrompt, userPrompt := buildClusterPrompt(assignable, relevant, o.rules)
+```
+
+and at `correlator.go:190`, change `parseClusterResponse(raw, filtered)` to `parseClusterResponse(raw, assignable)`.
+
+Add the helper next to `buildClusterPrompt`, and make `buildClusterPrompt` take the already-combined slice (drop the `assignable := ...` lines from Step 4's version, keeping `for i, e := range evts`):
+
+```go
+// assignableEvents is the single index space Cluster's prompt numbers and its
+// response parser resolves against: the in-window events, then every existing
+// narrative's eligible events in `existing` order.
+//
+// One function so the two sides cannot disagree. They were separate call sites
+// (buildClusterPrompt(filtered,...) and parseClusterResponse(raw, filtered))
+// before eligible narrative events became assignable, and keeping them separate
+// would have meant an eligible event's index resolving to a different event —
+// silent misattribution rather than a loud error.
+func assignableEvents(inWindow []Event, existing []Narrative) []Event {
+	out := make([]Event, 0, len(inWindow))
+	out = append(out, inWindow...)
+	for _, n := range existing {
+		out = append(out, n.EligibleEvents...)
+	}
+
+	return out
+}
+```
+
+Add a test pinning the shared index space:
+
+```go
+// TestCluster_EligibleEventIndexResolvesToTheRightEvent guards the one silent
+// failure this change could introduce: the prompt numbering a combined slice
+// while the parser resolves against the in-window slice alone. The model here
+// picks index 1 — the eligible narrative event, not any in-window event — so a
+// mismatched index space would either error or return the wrong event.
+func TestCluster_EligibleEventIndexResolvesToTheRightEvent(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	existing := []correlator.Narrative{{
+		ID: 9, Title: "Cache rework", Summary: "s",
+		WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+		EligibleEvents: []correlator.Event{
+			mustEvent(t, "github", "pr-500", "THE ELIGIBLE ONE", base.Add(-1*time.Hour)),
+		},
+	}}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "in-window work", base.Add(5*time.Minute)),
+	}
+	// index 0 = in-window, index 1 = the eligible narrative event.
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"extends","narrative_id":9,"title":"t","summary":"s","event_indices":[1]}]`,
+	}}
+
+	got, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+
+	require.NoError(t, err, "index 1 must be in range: the parser sees the combined slice")
+	require.Len(t, got, 1)
+	require.Len(t, got[0].Events, 1)
+	assert.Equal(t, "THE ELIGIBLE ONE", got[0].Events[0].Summary,
+		"index 1 must resolve to the eligible narrative event, not an in-window one")
+}
+```
+
+Drill it: pass `filtered` to `parseClusterResponse` instead of `assignable`. Expected failure, captured by running it while writing this plan:
+
+```
+event_indices value 1 out of range [0,1)
+```
+
+Record the output, then restore.
+
+> **Verified while writing:** Task 2's correlator changes were implemented against real code, the index-space test passed, the drill produced the error above, and `go test ./...` stayed green — so "watch is unaffected" is a checked claim, not an assumption. The scratch implementation was then reverted; the plan is what remains.
+
+- [ ] **Step 5: Run the tests**
+
+```
+go test ./internal/correlator/ 2>&1 | tail -20; echo "exit=$?"
+```
+
+Expected: the two new tests PASS, and every pre-existing correlator test still passes — especially `TestCluster_ContextIsAdjacentNarrativesOnly` (which asserts `CONTEXT ONLY` is present) and `TestCluster_UsesNarrativeContextEventsForExtendsDecision`.
+
+- [ ] **Step 6: Update the one construction site**
+
+`internal/pipeline/narrate.go`'s `hydrateContextNarratives` must partition rather than duplicate. Replace its loop body:
+
+```go
+	out := make([]correlator.Narrative, 0, len(rows))
+	for _, row := range rows {
+		contextEvents, err := s.NarrativeEventsForContext(row.ID)
+		if err != nil {
+			return nil, fmt.Errorf("hydrating context events for narrative %d: %w", row.ID, err)
+		}
+
+		// Partition by the commit watermark: eligible events become assignable,
+		// the rest stay context-only. An event must land in exactly one slice —
+		// putting it in both would list it twice in the prompt and let the model
+		// assign a frozen event by index.
+		eligibleIDs, err := s.EligibleEventIDs(row.ID)
+		if err != nil {
+			return nil, fmt.Errorf("resolving eligible events for narrative %d: %w", row.ID, err)
+		}
+		eligible := make(map[int64]bool, len(eligibleIDs))
+		for _, id := range eligibleIDs {
+			eligible[id] = true
+		}
+
+		var frozen, assignable []correlator.Event
+		for _, e := range contextEvents {
+			id, err := s.EventIDByExternalID(e.Source, e.ExternalID)
+			if err != nil {
+				return nil, fmt.Errorf("resolving event id for %s/%s: %w", e.Source, e.ExternalID, err)
+			}
+			if eligible[id] {
+				assignable = append(assignable, e)
+			} else {
+				frozen = append(frozen, e)
+			}
+		}
+
+		out = append(out, correlator.Narrative{
+			ID:             row.ID,
+			WindowStart:    row.WindowStart,
+			WindowEnd:      row.WindowEnd,
+			Title:          row.Title,
+			Summary:        row.Summary,
+			IssueKey:       row.IssueKey,
+			Confidence:     row.Confidence,
+			Status:         row.Status,
+			Events:         frozen,
+			EligibleEvents: assignable,
+		})
+	}
+```
+
+**If `events.Event` has no `ExternalID` field**, check its real shape (`grep -n "type Event struct" -A 12 internal/events/events.go`) and use whatever `EventIDByExternalID` actually needs. Do not invent a field.
+
+- [ ] **Step 7: Full correlator + pipeline suite**
+
+```
+go test ./internal/correlator/ ./internal/pipeline/ 2>&1 | tail -10; echo "exit=$?"
+```
+
+Expected: all pass. A failure in `internal/pipeline` here most likely means `watch`'s behaviour *did* change — investigate rather than adjusting the test, because "watch is unaffected" is a claim this task makes.
+
+- [ ] **Step 8: Drill — a frozen event must never become assignable**
+
+In `buildClusterPrompt`, temporarily append `n.Events` to `assignable` as well as `n.EligibleEvents`. Run:
+
+```
+go test ./internal/correlator/ -run TestCluster_EligibleNarrativeEventsAreAssignable -v 2>&1 | tail -15; echo "exit=$?"
+```
+
+Expected: FAILS on `"a frozen event must never be assignable: a posted comment already describes it"`. Record the output, then restore.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add internal/correlator/correlator.go internal/correlator/correlator_test.go internal/pipeline/narrate.go
+git commit -m "correlator: freeze existing narratives up to their commit watermark
+
+buildClusterPrompt printed every existing narrative's events as
+CONTEXT ONLY, so the model structurally could not reassign them. That is
+a blunt version of the commit watermark: all existing narratives frozen.
+
+Now a narrative's eligible events (linked after its last committed
+action) render in the numbered assignable section, while its frozen
+events stay context-only. watch is unaffected in practice — prior
+narratives normally have committed actions, so EligibleEvents is empty —
+which TestCluster_NoEligibleEventsMatchesTodaysBehaviour pins rather than
+asserts. This is what lets triage restructure with no special
+re-clustering mode.
+
+hydrateContextNarratives partitions rather than duplicating: an event in
+both slices would be listed twice and could be assigned by index despite
+being frozen.
+
+Drilled: adding n.Events to the assignable slice fails the
+frozen-must-not-be-assignable assertion."
+```
