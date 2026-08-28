@@ -900,9 +900,32 @@ this function worth having."
 
 ---
 
-### Task 4: `store.RemoveNarrativeIssue` — the one genuinely new mutation
+### Task 4: the two restructure seams — `RemoveNarrativeIssue` and `UnlinkNarrativeEvents`
 
-`[t]arget` needs to *remove* a narrative→issue link. `AddNarrativeIssues` only upserts, and the partial unique index `one_primary_per_narrative` would reject a second `primary` — so retarget is impossible without a delete.
+Both restructures need a *removal* seam the store does not have. They are paired here because they
+are the same shape (a scoped DELETE with a RowsAffected check) and because discovering the second
+one invalidated a claim in the design spec.
+
+**`[t]arget`** needs to remove a narrative→issue link: `AddNarrativeIssues` only upserts, and the partial unique index `one_primary_per_narrative` rejects a second `primary`, so retarget is impossible without a delete.
+
+**`[m]erge`** needs to remove a narrative→**event** link, which the spec originally said it did not. `Persist`'s `ClusterExtends` path calls `AddNarrativeEvents` — `INSERT OR IGNORE`, which adds the destination link and never removes the source. Probed directly while planning:
+
+```
+after "merge" A->B: A has 1, B has 1
+CONFIRMED double-link: merge must unlink from A explicitly
+```
+
+Without the unlink, a merged event stays attached to both narratives: the source looks alive, keeps feeding future `Cluster` calls as context, and the work is double-counted.
+
+**A second probe found the reason this seam is dangerous, and it constrains its use.** The watermark is per-narrative, so relinking a *frozen* event onto a narrative that never committed makes it eligible again:
+
+```
+BEFORE:                on A eligible=[]  (empty = frozen)
+AFTER relink onto B:   on B eligible=[1]
+CONFIRMED: frozen on A, eligible on B — the watermark is PER-NARRATIVE
+```
+
+That is **laundering**: the rule protecting committed work defeated by the operation it was meant to constrain, with nothing looking wrong. Hence the rule Task 6 must enforce — **a restructure only ever unlinks eligible events; frozen ones stay put.** `UnlinkNarrativeEvents` therefore takes explicit event ids rather than "all of narrative N", so a caller cannot ask for the unsafe thing in one call.
 
 **Files:**
 - Modify: `internal/store/store.go` (next to `AddNarrativeIssues`, ~line 1204)
@@ -1024,6 +1047,105 @@ func removeNarrativeIssueImpl(c dbConn, narrativeID int64, issueKey string) erro
 	return nil
 }
 ```
+
+
+#### Step 3b: `UnlinkNarrativeEvents` — merge's removal seam
+
+> **Verified while writing this plan:** implemented and run; both tests below pass as written.
+
+Append these tests to `internal/store/store_test.go`:
+
+```go
+package store_test
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/jcogilvie/unjira/internal/events"
+)
+
+func TestUnlinkNarrativeEvents_RemovesOnlyTheNamedLinks(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+
+	a, err := s.InsertNarrative(base, base.Add(time.Hour), "A", "s")
+	require.NoError(t, err)
+
+	var ids []int64
+	for i, ext := range []string{"u:1", "u:2", "u:3"} {
+		e := events.NewEvent("claude_code", ext, base.Add(time.Duration(i)*time.Minute), "w")
+		_, err := s.InsertEvent(e)
+		require.NoError(t, err)
+		eid, err := s.EventIDByExternalID("claude_code", ext)
+		require.NoError(t, err)
+		require.NoError(t, s.AddNarrativeEvents(a, []int64{eid}))
+		ids = append(ids, eid)
+	}
+
+	require.NoError(t, s.UnlinkNarrativeEvents(a, []int64{ids[0], ids[2]}))
+
+	n, err := s.NarrativeEventCount(a)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the un-named link survives")
+}
+
+func TestUnlinkNarrativeEvents_MissingLinkErrors(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	a, err := s.InsertNarrative(base, base.Add(time.Hour), "A", "s")
+	require.NoError(t, err)
+
+	err = s.UnlinkNarrativeEvents(a, []int64{999999})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no such link")
+}
+```
+
+And add to `internal/store/eligibility.go` (it belongs with the watermark it protects, not in the already-large `store.go`):
+
+```go
+// UnlinkNarrativeEvents removes specific event links from a narrative.
+func (s *Store) UnlinkNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return unlinkNarrativeEventsImpl(s.db, narrativeID, eventIDs)
+}
+
+func (t *Tx) UnlinkNarrativeEvents(narrativeID int64, eventIDs []int64) error {
+	return unlinkNarrativeEventsImpl(t.tx, narrativeID, eventIDs)
+}
+
+func unlinkNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+
+	for _, eventID := range eventIDs {
+		res, err := c.Exec(
+			`DELETE FROM narrative_events WHERE narrative_id = ? AND event_id = ?`,
+			narrativeID, eventID,
+		)
+		if err != nil {
+			return fmt.Errorf("unlinking event %d from narrative %d: %w", eventID, narrativeID, err)
+		}
+
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("checking rows affected unlinking event %d from narrative %d: %w", eventID, narrativeID, err)
+		}
+		if affected == 0 {
+			return fmt.Errorf("unlinking event %d from narrative %d: no such link", eventID, narrativeID)
+		}
+	}
+
+	return nil
+}
+```
+
+Note the signature takes **explicit event ids**, not "everything on narrative N". That is deliberate: Task 6 may only unlink *eligible* events, and an all-of-narrative variant would let a caller ask for the laundering case in a single call. Making the unsafe thing inexpressible beats documenting it.
 
 - [ ] **Step 4: Run**
 

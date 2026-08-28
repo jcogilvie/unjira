@@ -47,6 +47,37 @@ A merge in mixed state therefore *succeeds*: uncommitted events move out, commit
 the posted comment remains true about exactly what it described. No refusal, no warning, no
 inconsistency.
 
+### The invariant is self-undermining unless restructures respect it
+
+Found by experiment while planning, and it is the sharpest hazard in this design.
+
+The watermark is **per narrative**: `EligibleEventIDs` compares an event's `linked_at` against
+*that narrative's* `max(executed_at)`. So relinking a frozen event onto a narrative that has never
+committed makes it eligible again — proven directly:
+
+```
+BEFORE:                on A eligible=[]  (empty = frozen)
+AFTER relink onto B:   on B eligible=[1]
+CONFIRMED: frozen on A, eligible on B — the watermark is PER-NARRATIVE
+```
+
+**A merge could therefore launder a frozen event into an unfrozen one.** Not by deleting anything —
+`events` is append-only and untouched, and a `narrative_events` row is just
+`(narrative_id, event_id, linked_at)`, fully re-creatable. The damage is that the rule protecting
+committed work is defeated by the very operation it was meant to constrain, and nothing looks wrong:
+both narratives exist, the event exists, no error is raised. Every future pass then treats committed
+work as reshufflable, and A's posted comment describes work now attributed to B.
+
+**Resolution: a restructure only ever relinks eligible events. Frozen events stay where they are.**
+This makes the code match the invariant as already stated ("frozen events cannot move") rather than
+patching around it. A merge in mixed state moves the uncommitted half and leaves A holding exactly
+the events its comment described — which is what the table above already promises.
+
+Rejected: carrying `linked_at` across the relink (the destination's watermark is still NULL, so a
+preserved timestamp reads as eligible there anyway — it hides the laundering rather than preventing
+it), and making the watermark global across narratives (a stronger guarantee, but it would freeze
+events across unrelated narratives and is a bigger semantic change than this slice should make).
+
 **No schema change.** The watermark is
 `narrative_events.linked_at > max(actions.executed_at) for that narrative`. Both columns are written
 with `strftime('%Y-%m-%dT%H:%M:%fZ')` — verified identical, and deliberately so; `DeltaEvents`
@@ -183,8 +214,11 @@ without applying anything.
   been asked about, and only the writable-project scope stands between it and a write. On today's
   config that still means nothing outside DEVSBX — that gate is real — but a reviewer must not
   believe `Graduated: false` protects them here. **`--help` has to say this plainly**, and the flag
-  should refuse to run without `--dry-run` having been offered first... which is a design question,
-  not an implementation detail. Flagged: see Open questions.
+  should say so plainly in `--help`.
+
+  **Decided: ship it.** `--auto-approve` is a flag a human passes consciously — an available choice,
+  not a default or an inference. The gate exists to stop *unattended* writes; a person typing this
+  flag is attending. What it must not do is mislead, hence the `--help` wording above.
 
 ## Deferred to slice 7
 
@@ -215,14 +249,6 @@ exist**. `triage` grows a second phase when they do. `actions.feedback` is alrea
   PAAS-targeted action is refused while a DEVSBX one applies, which is the protection that actually
   exists.
 
-## Open questions
 
-**Should `--auto-approve` exist in the first release?** Now that it is clear the flag bypasses
-`Graduated` as well as the prompt (see above), it is the least-safe surface in this design: one
-command that applies an entire queue with only project scope in the way. The spec inherited it from
-the phase-1 spec, which was written before the gate's layering was this clear. Options: ship it with
-a loud `--help` warning; require an explicit `--yes-i-reviewed-the-dry-run`; or defer it until a
-real batch proves hand-review is too slow. **Left open rather than guessed at** — it wants the same
-deliberate decision `Graduated` itself got.
 - **`[t]arget` rejects an unwritable project**, inheriting PR #24's check rather than routing around
   it.
