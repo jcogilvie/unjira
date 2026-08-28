@@ -137,7 +137,7 @@ func TestUnlinkNarrativeEvents_RemovesOnlyTheNamedLinks(t *testing.T) {
 	a, err := s.InsertNarrative(base, base.Add(time.Hour), "A", "s")
 	require.NoError(t, err)
 
-	var ids []int64
+	ids := make([]int64, 0, 3)
 	for i, ext := range []string{"u:1", "u:2", "u:3"} {
 		e := events.NewEvent("claude_code", ext, base.Add(time.Duration(i)*time.Minute), "w")
 		_, err := s.InsertEvent(e)

@@ -11,6 +11,9 @@ import (
 // Verb is one disposition a reviewer chooses for one action.
 type Verb string
 
+// The eight dispositions. Single letters at the prompt are a r e m s k t q,
+// all distinct — skip takes k precisely because s belongs to split, and a
+// collision would make one disposition unreachable.
 const (
 	VerbApprove Verb = "approve"
 	VerbReject  Verb = "reject"
@@ -78,6 +81,8 @@ func (s *Session) Run() error {
 			return fmt.Errorf("prompting for action %d: %w", a.ID, err)
 		}
 		switch d.Verb {
+		case VerbApprove, VerbReject, VerbSkip, VerbQuit:
+			// Recorded below; nothing to do but advance.
 		case VerbEdit, VerbMerge, VerbSplit, VerbTarget:
 			// These do work rather than merely recording a disposition. The
 			// result replaces the affected actions and is re-presented, since

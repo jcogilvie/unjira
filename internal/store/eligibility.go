@@ -73,6 +73,10 @@ func (s *Store) UnlinkNarrativeEvents(narrativeID int64, eventIDs []int64) error
 	return unlinkNarrativeEventsImpl(s.db, narrativeID, eventIDs)
 }
 
+// UnlinkNarrativeEvents is the *Tx-scoped variant of
+// (*Store).UnlinkNarrativeEvents. A restructure uses it so the unlink and the
+// replacing link land in one transaction: a crash between them would leave the
+// events attached to neither narrative.
 func (t *Tx) UnlinkNarrativeEvents(narrativeID int64, eventIDs []int64) error {
 	return unlinkNarrativeEventsImpl(t.tx, narrativeID, eventIDs)
 }
