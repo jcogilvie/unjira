@@ -818,6 +818,27 @@ func prepareExtend(
 // pipeline_lock lease is what actually prevents a concurrent second writer,
 // but re-reading under the transaction costs nothing and avoids relying on
 // that lease being the *only* thing standing between the two reads.
+// relinkEvents moves eventIDs onto narrativeID, removing any link each event
+// has to a DIFFERENT narrative first.
+//
+// AddNarrativeEvents alone is INSERT OR IGNORE: it adds the new link and never
+// removes the old one. That is correct for a first assignment and wrong for a
+// reassignment — and reassignment is now reachable, because uncommitted events
+// stay eligible for re-clustering as later passes learn more (see
+// store.EligibleEventIDs). Without this, a re-clustered event ends up linked to
+// two narratives: the source looks alive, keeps feeding future Cluster calls as
+// context, and post-boundary history double-counts it — which is exactly how
+// compaction folded the wrong number of events before this existed.
+func relinkEvents(tx *store.Tx, narrativeID int64, eventIDs []int64) error {
+	for _, eventID := range eventIDs {
+		if err := tx.UnlinkEventFromOtherNarratives(narrativeID, eventID); err != nil {
+			return err
+		}
+	}
+
+	return tx.AddNarrativeEvents(narrativeID, eventIDs)
+}
+
 func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 	r := p.result
 
@@ -827,7 +848,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 		if err != nil {
 			return Narrative{}, err
 		}
-		if err := tx.AddNarrativeEvents(id, p.eventIDs); err != nil {
+		if err := relinkEvents(tx, id, p.eventIDs); err != nil {
 			return Narrative{}, err
 		}
 		return Narrative{
@@ -848,7 +869,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 		if err := tx.ExtendNarrative(r.NarrativeID, newEnd, r.Summary); err != nil {
 			return Narrative{}, err
 		}
-		if err := tx.AddNarrativeEvents(r.NarrativeID, p.eventIDs); err != nil {
+		if err := relinkEvents(tx, r.NarrativeID, p.eventIDs); err != nil {
 			return Narrative{}, err
 		}
 		if p.doCompact {

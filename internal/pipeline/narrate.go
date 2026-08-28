@@ -196,28 +196,53 @@ func hydrateContextNarratives(s *store.Store, window correlator.TimeRange) ([]co
 			return nil, fmt.Errorf("hydrating context events for narrative %d: %w", row.ID, err)
 		}
 
-		// Deliberately does NOT partition by the commit watermark: watch must
-		// never reshuffle a prior narrative's events, so every context event
-		// stays context-only and EligibleEvents is left nil.
+		// Partition by the commit watermark: uncommitted events stay eligible
+		// for re-clustering, frozen ones do not.
 		//
-		// The watermark answers "what may a REVIEWER restructure" (see
-		// store.EligibleEventIDs), which is a different question from "what may
-		// an autonomous pass restructure". The answer to the second is nothing:
-		// watch extends narratives, it does not relitigate them, and that is
-		// what makes a narrative a stable substrate for every later pass.
-		// internal/triage builds its own Narratives WITH EligibleEvents; this
-		// path is the reason watch's behaviour is provably unchanged rather
-		// than merely believed to be.
+		// watch runs are discrete, and the total floating (uncommitted) work is
+		// legitimately reshufflable until something commits — new events can
+		// change where a boundary belongs, and refusing to revise would make
+		// every early mis-clustering permanent until a human fixed it by hand.
+		// What cannot move is work a tracker mutation already describes; that is
+		// what store.EligibleEventIDs draws the line at.
+		//
+		// An event must land in exactly one slice. In both would list it twice
+		// in one prompt and invite assigning a frozen event by index.
+		eligibleIDs, err := s.EligibleEventIDs(row.ID)
+		if err != nil {
+			return nil, fmt.Errorf("resolving eligible events for narrative %d: %w", row.ID, err)
+		}
+
+		eligible := make(map[int64]bool, len(eligibleIDs))
+		for _, id := range eligibleIDs {
+			eligible[id] = true
+		}
+
+		var frozen, assignable []correlator.Event
+		for _, e := range contextEvents {
+			id, err := s.EventIDByExternalID(e.Source, e.ExternalID)
+			if err != nil {
+				return nil, fmt.Errorf("resolving event id for %s/%s: %w", e.Source, e.ExternalID, err)
+			}
+
+			if eligible[id] {
+				assignable = append(assignable, e)
+			} else {
+				frozen = append(frozen, e)
+			}
+		}
+
 		out = append(out, correlator.Narrative{
-			ID:          row.ID,
-			WindowStart: row.WindowStart,
-			WindowEnd:   row.WindowEnd,
-			Title:       row.Title,
-			Summary:     row.Summary,
-			IssueKey:    row.IssueKey,
-			Confidence:  row.Confidence,
-			Status:      row.Status,
-			Events:      contextEvents,
+			ID:             row.ID,
+			WindowStart:    row.WindowStart,
+			WindowEnd:      row.WindowEnd,
+			Title:          row.Title,
+			Summary:        row.Summary,
+			IssueKey:       row.IssueKey,
+			Confidence:     row.Confidence,
+			Status:         row.Status,
+			Events:         frozen,
+			EligibleEvents: assignable,
 		})
 	}
 
@@ -348,13 +373,42 @@ func collectCompactions(
 
 	priorVisible := make(map[int64]int, len(existing))
 	for _, n := range existing {
-		priorVisible[n.ID] = len(n.Events)
+		// BOTH halves: hydrateContextNarratives splits a narrative's visible
+		// events into Events (frozen by the commit watermark) and
+		// EligibleEvents (still reshufflable). "Visible as context before this
+		// pass" is the union — counting only Events under-reports V0 and makes
+		// EventsFolded too small, which is exactly what
+		// TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal caught
+		// when eligibility was introduced.
+		priorVisible[n.ID] = len(n.Events) + len(n.EligibleEvents)
+	}
+
+	// K counts only events NOT already visible on that narrative. Persist's
+	// incoming events used to be exclusively previously-unlinked, so V0 and K
+	// could never overlap; with eligibility, a narrative's own eligible event
+	// can come back assigned to itself, appearing in both V0 and r.Events.
+	// Counting it twice would inflate EventsFolded.
+	alreadyVisible := make(map[int64]map[string]bool, len(existing))
+	for _, n := range existing {
+		seen := make(map[string]bool, len(n.Events)+len(n.EligibleEvents))
+		for _, e := range n.Events {
+			seen[e.Source+"\x00"+e.ExternalID] = true
+		}
+		for _, e := range n.EligibleEvents {
+			seen[e.Source+"\x00"+e.ExternalID] = true
+		}
+		alreadyVisible[n.ID] = seen
 	}
 
 	incomingCount := make(map[int64]int, len(clustered))
 	for _, r := range clustered {
-		if r.Kind == correlator.ClusterExtends {
-			incomingCount[r.NarrativeID] += len(r.Events)
+		if r.Kind != correlator.ClusterExtends {
+			continue
+		}
+		for _, e := range r.Events {
+			if !alreadyVisible[r.NarrativeID][e.Source+"\x00"+e.ExternalID] {
+				incomingCount[r.NarrativeID]++
+			}
 		}
 	}
 

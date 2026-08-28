@@ -331,23 +331,26 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	assert.Equal(t, 7, totalLinked, "e1 through e7 are all still linked; compaction never deletes rows")
 }
 
-// TestHydrateContextNarratives_NeverMakesPriorEventsAssignable pins the line
-// between the autonomous and supervised paths.
+// TestHydrateContextNarratives_UncommittedPriorEventsAreAssignable pins the
+// line the commit watermark actually draws.
 //
-// store.EligibleEventIDs answers "what may a REVIEWER restructure" — anything
-// linked after the narrative's last committed action. That is the right rule for
-// triage and the wrong one for watch: an autonomous pass must extend narratives,
-// not relitigate them, or every interval becomes a re-clustering opportunity and
-// narratives stop being a stable substrate.
+// watch runs are discrete: a reviewer may run it a dozen times building a bolus
+// of work, or once right before triage. The total floating (uncommitted) work is
+// legitimately reshufflable the whole time, because later events can change where
+// a boundary belongs — refusing to revise would make every early mis-clustering
+// permanent until a human fixed it by hand, which is the compounding failure
+// this design exists to avoid.
 //
-// The first draft of the commit-watermark change wired eligibility in here, on
-// the assumption that prior narratives normally have committed actions. They do
-// not — Graduated ships false, so a supervised deployment has narratives with
-// uncommitted work indefinitely. That made every prior narrative reshufflable by
-// watch. TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal caught it
-// (the model's event_indices resolved to already-linked events), and this test
-// exists so the mistake cannot come back quietly.
-func TestHydrateContextNarratives_NeverMakesPriorEventsAssignable(t *testing.T) {
+// What may NOT move is work a tracker mutation already describes. That is the
+// only line, and store.EligibleEventIDs draws it.
+//
+// Written first as its own inverse ("watch must never reshuffle priors") on the
+// theory that autonomous re-clustering was unsafe. It is not: the failing test
+// that prompted that theory
+// (TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal) was reporting a
+// broken MECHANISM — collectCompactions counted only n.Events for V0 after
+// hydration started splitting the slices — not a broken policy.
+func TestHydrateContextNarratives_UncommittedPriorEventsAreAssignable(t *testing.T) {
 	s := narrateStore(t)
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 
@@ -360,23 +363,24 @@ func TestHydrateContextNarratives_NeverMakesPriorEventsAssignable(t *testing.T) 
 	_, err := pipeline.RunNarrate(t.Context(), s, client, narrateConfig(), window1, pipeline.NarrateOptions{})
 	require.NoError(t, err)
 
-	// Second pass: the prior narrative has NO committed action, so its events
-	// are "eligible" by the watermark — and must still not be assignable here.
 	seedNarrateEvent(t, s, "h2", "new work", base.Add(2*time.Minute))
 	client.responses = append(client.responses, `[{"kind":"new","title":"T2","summary":"s2","event_indices":[0]}]`)
-	window2 := correlator.TimeRange{Start: base.Add(time.Minute), End: base.Add(3 * time.Minute)}
+	// window2 starts at base so it OVERLAPS narrative 1's window — otherwise
+	// NarrativesOverlapping excludes it and there is no prior narrative in the
+	// prompt to be assignable or not, which would make this test vacuous.
+	window2 := correlator.TimeRange{Start: base, End: base.Add(3 * time.Minute)}
 
 	_, err = pipeline.RunNarrate(t.Context(), s, client, narrateConfig(), window2, pipeline.NarrateOptions{})
 	require.NoError(t, err)
 
-	// The second prompt's numbered section must contain ONLY the in-window
-	// event. If a prior narrative's events were assignable, "prior work" would
-	// appear above the CONTEXT ONLY marker.
 	require.GreaterOrEqual(t, len(client.prompts), 2)
-	numbered, _, found := strings.Cut(client.prompts[1], "Existing narratives (CONTEXT ONLY):")
+	numbered, context, found := strings.Cut(client.prompts[1], "Existing narratives (CONTEXT ONLY):")
 	require.True(t, found, "the prompt must still have both sections")
 
 	assert.Contains(t, numbered, "new work", "the in-window event is assignable")
-	assert.NotContains(t, numbered, "prior work",
-		"watch must never make a prior narrative's events assignable, committed or not")
+	assert.Contains(t, numbered, "prior work",
+		"the prior narrative has no committed action, so its events stay reshufflable")
+	assert.NotContains(t, context, "prior work",
+		"an eligible event must appear ONCE, in the numbered section — listing it twice would let "+
+			"the model assign it by index while also treating it as immovable context")
 }

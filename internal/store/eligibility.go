@@ -102,3 +102,29 @@ func unlinkNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) er
 
 	return nil
 }
+
+// UnlinkEventFromOtherNarratives removes this event's links to every narrative
+// except keepNarrativeID.
+//
+// Exists because correlator.Persist assigns events with AddNarrativeEvents
+// (INSERT OR IGNORE), which adds a link and never removes one. That is right for
+// a first assignment and wrong for a REASSIGNMENT — and reassignment is
+// reachable now that uncommitted events stay eligible for re-clustering as later
+// passes learn more. Without this, a re-clustered event is linked to two
+// narratives at once: the source narrative looks alive, keeps being fed to future
+// Cluster calls as context, and its post-boundary history double-counts the
+// event, so compaction folds the wrong number.
+//
+// Silent when there is nothing to remove, unlike UnlinkNarrativeEvents: a first
+// assignment legitimately has no prior link, and this runs on every assignment.
+func (t *Tx) UnlinkEventFromOtherNarratives(keepNarrativeID, eventID int64) error {
+	if _, err := t.tx.Exec(
+		`DELETE FROM narrative_events WHERE event_id = ? AND narrative_id != ?`,
+		eventID, keepNarrativeID,
+	); err != nil {
+		return fmt.Errorf("unlinking event %d from narratives other than %d: %w",
+			eventID, keepNarrativeID, err)
+	}
+
+	return nil
+}
