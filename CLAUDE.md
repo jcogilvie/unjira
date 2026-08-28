@@ -48,6 +48,32 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   but *authorization* to call them lives in the review queue / autonomy graduation, never in the
   client.
 
+## Keep the docs true in the PR that changes the code
+
+Not as a follow-up task. A 2026-08-27 audit found the README claiming **"Status: phase 0 (observe
+only) / Zero write risk"** while `gate.Applier` was reachable from two shipped commands and had
+already written to real Jira — the most load-bearing paragraph in the repo for a newcomer, and
+materially false. Two spec files said `Status: design` for work that had merged. Every instance
+traced to the same cause: landing a PR without touching the docs it invalidated.
+
+So, in the same PR:
+
+- **`README.md`** — if you changed the CLI surface, a config key, the pipeline's shape, a package
+  layout, or anything in "Design decisions (locked)". The Status section especially: it states what
+  unjira *can do to someone's Jira*, so a stale one is a safety problem, not a tidiness one.
+- **The design spec** — move `Status: design` to `## Status: landed <date>` with the verification
+  evidence (what you ran, what it printed) and any deviation from the design. Leave the original
+  "open questions" as written rather than editing them into agreement with what shipped; the record
+  of what was uncertain is worth more than a doc that looks prescient.
+- **`docs/design-notes.md`** — only when you hit a *new* failure mode worth a numbered incident.
+  This file is why-we-are-shaped-this-way, not a changelog.
+- **This file** — when an architecture invariant changes.
+
+A doc claim that can be checked should be checked. "602 assertions pass" and "the write path is
+gated" are both verifiable; write them only after running the thing, and quote what it printed. A
+plausible-looking number nobody measured is the same defect as a stale status line, just harder to
+notice.
+
 ## Conventions
 
 Full Go style — CLI parsing, error handling, testing idioms, package layout, linting, build — is
