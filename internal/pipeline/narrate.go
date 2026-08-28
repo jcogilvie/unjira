@@ -196,6 +196,18 @@ func hydrateContextNarratives(s *store.Store, window correlator.TimeRange) ([]co
 			return nil, fmt.Errorf("hydrating context events for narrative %d: %w", row.ID, err)
 		}
 
+		// Deliberately does NOT partition by the commit watermark: watch must
+		// never reshuffle a prior narrative's events, so every context event
+		// stays context-only and EligibleEvents is left nil.
+		//
+		// The watermark answers "what may a REVIEWER restructure" (see
+		// store.EligibleEventIDs), which is a different question from "what may
+		// an autonomous pass restructure". The answer to the second is nothing:
+		// watch extends narratives, it does not relitigate them, and that is
+		// what makes a narrative a stable substrate for every later pass.
+		// internal/triage builds its own Narratives WITH EligibleEvents; this
+		// path is the reason watch's behaviour is provably unchanged rather
+		// than merely believed to be.
 		out = append(out, correlator.Narrative{
 			ID:          row.ID,
 			WindowStart: row.WindowStart,

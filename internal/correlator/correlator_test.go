@@ -1074,3 +1074,114 @@ func TestCluster_TokenEstimateIsNotOptimistic(t *testing.T) {
 			"instead of bisecting",
 		worstObservedCharsPerToken, stats.EstimatedTokens, budgetedChars, promptChars)
 }
+
+// TestCluster_EligibleNarrativeEventsAreAssignable is the prompt-level half of
+// the commit watermark (store.EligibleEventIDs is the data half). A narrative's
+// eligible events must appear in the NUMBERED section the model may assign
+// from; its frozen events must stay in the context section without indices.
+//
+// This is the safety property, so it is asserted on prompt content rather than
+// on a return value: if a frozen event ever gained an index, the model could
+// reparent work a posted comment already described.
+func TestCluster_EligibleNarrativeEventsAreAssignable(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	existing := []correlator.Narrative{{
+		ID: 9, Title: "Cache rework", Summary: "Reworking the shared cache",
+		WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+		Events: []correlator.Event{
+			mustEvent(t, "github", "pr-412", "FROZEN committed work", base.Add(-2*time.Hour)),
+		},
+		EligibleEvents: []correlator.Event{
+			mustEvent(t, "github", "pr-500", "ELIGIBLE uncommitted work", base.Add(-1*time.Hour)),
+		},
+	}}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "in-window work", base.Add(5*time.Minute)),
+	}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+	require.NoError(t, err)
+	require.Len(t, llm.prompts, 1)
+
+	prompt := llm.prompts[0]
+	toCluster, context, found := strings.Cut(prompt, "Existing narratives (CONTEXT ONLY):")
+	require.True(t, found, "the prompt must still have both labeled sections")
+
+	assert.Contains(t, toCluster, "ELIGIBLE uncommitted work",
+		"an eligible narrative event must be numbered and assignable")
+	assert.NotContains(t, context, "ELIGIBLE uncommitted work",
+		"an eligible event must not ALSO appear as context — it would be listed twice")
+
+	assert.Contains(t, context, "FROZEN committed work",
+		"a frozen event stays in the context section")
+	assert.NotContains(t, toCluster, "FROZEN committed work",
+		"a frozen event must never be assignable: a posted comment already describes it")
+}
+
+// TestCluster_NoEligibleEventsMatchesTodaysBehaviour pins the compatibility
+// half: with EligibleEvents empty — every existing narrative fully committed,
+// which is watch's normal case — the prompt is exactly what it was before this
+// change. This is what makes "the invariant subsumes the old rule" a checked
+// claim rather than an assertion.
+func TestCluster_NoEligibleEventsMatchesTodaysBehaviour(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	existing := []correlator.Narrative{{
+		ID: 9, Title: "Cache rework", Summary: "Reworking the shared cache",
+		WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+		Events: []correlator.Event{
+			mustEvent(t, "github", "pr-412", "PR #412 add cache layer", base.Add(-2*time.Hour)),
+		},
+		// EligibleEvents deliberately nil.
+	}}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "debugging cache eviction", base.Add(5*time.Minute)),
+	}
+	llm := &fakeLLM{responses: []string{"[]"}}
+
+	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+	require.NoError(t, err)
+
+	prompt := llm.prompts[0]
+	toCluster, _, _ := strings.Cut(prompt, "Existing narratives (CONTEXT ONLY):")
+	assert.NotContains(t, toCluster, "PR #412 add cache layer",
+		"with nothing eligible, no existing-narrative event is assignable")
+	assert.Contains(t, prompt, "CONTEXT ONLY")
+}
+
+// TestCluster_EligibleEventIndexResolvesToTheRightEvent guards the one silent
+// failure this change could introduce: the prompt numbering a combined slice
+// while the parser resolves against the in-window slice alone. The model here
+// picks index 1 — the eligible narrative event, not any in-window event — so a
+// mismatched index space would either error or return the wrong event.
+func TestCluster_EligibleEventIndexResolvesToTheRightEvent(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	existing := []correlator.Narrative{{
+		ID: 9, Title: "Cache rework", Summary: "s",
+		WindowStart: base.Add(-2 * time.Hour), WindowEnd: base,
+		EligibleEvents: []correlator.Event{
+			mustEvent(t, "github", "pr-500", "THE ELIGIBLE ONE", base.Add(-1*time.Hour)),
+		},
+	}}
+	inWindow := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "in-window work", base.Add(5*time.Minute)),
+	}
+	// index 0 = in-window, index 1 = the eligible narrative event.
+	llm := &fakeLLM{responses: []string{
+		`[{"kind":"extends","narrative_id":9,"title":"t","summary":"s","event_indices":[1]}]`,
+	}}
+
+	got, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
+
+	require.NoError(t, err, "index 1 must be in range: the parser sees the combined slice")
+	require.Len(t, got, 1)
+	require.Len(t, got[0].Events, 1)
+	assert.Equal(t, "THE ELIGIBLE ONE", got[0].Events[0].Summary,
+		"index 1 must resolve to the eligible narrative event, not an in-window one")
+}

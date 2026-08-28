@@ -330,3 +330,53 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, 7, totalLinked, "e1 through e7 are all still linked; compaction never deletes rows")
 }
+
+// TestHydrateContextNarratives_NeverMakesPriorEventsAssignable pins the line
+// between the autonomous and supervised paths.
+//
+// store.EligibleEventIDs answers "what may a REVIEWER restructure" — anything
+// linked after the narrative's last committed action. That is the right rule for
+// triage and the wrong one for watch: an autonomous pass must extend narratives,
+// not relitigate them, or every interval becomes a re-clustering opportunity and
+// narratives stop being a stable substrate.
+//
+// The first draft of the commit-watermark change wired eligibility in here, on
+// the assumption that prior narratives normally have committed actions. They do
+// not — Graduated ships false, so a supervised deployment has narratives with
+// uncommitted work indefinitely. That made every prior narrative reshufflable by
+// watch. TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal caught it
+// (the model's event_indices resolved to already-linked events), and this test
+// exists so the mistake cannot come back quietly.
+func TestHydrateContextNarratives_NeverMakesPriorEventsAssignable(t *testing.T) {
+	s := narrateStore(t)
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+
+	seedNarrateEvent(t, s, "h1", "prior work", base)
+	client := &narrateLLM{
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+	}
+	window1 := correlator.TimeRange{Start: base, End: base.Add(time.Minute)}
+
+	_, err := pipeline.RunNarrate(t.Context(), s, client, narrateConfig(), window1, pipeline.NarrateOptions{})
+	require.NoError(t, err)
+
+	// Second pass: the prior narrative has NO committed action, so its events
+	// are "eligible" by the watermark — and must still not be assignable here.
+	seedNarrateEvent(t, s, "h2", "new work", base.Add(2*time.Minute))
+	client.responses = append(client.responses, `[{"kind":"new","title":"T2","summary":"s2","event_indices":[0]}]`)
+	window2 := correlator.TimeRange{Start: base.Add(time.Minute), End: base.Add(3 * time.Minute)}
+
+	_, err = pipeline.RunNarrate(t.Context(), s, client, narrateConfig(), window2, pipeline.NarrateOptions{})
+	require.NoError(t, err)
+
+	// The second prompt's numbered section must contain ONLY the in-window
+	// event. If a prior narrative's events were assignable, "prior work" would
+	// appear above the CONTEXT ONLY marker.
+	require.GreaterOrEqual(t, len(client.prompts), 2)
+	numbered, _, found := strings.Cut(client.prompts[1], "Existing narratives (CONTEXT ONLY):")
+	require.True(t, found, "the prompt must still have both sections")
+
+	assert.Contains(t, numbered, "new work", "the in-window event is assignable")
+	assert.NotContains(t, numbered, "prior work",
+		"watch must never make a prior narrative's events assignable, committed or not")
+}
