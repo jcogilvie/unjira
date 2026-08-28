@@ -368,12 +368,57 @@ slice starts — this is not a fixed waterfall plan.
    interface was split (`TaskReader` + `TaskWriter`, with `TaskTracker` the composite) so that this
    slice's propose-never-apply rule is enforced by the compiler rather than by convention. Calling
    `AddComment` from the reconciler is a build error, not a code-review catch.
-5. **Auto-commit gate + `watch`** — wires collect → correlator → reconciler → gate into one
-   command, `--dry-run` support.
-6. **`actions`/`rules` primitives + `triage`** — the human-facing surface, built on the
-   primitives; in-session rework loop; `--auto-approve`/`--refresh`/`--dry-run`.
+5. **Auto-commit gate + `watch`** — ✅ landed. `config.AutoCommit` (`Graduated` false for every
+   action type, and unjira has no code path that writes it), `internal/gate` (pure `Decide` plus an
+   `Applier` holding a `TaskWriter`), `pipeline.RunAutoCommit`, and the `watch` interval loop with
+   `--once`/`--dry-run`/graceful shutdown. See
+   `docs/superpowers/specs/2026-08-26-watch-autocommit-design.md`.
+
+   Two things that turned out to matter more than the code:
+
+   - **`reconciler.Persist` returns the rows it wrote**, because the obvious accessor is wrong:
+     `ActionsByStatus("proposed")` returns every queued action including ones from earlier passes a
+     human has not triaged, so auto-committing those would apply decisions still under
+     consideration. "Fresh this pass" is structural, not something a caller must remember.
+   - **The all-or-nothing precondition is `reconcileErr == nil`, not `len(results) > 0`.** Reconcile
+     isolates failures per narrative and returns *both* results and an error, so the results look
+     usable when they are partial.
+
+   Unblocked by `llm.api_key_helper`
+   (`docs/superpowers/specs/2026-08-26-llm-credential-helper-design.md`) — a loop cannot run
+   unattended against a gateway issuing short-lived tokens, so credential refresh was a hard
+   prerequisite, not a nicety.
+
+   **The apply path is proven against real Jira** (`internal/live/autocommit_test.go`): a graduated
+   `comment` posted to a DEVSBX issue and was read back; an ungraduated one at 0.99 confidence wrote
+   nothing; a real 404 recorded a real reason. Cleanup verified through a path independent of
+   unjira's own client.
+6. **`actions`/`rules` primitives + `triage`** — 🚧 first half landed. `unjira actions list
+   [--json] [--status]` and `actions decide <id> --approve|--reject|--edit` shipped, splitting the
+   slice at the seam this spec already draws (`triage` is "built on the primitives above"), so the
+   queue became viewable — and an auto-commit failure visible — before the interactive loop exists.
+   See `docs/superpowers/specs/2026-08-27-actions-primitives-design.md`.
+
+   `--approve` reuses `gate.Applier` rather than adding a second apply path, and refuses an
+   already-`applied` action (re-approving would double-post a comment). It deliberately allows
+   `failed` → approve: the gate rightly refuses to retry failed writes *automatically*, but a human
+   retrying after fixing the cause is a different act.
+
+   Landed with it: **`actions.error`**, because a `failed` action recorded *that* it failed and never
+   *why* — the reason was built in `Applier.Apply` and destroyed at four separate boundaries, so the
+   surface built to make failures visible could only ever report "it failed." See
+   `docs/superpowers/specs/2026-08-27-failure-reason-capture-design.md`.
+
+   Still open in this slice: **`triage`** (the interactive batch loop, in-session rework,
+   `--auto-approve`/`--refresh`/`--dry-run`) and **`unjira rules list|decide`**, which needs slice 7
+   to have anything to list.
 7. **`internal/rules` (Distill) + learn-interval surfacing in `triage`** — rule proposal
-   generation and the keep/modify/reject write path.
+   generation and the keep/modify/reject write path. Not started.
+
+   Note the *reading* half of `rules/` is done: both the correlator and (as of this change) the
+   reconciler load their scope's rules and append them to their system prompts. Distillation — turning
+   reviewer `feedback` into new rule files — is what remains. `actions.feedback` is already persisted
+   by `actions decide --edit` precisely so this slice has an input.
 
 First slice scope (per the "one collector through the full loop" decision): everything above
 runs against `claude_code` events only. A second collector (GitHub, Slack) is explicitly future

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -34,7 +35,7 @@ func TestDraftProducesOneActionPerActionableLinkWithDistinctBodies(t *testing.T)
 	}
 
 	got, stats, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "added retry logic")}, verified)
+		[]events.Event{codeEvent("e1", "added retry logic")}, verified, nil)
 	require.NoError(t, err)
 
 	require.Len(t, got, 2)
@@ -58,7 +59,7 @@ func TestDraftFloorsConfidenceForAnIllegalTransition(t *testing.T) {
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "finished it")}, verified)
+		[]events.Event{codeEvent("e1", "finished it")}, verified, nil)
 	require.NoError(t, err)
 
 	require.Len(t, got, 1)
@@ -81,7 +82,7 @@ func TestDraftIgnoresAnUnrecognizedIssueKey(t *testing.T) {
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil)
 	require.NoError(t, err)
 
 	assert.Empty(t, got,
@@ -104,7 +105,7 @@ func TestDraftPromptCarriesTheDeltaAndEachLinksLiveState(t *testing.T) {
 	}}
 
 	_, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "the delta event summary")}, verified)
+		[]events.Event{codeEvent("e1", "the delta event summary")}, verified, nil)
 	require.NoError(t, err)
 
 	require.Len(t, client.prompts, 1)
@@ -129,7 +130,7 @@ func TestDraftRejectsAnUnknownActionType(t *testing.T) {
 	}}
 
 	_, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil)
 	require.Error(t, err, "an action type outside the closed set must be a loud error, not a silent drop")
 }
 
@@ -147,7 +148,7 @@ func TestDraftToleratesAMarkdownFenceDespiteTheSystemPromptForbiddingIt(t *testi
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 }
@@ -164,10 +165,65 @@ func TestDraftClampsAnOutOfRangeConfidence(t *testing.T) {
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.LessOrEqual(t, got[0].Confidence, 1.0, "a model confidence above 1 must be clamped, never trusted verbatim")
+}
+
+func TestDraftAppendsReconcilerRulesToTheSystemPrompt(t *testing.T) {
+	// The whole bug being fixed: a scope:reconciler rule file existed and was
+	// parsed by internal/rules, but nothing ever appended it to a prompt an
+	// LLM actually receives. Assert on the captured systemPrompt, not on any
+	// intermediate return value.
+	client := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"ok","confidence":0.7,"rationale":"r"}]`,
+	}}
+
+	narrative := store.NarrativeRow{ID: 1, Title: "t", Summary: "s"}
+	verified := []verifiedLink{{
+		Link:  store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
+		Issue: tasktracker.Issue{Key: "PROJ-1"},
+	}}
+	learnedRules := []rules.Rule{
+		{
+			Name: "bot-pr-noise", Scope: rules.ScopeReconciler, Confidence: rules.ConfidenceHigh,
+			Body: "Sentinel reconciler rule body.",
+		},
+	}
+
+	_, _, err := draft(t.Context(), client, narrative,
+		[]events.Event{codeEvent("e1", "did work")}, verified, learnedRules)
+	require.NoError(t, err)
+
+	require.Len(t, client.systemPrompts, 1)
+	assert.Contains(t, client.systemPrompts[0], "Sentinel reconciler rule body.",
+		"a scope:reconciler rule must reach the actual system prompt sent to the LLM")
+	assert.Contains(t, client.systemPrompts[0], "bot-pr-noise")
+}
+
+func TestDraftWithNoRulesLeavesSystemPromptUnchanged(t *testing.T) {
+	// No rules configured must not append a stray empty section — the
+	// baseline system prompt is exactly draftSystemPrompt, with no trailing
+	// whitespace or extra newlines.
+	client := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"ok","confidence":0.7,"rationale":"r"}]`,
+	}}
+
+	narrative := store.NarrativeRow{ID: 1, Title: "t", Summary: "s"}
+	verified := []verifiedLink{{
+		Link:  store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
+		Issue: tasktracker.Issue{Key: "PROJ-1"},
+	}}
+
+	_, _, err := draft(t.Context(), client, narrative,
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil)
+	require.NoError(t, err)
+
+	require.Len(t, client.systemPrompts, 1)
+	assert.Equal(t, draftSystemPrompt, client.systemPrompts[0],
+		"no rules must leave the system prompt byte-for-byte the fixed constant, "+
+			"not the constant plus an empty appended section")
 }
 
 func TestDraftRecordsUsageInStats(t *testing.T) {
@@ -183,7 +239,7 @@ func TestDraftRecordsUsageInStats(t *testing.T) {
 	}}
 
 	_, stats, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Calls, "addUsage must not be double-counted alongside an explicit stats.Calls++")
 	assert.EqualValues(t, 11, stats.PromptTokens)

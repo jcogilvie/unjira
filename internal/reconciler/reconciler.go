@@ -10,6 +10,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -32,6 +33,59 @@ var selectionRoles = []store.Role{
 	correlator.RoleMentioned,
 }
 
+// reconcileOptions holds Reconcile's optional configuration, threaded
+// through ReconcileOption. See ReconcileOption's doc comment for why this
+// exists despite Reconcile having exactly one option today.
+type reconcileOptions struct {
+	rules []rules.Rule
+}
+
+// ReconcileOption configures an optional Reconcile behaviour.
+//
+// Reconcile is deliberately given the same variadic-options shape as
+// correlator.Match/Cluster, not a plain positional parameter, even though it
+// has exactly one option today and exactly one production caller
+// (internal/pipeline/reconcile.go). Two reasons, not one:
+//
+//  1. Consistency across unjira's two LLM-drafting packages. Both Match and
+//     Reconcile receive "resolved values internal/pipeline already read from
+//     config" (rules, in both cases) rather than reading config themselves —
+//     that is the layering rule docs/go-conventions.md's constructor
+//     guidance and this package's own doc comment both state. An option
+//     that carries a resolved value across that boundary reads the same way
+//     in both packages instead of one taking a slice parameter and the
+//     other a functional option for the identical kind of value.
+//  2. Match/Cluster did not start with multiple options either —
+//     WithLinkExclusions and WithRules were added to Match over two separate
+//     commits, and WithClusterRules to Cluster in a third. Reconcile is
+//     exactly as young as Match was before its first option landed: a
+//     narrative-delta filter, a per-scope confidence override, or a second
+//     rules.Scope (estimator rules, once an estimator exists) are all
+//     plausible next additions here, none of which should force every
+//     existing call site (there is one today, but that will not stay true)
+//     to grow another positional argument.
+//
+// docs/go-conventions.md's constructor guidance ("reach for functional
+// options only once a constructor accumulates enough optional parameters
+// that positional args get unclear") is about *constructors* with several
+// required dependencies; Reconcile already takes 5 required parameters
+// before any option, and grows in the same direction Match did — a rule for
+// disambiguating required dependencies at construction time is not an
+// argument against options for what is, on its own terms, optional
+// configuration.
+type ReconcileOption func(*reconcileOptions)
+
+// WithRules supplies rules/ entries already filtered to
+// rules.ScopeReconciler (see rules.ForScope) so Reconcile can pass them
+// through to draft's system prompt. Like correlator.WithRules, Reconcile
+// only ever sees what the caller (internal/pipeline) already read from
+// config and resolved — it does not load or filter rules itself.
+func WithRules(learnedRules []rules.Rule) ReconcileOption {
+	return func(o *reconcileOptions) {
+		o.rules = learnedRules
+	}
+}
+
 // Reconcile drafts proposed actions for narratives with at least one
 // narrative_issues link of any role. A mentioned-only narrative is still
 // selected (see selectionRoles) so it gets a ReconcileResult documenting
@@ -51,7 +105,13 @@ func Reconcile(
 	tracker tasktracker.TaskReader,
 	client llm.Client,
 	cfg config.ReconcilerConfig,
+	opts ...ReconcileOption,
 ) ([]ReconcileResult, correlator.Stats, error) {
+	var o reconcileOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	limit := cfg.NarrativeLimit()
 
 	narratives, err := s.NarrativesWithActionableLinks(limit+1, selectionRoles)
@@ -77,7 +137,7 @@ func Reconcile(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg)
+		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg, o.rules)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -102,6 +162,7 @@ func reconcileOne(
 	client llm.Client,
 	narrative store.NarrativeRow,
 	cfg config.ReconcilerConfig,
+	learnedRules []rules.Rule,
 ) (ReconcileResult, correlator.Stats, error) {
 	result := ReconcileResult{NarrativeID: narrative.ID}
 
@@ -146,7 +207,7 @@ func reconcileOne(
 		return result, correlator.Stats{}, nil
 	}
 
-	drafted, stats, err := draft(ctx, client, narrative, delta, verified)
+	drafted, stats, err := draft(ctx, client, narrative, delta, verified, learnedRules)
 	if err != nil {
 		return result, stats, fmt.Errorf("drafting for narrative %d: %w", narrative.ID, err)
 	}

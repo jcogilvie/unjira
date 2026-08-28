@@ -40,8 +40,13 @@ type ReconcileRunResult struct {
 	Persisted []store.ActionRow
 }
 
-// RunReconcile runs one reconcile pass: validate cfg.Reconciler, draft
-// proposals, and (unless DryRun) persist them.
+// RunReconcile runs one reconcile pass: validate cfg.Reconciler, load
+// rules/'s rules.ScopeReconciler subset (see loadReconcilerRules) and hand
+// it to reconciler.WithRules, draft proposals, and (unless DryRun) persist
+// them. Loading rules/ here rather than in internal/reconciler follows the
+// identical split RunMatch already uses for the correlator's rules — see
+// match.go's doc comment: config parsing/loading is pipeline's job, and
+// reconciler only ever sees the resolved rules.Rule slice as a parameter.
 //
 // tracker is a tasktracker.TaskReader, not a TaskTracker: reconciler.Reconcile
 // already takes only a reader (the reconciler proposes and never applies), and
@@ -75,7 +80,13 @@ func RunReconcile(
 		return ReconcileRunResult{}, fmt.Errorf("invalid reconciler config: %w", err)
 	}
 
-	results, stats, reconcileErr := reconciler.Reconcile(ctx, s, tracker, client, cfg.Reconciler)
+	reconcilerRules, err := loadReconcilerRules(cfg)
+	if err != nil {
+		return ReconcileRunResult{}, err
+	}
+
+	results, stats, reconcileErr := reconciler.Reconcile(
+		ctx, s, tracker, client, cfg.Reconciler, reconciler.WithRules(reconcilerRules))
 	result := ReconcileRunResult{Results: results, Stats: stats, DryRun: opts.DryRun}
 
 	if opts.DryRun {

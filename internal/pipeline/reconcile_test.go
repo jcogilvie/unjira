@@ -9,6 +9,8 @@ package pipeline_test
 // RenderReconcileResult's tests are pure and need neither a store nor an LLM.
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -119,6 +121,129 @@ func TestRunReconcilePersistsWhenNotDryRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1, "a non-dry-run pass persists what it drafted")
 	assert.Equal(t, "proposed", got[0].Status)
+}
+
+// TestRunReconcile_LoadsReconcilerRulesAndAppendsThemToTheDraftingSystemPrompt
+// is the fix's end-to-end proof: a scope:reconciler rule file on disk must
+// reach the actual system prompt RunReconcile's LLM call sends — not merely
+// survive rules.Load/ForScope, which internal/rules already tested before
+// this fix existed.
+func TestRunReconcile_LoadsReconcilerRulesAndAppendsThemToTheDraftingSystemPrompt(t *testing.T) {
+	s := matchPipelineStore(t)
+	seedReconcilableNarrative(t, s, "PROJ-1")
+
+	tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+		"PROJ-1": {Key: "PROJ-1", Summary: "the ticket", StatusName: "In Progress"},
+	}}
+	llmFake := &pipelineFakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"the work landed","confidence":0.9,"rationale":"delta shows it"}]`,
+	}}
+
+	rulesDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "sentinel.md"), []byte(`---
+scope: reconciler
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Sentinel reconcile-time rule body.
+`), 0o600))
+
+	cfg := config.Config{
+		Reconciler: config.ReconcilerConfig{MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5},
+		Rules:      config.RulesConfig{Dir: rulesDir},
+	}
+
+	_, err := pipeline.RunReconcile(t.Context(), s, tracker, llmFake, cfg, pipeline.ReconcileOptions{})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, llmFake.systemPrompts)
+	assert.Contains(t, llmFake.systemPrompts[0], "Sentinel reconcile-time rule body.")
+	assert.Contains(t, llmFake.systemPrompts[0], "sentinel")
+}
+
+// TestRunReconcile_CorrelatorScopedRuleNeverReachesTheDraftingPrompt proves
+// scope filtering is real rather than "load everything and hope": a
+// scope:correlator rule living in the same rules/ directory as a
+// scope:reconciler rule must never reach RunReconcile's drafting prompt.
+func TestRunReconcile_CorrelatorScopedRuleNeverReachesTheDraftingPrompt(t *testing.T) {
+	s := matchPipelineStore(t)
+	seedReconcilableNarrative(t, s, "PROJ-1")
+
+	tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+		"PROJ-1": {Key: "PROJ-1", Summary: "the ticket", StatusName: "In Progress"},
+	}}
+	llmFake := &pipelineFakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"the work landed","confidence":0.9,"rationale":"delta shows it"}]`,
+	}}
+
+	rulesDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "correlator-only.md"), []byte(`---
+scope: correlator
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Sentinel correlator-only rule body.
+`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "reconciler-only.md"), []byte(`---
+scope: reconciler
+confidence: high
+learned: 2026-07-16
+source: test
+---
+
+Sentinel reconciler-only rule body.
+`), 0o600))
+
+	cfg := config.Config{
+		Reconciler: config.ReconcilerConfig{MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5},
+		Rules:      config.RulesConfig{Dir: rulesDir},
+	}
+
+	_, err := pipeline.RunReconcile(t.Context(), s, tracker, llmFake, cfg, pipeline.ReconcileOptions{})
+	require.NoError(t, err)
+
+	require.NotEmpty(t, llmFake.systemPrompts)
+	assert.NotContains(t, llmFake.systemPrompts[0], "Sentinel correlator-only rule body.",
+		"a scope:correlator rule must never reach the reconciler's drafting prompt")
+	assert.Contains(t, llmFake.systemPrompts[0], "Sentinel reconciler-only rule body.",
+		"the scope:reconciler rule in the same directory must still reach it")
+}
+
+// TestRunReconcile_MissingRulesDirIsANoOpNotAnError mirrors RunMatch's and
+// RunNarrate's identical guarantee (see match_test.go's
+// TestRunMatch_MissingRulesDirIsANoOpNotAnError): a fresh clone or a
+// deployment with no seeded rules/ must still run, cleanly, all the way
+// through drafting. The byte-for-byte "no stray appended section" assertion
+// for an empty rules set is pinned once, precisely, at the unit level —
+// internal/reconciler's TestDraftWithNoRulesLeavesSystemPromptUnchanged —
+// since draftSystemPrompt is unexported and this package intentionally has
+// no export_test.go shim reaching into internal/reconciler's internals
+// (unlike internal/correlator's, which internal/pipeline's own tests never
+// reach into either).
+func TestRunReconcile_MissingRulesDirIsANoOpNotAnError(t *testing.T) {
+	s := matchPipelineStore(t)
+	seedReconcilableNarrative(t, s, "PROJ-1")
+
+	tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+		"PROJ-1": {Key: "PROJ-1", Summary: "the ticket", StatusName: "In Progress"},
+	}}
+	llmFake := &pipelineFakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"the work landed","confidence":0.9,"rationale":"delta shows it"}]`,
+	}}
+
+	cfg := config.Config{
+		Reconciler: config.ReconcilerConfig{MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5},
+		Rules:      config.RulesConfig{Dir: filepath.Join(t.TempDir(), "does-not-exist")},
+	}
+
+	result, err := pipeline.RunReconcile(t.Context(), s, tracker, llmFake, cfg, pipeline.ReconcileOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Results, 1)
+	require.Len(t, result.Results[0].Proposed, 1)
 }
 
 func TestRenderReconcileResultNamesWhatWasSuppressedAndWhy(t *testing.T) {

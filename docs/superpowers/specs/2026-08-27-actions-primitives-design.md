@@ -11,7 +11,19 @@ unjira actions decide <id> --approve | --reject | --edit <text>
 human-facing surface, built on the primitives above." Splitting the slice that way means the queue
 becomes viewable — and an auto-commit failure becomes visible — before the interactive loop exists.
 
-Status: design. Unblocked by slice 5 (`watch` + the auto-commit gate, PR #17).
+## Status: landed 2026-08-27 (PR #20)
+
+`earthly +reviewable` green, 432 tests, 0 skipped. `actions list` surfaced the real 26-action
+backlog for the first time — only `list` was run against real data, since `decide` mutates the queue
+and (for `--approve`) Jira. The double-post guard was drilled rather than trusted: removing it fails
+`TestActionsDecide_ApproveOnAlreadyAppliedActionIsRefused`.
+
+**The open question below — where a failed write's reason lives — was closed immediately after, in
+PR #21.** A new `actions.error` column, deliberately separate from `feedback`. See
+`2026-08-27-failure-reason-capture-design.md`; the "Open questions" section here is kept as written
+for the record rather than edited into agreement with what shipped.
+
+Unblocked by slice 5 (`watch` + the auto-commit gate, PR #17).
 
 ## Why this is the urgent half
 

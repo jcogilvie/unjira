@@ -13,6 +13,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -341,6 +342,60 @@ func TestReconcileNeverWritesToTheTracker(t *testing.T) {
 
 	assert.Empty(t, tracker.writeCalls,
 		"this slice proposes and never applies; any write here is an architecture violation")
+}
+
+func TestReconcileWithNoOptionsIsValid(t *testing.T) {
+	// Mirrors correlator.Match/Cluster's "zero options is valid" guarantee:
+	// Reconcile must not require WithRules (or any future option) to be
+	// called.
+	s := reconcileStore(t)
+	tracker := &fakeTracker{
+		issues: map[string]tasktracker.Issue{
+			"PROJ-1": {Key: "PROJ-1", Summary: "the ticket", StatusCategory: tasktracker.StatusInProgress},
+		},
+	}
+
+	seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), codeEvent("e1", "wrote some code"))
+
+	llmClient := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"the work landed","confidence":0.9,"rationale":"delta shows it"}]`,
+	}}
+
+	results, _, err := Reconcile(t.Context(), s, tracker, llmClient, testConfig())
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Proposed, 1)
+}
+
+// TestReconcileWithRulesAppendsThemToTheDraftingSystemPrompt is the
+// end-to-end proof that a scope:reconciler rule reaches the LLM call
+// Reconcile ultimately makes via draft, through WithRules — not merely
+// through draft's own unit tests in draft_test.go.
+func TestReconcileWithRulesAppendsThemToTheDraftingSystemPrompt(t *testing.T) {
+	s := reconcileStore(t)
+	tracker := &fakeTracker{
+		issues: map[string]tasktracker.Issue{
+			"PROJ-1": {Key: "PROJ-1", Summary: "the ticket", StatusCategory: tasktracker.StatusInProgress},
+		},
+	}
+
+	seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), codeEvent("e1", "wrote some code"))
+
+	llmClient := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"the work landed","confidence":0.9,"rationale":"delta shows it"}]`,
+	}}
+	learnedRules := []rules.Rule{
+		{
+			Name: "bot-pr-noise", Scope: rules.ScopeReconciler, Confidence: rules.ConfidenceHigh,
+			Body: "Sentinel reconciler rule body.",
+		},
+	}
+
+	_, _, err := Reconcile(t.Context(), s, tracker, llmClient, testConfig(), WithRules(learnedRules))
+	require.NoError(t, err)
+
+	require.Len(t, llmClient.systemPrompts, 1)
+	assert.Contains(t, llmClient.systemPrompts[0], "Sentinel reconciler rule body.")
 }
 
 func TestReconcileDropsSelfAuthoredEventsBeforeComputingTheDelta(t *testing.T) {
