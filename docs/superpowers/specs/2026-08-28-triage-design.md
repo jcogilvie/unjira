@@ -164,9 +164,18 @@ without applying anything.
 - **`--refresh`** — `store.Acquire` (blocking; already exists) so triage reviews a completed pass
   rather than data a `watch` tick is mid-way through changing.
 - **`--auto-approve`** — runs the full flow and prints the batch, but approves without prompting.
-  **It bypasses the prompt, never the gates**: graduated, writable project, and confidence floor all
-  still apply at commit, so on today's config it would still write nothing outside DEVSBX. Worth
-  saying explicitly in `--help`, because the flag's name suggests more power than it has.
+  **What it does and does not bypass — corrected after reading the code, because the first draft of
+  this spec overstated it.** `gate.Applier.Apply` enforces exactly one gate: the writable-project
+  check. `Graduated` and `ConfidenceFloor` live in `gate.Decide`, which the human-approval path
+  (`actions decide --approve`) **never calls** — deliberately, per its doc comment: the auto-commit
+  gate governs *unattended* writes, and a human explicitly approving an action is not unattended.
+
+  So `--auto-approve` is stronger than "skip the prompt." It approves everything a human would have
+  been asked about, and only the writable-project scope stands between it and a write. On today's
+  config that still means nothing outside DEVSBX — that gate is real — but a reviewer must not
+  believe `Graduated: false` protects them here. **`--help` has to say this plainly**, and the flag
+  should refuse to run without `--dry-run` having been offered first... which is a design question,
+  not an implementation detail. Flagged: see Open questions.
 
 ## Deferred to slice 7
 
@@ -191,7 +200,20 @@ exist**. `triage` grows a second phase when they do. `actions.feedback` is alrea
 - **Merge in mixed state** keeps committed events on the original narrative and moves the rest.
 - **Session state machine** with a scripted prompter: dispositions accumulate, nothing applies before
   the final confirm, `q` abandons without writing.
-- **`--auto-approve` still respects all three gates** — asserted against a recording writer, since
-  the whole risk of the flag is someone assuming otherwise.
+- **`--auto-approve` respects the writable-project gate** — asserted against a recording writer.
+  Deliberately NOT asserted for `Graduated`/`ConfidenceFloor`: the approve path does not consult
+  them, and a test claiming otherwise would encode a false safety property. Instead, assert that a
+  PAAS-targeted action is refused while a DEVSBX one applies, which is the protection that actually
+  exists.
+
+## Open questions
+
+**Should `--auto-approve` exist in the first release?** Now that it is clear the flag bypasses
+`Graduated` as well as the prompt (see above), it is the least-safe surface in this design: one
+command that applies an entire queue with only project scope in the way. The spec inherited it from
+the phase-1 spec, which was written before the gate's layering was this clear. Options: ship it with
+a loud `--help` warning; require an explicit `--yes-i-reviewed-the-dry-run`; or defer it until a
+real batch proves hand-review is too slow. **Left open rather than guessed at** — it wants the same
+deliberate decision `Graduated` itself got.
 - **`[t]arget` rejects an unwritable project**, inheriting PR #24's check rather than routing around
   it.
