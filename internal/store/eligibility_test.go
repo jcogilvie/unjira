@@ -166,3 +166,99 @@ func TestUnlinkNarrativeEvents_MissingLinkErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no such link")
 }
+
+// TestEligibleEvents_IsTheRedraftDeltaThatDeltaEventsCannotBe is the reason
+// EligibleEvents exists at all. DeltaEvents is bounded by
+// max(actions.created_at), so the moment ANY action exists it returns nothing —
+// correct for "should we propose again", and exactly wrong for "redraft the
+// action that already exists", because the action being edited is itself what
+// suppresses its own source events.
+//
+// This test asserts BOTH accessors on the same fixture, so the contrast is the
+// assertion rather than a comment claiming it.
+func TestEligibleEvents_IsTheRedraftDeltaThatDeltaEventsCannotBe(t *testing.T) {
+	s := openStore(t)
+	nid, ids := seedNarrativeWithEvents(t, s, 2)
+
+	// A proposed action — the one a reviewer is about to edit.
+	_, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"first draft"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	delta, err := s.DeltaEvents(nid)
+	require.NoError(t, err)
+	assert.Empty(t, delta,
+		"DeltaEvents is bounded by max(created_at), so the action being edited hides its own events")
+
+	eligible, err := s.EligibleEvents(nid)
+	require.NoError(t, err)
+	assert.Len(t, eligible, len(ids),
+		"EligibleEvents is bounded by the COMMIT watermark, so a proposed action hides nothing")
+}
+
+// TestEligibleEvents_ExcludesWhatACommitAlreadyDescribed: the redraft delta
+// obeys the same watermark every restructure does, so an edit and a merge agree
+// about which events are still in play.
+func TestEligibleEvents_ExcludesWhatACommitAlreadyDescribed(t *testing.T) {
+	s := openStore(t)
+	nid, _ := seedNarrativeWithEvents(t, s, 2)
+
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"posted"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatus(id, "applied"))
+
+	time.Sleep(5 * time.Millisecond)
+
+	later := events.NewEvent("claude_code", "elig:later", time.Date(2026, 8, 28, 11, 0, 0, 0, time.UTC), "more work")
+	_, err = s.InsertEvent(later)
+	require.NoError(t, err)
+	laterID, err := s.EventIDByExternalID("claude_code", "elig:later")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(nid, []int64{laterID}))
+
+	got, err := s.EligibleEvents(nid)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1, "only the post-commit event is redraftable")
+	assert.Equal(t, "elig:later", got[0].ExternalID,
+		"a redraft must not re-describe work an applied comment already covered")
+}
+
+// TestEligibleEvents_AgreesWithEligibleEventIDs: the two accessors run the same
+// watermark predicate over the same rows. They are separate SQL statements, so a
+// change to one that missed the other would silently let an edit and a merge
+// disagree about eligibility.
+func TestEligibleEvents_AgreesWithEligibleEventIDs(t *testing.T) {
+	s := openStore(t)
+	nid, _ := seedNarrativeWithEvents(t, s, 3)
+
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"posted"}`, Status: "proposed",
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatus(id, "applied"))
+
+	time.Sleep(5 * time.Millisecond)
+	for i, ext := range []string{"agree:1", "agree:2"} {
+		e := events.NewEvent("claude_code", ext, time.Date(2026, 8, 28, 12, i, 0, 0, time.UTC), "w")
+		_, err := s.InsertEvent(e)
+		require.NoError(t, err)
+		eid, err := s.EventIDByExternalID("claude_code", ext)
+		require.NoError(t, err)
+		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	}
+
+	byID, err := s.EligibleEventIDs(nid)
+	require.NoError(t, err)
+	hydrated, err := s.EligibleEvents(nid)
+	require.NoError(t, err)
+
+	assert.Len(t, hydrated, len(byID),
+		"EligibleEvents and EligibleEventIDs must select the same links")
+}

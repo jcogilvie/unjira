@@ -1,6 +1,10 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/jcogilvie/unjira/internal/events"
+)
 
 // EligibleEventIDs returns the narrative's event links that may still be
 // reshuffled by a reviewer-driven re-cluster: those linked AFTER the
@@ -131,4 +135,51 @@ func (t *Tx) UnlinkEventFromOtherNarratives(keepNarrativeID, eventID int64) erro
 	}
 
 	return nil
+}
+
+// EligibleEvents returns the same links EligibleEventIDs selects, hydrated into
+// full events and ordered for reading (occurred_at, then id).
+//
+// This is the redraft delta, and it is deliberately NOT DeltaEvents. DeltaEvents
+// is bounded by max(actions.created_at), so once ANY action exists for a
+// narrative it returns nothing — which is right for "should we propose again"
+// and exactly wrong for "redraft the action that already exists," because the
+// action being edited is itself what suppresses its own source events. Verified
+// by probe: 1 event before inserting an action, 0 after.
+//
+// The commit watermark is the correct bound instead, and not merely as a
+// workaround: a redraft should describe every piece of work no tracker mutation
+// has claimed yet, which is what "linked after the last applied action" means.
+// It is the same invariant triage's restructures already run on, so an edit and
+// a merge agree about which events are still in play.
+func (s *Store) EligibleEvents(narrativeID int64) ([]events.Event, error) {
+	rows, err := s.db.Query(
+		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
+		 FROM narrative_events ne
+		 JOIN events e ON e.id = ne.event_id
+		 WHERE ne.narrative_id = ?
+		   AND (
+		     (SELECT max(executed_at) FROM actions
+		       WHERE narrative_id = ? AND status = 'applied') IS NULL
+		     OR ne.linked_at > (SELECT max(executed_at) FROM actions
+		       WHERE narrative_id = ? AND status = 'applied')
+		   )
+		 ORDER BY e.occurred_at, e.id`,
+		narrativeID, narrativeID, narrativeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying eligible events for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []events.Event
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning eligible event for narrative %d: %w", narrativeID, err)
+		}
+		out = append(out, e)
+	}
+
+	return out, rows.Err()
 }
