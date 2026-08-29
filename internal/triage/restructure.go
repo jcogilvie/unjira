@@ -1,9 +1,15 @@
 package triage
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/jcogilvie/unjira/internal/correlator"
+	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/reconciler"
+	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
 // commitState is whether unjira has already mutated the tracker for a
@@ -81,13 +87,41 @@ func hasCommittedAction(s *store.Store, narrativeID int64) (bool, error) {
 //
 // Lives here rather than in cmd/ so the operations are testable without
 // driving a terminal, and so cmd/unjira/triage.go stays a pure I/O shell.
+//
+// tracker is a TaskReader, not a TaskWriter or TaskTracker, and that is the
+// whole safety story for this type. Redrafting and retargeting must verify live
+// state (rules/intent-not-outcome.md) and must never apply anything — batch
+// apply's guarantee is that nothing reaches a tracker until the single
+// gate.Applier call after Confirm. Typing the field as a reader makes a write
+// from here fail to compile rather than relying on this comment.
 type StoreHandler struct {
-	store *store.Store
+	store   *store.Store
+	tracker tasktracker.TaskReader
+	client  llm.Client
+	rules   []rules.Rule
 }
 
 // NewStoreHandler builds the production Handler.
-func NewStoreHandler(s *store.Store) *StoreHandler {
-	return &StoreHandler{store: s}
+//
+// tracker/client may be nil, and that is a supported configuration rather than
+// an oversight: `--dry-run` passes no Handler at all, but a caller that could not
+// resolve a tracker (no default project configured, say) should still get a
+// working session for approve/reject/skip rather than no session. The verbs that
+// need those dependencies check for them and report themselves unavailable, the
+// same way a nil Handler already does.
+//
+// No context field: Handler's methods take one per call instead. A context stored
+// on a long-lived dependency outlives the call it was made for and cannot be
+// cancelled per-operation — golangci-lint's containedctx flags exactly that, and
+// heeding it here is right rather than suppressed, since a redraft is a
+// cancellable LLM round-trip.
+func NewStoreHandler(
+	s *store.Store,
+	tracker tasktracker.TaskReader,
+	client llm.Client,
+	learnedRules []rules.Rule,
+) *StoreHandler {
+	return &StoreHandler{store: s, tracker: tracker, client: client, rules: learnedRules}
 }
 
 // MergeNarratives moves the source narrative's eligible events onto the target,
@@ -151,21 +185,208 @@ func (h *StoreHandler) ResolveMergeTarget(aID, bID int64) (target, source int64,
 	)
 }
 
-// Redraft satisfies Handler. Not yet implemented: wiring it needs an llm.Client
-// and the narrative's verified links, which cmd/unjira has but this handler is
-// not yet given. Returns a clear error rather than a silent no-op so a reviewer
-// asking for an edit learns it is unavailable instead of believing it worked.
-func (h *StoreHandler) Redraft(_ store.ActionRow, _ string) (store.ActionRow, error) {
-	return store.ActionRow{}, fmt.Errorf(
-		"edit is not wired yet: reconciler.Redraft exists but this handler has no LLM client")
+// Redraft satisfies Handler: re-draft this action against the reviewer's
+// correction and return the PERSISTED replacement.
+//
+// Persisted, not just returned, and that is load-bearing. An in-memory
+// replacement has no id, and gate.Applier calls
+// UpdateActionStatusAndError(action.ID, ...) — which matches zero rows for id 0.
+// The failure would surface at APPLY time, after the reviewer already approved
+// the new text, while the original row sat at proposed forever. Probed:
+// "approved 1 action(s); first ID=0". So the write is part of the operation, not
+// a step a caller might forget.
+//
+// SupersedeAction does both halves in one transaction: it rules on the old row
+// (recording the reviewer's words in actions.feedback for slice 7's
+// rules.Distill) and inserts the replacement. Two live proposals for the same
+// work would let unjira post both.
+//
+// A narrative whose redraft yields several actions (a same_work pair) keeps only
+// the one matching this action's issue: the reviewer edited ONE action, and
+// silently replacing its sibling with text they never asked about would be a
+// worse surprise than declining.
+func (h *StoreHandler) Redraft(
+	ctx context.Context, action store.ActionRow, feedback string,
+) (store.ActionRow, error) {
+	if h.client == nil || h.tracker == nil {
+		return store.ActionRow{}, fmt.Errorf(
+			"edit is unavailable: this session has no LLM client or tracker")
+	}
+
+	drafted, _, err := reconciler.ReworkOne(
+		ctx, h.store, h.tracker, h.client, action.NarrativeID, feedback, h.rules)
+	if err != nil {
+		return store.ActionRow{}, err
+	}
+
+	replacement, err := pickForIssue(drafted, action.IssueKey)
+	if err != nil {
+		return store.ActionRow{}, err
+	}
+
+	row, err := h.persistReplacement(action, "edited", feedback, replacement)
+	if err != nil {
+		return store.ActionRow{}, err
+	}
+
+	return row, nil
+}
+
+// pickForIssue selects the redrafted action for issueKey.
+//
+// A redraft covers the whole narrative, so a same_work pair yields two actions
+// while the reviewer edited only one. Returning the wrong one would post text
+// about a different audience's ticket; returning both would replace an action
+// nobody asked to change. Erroring when the model dropped the edited issue
+// entirely beats substituting a sibling.
+func pickForIssue(drafted []reconciler.ProposedAction, issueKey string) (reconciler.ProposedAction, error) {
+	for _, d := range drafted {
+		if d.IssueKey == issueKey {
+			return d, nil
+		}
+	}
+
+	return reconciler.ProposedAction{}, fmt.Errorf(
+		"the redraft produced no action for %s (it returned %d action(s) for other issues); "+
+			"nothing was changed", issueKey, len(drafted))
+}
+
+// persistReplacement rules on the old row and inserts the new one atomically,
+// returning the replacement with its assigned id.
+//
+// Encodes the payload via reconciler.ActionPayload rather than building JSON
+// here: gate.Applier decodes with typed structs mirroring that exact shape, so a
+// second encoder would be a silent divergence — a triage-written payload the
+// applier could not read.
+func (h *StoreHandler) persistReplacement(
+	old store.ActionRow, ruling, feedback string, replacement reconciler.ProposedAction,
+) (store.ActionRow, error) {
+	payload, err := reconciler.ActionPayload(replacement)
+	if err != nil {
+		return store.ActionRow{}, err
+	}
+
+	row := store.ActionRow{
+		NarrativeID: old.NarrativeID,
+		Type:        string(replacement.Type),
+		IssueKey:    replacement.IssueKey,
+		Payload:     payload,
+		Confidence:  replacement.Confidence,
+		Rationale:   replacement.Rationale,
+		Status:      "proposed",
+	}
+
+	id, err := h.store.SupersedeAction(old.ID, ruling, feedback, row)
+	if err != nil {
+		return store.ActionRow{}, err
+	}
+	row.ID = id
+
+	return row, nil
+}
+
+// Retarget moves a narrative's primary link to a different issue and redrafts
+// against it — triage's [t]arget, for "right work, wrong ticket."
+//
+// Verifies the new issue before linking it. That is not defensive politeness: the
+// old link was verified by the pass that drafted this action, the new one never
+// was, and rules/verify-correlations.md is explicit that a stated key is not
+// trusted until confirmed. A typo'd key would otherwise become a stored link
+// pointing at nothing.
+//
+// The link is REPLACED, not added: the partial unique index
+// one_primary_per_narrative rejects a second primary row, so RemoveNarrativeIssue
+// must run first. Both in one transaction — a crash between them would leave the
+// narrative with no primary at all, which reads as untracked work and would put
+// it back in matching's backlog.
+//
+// provenance is ProvenanceReviewer: a human's assertion is not the same kind of
+// claim as a model's inference from a branch name, and later passes should be
+// able to tell them apart rather than treating this as just another guess.
+func (h *StoreHandler) Retarget(
+	ctx context.Context, action store.ActionRow, newKey string,
+) (store.ActionRow, error) {
+	if h.client == nil || h.tracker == nil {
+		return store.ActionRow{}, fmt.Errorf(
+			"target is unavailable: this session has no LLM client or tracker")
+	}
+
+	if newKey == action.IssueKey {
+		return store.ActionRow{}, fmt.Errorf(
+			"action %d already targets %s; nothing to retarget", action.ID, newKey)
+	}
+
+	if _, err := h.tracker.GetIssue(newKey); err != nil {
+		return store.ActionRow{}, fmt.Errorf(
+			"cannot retarget to %s: %w (the issue must exist before unjira will link work to it)",
+			newKey, err)
+	}
+
+	if err := h.relinkPrimary(action.NarrativeID, action.IssueKey, newKey); err != nil {
+		return store.ActionRow{}, err
+	}
+
+	drafted, _, err := reconciler.ReworkOne(
+		ctx, h.store, h.tracker, h.client, action.NarrativeID,
+		fmt.Sprintf("The reviewer reattributed this work from %s to %s. Draft for %s.",
+			action.IssueKey, newKey, newKey),
+		h.rules)
+	if err != nil {
+		return store.ActionRow{}, err
+	}
+
+	replacement, err := pickForIssue(drafted, newKey)
+	if err != nil {
+		return store.ActionRow{}, err
+	}
+
+	// "rejected", not "edited": the old action named the wrong issue, so it was
+	// not reworded — it was ruled against. slice 7 should learn from that
+	// distinction rather than seeing every triage correction as a wording tweak.
+	return h.persistReplacement(action, "rejected",
+		fmt.Sprintf("retargeted from %s to %s", action.IssueKey, newKey), replacement)
+}
+
+// relinkPrimary swaps the narrative's primary link, in one transaction.
+func (h *StoreHandler) relinkPrimary(narrativeID int64, oldKey, newKey string) error {
+	if err := h.store.WithTx(func(tx *store.Tx) error {
+		if oldKey != "" {
+			if err := tx.RemoveNarrativeIssue(narrativeID, oldKey); err != nil {
+				return err
+			}
+		}
+
+		return tx.AddNarrativeIssues(narrativeID, []store.NarrativeIssue{{
+			IssueKey:   newKey,
+			Role:       correlator.RolePrimary,
+			Provenance: string(correlator.ProvenanceReviewer),
+			Confidence: 1.0,
+			Connection: "",
+		}})
+	}); err != nil {
+		return fmt.Errorf("retargeting narrative %d from %s to %s: %w",
+			narrativeID, oldKey, newKey, err)
+	}
+
+	return nil
 }
 
 // Restructure satisfies Handler, dispatching merge/split/retarget.
 //
-// Only merge is implemented. Split and retarget report themselves unavailable
-// rather than silently doing nothing — a reviewer must not believe a
-// restructure happened when it did not.
-func (h *StoreHandler) Restructure(d Decision, batch []store.ActionRow) ([]store.ActionRow, error) {
+// Split is the one verb still unwired: unlike merge (which moves existing links)
+// and retarget (which replaces one), splitting requires re-running Cluster with
+// an instruction and persisting new narratives, so it is a correlator operation
+// rather than a store one. It reports itself unavailable rather than silently
+// doing nothing — a reviewer must not believe a restructure happened when it did
+// not.
+func (h *StoreHandler) Restructure(
+	_ context.Context, d Decision, batch []store.ActionRow,
+) ([]store.ActionRow, error) {
+	if d.Verb == VerbTarget {
+		return nil, fmt.Errorf(
+			"target is dispatched by Session directly, not through Restructure: this is a bug")
+	}
+
 	if d.Verb != VerbMerge {
 		return nil, fmt.Errorf("%s is not wired yet", d.Verb)
 	}

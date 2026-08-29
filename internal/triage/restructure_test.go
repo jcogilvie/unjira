@@ -77,7 +77,7 @@ func TestStoreHandler_MergeMovesOnlyEligibleEvents(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	source, sourceEvents := seedHandlerNarrative(t, s, "source", base.Add(time.Hour), "sh:s1", "sh:s2")
 
-	h := NewStoreHandler(s)
+	h := NewStoreHandler(s, nil, nil, nil)
 	moved, err := h.MergeNarratives(target, source)
 
 	require.NoError(t, err)
@@ -110,7 +110,7 @@ func TestStoreHandler_MergeRefusesAFullyCommittedSource(t *testing.T) {
 	source, _ := seedHandlerNarrative(t, s, "source", base.Add(time.Hour), "sh:s1")
 	commitAgainstNarrative(t, s, source)
 
-	_, err := NewStoreHandler(s).MergeNarratives(target, source)
+	_, err := NewStoreHandler(s, nil, nil, nil).MergeNarratives(target, source)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no uncommitted events")
@@ -171,7 +171,7 @@ func TestStoreHandler_ResolveMergeTargetReadsRealCommitState(t *testing.T) {
 	committed, _ := seedHandlerNarrative(t, s, "committed", base.Add(time.Hour), "rm:c1")
 	commitAgainstNarrative(t, s, committed)
 
-	h := NewStoreHandler(s)
+	h := NewStoreHandler(s, nil, nil, nil)
 
 	// Name the UNCOMMITTED one first: direction must still favour the committed.
 	target, source, err := h.ResolveMergeTarget(uncommitted, committed)
@@ -193,7 +193,7 @@ func TestStoreHandler_ResolveMergeTargetRefusesTwoCommitted(t *testing.T) {
 	commitAgainstNarrative(t, s, a)
 	commitAgainstNarrative(t, s, b)
 
-	_, _, err := NewStoreHandler(s).ResolveMergeTarget(a, b)
+	_, _, err := NewStoreHandler(s, nil, nil, nil).ResolveMergeTarget(a, b)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "both have committed actions")

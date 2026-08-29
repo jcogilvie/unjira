@@ -1,6 +1,7 @@
 package triage_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,7 +56,7 @@ func TestSession_CollectsOneDecisionPerActionAndAppliesNothing(t *testing.T) {
 		{Verb: triage.VerbReject, Text: "not worth posting"},
 		{Verb: triage.VerbApprove},
 	}}
-	s := triage.NewSession(batchOf(1, 2, 3), p, nil)
+	s := triage.NewSession(context.Background(), batchOf(1, 2, 3), p, nil)
 
 	require.NoError(t, s.Run())
 
@@ -74,7 +75,7 @@ func TestSession_QuitAbandonsWithoutApplying(t *testing.T) {
 		{Verb: triage.VerbApprove},
 		{Verb: triage.VerbQuit},
 	}}
-	s := triage.NewSession(batchOf(1, 2, 3), p, nil)
+	s := triage.NewSession(context.Background(), batchOf(1, 2, 3), p, nil)
 
 	err := s.Run()
 
@@ -86,19 +87,32 @@ func TestSession_QuitAbandonsWithoutApplying(t *testing.T) {
 // stubHandler records what it was asked and returns canned replacements.
 type stubHandler struct {
 	redraftCalls     []string
+	retargetCalls    []string
 	restructureCalls []triage.Decision
 	replacement      store.ActionRow
 	restructured     []store.ActionRow
 	err              error
 }
 
-func (h *stubHandler) Redraft(_ store.ActionRow, feedback string) (store.ActionRow, error) {
+func (h *stubHandler) Redraft(
+	_ context.Context, _ store.ActionRow, feedback string,
+) (store.ActionRow, error) {
 	h.redraftCalls = append(h.redraftCalls, feedback)
 
 	return h.replacement, h.err
 }
 
-func (h *stubHandler) Restructure(d triage.Decision, _ []store.ActionRow) ([]store.ActionRow, error) {
+func (h *stubHandler) Retarget(
+	_ context.Context, _ store.ActionRow, issueKey string,
+) (store.ActionRow, error) {
+	h.retargetCalls = append(h.retargetCalls, issueKey)
+
+	return h.replacement, h.err
+}
+
+func (h *stubHandler) Restructure(
+	_ context.Context, d triage.Decision, _ []store.ActionRow,
+) ([]store.ActionRow, error) {
 	h.restructureCalls = append(h.restructureCalls, d)
 
 	return h.restructured, h.err
@@ -119,7 +133,7 @@ func TestSession_EditRepresentsTheReplacement(t *testing.T) {
 		{Verb: triage.VerbApprove}, // disposition for the REPLACEMENT
 	}}
 
-	s := triage.NewSession(batchOf(1), p, h)
+	s := triage.NewSession(context.Background(), batchOf(1), p, h)
 	require.NoError(t, s.Run())
 
 	assert.Equal(t, []string{"too vague"}, h.redraftCalls)
@@ -140,7 +154,7 @@ func TestSession_NilHandlerNotifiesAndReprompts(t *testing.T) {
 		{Verb: triage.VerbApprove},
 	}}
 
-	s := triage.NewSession(batchOf(1), p, nil)
+	s := triage.NewSession(context.Background(), batchOf(1), p, nil)
 	require.NoError(t, s.Run())
 
 	require.Len(t, p.notices, 1)
@@ -163,7 +177,7 @@ func TestSession_RestructureKeepsUnaffectedDispositions(t *testing.T) {
 		{Verb: triage.VerbApprove},                       // the merged replacement
 	}}
 
-	s := triage.NewSession(batchOf(1, 2), p, h)
+	s := triage.NewSession(context.Background(), batchOf(1, 2), p, h)
 	require.NoError(t, s.Run())
 
 	approved := s.Approved()

@@ -50,7 +50,7 @@ func TestSupersedeAction_ClosesTheOldRowAndPersistsTheNew(t *testing.T) {
 	fresh, err := s.GetAction(newID)
 	require.NoError(t, err)
 	assert.Equal(t, "proposed", fresh.Status)
-	assert.Equal(t, `{"body":"shorter"}`, fresh.Payload)
+	assert.JSONEq(t, `{"body":"shorter"}`, fresh.Payload)
 }
 
 // TestSupersedeAction_PersistsTheReviewersWords is the defect that shipped in PR

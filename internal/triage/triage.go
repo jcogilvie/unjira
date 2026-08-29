@@ -2,6 +2,7 @@
 package triage
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -57,17 +58,22 @@ type Session struct {
 	decisions map[int64]Decision
 	prompter  Prompter
 	handler   Handler
+	// ctx bounds the LLM calls the handler makes on this pass. Held here rather
+	// than on the handler because a Session IS one pass — its lifetime and the
+	// context's are the same — whereas a handler is a long-lived dependency.
+	ctx context.Context //nolint:containedctx // a Session is one pass; see above
 }
 
 // NewSession builds a review session. handler may be nil: the verbs that need
 // it (edit and the three restructures) then report that they are unavailable
 // and the reviewer is re-prompted, which is exactly what --dry-run wants.
-func NewSession(batch []store.ActionRow, p Prompter, h Handler) *Session {
+func NewSession(ctx context.Context, batch []store.ActionRow, p Prompter, h Handler) *Session {
 	return &Session{
 		batch:     batch,
 		decisions: make(map[int64]Decision, len(batch)),
 		prompter:  p,
 		handler:   h,
+		ctx:       ctx,
 	}
 }
 
@@ -136,6 +142,49 @@ func (s *Session) Approved() []store.ActionRow {
 	return out
 }
 
+// Ruling is one recorded disposition that must be written to the store.
+type Ruling struct {
+	ActionID int64
+	// Status is the actions.status value to record: "rejected" today.
+	Status string
+	// Feedback is the reviewer's free text, read later by slice 7's
+	// rules.Distill.
+	Feedback string
+}
+
+// Rulings returns the dispositions that must be PERSISTED but do not write to a
+// tracker — today, every reject.
+//
+// This exists because PR #26 shipped without it and thereby lost every ruling. A
+// Session recorded reject text in memory and cmd/unjira only ever called
+// Approved(), so a rejected action stayed at status=proposed, came back in the
+// next session, and actions.feedback stayed NULL. The triage spec asserted the
+// opposite — "actions.feedback is already persisted by [r]eject/[e]dit, so slice
+// 7 will have its input waiting" — which was simply untrue, and untrue in a way
+// nothing surfaced: rejecting looked like it worked.
+//
+// Kept separate from Approved() rather than folded into one "everything to
+// write" method, because the two have different stakes. Approved() feeds
+// gate.Applier and can mutate someone's Jira; this only ever writes to the local
+// store. A caller must not be able to confuse them, and a reader of
+// cmd/unjira/triage.go should be able to see which is which.
+//
+// Skip is deliberately absent: leaving an action at proposed for a later session
+// IS the outcome, so there is nothing to record. Edit and target are absent too,
+// because StoreHandler already persisted them via SupersedeAction — they had to
+// be written during the session to have an id at all.
+func (s *Session) Rulings() []Ruling {
+	var out []Ruling
+	for _, a := range s.batch {
+		d := s.decisions[a.ID]
+		if d.Verb == VerbReject {
+			out = append(out, Ruling{ActionID: a.ID, Status: "rejected", Feedback: d.Text})
+		}
+	}
+
+	return out
+}
+
 // Summary renders the pending dispositions for the final confirmation.
 func (s *Session) Summary() string {
 	counts := map[Verb]int{}
@@ -162,11 +211,26 @@ var ErrAbandoned = fmt.Errorf("triage abandoned by reviewer")
 // can script one and stub the other.
 type Handler interface {
 	// Redraft returns a replacement action for an edit.
-	Redraft(action store.ActionRow, feedback string) (store.ActionRow, error)
-	// Restructure performs a merge/split/retarget and returns the actions that
-	// replace the affected ones. Returning a slice (not one action) is why
-	// re-presentation exists: a split yields more actions than it consumed.
-	Restructure(d Decision, batch []store.ActionRow) ([]store.ActionRow, error)
+	//
+	// Takes a context because it makes an LLM call. Session holds one for exactly
+	// this reason rather than the handler storing one: a stored context outlives
+	// the call it was made for and cannot be cancelled per-operation, which is
+	// what golangci-lint's containedctx check objects to and it is right to.
+	Redraft(ctx context.Context, action store.ActionRow, feedback string) (store.ActionRow, error)
+	// Retarget moves this action's work to a different issue and returns the
+	// replacement.
+	//
+	// Separate from Restructure despite the design calling both "restructures",
+	// because the shapes genuinely differ: retarget concerns ONE action and yields
+	// exactly one replacement, while merge and split operate across batch
+	// positions and may yield zero or many. Folding it in would mean routing an
+	// issue key through Decision.Positions, which has no position to carry, and
+	// giving up the compiler's guarantee that exactly one action comes back.
+	Retarget(ctx context.Context, action store.ActionRow, issueKey string) (store.ActionRow, error)
+	// Restructure performs a merge/split and returns the actions that replace the
+	// affected ones. Returning a slice (not one action) is why re-presentation
+	// exists: a split yields more actions than it consumed.
+	Restructure(ctx context.Context, d Decision, batch []store.ActionRow) ([]store.ActionRow, error)
 }
 
 // handle runs the verbs that require work, returning the actions that replace
@@ -176,16 +240,36 @@ func (s *Session) handle(d Decision, i int) ([]store.ActionRow, error) {
 		return nil, fmt.Errorf("%s is not available in this session", d.Verb)
 	}
 
-	if d.Verb == VerbEdit {
-		replacement, err := s.handler.Redraft(s.batch[i], d.Text)
+	switch d.Verb {
+	case VerbEdit:
+		replacement, err := s.handler.Redraft(s.ctx, s.batch[i], d.Text)
 		if err != nil {
 			return nil, err
 		}
 
 		return []store.ActionRow{replacement}, nil
+
+	case VerbTarget:
+		replacement, err := s.handler.Retarget(s.ctx, s.batch[i], d.Text)
+		if err != nil {
+			return nil, err
+		}
+
+		return []store.ActionRow{replacement}, nil
+
+	case VerbMerge, VerbSplit:
+		return s.handler.Restructure(s.ctx, d, s.batch)
+
+	case VerbApprove, VerbReject, VerbSkip, VerbQuit:
+		// Unreachable: Run only calls handle for the four work verbs. Named
+		// explicitly rather than left to a default, so that adding a Verb forces a
+		// decision here — and loud rather than falling through to Restructure,
+		// which would silently treat an approve as a merge if Run's dispatch ever
+		// drifted from this switch.
+		return nil, fmt.Errorf("%s does not require a handler", d.Verb)
 	}
 
-	return s.handler.Restructure(d, s.batch)
+	return nil, fmt.Errorf("unknown verb %q", d.Verb)
 }
 
 // spliceBatch replaces the action at index i with replacements, dropping any

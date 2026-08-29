@@ -96,6 +96,16 @@ const (
 	// mention — see the package doc comment for why no finer-grained prose
 	// tier exists.
 	ProvenanceProseLater Provenance = "prose_later"
+	// ProvenanceReviewer is a key a human asserted during triage's [t]arget.
+	// Distinct from every tier above because those are INFERENCES from
+	// artifacts, and this is a person stating where the work belongs. It ranks
+	// strongest for that reason: a reviewer looking at the drafted text and the
+	// ticket together has strictly more information than a branch-name parse.
+	//
+	// Recorded distinctly rather than reusing ProvenanceBranch so a later pass
+	// can tell "someone decided this" from "we guessed this", which matters when
+	// deciding whether to revisit a link.
+	ProvenanceReviewer Provenance = "reviewer"
 )
 
 // Rank returns p's tiebreaker strength: lower is stronger. Used only to
@@ -106,6 +116,13 @@ const (
 // gracefully, not fail a matching pass.
 func (p Provenance) Rank() int {
 	switch p {
+	case ProvenanceReviewer:
+		// Strongest, ahead of every inferred tier: a human who looked at the
+		// drafted text and the ticket together has more information than any
+		// artifact parse. Without this case it would fall to default (weakest),
+		// which inverts the intent — a reviewer's explicit correction losing a
+		// tiebreak to a branch-name guess.
+		return -1
 	case ProvenanceBranch:
 		return 0
 	case ProvenanceJiraEvent:

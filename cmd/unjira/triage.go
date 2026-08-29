@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/gate"
+	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/triage"
 )
@@ -253,15 +254,19 @@ func (c *triageCmd) Run(app *appContext) error {
 
 	prompter := newTerminalPrompter()
 
-	// --dry-run passes no Handler, so edit and the restructures report
-	// themselves unavailable and re-prompt. That is deliberate: those verbs
-	// persist narrative changes, and a dry run must not.
+	// --dry-run passes no Handler, so edit/target/merge report themselves
+	// unavailable and re-prompt. That is deliberate: those verbs persist
+	// narrative and action changes, and a dry run must not.
 	var handler triage.Handler
 	if !c.DryRun {
-		handler = triage.NewStoreHandler(app.store)
+		h, err := app.triageHandler()
+		if err != nil {
+			return err
+		}
+		handler = h
 	}
 
-	session := triage.NewSession(batch, prompter, handler)
+	session := triage.NewSession(context.Background(), batch, prompter, handler)
 
 	fmt.Printf("%d proposed action(s) to review.\n", len(batch))
 
@@ -288,6 +293,16 @@ func (c *triageCmd) Run(app *appContext) error {
 		return nil
 	}
 
+	// Rulings are persisted BEFORE the apply confirmation, and independently of
+	// it. A reject writes nothing to a tracker, so it is not the confirmation's
+	// business — and gating it on "apply?" would mean a reviewer who rejects
+	// several actions and then answers N loses every ruling. Nothing in PR #26
+	// wrote these at all, so a rejected action came back in the next session and
+	// slice 7's rules.Distill had no input; see Session.Rulings.
+	if err := app.recordRulings(session.Rulings()); err != nil {
+		return err
+	}
+
 	if len(approved) == 0 {
 		fmt.Println("\nnothing approved; nothing applied")
 
@@ -305,6 +320,71 @@ func (c *triageCmd) Run(app *appContext) error {
 	}
 
 	return app.applyApproved(approved)
+}
+
+// triageHandler builds the production Handler, resolving the tracker and LLM
+// client that edit and target need.
+//
+// A resolution failure is reported and the session continues WITHOUT those verbs
+// rather than aborting: approve/reject/skip need neither dependency, and refusing
+// to open a review queue because no default project is configured would be a
+// worse outcome than a session where three verbs say they are unavailable.
+//
+// The tracker is passed as a TaskReader. taskTracker returns the full
+// TaskTracker, so this narrowing is what makes a write from the handler fail to
+// compile — the same guarantee RunReconcile relies on.
+func (a *appContext) triageHandler() (triage.Handler, error) {
+	project, err := a.projectKey("")
+	if err != nil {
+		fmt.Printf("  note: edit/target unavailable (%v)\n", err)
+
+		return triage.NewStoreHandler(a.store, nil, nil, nil), nil
+	}
+
+	tracker, err := a.taskTracker(project)
+	if err != nil {
+		fmt.Printf("  note: edit/target unavailable (%v)\n", err)
+
+		return triage.NewStoreHandler(a.store, nil, nil, nil), nil
+	}
+
+	client, err := a.llmClient()
+	if err != nil {
+		fmt.Printf("  note: edit/target unavailable (%v)\n", err)
+
+		return triage.NewStoreHandler(a.store, tracker, nil, nil), nil
+	}
+
+	// The SAME rules a watch pass would have used. A redraft prompted without
+	// them would silently ignore everything slice 7 taught, so the reviewer's
+	// correction would land while a rule they wrote earlier was dropped.
+	learnedRules, err := pipeline.ReconcilerRules(a.config)
+	if err != nil {
+		return nil, err
+	}
+
+	return triage.NewStoreHandler(a.store, tracker, client, learnedRules), nil
+}
+
+// recordRulings persists the reviewer's non-tracker dispositions.
+//
+// One failure does not abort the rest, matching applyApproved: each ruling
+// concerns its own action, and losing four rulings because the fifth hit a
+// constraint would discard review work for an unrelated reason.
+func (a *appContext) recordRulings(rulings []triage.Ruling) error {
+	var errs error
+	for _, r := range rulings {
+		if err := a.store.RecordRuling(r.ActionID, r.Status, r.Feedback); err != nil {
+			fmt.Printf("  failed to record %s on action %d: %v\n", r.Status, r.ActionID, err)
+			errs = errors.Join(errs, err)
+
+			continue
+		}
+
+		fmt.Printf("  recorded %s on action %d\n", r.Status, r.ActionID)
+	}
+
+	return errs
 }
 
 // applyApproved hands the confirmed set to gate.Applier — the only code in
