@@ -185,6 +185,46 @@ accessor exists.
 operation that reparents can launder it. Prefer making the unsafe reparenting inexpressible over
 checking for it, because a check lives in one place and callers multiply.
 
+## 14. An unexported parameter type can make an exported function silently useless
+
+Discovered 2026-08-29 while wiring `triage`'s `[e]dit` (`internal/reconciler/rework.go`).
+
+`reconciler.Redraft` was exported, tested, and documented — and uncallable from any other package.
+Its `verified []verifiedLink` parameter names an unexported type. Naming that type from outside
+fails to compile, which is fine; a caller learns immediately. The problem is what happens next:
+`nil` satisfies the slice, so the *workaround* compiles. And `actionsFromVerdicts` drops every
+verdict whose `issue_key` is absent from the verified set, so a nil `verified` discards the model's
+entire response:
+
+```
+reconciler: narrative 1 redraft named unrecognized issue_key "DEVSBX-9", ignoring
+err=<nil> actions=0
+```
+
+No error. No actions. One LLM call spent. A caller doing the only thing that compiles gets a
+successful no-op.
+
+Two failure modes compounded. The type system blocked the correct call while permitting an incorrect
+one, and a defensive "drop what we cannot verify" policy — right on its own terms, from
+`rules/verify-correlations.md` — converted the incorrect call into a silent success rather than a
+loud failure. Neither is a bug alone.
+
+The fix was not to export `verifiedLink`. It pairs a store row with live tracker state read under a
+specific pass, so a caller able to construct one could assert verification that never happened,
+which is the thing that rule exists to prevent. Instead a new entry point *performs* the
+verification: `ReworkOne` takes a narrative id and does the `GetIssue` itself. The unexported type
+stays unexported; the capability becomes reachable through a function that cannot lie about it.
+
+That also surfaced a stale assumption in `Redraft`'s own doc comment — it justifies reusing
+already-verified links because live state "was confirmed earlier in this same pass," which is true
+inside one `Reconcile` pass and false for `triage`, a separate process running possibly days later.
+A comment can be accurate when written and become wrong when a second caller appears.
+
+**Generalization worth carrying:** an exported function whose signature mentions an unexported type
+is not part of the package's API, whatever it looks like. Before treating one as a seam, try calling
+it from where it will actually be called — and check what the *compiling* call does, not only whether
+it compiles. "It returned no error" and "it did the thing" are different claims.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

@@ -99,10 +99,14 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 
 `triage` is the human-facing surface: it shows one action at a time with its full
 body, and **applies nothing until you confirm at the end**. Beyond approve/reject
-it can reword an action, retarget it to a different issue, or re-cluster the
-underlying work — merging two narratives that turned out to be one story, or
-splitting one that was two. Uncommitted work stays reshufflable; anything a
-tracker mutation already describes does not move.
+it can reword an action (`e`), retarget it to a different issue (`t`), or merge two
+narratives that turned out to be one story (`m`). Uncommitted work stays
+reshufflable; anything a tracker mutation already describes does not move.
+
+`[s]plit` is **not yet implemented** and says so when used — it needs the clusterer
+re-run with an instruction, rather than the link moves merge and retarget make. A
+reject records your reasoning, which is what slice 7's rule distillation will
+learn from.
 
 Start with `watch --once --dry-run`: it runs every stage and prints what it *would* do, skipping
 `Persist` and the gate, and says which stages it skipped rather than going quiet.
@@ -161,8 +165,8 @@ internal/
                         Holds a TaskReader and therefore cannot write
   gate/                 the auto-commit gate: pure Decide + an Applier holding a
                         TaskWriter. The only code in unjira that writes to a tracker
-  triage/               the interactive review session as a state machine, with a
-                        Prompter seam so it never touches a terminal
+  triage/               the interactive review session as a state machine, with
+                        Prompter and Handler seams so it never touches a terminal
   rules/                load, scope-filter, and render rules/*.md into prompts
   workflow/             observed workflow graphs mined from changelogs; BFS path planning
   pipeline/             stage orchestration: RunCollect / RunNarrate / RunMatch /
