@@ -245,3 +245,50 @@ func TestDraftRecordsUsageInStats(t *testing.T) {
 	assert.EqualValues(t, 11, stats.PromptTokens)
 	assert.EqualValues(t, 22, stats.CompletionTokens)
 }
+
+// TestRedraft_PutsReviewerFeedbackInThePrompt is the whole point of Redraft:
+// the reviewer's correction must reach the model, not merely be persisted.
+func TestRedraft_PutsReviewerFeedbackInThePrompt(t *testing.T) {
+	f := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"comment","body":"revised body","confidence":0.9,"rationale":"reworded per reviewer"}]`,
+	}}
+
+	narrative := store.NarrativeRow{ID: 1, Title: "retry logic", Summary: "added retries"}
+	verified := []verifiedLink{{
+		Link:  store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
+		Issue: tasktracker.Issue{Key: "PROJ-1", Summary: "add retries"},
+	}}
+
+	got, _, err := Redraft(t.Context(), f, narrative,
+		[]events.Event{codeEvent("e1", "added retry logic")}, verified,
+		nil, "too vague — name the actual PR")
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "revised body", got[0].Body)
+
+	require.Len(t, f.prompts, 1)
+	assert.Contains(t, f.prompts[0], "too vague — name the actual PR",
+		"the reviewer's feedback must appear in the user prompt the model actually receives")
+}
+
+// TestRedraft_EmptyFeedbackIsAnError: Redraft exists to carry a correction. An
+// empty one means the caller lost the reviewer's text somewhere, which should
+// fail loudly rather than silently spending an LLM call to reproduce the same
+// draft.
+func TestRedraft_EmptyFeedbackIsAnError(t *testing.T) {
+	f := &fakeLLM{responses: []string{`[]`}}
+
+	narrative := store.NarrativeRow{ID: 1, Title: "retry logic", Summary: "added retries"}
+	verified := []verifiedLink{{
+		Link:  store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
+		Issue: tasktracker.Issue{Key: "PROJ-1", Summary: "add retries"},
+	}}
+
+	_, _, err := Redraft(t.Context(), f, narrative,
+		[]events.Event{codeEvent("e1", "added retry logic")}, verified, nil, "   ")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "feedback")
+	assert.Empty(t, f.prompts, "no LLM call should be spent on an empty correction")
+}

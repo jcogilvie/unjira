@@ -147,6 +147,44 @@ hallucination is more dangerous than a flagged unknown.
 
 ---
 
+## 13. A rule keyed on an entity's current parent is defeated by reparenting
+
+Discovered 2026-08-28 while building `triage`'s re-clustering (`internal/triage`,
+`store.EligibleEventIDs`).
+
+Committed work must not be reattributed: unjira cannot unpost a comment, un-transition a status, or
+un-create an issue. The rule was a watermark — an event linked to a narrative *before* that
+narrative's last applied action is frozen, everything since is reshufflable. Sound in isolation, and
+it needs no schema change, since `narrative_events.linked_at` and `actions.executed_at` already share
+a timestamp format.
+
+But the watermark is evaluated **per narrative**. So relinking a frozen event onto a narrative that
+never committed makes it eligible again — proven directly:
+
+```
+BEFORE:                on A eligible=[]  (empty = frozen)
+AFTER relink onto B:   on B eligible=[1]
+```
+
+A merge could therefore *launder* a frozen event into an unfrozen one. Nothing looks wrong
+afterward: both narratives exist, the event exists, no error is raised. Every later pass then treats
+committed work as reshufflable.
+
+The instructive part is the fix. Guarding the move — "refuse to relink a frozen event" — would work
+and would depend on every future caller remembering. Instead the *direction* became determined: the
+committed narrative is always the merge target, because a tracker mutation already made it the
+workstream of record. Frozen events therefore live on the target and are never relinked at all. The
+unsafe case stops being forbidden and becomes **unreachable**.
+
+The same reasoning shaped the seam: `UnlinkNarrativeEvents` takes explicit event ids rather than "all
+of narrative N", so a caller cannot express the laundering case in one call. Two drills confirm it —
+skipping the unlink fails immediately, and asking for "all events" does not compile, because no such
+accessor exists.
+
+**Generalization worth carrying:** when an invariant is keyed on an entity's *current* parent, any
+operation that reparents can launder it. Prefer making the unsafe reparenting inexpressible over
+checking for it, because a check lives in one place and callers multiply.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

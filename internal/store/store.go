@@ -1881,3 +1881,46 @@ func (s *Store) ReleaseLock(runID string) error {
 
 	return nil
 }
+
+// RemoveNarrativeIssue deletes one narrative→issue link. It exists for
+// `triage`'s retarget disposition, and it has to exist because
+// AddNarrativeIssues only upserts: the partial unique index
+// one_primary_per_narrative rejects a second primary while the first is
+// present, so "this belongs on a different ticket" is remove-then-add rather
+// than an update.
+//
+// A missing link is an error, not a silent success. Retarget's caller uses the
+// error to abort before adding the replacement — otherwise a typo'd key would
+// report a successful retarget having changed nothing, and the reviewer would
+// believe an attribution moved when it did not.
+func (s *Store) RemoveNarrativeIssue(narrativeID int64, issueKey string) error {
+	return removeNarrativeIssueImpl(s.db, narrativeID, issueKey)
+}
+
+// RemoveNarrativeIssue is the *Tx-scoped variant of
+// (*Store).RemoveNarrativeIssue. Retarget uses it so the remove and the
+// replacing add land in one transaction: a crash between them would leave a
+// narrative with no primary at all.
+func (t *Tx) RemoveNarrativeIssue(narrativeID int64, issueKey string) error {
+	return removeNarrativeIssueImpl(t.tx, narrativeID, issueKey)
+}
+
+func removeNarrativeIssueImpl(c dbConn, narrativeID int64, issueKey string) error {
+	res, err := c.Exec(
+		`DELETE FROM narrative_issues WHERE narrative_id = ? AND issue_key = ?`,
+		narrativeID, issueKey,
+	)
+	if err != nil {
+		return fmt.Errorf("removing issue link %s from narrative %d: %w", issueKey, narrativeID, err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected removing %s from narrative %d: %w", issueKey, narrativeID, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("removing issue link %s from narrative %d: no such link", issueKey, narrativeID)
+	}
+
+	return nil
+}

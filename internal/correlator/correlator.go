@@ -59,6 +59,23 @@ type Narrative struct {
 	// of older events lives in Summary. Cluster reads these for context
 	// only and never fetches them itself, keeping Cluster pure compute.
 	Events []Event
+
+	// EligibleEvents are this narrative's events that a reviewer-driven
+	// re-cluster may reassign: those linked after the narrative's last
+	// committed action (see store.EligibleEventIDs). They render in the
+	// NUMBERED section alongside in-window events, so the model can move them;
+	// Events above stay context-only and cannot be reassigned.
+	//
+	// Empty for every routine watch pass, because by the time watch runs a
+	// prior narrative normally has a committed action. That is why this
+	// refines the old "all existing narratives are frozen" rule rather than
+	// weakening it: the freeze now ends at each narrative's commit watermark
+	// instead of at its existence, and watch's behaviour does not move.
+	//
+	// A caller must not put the same event in both slices. Doing so would list
+	// it twice in one prompt and invite the model to assign a frozen event by
+	// index — see pipeline.hydrateContextNarratives, which partitions.
+	EligibleEvents []Event
 }
 
 // ClusterKind distinguishes a brand-new narrative from one extending an
@@ -172,7 +189,13 @@ func Cluster(
 	filtered := filterEventsInWindow(evts, window)
 	relevant := filterAdjacentOrOverlapping(existing, window)
 
-	systemPrompt, userPrompt := buildClusterPrompt(filtered, relevant, o.rules)
+	// assignable shares ONE index space between the prompt and the parser:
+	// buildClusterPrompt numbers this exact slice, and parseClusterResponse
+	// resolves event_indices against it. Passing `filtered` to the parser while
+	// the prompt numbered a longer slice would make an eligible event's index
+	// resolve to the wrong event, silently.
+	assignable := assignableEvents(filtered, relevant)
+	systemPrompt, userPrompt := buildClusterPrompt(assignable, relevant, o.rules)
 
 	var stats Stats
 	estimated := estimateTokens(systemPrompt + userPrompt)
@@ -187,7 +210,7 @@ func Cluster(
 	}
 	stats.AddUsage(usage)
 
-	results, err := parseClusterResponse(raw, filtered)
+	results, err := parseClusterResponse(raw, assignable)
 	if err != nil {
 		return nil, stats, err
 	}
@@ -260,6 +283,25 @@ func estimateTokens(text string) int {
 // overlapping/adjacent narratives as CONTEXT ONLY (their events carry no
 // index, so the model structurally cannot reassign them). See
 // docs/superpowers/specs/2026-08-12-correlator-hydrated-context-rework.md.
+// assignableEvents is the single index space Cluster's prompt numbers and its
+// response parser resolves against: the in-window events, then every existing
+// narrative's eligible events in `existing` order.
+//
+// One function so the two sides cannot disagree. They were separate call sites
+// (buildClusterPrompt(filtered, ...) and parseClusterResponse(raw, filtered))
+// before eligible narrative events became assignable, and keeping them separate
+// would have meant an eligible event's index resolving to a DIFFERENT event —
+// silent misattribution rather than a loud error.
+func assignableEvents(inWindow []Event, existing []Narrative) []Event {
+	out := make([]Event, 0, len(inWindow))
+	out = append(out, inWindow...)
+	for _, n := range existing {
+		out = append(out, n.EligibleEvents...)
+	}
+
+	return out
+}
+
 func buildClusterPrompt(evts []Event, existing []Narrative, learnedRules []rules.Rule) (systemPrompt, userPrompt string) {
 	systemPrompt = clusterSystemPrompt
 	if rendered := rules.Render(learnedRules); rendered != "" {
@@ -776,6 +818,27 @@ func prepareExtend(
 // pipeline_lock lease is what actually prevents a concurrent second writer,
 // but re-reading under the transaction costs nothing and avoids relying on
 // that lease being the *only* thing standing between the two reads.
+// relinkEvents moves eventIDs onto narrativeID, removing any link each event
+// has to a DIFFERENT narrative first.
+//
+// AddNarrativeEvents alone is INSERT OR IGNORE: it adds the new link and never
+// removes the old one. That is correct for a first assignment and wrong for a
+// reassignment — and reassignment is now reachable, because uncommitted events
+// stay eligible for re-clustering as later passes learn more (see
+// store.EligibleEventIDs). Without this, a re-clustered event ends up linked to
+// two narratives: the source looks alive, keeps feeding future Cluster calls as
+// context, and post-boundary history double-counts it — which is exactly how
+// compaction folded the wrong number of events before this existed.
+func relinkEvents(tx *store.Tx, narrativeID int64, eventIDs []int64) error {
+	for _, eventID := range eventIDs {
+		if err := tx.UnlinkEventFromOtherNarratives(narrativeID, eventID); err != nil {
+			return err
+		}
+	}
+
+	return tx.AddNarrativeEvents(narrativeID, eventIDs)
+}
+
 func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 	r := p.result
 
@@ -785,7 +848,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 		if err != nil {
 			return Narrative{}, err
 		}
-		if err := tx.AddNarrativeEvents(id, p.eventIDs); err != nil {
+		if err := relinkEvents(tx, id, p.eventIDs); err != nil {
 			return Narrative{}, err
 		}
 		return Narrative{
@@ -806,7 +869,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 		if err := tx.ExtendNarrative(r.NarrativeID, newEnd, r.Summary); err != nil {
 			return Narrative{}, err
 		}
-		if err := tx.AddNarrativeEvents(r.NarrativeID, p.eventIDs); err != nil {
+		if err := relinkEvents(tx, r.NarrativeID, p.eventIDs); err != nil {
 			return Narrative{}, err
 		}
 		if p.doCompact {

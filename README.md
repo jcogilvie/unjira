@@ -64,7 +64,7 @@ that grants write authority is one copy-paste from arming a real deployment.
 |---|---|
 | ✅ 1–4 | LLM client, `correlator.Cluster`, persistence + compaction, `internal/reconciler` |
 | ✅ 5 | auto-commit gate + `watch` |
-| 🚧 6 | `unjira actions list\|decide` landed; **`triage`** (interactive loop) not started |
+| ✅ 6 | `unjira actions list\|decide` **and `triage`** — the machine-facing and human-facing halves of the review surface |
 | ⬜ 7 | `rules.Distill` — rule *reading* works in both prompts; distilling new rules from reviewer feedback does not |
 
 See `docs/superpowers/specs/2026-08-11-phase1-correlator-design.md` for the slice list with the
@@ -92,7 +92,17 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 ./unjira actions list                # the review queue
 ./unjira actions list --status failed --json
 ./unjira actions decide 42 --approve # applies via the same gate watch uses
+
+./unjira triage                      # review the queue one action at a time
+./unjira triage --dry-run            # walk it, decide, write nothing
 ```
+
+`triage` is the human-facing surface: it shows one action at a time with its full
+body, and **applies nothing until you confirm at the end**. Beyond approve/reject
+it can reword an action, retarget it to a different issue, or re-cluster the
+underlying work — merging two narratives that turned out to be one story, or
+splitting one that was two. Uncommitted work stays reshufflable; anything a
+tracker mutation already describes does not move.
 
 Start with `watch --once --dry-run`: it runs every stage and prints what it *would* do, skipping
 `Persist` and the gate, and says which stages it skipped rather than going quiet.
@@ -122,7 +132,7 @@ behind the `live-jira` environment.
 
 ```
 cmd/unjira/             CLI entrypoint (Kong): collect | digest | status | watch |
-                        actions | dev
+                        actions | triage | dev
 internal/
   events/               normalized Event model — the contract every collector emits
   store/                SQLite schema and access: events, cursors, narratives,
@@ -151,6 +161,8 @@ internal/
                         Holds a TaskReader and therefore cannot write
   gate/                 the auto-commit gate: pure Decide + an Applier holding a
                         TaskWriter. The only code in unjira that writes to a tracker
+  triage/               the interactive review session as a state machine, with a
+                        Prompter seam so it never touches a terminal
   rules/                load, scope-filter, and render rules/*.md into prompts
   workflow/             observed workflow graphs mined from changelogs; BFS path planning
   pipeline/             stage orchestration: RunCollect / RunNarrate / RunMatch /

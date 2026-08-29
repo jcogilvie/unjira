@@ -1647,3 +1647,55 @@ func TestUpdateActionStatusAndErrorStampingMatchesPlainUpdateActionStatus(t *tes
 	require.NotNil(t, got.ExecutedAt, "a failed write still stamps executed_at: the write was attempted")
 	assert.Equal(t, reason, got.Error)
 }
+
+// TestRemoveNarrativeIssue_ThenAddPrimarySucceeds is the retarget path, and the
+// reason this method has to exist: one_primary_per_narrative is a partial
+// unique index, so adding a second primary fails while the first is present.
+// Retargeting is therefore remove-then-add, not upsert.
+func TestRemoveNarrativeIssue_ThenAddPrimarySucceeds(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	require.NoError(t, s.AddNarrativeIssues(nid, []store.NarrativeIssue{
+		{IssueKey: "PROJ-1", Role: store.Role("primary"), Provenance: "jira_event", Confidence: 0.9},
+	}))
+
+	// Prove the constraint is real before proving the fix: a second primary
+	// must fail while the first exists. Without this the test could pass for
+	// the wrong reason.
+	err = s.AddNarrativeIssues(nid, []store.NarrativeIssue{
+		{IssueKey: "PROJ-2", Role: store.Role("primary"), Provenance: "reviewer", Confidence: 1.0},
+	})
+	require.Error(t, err, "one_primary_per_narrative must reject a second primary")
+
+	require.NoError(t, s.RemoveNarrativeIssue(nid, "PROJ-1"))
+
+	require.NoError(t, s.AddNarrativeIssues(nid, []store.NarrativeIssue{
+		{IssueKey: "PROJ-2", Role: store.Role("primary"), Provenance: "reviewer", Confidence: 1.0},
+	}), "after removing the old primary the new one must be insertable")
+
+	links, err := s.NarrativeIssues(nid)
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, "PROJ-2", links[0].IssueKey)
+	assert.Equal(t, "reviewer", links[0].Provenance,
+		"a human's assertion is recorded as reviewer-provenance, not a model's inference")
+}
+
+// TestRemoveNarrativeIssue_MissingLinkErrors: silently succeeding would let a
+// retarget report success having changed nothing.
+func TestRemoveNarrativeIssue_MissingLinkErrors(t *testing.T) {
+	s := openStore(t)
+
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "t", "s")
+	require.NoError(t, err)
+
+	err = s.RemoveNarrativeIssue(nid, "NOPE-1")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NOPE-1")
+}
