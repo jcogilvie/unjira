@@ -313,22 +313,42 @@ func (a *Applier) checkWritable(issueKey string) error {
 // every AddComment/SetStatus/CreateIssue call, and there is no other
 // TaskWriter holder in the repo to route around it.
 //
-// An unresolvable project (no connection covers it at all) is reported as not
-// writable too, rather than as a different kind of error: from a write-
-// authorization standpoint "no connection says yes" and "a connection says no"
-// are the same outcome, and a caller checking for the write-scope message
-// shape should not need to distinguish them.
+// The two refusals are reported DIFFERENTLY, which an earlier version of this
+// function deliberately did not do — it argued that "no connection says yes" and
+// "a connection says no" are the same outcome from a write-authorization
+// standpoint. That is true of the outcome and false of the remedy, which is what
+// the message is for.
+//
+// A project inside a connection's project_keys but absent from
+// writable_project_keys is a scope decision someone made: the fix is to add it,
+// and naming the connection tells them where. A project no connection covers at
+// all is not a scope decision — unjira does not track it, and the old message
+// sent the reader to edit `writable_project_keys` for connection "none", a
+// connection that does not exist. Following that advice is impossible.
+//
+// The distinction matters most for a reviewer in triage. Both refusals look
+// identical in the output, and only one of them means "you can allow this if you
+// want to". The other means "unjira drafted an action for work outside what it
+// tracks", which is a signal about the correlator's attribution — the mention
+// that produced this candidate probably should not have become a link, and
+// triage's [t]arget is the remedy rather than a config edit.
 func (a *Applier) checkProjectWritable(project string) error {
 	conn, ok := config.Config{Jira: a.jiraConnections}.JiraConnectionForProject(project)
-	if !ok || !conn.IsProjectWritable(project) {
-		name := "none"
-		if ok {
-			name = conn.Name
-		}
-
+	if !ok {
 		return fmt.Errorf(
-			"project %q is not writable (jira[].writable_project_keys does not include it "+
-				"for connection %q)", project, name,
+			"project %q is not tracked by unjira: no jira connection lists it in project_keys, so "+
+				"this action targets work outside what unjira manages. If %q should be tracked, add "+
+				"it to a connection's project_keys (and writable_project_keys to allow writes); "+
+				"otherwise retarget the action to a tracked issue",
+			project, project,
+		)
+	}
+
+	if !conn.IsProjectWritable(project) {
+		return fmt.Errorf(
+			"project %q is readable but not writable (connection %q lists it in project_keys but "+
+				"not in writable_project_keys); add it there to allow writes",
+			project, conn.Name,
 		)
 	}
 
