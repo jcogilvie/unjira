@@ -336,21 +336,21 @@ func (c *triageCmd) Run(app *appContext) error {
 func (a *appContext) triageHandler() (triage.Handler, error) {
 	project, err := a.projectKey("")
 	if err != nil {
-		fmt.Printf("  note: edit/target unavailable (%v)\n", err)
+		noteUnavailable("no default project is configured (tracker.default_project)")
 
 		return triage.NewStoreHandler(a.store, nil, nil, nil), nil
 	}
 
 	tracker, err := a.taskTracker(project)
 	if err != nil {
-		fmt.Printf("  note: edit/target unavailable (%v)\n", err)
+		noteUnavailable("the tracker could not be resolved (check tracker.backend and credentials)")
 
 		return triage.NewStoreHandler(a.store, nil, nil, nil), nil
 	}
 
 	client, err := a.llmClient()
 	if err != nil {
-		fmt.Printf("  note: edit/target unavailable (%v)\n", err)
+		noteUnavailable("no LLM client could be built (check the llm block and its credential)")
 
 		return triage.NewStoreHandler(a.store, tracker, nil, nil), nil
 	}
@@ -364,6 +364,28 @@ func (a *appContext) triageHandler() (triage.Handler, error) {
 	}
 
 	return triage.NewStoreHandler(a.store, tracker, client, learnedRules), nil
+}
+
+// noteUnavailable tells the reviewer that edit and target will not work this
+// session, and WHY in terms of what to configure.
+//
+// It prints a fixed, hand-written cause rather than the underlying error, and
+// that is a deliberate narrowing rather than laziness. The first draft printed
+// `%v` of the error, which CodeQL flagged as high-severity
+// `go/clear-text-logging`: "Sensitive data returned by an access to APIKeyHelper
+// flows to a logging call." The taint is real — llmCredential's failure paths
+// reach ResolvedAPIKeyHelper, whose error quotes llm.api_key_helper with %q. That
+// value is a command line, so a helper written as `sh -c 'print-token --key=...'`
+// would put a credential on stdout, and unlike a log file stdout is what a
+// reviewer pastes into a bug report.
+//
+// Every other caller of llmClient RETURNS its error rather than printing it, so
+// this function was the only place in the repo introducing that flow. Suppressing
+// the alert would have kept a real (if unlikely) leak for the sake of a
+// diagnostic; a fixed string names the config key to check, which is the actually
+// useful half of the message anyway.
+func noteUnavailable(cause string) {
+	fmt.Printf("  note: edit and target are unavailable this session: %s\n", cause)
 }
 
 // recordRulings persists the reviewer's non-tracker dispositions.

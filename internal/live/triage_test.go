@@ -3,6 +3,7 @@
 package live
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -42,7 +43,8 @@ func TestLiveTriage_ApprovedActionReachesJira(t *testing.T) {
 
 	require.Empty(t, commentBodies(t, client, key), "a freshly created issue starts with no comments")
 
-	session := triage.NewSession([]store.ActionRow{action}, nil, nil)
+	session := triage.NewSession(
+		context.Background(), []store.ActionRow{action}, nil, nil)
 	session.ApproveAll()
 
 	approved := session.Approved()
