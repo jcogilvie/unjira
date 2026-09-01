@@ -99,13 +99,13 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 
 `triage` is the human-facing surface: it shows one action at a time with its full
 body, and **applies nothing until you confirm at the end**. Beyond approve/reject
-it can reword an action (`e`), retarget it to a different issue (`t`), or merge two
-narratives that turned out to be one story (`m`). Uncommitted work stays
-reshufflable; anything a tracker mutation already describes does not move.
+it can reword an action (`e`), retarget it to a different issue (`t`), merge two
+narratives that turned out to be one story (`m`), or split one that was two (`s`).
+Uncommitted work stays reshufflable; anything a tracker mutation already describes
+does not move — so splitting a narrative whose comment already posted keeps the
+described events where they are and moves only the rest.
 
-`[s]plit` is **not yet implemented** and says so when used — it needs the clusterer
-re-run with an instruction, rather than the link moves merge and retarget make. A
-reject records your reasoning, which is what slice 7's rule distillation will
+A reject records your reasoning, which is what slice 7's rule distillation will
 learn from.
 
 Start with `watch --once --dry-run`: it runs every stage and prints what it *would* do, skipping
