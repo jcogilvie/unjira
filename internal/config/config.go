@@ -309,12 +309,33 @@ func (c CorrelatorConfig) Validate() error {
 // expensive.
 const DefaultMaxCandidatesPerNarrative = 10
 
+// DefaultMaxNarrativesPerMatchPass bounds how many narratives one matching pass
+// examines, mirroring DefaultMaxNarrativesPerPass for the reconciler.
+//
+// A separate constant rather than reusing the reconciler's: the two stages have
+// different per-narrative costs. Matching spends one GetIssue per candidate and
+// an LLM call only when 2+ candidates survive verification — a lone candidate is
+// resolved deterministically for free — while the reconciler spends a GetIssue
+// per link plus a drafting call for every narrative it examines. Tying them to
+// one number would mean tuning the cheaper stage by the expensive one's budget.
+const DefaultMaxNarrativesPerMatchPass = 20
+
 // MatchConfig tunes narrative→issue matching. See
 // docs/superpowers/specs/2026-08-24-narrative-issue-matching-design.md.
 type MatchConfig struct {
 	// MaxCandidatesPerNarrative caps candidates examined per narrative. Zero
 	// means DefaultMaxCandidatesPerNarrative.
 	MaxCandidatesPerNarrative int `json:"max_candidates_per_narrative"`
+	// MaxNarrativesPerPass caps how many unmatched narratives one pass
+	// examines. Zero means DefaultMaxNarrativesPerMatchPass.
+	//
+	// Distinct from MaxCandidatesPerNarrative, and that distinction is why this
+	// field exists: correlator.Match used the candidate cap as the narrative cap,
+	// so a config setting max_candidates_per_narrative=10 silently examined only
+	// 10 narratives per pass. On a 30-narrative backlog that left 20 unmatched,
+	// which then reached the create path as untracked work and drew proposals for
+	// new tickets duplicating issues those narratives already named.
+	MaxNarrativesPerPass int `json:"max_narratives_per_pass"`
 	// ConfidenceFloor governs only whether a primary is promoted into the
 	// denormalized narratives.issue_key. Below it, every narrative_issues row
 	// is still written — including the primary — but narratives.issue_key stays
@@ -333,6 +354,19 @@ func (c MatchConfig) CandidateLimit() int {
 	return c.MaxCandidatesPerNarrative
 }
 
+// NarrativeLimit returns the effective per-pass narrative cap.
+//
+// Named to match ReconcilerConfig.NarrativeLimit so the two stages read the same
+// way at their call sites — the previous code's single `limit` variable serving
+// both roles is exactly how the two got conflated.
+func (c MatchConfig) NarrativeLimit() int {
+	if c.MaxNarrativesPerPass == 0 {
+		return DefaultMaxNarrativesPerMatchPass
+	}
+
+	return c.MaxNarrativesPerPass
+}
+
 // Validate rejects configurations that would fail silently at runtime.
 //
 // A ConfidenceFloor above 1 is the important case: confidence is a 0..1 score,
@@ -343,6 +377,13 @@ func (c MatchConfig) Validate() error {
 		return fmt.Errorf(
 			"match.max_candidates_per_narrative is %d: must be positive, or omitted for the default of %d",
 			c.MaxCandidatesPerNarrative, DefaultMaxCandidatesPerNarrative,
+		)
+	}
+
+	if c.MaxNarrativesPerPass < 0 {
+		return fmt.Errorf(
+			"match.max_narratives_per_pass is %d: must be positive, or omitted for the default of %d",
+			c.MaxNarrativesPerPass, DefaultMaxNarrativesPerMatchPass,
 		)
 	}
 

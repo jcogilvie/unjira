@@ -7,6 +7,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/config"
@@ -166,11 +167,31 @@ func Match(
 		opt(&o)
 	}
 
-	limit := cfg.CandidateLimit()
+	// TWO limits, deliberately named apart. A single `limit` served both roles
+	// here, so a config setting max_candidates_per_narrative=10 silently examined
+	// only 10 narratives per pass — on a 30-narrative backlog that left 20
+	// unmatched, and those then reached the create path as untracked work and drew
+	// proposals for tickets duplicating issues they already named. The linked
+	// narratives came out as a contiguous id block, which is what gave it away.
+	candidateLimit := cfg.CandidateLimit()
+	narrativeLimit := cfg.NarrativeLimit()
 
-	narratives, err := s.NarrativesWithoutIssueKey(limit)
+	narratives, err := s.NarrativesWithoutIssueKey(narrativeLimit + 1)
 	if err != nil {
 		return nil, Stats{}, fmt.Errorf("listing narratives without an issue key: %w", err)
+	}
+
+	// Reaching the cap is logged, never silent — the same treatment Reconcile
+	// gives its own cap, and its absence here is why 20 unexamined narratives read
+	// as a matching failure rather than a batch limit. Fetching limit+1 above is
+	// how this knows the difference between "exactly full" and "more waiting".
+	if len(narratives) > narrativeLimit {
+		log.Printf(
+			"correlator: %d or more narratives are unmatched but this pass examines %d "+
+				"(match.max_narratives_per_pass); the remainder wait for the next pass",
+			len(narratives), narrativeLimit,
+		)
+		narratives = narratives[:narrativeLimit]
 	}
 
 	var (
@@ -180,7 +201,7 @@ func Match(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := matchOne(ctx, s, tracker, client, n, o.linkExclusions, limit, cfg, o.rules)
+		result, oneStats, err := matchOne(ctx, s, tracker, client, n, o.linkExclusions, candidateLimit, cfg, o.rules)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -236,7 +257,7 @@ func matchOne(
 		return result, Stats{}, nil
 	}
 
-	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, verified, learnedRules)
+	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, evts, verified, learnedRules)
 	if err != nil {
 		return result, stats, fmt.Errorf("classifying candidates for narrative %d: %w", narrative.ID, err)
 	}
@@ -293,6 +314,7 @@ func resolveVerified(
 	ctx context.Context,
 	client llm.Client,
 	narrative store.NarrativeRow,
+	evts []Event,
 	verified []verifiedCandidate,
 	learnedRules []rules.Rule,
 ) (links []store.NarrativeIssue, primaryKey string, primaryConfidence float64, rationale string, stats Stats, err error) {
@@ -308,11 +330,40 @@ func resolveVerified(
 		return links, v.IssueKey, 1.0, "", Stats{}, nil
 	}
 
-	n := Narrative{ID: narrative.ID, Title: narrative.Title, Summary: narrative.Summary}
+	// Events, not just title/summary. matchOne already loaded them above for
+	// candidate gathering, and withholding them is what let a real narrative go
+	// unlinked: its two Jira events naming PAAS-4038 were the evidence that
+	// settled which of four candidates owned the work, and the classifier never
+	// saw them. See match_events_test.go for the reproduction.
+	n := Narrative{
+		ID: narrative.ID, Title: narrative.Title, Summary: narrative.Summary, Events: evts,
+	}
 
 	verdicts, callStats, callErr := classifyCandidates(ctx, client, n, verified, learnedRules)
 	if callErr != nil {
 		return nil, "", 0, "", callStats, callErr
+	}
+
+	if len(verdicts) == 0 {
+		// The classifier declined to attribute anything, which discards every
+		// candidate below — including any whose provenance was a recorded fact
+		// rather than an inference. Logged because silence is exactly how this
+		// went unnoticed through a real pass: a narrative with four verified
+		// candidates ended with zero links, no error, and no line anywhere saying
+		// so, and the create path then proposed a duplicate ticket for work
+		// already tracked.
+		//
+		// NOT an error, deliberately. classifySystemPrompt does say "Exactly one
+		// candidate must receive this role", so an empty array violates a stated
+		// requirement and is arguably malformed — but failing here would abort a
+		// narrative that the next pass may classify fine, and the prompt now
+		// carries the narrative's events, which may remove the case entirely.
+		// Visibility first; escalate only if it recurs with the evidence present.
+		log.Printf(
+			"correlator: narrative %d classifier returned no verdicts for %d verified candidate(s); "+
+				"nothing linked, so this narrative still reads as untracked",
+			narrative.ID, len(verified),
+		)
 	}
 
 	byKey := make(map[string]verifiedCandidate, len(verified))
@@ -465,10 +516,38 @@ func classifyCandidates(
 // description is the reason tasktracker.Issue gained that field: a one-line
 // summary frequently cannot distinguish the ticket a narrative implements
 // from one it merely mentions in passing.
+// buildMatchPrompt renders the narrative, its events, and every verified
+// candidate.
+//
+// The EVENTS are the part that took a production failure to get right. Without
+// them the model is asked which of several tickets owns this work while seeing
+// only the keys and their Jira metadata — and the system prompt tells it to
+// "judge from each candidate's summary, description, and status, not from
+// provenance strength alone", which asks for evidence-based judgment while
+// withholding the evidence. A narrative whose two Jira events were literally
+// status changes on PAAS-4038 went unlinked because that fact reached the model
+// only as the single word "jira_event" on a candidate line.
+//
+// Rendered in the same shape buildDraftPrompt and buildClusterPrompt use, so all
+// three prompts describe an event identically.
 func buildMatchPrompt(n Narrative, candidates []verifiedCandidate) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "Narrative: title=%q\nsummary: %q\n\nCandidates:\n", n.Title, n.Summary)
+	fmt.Fprintf(&b, "Narrative: title=%q\nsummary: %q\n", n.Title, n.Summary)
+
+	if len(n.Events) > 0 {
+		b.WriteString("\nEvents in this narrative:\n")
+		for _, e := range n.Events {
+			// %q on Summary for the same reason buildClusterPrompt quotes it:
+			// event summaries come from arbitrary upstream text, and an embedded
+			// newline could otherwise fabricate a line the model reads as
+			// structure.
+			fmt.Fprintf(&b, "- [%s] %q (occurred_at=%s)\n",
+				e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+		}
+	}
+
+	b.WriteString("\nCandidates:\n")
 
 	for _, c := range candidates {
 		fmt.Fprintf(&b, "- issue_key=%s provenance=%s\n", c.IssueKey, c.Provenance)
