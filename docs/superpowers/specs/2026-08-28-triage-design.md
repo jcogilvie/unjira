@@ -47,10 +47,127 @@ the user:
 
 ### Shipped narrower than designed
 
-`[e]dit`, `[s]plit`, and `[t]arget` return explicit "not wired yet" errors. `Redraft` exists in
-`internal/reconciler` (with tests) but `StoreHandler` holds no LLM client; split and retarget need
-the same. Merge is complete. The verbs report themselves unavailable rather than silently no-oping,
-so a reviewer cannot believe a restructure happened when it did not.
+**Superseded 2026-08-29 — see "Wiring the stubbed verbs" below.** `[e]dit` and `[t]arget` are now
+wired; only `[s]plit` remains unavailable. The original note read:
+
+> `[e]dit`, `[s]plit`, and `[t]arget` return explicit "not wired yet" errors. `Redraft` exists in
+> `internal/reconciler` (with tests) but `StoreHandler` holds no LLM client; split and retarget need
+> the same. Merge is complete. The verbs report themselves unavailable rather than silently no-oping,
+> so a reviewer cannot believe a restructure happened when it did not.
+
+That "StoreHandler holds no LLM client" diagnosis was incomplete in a way that mattered: `Redraft`
+was not merely unwired, it was **uncallable**, and the shape that did compile failed silently. Below.
+
+## Wiring the stubbed verbs (2026-08-29)
+
+680 assertions (534 top-level + 146 subtests), 0 skipped; `golangci-lint` `0 issues.`
+
+### A correction to this spec: reject/edit feedback was NEVER persisted
+
+The Testing and "Deferred to slice 7" sections both asserted this, and it was false:
+
+> `actions.feedback` is already persisted by `[r]eject`/`[e]dit`, so slice 7 will have its input
+> waiting.
+
+It was not. `Session` recorded reject text in memory and `cmd/unjira/triage.go` only ever called
+`Approved()`. So a rejected action stayed at `status=proposed`, came back in the next session, and
+`actions.feedback` stayed NULL — meaning `rules.Distill` would have found **nothing** from any
+triage session and silently learned nothing. Grep confirmed the sole writer of that column was
+`actions decide --edit`; triage was not a caller.
+
+Worth recording as a spec defect rather than quietly fixing, because of *how* it read as true:
+`actions.feedback` did exist, `actions decide --edit` did write it, and `[r]eject` did capture
+free text. Every clause was individually verifiable. Nothing connected them, and the claim that
+they were connected was never checked.
+
+Fixed by `Session.Rulings()` plus `store.RecordRuling`. Rulings persist BEFORE the apply
+confirmation and independently of it: a reject writes to no tracker, so gating it on `apply?` would
+mean a reviewer who rejects several actions then answers `N` loses every ruling. Verified against a
+real store:
+
+```
+recorded rejected on action 1
+1|rejected|this belongs on a different ticket|2026-08-29T02:16:39.040Z
+proposed queue: 0
+second run -> "nothing to review: no actions at status=proposed"
+```
+
+### `reconciler.Redraft` was uncallable, and the compiling call was a silent no-op
+
+Probed rather than assumed. Naming its parameter type from another package fails to compile:
+
+```
+name verifiedLink not exported by package reconciler
+```
+
+and the one shape that DOES compile, passing `nil`, is silently useless:
+
+```
+reconciler: narrative 1 redraft named unrecognized issue_key "DEVSBX-9", ignoring
+err=<nil> actions=0
+```
+
+`actionsFromVerdicts` drops every verdict whose `issue_key` is absent from the verified set, so a
+nil `verified` discards the model's whole response and returns no error. A caller reaching for
+`Redraft` directly gets a successful no-op: an LLM call spent, an action unchanged, a reviewer told
+nothing went wrong.
+
+Keeping `verifiedLink` unexported is still right — it pairs a store row with live tracker state read
+under a specific pass, so letting a caller construct one would let it assert verification that never
+happened, exactly what `rules/verify-correlations.md` forbids. The fix is `reconciler.ReworkOne`,
+which **performs** the verification rather than accepting a claim of it.
+
+That also corrects a reused assumption. `Redraft`'s doc comment justifies reusing already-verified
+links because live state "was confirmed earlier in this same pass" — sound inside one `Reconcile`
+pass, and false for triage, which is a separate process from the watch pass that drafted these
+actions, possibly days later. There is no verification from "this same pass" to reuse.
+
+### The redraft delta is the commit watermark, not `DeltaEvents`
+
+`DeltaEvents` is bounded by `max(actions.created_at)`, so once the action being edited exists it
+returns nothing at all:
+
+```
+delta BEFORE any action:      1 events
+delta AFTER the action exists: 0 events
+```
+
+The action being edited is itself what suppresses its own source events. A redraft built on it would
+prompt the model with an empty delta and produce text about nothing — no error, no warning. So
+`store.EligibleEvents` bounds on the commit watermark instead, which is both correct ("describe
+every piece of work no tracker mutation has claimed") and the same bound every restructure uses, so
+an edit and a merge agree about which events are in play.
+
+### A replacement must be persisted to be approvable
+
+Probed: `approved 1 action(s); first ID=0`. `gate.Applier` calls
+`UpdateActionStatusAndError(action.ID, ...)`, which matches zero rows for id 0 — so the failure
+lands at APPLY time, after the reviewer already approved the new text, while the original row sits
+at `proposed` forever. `store.SupersedeAction` therefore rules on the old row and inserts the
+replacement in ONE transaction: two live proposals for the same work would let unjira post both.
+
+### Retarget
+
+Verifies the new issue before linking it (the old link was verified by the drafting pass; the new
+one never was). Replaces rather than adds, since `one_primary_per_narrative` rejects a second
+primary — in one transaction, because a crash between remove and add would leave the narrative with
+no primary at all, reading as untracked work and re-entering matching's backlog. Records
+`ProvenanceReviewer`, ranked ahead of every inferred tier, so a later pass can distinguish "someone
+decided this" from "we guessed this". Rules the old row `rejected`, not `edited`: it named the wrong
+issue, so it was not reworded.
+
+### Split, still unwired
+
+Unlike merge (moves existing links) and retarget (replaces one), split needs `Cluster` re-run with
+an instruction and new narratives persisted — a correlator operation rather than a store one. It
+reports itself unavailable.
+
+### Also: heeded a linter rather than suppressing it
+
+The first draft stored a `context.Context` on `StoreHandler`, which `containedctx` flags. It is
+right to: a stored context outlives the call it was made for and cannot be cancelled
+per-operation, and a redraft is a cancellable LLM round-trip. `Handler`'s methods now take one per
+call, and `Session` holds the pass-scoped one.
 
 The live-tier test (`internal/live/triage_test.go`) **compiles but was not run** — it writes to real
 Jira and wants an explicit decision, the same handling PR #24's live test got.
@@ -307,8 +424,11 @@ without applying anything.
 
 The phase-1 spec has `triage` also reviewing distilled rules on a learn-interval. That half needs
 `rules.Distill`, `unjira rules list|decide`, and a `learn_interval` config key — **none of which
-exist**. `triage` grows a second phase when they do. `actions.feedback` is already persisted by
-`[r]eject`/`[e]dit`, so slice 7 will have its input waiting.
+exist**. `triage` grows a second phase when they do.
+
+~~`actions.feedback` is already persisted by `[r]eject`/`[e]dit`, so slice 7 will have its input
+waiting.~~ **False when written, fixed 2026-08-29.** Triage persisted nothing, so this input did not
+exist. See "A correction to this spec" above.
 
 ## Testing
 

@@ -40,7 +40,7 @@ func Persist(s *store.Store, results []ReconcileResult) ([]store.ActionRow, erro
 	err := s.WithTx(func(tx *store.Tx) error {
 		for _, result := range results {
 			for _, action := range result.Proposed {
-				payload, err := actionPayload(action)
+				payload, err := ActionPayload(action)
 				if err != nil {
 					return fmt.Errorf(
 						"encoding payload for %s action on narrative %d: %w",
@@ -82,13 +82,19 @@ func Persist(s *store.Store, results []ReconcileResult) ([]store.ActionRow, erro
 	return persisted, nil
 }
 
-// actionPayload encodes the type-specific half of an action as JSON, since
+// ActionPayload encodes the type-specific half of an action as JSON, since
 // actions.payload's shape depends on actions.type.
 //
 // Encoded via a map rather than string concatenation so a body containing
 // quotes or newlines cannot corrupt the column — comment bodies are free prose
 // and routinely contain both.
-func actionPayload(action ProposedAction) (string, error) {
+//
+// Exported because internal/triage writes replacement action rows directly when
+// a reviewer edits or retargets one, and gate.Applier decodes with typed structs
+// mirroring this exact shape. A second encoder in triage would be a silent
+// divergence: a payload triage wrote that the applier could not read, discovered
+// only when a reviewer approved it.
+func ActionPayload(action ProposedAction) (string, error) {
 	var payload map[string]any
 
 	switch action.Type {

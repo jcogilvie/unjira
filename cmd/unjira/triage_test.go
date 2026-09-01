@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -135,7 +136,7 @@ func TestTriage_ApproveAllMarksEveryAction(t *testing.T) {
 	a := seedTriageAction(t, s, "DEVSBX-1")
 	b := seedTriageAction(t, s, "DEVSBX-2")
 
-	session := triage.NewSession([]store.ActionRow{a, b}, nil, nil)
+	session := triage.NewSession(context.Background(), []store.ActionRow{a, b}, nil, nil)
 	session.ApproveAll()
 
 	approved := session.Approved()

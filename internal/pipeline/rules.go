@@ -41,3 +41,16 @@ func loadCorrelatorRules(cfg config.Config) ([]rules.Rule, error) {
 func loadReconcilerRules(cfg config.Config) ([]rules.Rule, error) {
 	return loadRulesForScope(cfg, rules.ScopeReconciler)
 }
+
+// ReconcilerRules is loadReconcilerRules for callers outside this package.
+//
+// Exported for `unjira triage`, which redrafts actions itself rather than going
+// through RunReconcile and so must load the same rules that pass would have. Not
+// merely convenient: a redraft prompted WITHOUT the reconciler's learned rules
+// would silently ignore everything slice 7 taught — the reviewer's correction
+// would land while a rule they wrote earlier was dropped, and nothing would
+// report the difference. Sharing this one loader is what keeps a triage redraft
+// and a watch draft prompted identically.
+func ReconcilerRules(cfg config.Config) ([]rules.Rule, error) {
+	return loadReconcilerRules(cfg)
+}
