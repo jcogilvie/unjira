@@ -440,3 +440,114 @@ func TestApplier_WriteScope_CreateHonoursWritableSetNotJustProjectKeys(t *testin
 	assert.Equal(t, "failed", got.Status)
 	assert.Contains(t, got.Error, "PAAS")
 }
+
+// TestApplier_Create_LinksTheNewIssueToItsNarrative is the duplicate-ticket
+// guard. applyCreate used to discard CreateIssue's returned key
+// (`if _, err := ...`), so the narrative kept zero narrative_issues rows and
+// still read as untracked work — and the next pass proposed a create for it
+// again. Probed before the fix:
+//
+//	CreateIssue called 1 time(s), returned DEVSBX-100
+//	narrative_issues rows for narrative 1: 0
+//
+// Of the three mutation types this is the least recoverable: unjira cannot
+// un-create an issue, and each duplicate is an object other people reference.
+func TestApplier_Create_LinksTheNewIssueToItsNarrative(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type:    "create",
+		Payload: `{"summary":"Do the thing","description":"the body"}`,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+
+	require.NoError(t, applier.Apply(action))
+
+	links, err := s.NarrativeIssues(action.NarrativeID)
+	require.NoError(t, err)
+	require.Len(t, links, 1,
+		"without a link the narrative still looks untracked and the next pass creates a duplicate")
+	assert.Equal(t, "NEW-1", links[0].IssueKey,
+		"the link must name the key the tracker actually returned")
+}
+
+// TestApplier_Create_RecordsUnjiraCreatedProvenance: this is not an inference
+// about where work belongs — unjira put it there. A later pass should be able to
+// tell that apart from a branch-name guess.
+func TestApplier_Create_RecordsUnjiraCreatedProvenance(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type:    "create",
+		Payload: `{"summary":"s","description":"d"}`,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	require.NoError(t, applier.Apply(action))
+
+	links, err := s.NarrativeIssues(action.NarrativeID)
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, "unjira_created", links[0].Provenance)
+	assert.Equal(t, store.Role("primary"), links[0].Role,
+		"a created issue IS the record of this work, so it is the primary")
+}
+
+// TestApplier_Create_ASecondPassFindsTheNarrativeTracked closes the loop the way
+// it actually manifests: the point of linking is that the narrative stops being
+// selected as untracked. Asserted through the selector matching drafts, not just
+// on the link row.
+func TestApplier_Create_ASecondPassFindsTheNarrativeTracked(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type:    "create",
+		Payload: `{"summary":"s","description":"d"}`,
+	})
+
+	before, err := s.NarrativesWithoutIssueKey(10)
+	require.NoError(t, err)
+	require.Len(t, before, 1, "precondition: the narrative starts untracked")
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	require.NoError(t, applier.Apply(action))
+
+	tracked, err := s.NarrativesWithActionableLinks(10, []store.Role{store.Role("primary")})
+	require.NoError(t, err)
+	assert.Len(t, tracked, 1,
+		"the narrative must now be the reconciler's business, not matching's backlog")
+}
+
+// TestApplier_Create_ReportsAnOrphanWhenTheTrackerReturnsNoKey: an issue that
+// exists but cannot be linked is the duplicate-ticket condition. It must be loud,
+// because a human has to find the orphan before the next pass runs.
+func TestApplier_Create_ReportsAnOrphanWhenTheTrackerReturnsNoKey(t *testing.T) {
+	s := applierStore(t)
+	w := &keylessWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type:    "create",
+		Payload: `{"summary":"s","description":"d"}`,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "returned no key")
+	assert.Contains(t, err.Error(), "link it by hand")
+
+	stored, err := s.GetAction(action.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", stored.Status,
+		"an unlinkable create is a failure a human must see, not a silent success")
+}
+
+// keylessWriter creates successfully but returns an empty key — a tracker that
+// mutated reality and told us nothing usable about it.
+type keylessWriter struct{ fakeWriter }
+
+func (w *keylessWriter) CreateIssue(string, string, string, string, []string) (string, error) {
+	return "", nil
+}

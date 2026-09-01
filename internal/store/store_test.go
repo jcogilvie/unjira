@@ -1699,3 +1699,64 @@ func TestRemoveNarrativeIssue_MissingLinkErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "NOPE-1")
 }
+
+// TestNarrativesWithNoIssueLink_IsStricterThanWithoutIssueKey is the distinction
+// the create path depends on. NarrativesWithoutIssueKey selects on the
+// denormalized narratives.issue_key, which MatchConfig.ConfidenceFloor only
+// promotes above the floor — so a narrative with a REAL but low-confidence primary
+// has narrative_issues rows and a NULL issue_key, and appears in its results.
+// Proposing a create for one would open a duplicate ticket for work that IS
+// tracked.
+//
+// Both accessors are asserted on one fixture so the contrast is the assertion.
+func TestNarrativesWithNoIssueLink_IsStricterThanWithoutIssueKey(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+
+	// Linked, but issue_key never promoted (the low-confidence-primary case).
+	linked, err := s.InsertNarrative(base, base.Add(time.Hour), "tracked", "has a link")
+	require.NoError(t, err)
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(linked, []store.NarrativeIssue{{
+			IssueKey: "PROJ-1", Role: store.Role("primary"),
+			Provenance: "branch", Confidence: 0.3, Connection: "test",
+		}})
+	}))
+
+	// Genuinely untracked: no link of any role.
+	unlinked, err := s.InsertNarrative(base, base.Add(time.Hour), "untracked", "no link at all")
+	require.NoError(t, err)
+
+	byKey, err := s.NarrativesWithoutIssueKey(10)
+	require.NoError(t, err)
+	assert.Len(t, byKey, 2,
+		"selecting on issue_key includes the linked-but-unpromoted narrative")
+
+	byLink, err := s.NarrativesWithNoIssueLink(10)
+	require.NoError(t, err)
+	require.Len(t, byLink, 1,
+		"selecting on link existence excludes it, which is what the create path needs")
+	assert.Equal(t, unlinked, byLink[0].ID)
+}
+
+// TestNarrativesWithNoIssueLink_AnyRoleCounts: a `mentioned`-only narrative is not
+// untracked work — somebody cited an issue for it. Creating a new ticket would
+// duplicate whatever that citation points at.
+func TestNarrativesWithNoIssueLink_AnyRoleCounts(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+
+	id, err := s.InsertNarrative(base, base.Add(time.Hour), "mentioned only", "cited an issue")
+	require.NoError(t, err)
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(id, []store.NarrativeIssue{{
+			IssueKey: "PROJ-9", Role: store.Role("mentioned"),
+			Provenance: "prose_later", Confidence: 0.2, Connection: "test",
+		}})
+	}))
+
+	got, err := s.NarrativesWithNoIssueLink(10)
+
+	require.NoError(t, err)
+	assert.Empty(t, got, "a mentioned link is still a link; this is not untracked work")
+}

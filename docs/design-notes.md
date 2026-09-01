@@ -224,6 +224,90 @@ A comment can be accurate when written and become wrong when a second caller app
 is not part of the package's API, whatever it looks like. Before treating one as a seam, try calling
 it from where it will actually be called — and check what the *compiling* call does, not only whether
 it compiles. "It returned no error" and "it did the thing" are different claims.
+## 15. A missing selection path reads as a missing prompt option
+
+Discovered 2026-08-28 while investigating "the drafting prompt never offers `create`, so untracked
+work produces no action" (`internal/reconciler/create.go`).
+
+The report was accurate about the symptom and wrong about the cause, and the wrong fix looked
+obvious — add `create` to `draftSystemPrompt` and a create becomes proposable. Every layer
+downstream already supported it: the parser accepted the type, `suppressDuplicates` special-cased
+it, `Persist` persisted it, `gate.Applier` applied it via `CreateIssue`, and
+`tracker.default_project` existed solely to route it. Only the prompt appeared to be missing.
+
+Probing first:
+
+```
+NarrativesWithActionableLinks (reconciler's backlog) -> 0 rows
+NarrativesWithoutIssueKey (matching's backlog)       -> 1 rows
+```
+
+`Reconcile` selects narratives that HAVE a link, by construction. A narrative with none is never
+passed to `reconcileOne` at all, so the drafting prompt is never consulted for it. Adding an option
+to that prompt would have changed **nothing** — the code would look fixed, the tests would pass,
+and untracked work would still produce no action.
+
+The real gap was a selection path. And building one surfaced a second trap: the obvious accessor,
+`NarrativesWithoutIssueKey`, selects on the denormalized `narratives.issue_key`, which
+`MatchConfig.ConfidenceFloor` only promotes above the floor. A narrative with a REAL but
+low-confidence primary therefore has `narrative_issues` rows AND a NULL `issue_key`, and appears in
+its results — so a create path built on it would open duplicate tickets for work that IS tracked,
+just not confidently. The correct question is `NOT EXISTS (SELECT 1 FROM narrative_issues ...)`:
+does any link exist at all.
+
+Both halves of the same mistake: reasoning about a pipeline from the stage where the symptom appears
+rather than from the stage that decides what reaches it.
+
+**Generalization worth carrying:** when a capability is fully plumbed but never observed, check
+whether anything *selects* the input for it before concluding the last visible layer is at fault.
+"Nothing happens" is evidence about reachability, not about the code you can see. And when two
+accessors sound interchangeable, read what each one actually filters on — a denormalized column and
+the table it denormalizes are not the same question.
+
+## 16. A gate is only a gate if it prevents an action no other gate prevents
+
+Caught in review 2026-08-29, designing the create path above
+(`internal/reconciler/create.go`). Recorded because it was nearly shipped, and because the reasoning
+that nearly shipped it is reusable in the wrong direction.
+
+`create` is the least recoverable mutation unjira makes — a stale comment is deletable, a wrong
+transition is in the changelog, but a spurious issue is a new object other people reference. That
+makes "require an explicit opt-in before proposing one" sound obviously right, in the same register as
+`auto_commit.graduated`.
+
+It is not right, and one probe is enough to see why:
+
+```
+Decide(create @ confidence 1.0, nil)          -> DecisionQueue
+Decide(create, {comment: graduated=true})     -> DecisionQueue
+Decide(create, {create: graduated=false})     -> DecisionQueue
+```
+
+`gate.Decide` refuses to auto-apply a create unless a human graduated creates specifically. **The
+review queue is the gate.** A flag guarding *proposing* would prevent nothing, because proposing
+mutates nothing — and it would conflate "unjira suggests something" with "unjira acts", the
+distinction this whole codebase is organized around. It would also make the capability unusable in
+practice: nobody enables a flag whose own documentation implies danger.
+
+What makes such a gate *feel* justified is usually a real defect standing next to it. Here it was
+cost. Without a memory of refusals, a declined narrative is re-judged every pass:
+
+```
+pass 1: proposed=0  cumulative LLM calls=1
+pass 2: proposed=0  cumulative LLM calls=2
+pass 3: proposed=0  cumulative LLM calls=3
+```
+
+A recurring bill, not a hazard — and a gate "fixes" it only by disabling the feature. The actual fix
+is to persist the decline and re-ask when new events arrive, reusing `DeltaEvents`, which is already
+bounded by `max(actions.created_at)` and so answers "has anything changed since we last judged this"
+with no new column.
+
+**Generalization worth carrying:** before adding a gate, name the specific action it prevents and
+check whether an existing gate already prevents it. A gate that reads as safety but only suppresses a
+*proposal* is a feature flag wearing borrowed authority. And when one feels necessary anyway, look for
+the real defect nearby — it is usually a cost, a missing memory, or an unbounded loop, and fixing that
+is both cheaper and reversible where a gate tends to be permanent.
 
 ## What these validate about the architecture
 

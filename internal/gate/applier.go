@@ -211,6 +211,27 @@ func (a *Applier) applyTransition(action store.ActionRow) error {
 	return nil
 }
 
+// applyCreate opens a new issue AND links it back to the narrative that
+// motivated it.
+//
+// The link-back is the load-bearing half, and it was missing: this function used
+// to discard CreateIssue's returned key (`if _, err := ...`). Probed before
+// fixing:
+//
+//	CreateIssue called 1 time(s), returned DEVSBX-100
+//	narrative_issues rows for narrative 1: 0
+//
+// With no link, the narrative still has zero narrative_issues rows, so it still
+// reads as untracked work — and the next pass proposes a create for it again.
+// That is a loop that manufactures DUPLICATE JIRA TICKETS, each one an object
+// other people reference and none of which unjira can un-create. Of the three
+// mutation types this is the least recoverable, so it is also the one that most
+// needed closing.
+//
+// The link is written even if CreateIssue succeeded but the link fails: that case
+// returns an error naming the created key, so a human can attach it by hand. The
+// alternative — swallowing the link error — would recreate the duplicate loop
+// while reporting success.
 func (a *Applier) applyCreate(action store.ActionRow) error {
 	if a.defaultProject == "" {
 		return fmt.Errorf(
@@ -228,11 +249,43 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 		return fmt.Errorf("action %d: decoding create payload %q: %w", action.ID, action.Payload, err)
 	}
 
-	if _, err := a.writer.CreateIssue(a.defaultProject, p.Summary, defaultIssueType, p.Description, nil); err != nil {
+	key, err := a.writer.CreateIssue(a.defaultProject, p.Summary, defaultIssueType, p.Description, nil)
+	if err != nil {
 		return fmt.Errorf("creating issue in %s: %w", a.defaultProject, err)
 	}
 
+	if key == "" {
+		// A tracker that created something but told us nothing leaves us unable to
+		// link it, which is the duplicate-ticket condition. Loud, because the
+		// issue DOES exist and a human needs to know it is orphaned.
+		return fmt.Errorf(
+			"created an issue in %s but the tracker returned no key, so it cannot be linked to "+
+				"narrative %d; find it and link it by hand before the next pass proposes another",
+			a.defaultProject, action.NarrativeID)
+	}
+
+	if err := a.linkCreatedIssue(action.NarrativeID, key); err != nil {
+		return fmt.Errorf("created %s but could not link it to narrative %d (%w); link it by hand "+
+			"before the next pass proposes another", key, action.NarrativeID, err)
+	}
+
 	return nil
+}
+
+// linkCreatedIssue records the new issue as the narrative's primary.
+//
+// provenance is "unjira_created": distinct from every matching provenance because
+// this is not an inference about where work belongs — unjira put it there.
+// Confidence 1.0 for the same reason.
+func (a *Applier) linkCreatedIssue(narrativeID int64, key string) error {
+	return a.store.WithTx(func(tx *store.Tx) error {
+		return tx.AddNarrativeIssues(narrativeID, []store.NarrativeIssue{{
+			IssueKey:   key,
+			Role:       "primary",
+			Provenance: "unjira_created",
+			Confidence: 1.0,
+		}})
+	})
 }
 
 // checkWritable is applyComment/applyTransition's entry into the write-scope

@@ -58,6 +58,11 @@ A fresh clone has none of these configured, so a fresh clone applies nothing. `c
 deliberately omits `auto_commit` and `writable_project_keys` for exactly this reason: an example
 that grants write authority is one copy-paste from arming a real deployment.
 
+**These three cover opening new issues too.** A `create` is proposed for untracked work like any
+other action and lands in the queue, where gate 1 refuses to auto-apply it unless a human graduated
+`create` specifically. There is no separate flag for proposing one — a proposal is a queue entry,
+not a mutation, so gate 1 is already the thing standing between untracked work and a new ticket.
+
 ### What's done, per phase-1 slice
 
 | | |
@@ -193,7 +198,11 @@ data/                   SQLite database lives here (gitignored)
   never cause an illegal call.
 - **Untracked-work detection is the default path, not a special case.** Any narrative that
   fails to match an open issue with sufficient confidence lands in the unlinked bucket,
-  whatever stream it came from. Some workflows substitute a placeholder ticket key to satisfy a
+  whatever stream it came from. unjira then asks whether the work warrants a ticket nobody filed —
+  and most of the time the answer is no, so a refusal is a first-class outcome, recorded as a
+  `declined` action rather than silence. A decline is remembered: the same narrative is only
+  re-judged once new events arrive, so a "no" costs one model call rather than one per `watch`
+  tick. Some workflows substitute a placeholder ticket key to satisfy a
   commit-message linter when no real ticket applies; `exclude_from_linking` (a list of regex
   patterns in config, empty by default) tells unjira which ticket-shaped matches are placeholders
   rather than real links, without discarding the fact that one was seen — an event whose only

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jcogilvie/unjira/internal/config"
@@ -87,6 +88,19 @@ func RunReconcile(
 
 	results, stats, reconcileErr := reconciler.Reconcile(
 		ctx, s, tracker, client, cfg.Reconciler, reconciler.WithRules(reconcilerRules))
+
+	// Untracked narratives are a SEPARATE selection: Reconcile's backlog requires
+	// a narrative_issues link by construction, so a narrative with none is never
+	// examined by it at all. That is why untracked work produced no action even
+	// though every layer below supports `create` — the gap was a missing selection
+	// path, not a missing prompt option. No-ops unless
+	// reconciler.propose_creates is true.
+	createResults, createStats, createErr := reconciler.ProposeCreates(
+		ctx, s, client, cfg.Reconciler, reconcilerRules)
+	results = append(results, createResults...)
+	stats.Add(createStats)
+	reconcileErr = errors.Join(reconcileErr, createErr)
+
 	result := ReconcileRunResult{Results: results, Stats: stats, DryRun: opts.DryRun}
 
 	if opts.DryRun {

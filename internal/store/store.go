@@ -132,6 +132,11 @@ CREATE TABLE IF NOT EXISTS actions (
     rationale    TEXT,
     status       TEXT NOT NULL DEFAULT 'proposed',
                                       -- proposed | approved | edited | rejected | applied | failed
+                                      -- | declined  (the MODEL judged the work not
+                                      --   worth a ticket; no human ruled, nothing
+                                      --   was written. Distinct from 'rejected',
+                                      --   which is a human's ruling — see
+                                      --   reconciler.StatusDeclined)
     decided_at   TEXT,
     executed_at  TEXT,
     -- Written by slice 6's triage/rework loop, nothing today. Added now so
@@ -1483,7 +1488,7 @@ type ActionRow struct {
 	Payload     string  `json:"payload"` // JSON; shape depends on Type
 	Confidence  float64 `json:"confidence"`
 	Rationale   string  `json:"rationale"`
-	Status      string  `json:"status"` // proposed | approved | edited | rejected | applied | failed
+	Status      string  `json:"status"` // proposed | approved | edited | rejected | applied | failed | declined
 	Feedback    string  `json:"feedback"`
 	// Error is the tracker error's message when Status is "failed" — see the
 	// actions.error column comment in the schema string above for why this is
@@ -1923,4 +1928,54 @@ func removeNarrativeIssueImpl(c dbConn, narrativeID int64, issueKey string) erro
 	}
 
 	return nil
+}
+
+// NarrativesWithNoIssueLink returns up to limit narratives having NO
+// narrative_issues row of any role — genuinely untracked work.
+//
+// Distinct from NarrativesWithoutIssueKey, and the difference is the whole point.
+// That accessor selects on the denormalized narratives.issue_key, which
+// MatchConfig.ConfidenceFloor only promotes above the floor — so a narrative with
+// a real but low-confidence primary has narrative_issues rows AND a NULL
+// issue_key, and appears in its results. Proposing a create for one of those
+// would open a duplicate ticket for work that IS tracked, just not confidently.
+//
+// So this asks the stricter question: does any link exist at all? Only a NOT
+// EXISTS answer means nobody filed anything.
+//
+// Exists because the reconciler could not see untracked narratives at all.
+// NarrativesWithActionableLinks requires a link by construction, so reconcileOne
+// was never invoked for an unlinked narrative — proven by probe:
+//
+//	NarrativesWithActionableLinks (reconciler's backlog) -> 0 rows
+//	NarrativesWithoutIssueKey (matching's backlog)       -> 1 rows
+//
+// which is why adding "create" to the drafting prompt would have changed nothing.
+func (s *Store) NarrativesWithNoIssueLink(limit int) ([]NarrativeRow, error) {
+	rows, err := s.db.Query(
+		`SELECT n.id, n.window_start, n.window_end, n.title, n.summary, n.issue_key,
+		        n.confidence, n.status, n.compaction_boundary, n.compaction_boundary_event_id
+		 FROM narratives n
+		 WHERE NOT EXISTS (
+		     SELECT 1 FROM narrative_issues ni WHERE ni.narrative_id = n.id
+		 )
+		 ORDER BY n.window_start, n.id
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying narratives with no issue link: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []NarrativeRow
+	for rows.Next() {
+		row, err := scanNarrativeRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning unlinked narrative row: %w", err)
+		}
+		out = append(out, row)
+	}
+
+	return out, rows.Err()
 }
