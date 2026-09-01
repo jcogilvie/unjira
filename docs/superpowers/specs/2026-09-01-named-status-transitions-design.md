@@ -121,6 +121,44 @@ work-derived signals:
 Deliberately asymmetric: a transition is proposable from observed **work**, never from observed
 **tracker state**. Tracker state is what tells unjira a move is unnecessary.
 
+### 3a. Recency, not direction, decides whether to propose
+
+The obvious guard is monotonicity — never propose a status earlier in the workflow than where the
+ticket already is. It is wrong, and inverts into the exact failure it is meant to prevent.
+
+Backward moves are ordinary and load-bearing. Security scans a ticket we marked done, finds the vuln
+still present, and moves it `In Review → In Progress`. A test cycle produces findings and bounces a
+ticket back for rework. Each is simultaneously evidence that work happened *and* that more work
+remains — precisely the state a reconciler should be able to represent.
+
+Now apply monotonicity to that case. unjira still holds PR-created evidence, still concludes
+`In Review`, and proposes moving the ticket forward again — undoing the handoff. Monotonicity does not
+stop unjira from fighting a human's deliberate move; it *guarantees* it, every pass, until the
+evidence ages out.
+
+Direction is not the discriminator. **Recency is:**
+
+> Propose a transition only when the work evidence postdates the issue's last status change.
+
+| Situation | Outcome |
+|---|---|
+| Security moved it at T2; our newest linked event is T1 < T2 | Propose nothing. The tracker knows something we don't. |
+| Our newest linked event postdates the last status change | Propose, in **either** direction. |
+
+One rule covers both cases, needs no notion of forward or backward, and generalizes to handoffs unjira
+has never seen — including ones by systems it does not collect from. A move by anyone, for any reason,
+supersedes evidence older than itself.
+
+This sharpens the asymmetry above rather than weakening it. Tracker state still never *motivates* a
+transition; it only ever *vetoes* one. What changes is the vocabulary of the veto: not just "already
+there, unnecessary," but "changed after we looked, superseded."
+
+The timestamp is available. `workflow`'s miner already reads changelogs via `StatusChanges`; this needs
+one status change — the most recent — which is `Issue.StatusChangedAt`, populated on the live read path
+beside `StatusName`. Absent it (a backend with no changelog, or a ticket never transitioned), the rule
+cannot fire and the transition is proposable — degrading toward proposing, since a proposal is reviewed
+and a suppression is invisible.
+
 **unjira narrates transitions it did not make.** The comment proposed for PAAS-4038 opened:
 
 > "Status moved from Discovery to Ready for Dev. Implementation plan finalized: ..."
@@ -188,7 +226,7 @@ separately — two of which are mechanical consequences of the third.
 ## Scope
 
 - `internal/tasktracker` — `SetStatus` signature, `AvailableTransitions` replacing
-  `AvailableStatusCategories`, new `Transition` type
+  `AvailableStatusCategories`, new `Transition` type, `Issue.StatusChangedAt`
 - `internal/clients/jira` — both methods; `SetStatus` matches on name rather than resolving a category
 - `internal/clients/local` — same; `local_issues.status_category` becomes `status` holding a name
   (greenfield schema, no migration)
@@ -221,6 +259,10 @@ separately — two of which are mechanical consequences of the third.
 
 ## Open questions
 
+These were the questions this spec could not answer from the code. Each is answered below, in
+`## Resolutions`; the questions are left as written because the record of what was uncertain is worth
+more than a doc that looks prescient.
+
 - **Does the admin workflow API tier get built now or later?** The package doc names it as tier one.
   Mining works and is what this spec uses; the admin API would make the graph authoritative rather
   than statistical, but needs permissions a normal user may not have. Deferring means the graph stays
@@ -232,3 +274,21 @@ separately — two of which are mechanical consequences of the third.
   graph is stale (re-mine and retry) or the move is genuinely impossible (refuse and say so). These
   are indistinguishable from inside `Path`, and guessing wrong in either direction is bad: refusing a
   legal move, or looping on an impossible one.
+
+## Resolutions
+
+**Admin API: deferred.** The mined graph stays the planner. Its being statistical costs a refused hop
+at worst, never a bad write, because every hop is validated live before it runs. Building the admin
+tier would also require writing the mining fallback anyway, for users without the permission.
+
+**Rare edges: record the frequency, do not gate.** The edge's observed count travels with the action so
+a reviewer sees `seen 1x` and the data accumulates. Choosing a threshold today would be inventing
+rigor — nothing yet establishes that rarity predicts wrongness, and a wrong threshold silently
+suppresses legitimate moves, which is the failure mode hardest to notice.
+
+**Nil `Path`: ask the live endpoint, then decide.** Call `AvailableTransitions`. If the target is
+directly offered, the graph was merely stale — take the hop and mark the cache dirty, which is the same
+self-healing trigger a rejection uses. If it is not offered, refuse and say so, naming both facts: no
+observed route *and* not currently offered. This resolves the ambiguity with the authority the design
+already grants rather than by guessing, and costs an API call the apply path makes regardless. Inline
+re-mining is rejected: ~40s for 200 issues is far too slow inside a reconcile pass.
