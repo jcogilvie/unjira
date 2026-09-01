@@ -310,21 +310,21 @@ func verifyLinks(
 			continue
 		}
 
-		categories, catErr := tracker.AvailableStatusCategories(l.IssueKey)
-		if catErr != nil {
-			if correlator.IsTransportError(catErr) {
+		transitions, transErr := tracker.AvailableTransitions(l.IssueKey)
+		if transErr != nil {
+			if correlator.IsTransportError(transErr) {
 				return nil, unverified, fmt.Errorf(
-					"reading transitions for %s on narrative %d: %w", l.IssueKey, narrativeID, catErr,
+					"reading transitions for %s on narrative %d: %w", l.IssueKey, narrativeID, transErr,
 				)
 			}
 			// Not-found here is odd (GetIssue just succeeded) but survivable:
 			// no known-legal transition means no transition is proposed, which
 			// floorConfidence enforces.
-			categories = nil
+			transitions = nil
 		}
 
 		verified = append(verified, verifiedLink{
-			Link: l, Issue: issue, AvailableStatus: categories,
+			Link: l, Issue: issue, Transitions: transitions,
 		})
 	}
 

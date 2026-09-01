@@ -48,8 +48,8 @@ func (f *fakeWriter) AddComment(key, text string) error {
 	return f.errs[call]
 }
 
-func (f *fakeWriter) SetStatus(key string, target tasktracker.StatusCategory) error {
-	call := fmt.Sprintf("SetStatus:%s:%s", key, target)
+func (f *fakeWriter) SetStatus(key, targetStatus string) error {
+	call := fmt.Sprintf("SetStatus:%s:%s", key, targetStatus)
 	f.calls = append(f.calls, call)
 
 	return f.errs[call]
@@ -133,15 +133,18 @@ func TestApplier_Comment_CallsAddCommentAndMarksApplied(t *testing.T) {
 func TestApplier_Transition_CallsSetStatusAndMarksApplied(t *testing.T) {
 	s := applierStore(t)
 	w := &fakeWriter{}
+	// A multi-word name with a space, which is what real statuses look like and
+	// what the old category-shaped payload could not carry.
 	action := insertAction(t, s, store.ActionRow{
-		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"done"}`, Confidence: 0.9,
+		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"In Review"}`, Confidence: 0.9,
 	})
 
 	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
 	err := applier.Apply(action)
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"SetStatus:PROJ-1:done"}, w.calls)
+	assert.Equal(t, []string{"SetStatus:PROJ-1:In Review"}, w.calls,
+		"the name reaches the writer unchanged; this package does not reinterpret it")
 
 	got, err := s.ActionsForNarrative(action.NarrativeID)
 	require.NoError(t, err)
@@ -311,18 +314,51 @@ func TestApplier_MalformedPayload_ErrorsWithoutCallingTheTracker(t *testing.T) {
 	assert.Equal(t, "failed", got[0].Status)
 }
 
-func TestApplier_UnrecognizedTargetStatus_ErrorsWithoutCallingTheTracker(t *testing.T) {
+// TestApplier_PassesAnArbitraryStatusNameThrough replaces a test that asserted
+// the OPPOSITE, and the reversal is the point.
+//
+// That test fed `{"target_status":"blocked"}` and required an error, because
+// "blocked" was not one of the three StatusCategory values. But Blocked is a real
+// PAAS status — the old check rejected a legitimate destination for not being a
+// category, which is the defect this change exists to fix.
+//
+// This package can no longer validate a name: there is no closed set of them.
+// Legality is "does this issue currently offer this transition," which is a live
+// per-issue read that SetStatus already performs and errors on. Re-checking here
+// would spend a second request and open a window in which the answer can change,
+// preventing nothing. See docs/design-notes.md incident 16.
+func TestApplier_PassesAnArbitraryStatusNameThrough(t *testing.T) {
 	s := applierStore(t)
 	w := &fakeWriter{}
 	action := insertAction(t, s, store.ActionRow{
-		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"blocked"}`, Confidence: 0.9,
+		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"Blocked"}`, Confidence: 0.9,
 	})
 
 	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
-	err := applier.Apply(action)
 
-	require.Error(t, err)
-	assert.Empty(t, w.calls)
+	require.NoError(t, applier.Apply(action))
+	assert.Equal(t, []string{"SetStatus:PROJ-1:Blocked"}, w.calls,
+		"a status this package has never heard of is still a legal destination")
+}
+
+// TestApplier_EmptyTargetStatus_ErrorsWithoutCallingTheTracker: the one check
+// that survives. An empty target is a malformed payload — never valid for its
+// declared type — which is this package's business rather than a tracker round
+// trip to spend discovering.
+func TestApplier_EmptyTargetStatus_ErrorsWithoutCallingTheTracker(t *testing.T) {
+	for _, payload := range []string{`{"target_status":""}`, `{"target_status":"   "}`, `{}`} {
+		s := applierStore(t)
+		w := &fakeWriter{}
+		action := insertAction(t, s, store.ActionRow{
+			Type: "transition", IssueKey: "PROJ-1", Payload: payload, Confidence: 0.9,
+		})
+
+		applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+		err := applier.Apply(action)
+
+		require.Error(t, err, "payload %s must be refused", payload)
+		assert.Empty(t, w.calls, "and must not reach the tracker")
+	}
 }
 
 // TestApplier_UnknownActionType_ErrorsRatherThanGuessing covers "estimate" —

@@ -145,16 +145,20 @@ func TestInsertLocalIssue_AssignsSequentialKeyPerProject(t *testing.T) {
 	assert.Equal(t, "OTHER-1", otherKey)
 }
 
-func TestSetLocalIssueStatus_UpdatesCategory(t *testing.T) {
+func TestSetLocalIssueStatus_StoresTheNameVerbatim(t *testing.T) {
 	s := openStore(t)
 	key, err := s.InsertLocalIssue("PROJ", "Do the thing", "Task", "", nil)
 	require.NoError(t, err)
 
-	require.NoError(t, s.SetLocalIssueStatus(key, "in_progress"))
+	// A multi-word name with a space, which is what a real tracker's statuses
+	// look like and what a category could never hold.
+	require.NoError(t, s.SetLocalIssueStatus(key, "In Review"))
 
 	issue, err := s.GetLocalIssue(key)
 	require.NoError(t, err)
-	assert.Equal(t, "in_progress", issue.StatusCategory)
+	assert.Equal(t, "In Review", issue.Status,
+		"stored unchanged: normalizing here would make the local backend disagree "+
+			"with a real one, whose status names are whatever the admin typed")
 }
 
 func TestSetLocalIssueStatus_MissingReturnsErrLocalIssueNotFound(t *testing.T) {
@@ -238,7 +242,8 @@ func TestInsertLocalIssue_GetLocalIssue_RoundTrips(t *testing.T) {
 	assert.Equal(t, "Do the thing", issue.Summary)
 	assert.Equal(t, "a description", issue.Description)
 	assert.Equal(t, "Task", issue.IssueType)
-	assert.Equal(t, "todo", issue.StatusCategory)
+	assert.Equal(t, "To Do", issue.Status,
+		"a fresh issue starts at the schema default, which is a status NAME")
 	assert.Equal(t, []string{"bug", "urgent"}, issue.Labels)
 }
 

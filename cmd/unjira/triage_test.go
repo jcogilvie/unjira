@@ -12,7 +12,6 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/store"
-	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/triage"
 )
 
@@ -83,8 +82,8 @@ func (w *triageRecordingWriter) AddComment(key, _ string) error {
 	return nil
 }
 
-func (w *triageRecordingWriter) SetStatus(key string, target tasktracker.StatusCategory) error {
-	w.calls = append(w.calls, "SetStatus:"+key+":"+string(target))
+func (w *triageRecordingWriter) SetStatus(key, targetStatus string) error {
+	w.calls = append(w.calls, "SetStatus:"+key+":"+targetStatus)
 
 	return nil
 }

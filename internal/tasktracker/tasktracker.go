@@ -11,10 +11,19 @@ import (
 	"regexp"
 )
 
-// StatusCategory is a normalized status bucket every backend maps into.
-// Deliberately coarse: GitHub Issues has no named-status concept at all,
-// only open/closed, so a category-based target is the common denominator
-// across backends.
+// StatusCategory is a normalized status bucket every backend maps into, for
+// REPORTING current state and for coarse direction checks (a done -> todo move
+// is a suspicious reopen whatever the two statuses are named).
+//
+// Never a transition target. It was one until 2026-09-01, on the reasoning that
+// GitHub Issues has no named-status concept and so a category is the common
+// denominator across backends. That argument holds for reading and inverts for
+// writing: a named target degrades gracefully to a two-name backend (open and
+// closed are names), while a category target cannot upgrade to a nineteen-status
+// one. Real measurement settled it — in the PAAS project both edges unjira exists
+// to propose, Ready for Dev -> In Progress and In Progress -> In Review, are
+// in_progress -> in_progress, so a category could express neither. See
+// docs/superpowers/specs/2026-09-01-named-status-transitions-design.md.
 type StatusCategory string
 
 // The three normalized status categories every backend maps into.
@@ -23,6 +32,25 @@ const (
 	StatusInProgress StatusCategory = "in_progress"
 	StatusDone       StatusCategory = "done"
 )
+
+// Transition is one destination an issue can legally move to right now, as the
+// live backend reports it.
+type Transition struct {
+	// ToStatus is the tracker's own name for the destination — "In Review", not
+	// "in_progress". This is what a proposed transition targets and what
+	// SetStatus matches on.
+	//
+	// A backend with no named statuses reports whatever it calls its two states
+	// ("open"/"closed" for GitHub Issues). Those are names too; there are just
+	// two of them.
+	ToStatus string
+
+	// ToCategory is the normalized bucket ToStatus falls in, kept for the cheap
+	// direction check confidence flooring wants. Several distinct ToStatus
+	// values routinely share one ToCategory — that is the entire reason
+	// ToStatus exists — so this must never be used to select a target.
+	ToCategory StatusCategory
+}
 
 // Issue is a backend-normalized view of one tracked work item.
 type Issue struct {
@@ -65,14 +93,14 @@ type TaskReader interface {
 	// callers must treat this as backend-flavored.
 	SearchIssues(query string, limit int) ([]Issue, error)
 
-	// AvailableStatusCategories reports which normalized status categories the
-	// issue can legally move to right now, per the live backend.
+	// AvailableTransitions reports every destination the issue can legally move
+	// to right now, per the live backend, each as a name plus its normalized
+	// category.
 	//
-	// Normalized categories rather than backend-native transition identifiers,
-	// for the same reason SetStatus takes a category: Jira's named,
-	// admin-configurable transitions have no counterpart in GitHub Issues'
-	// open/closed model, and callers only need to know whether a target is
-	// reachable.
+	// Names, not just categories: several legal destinations routinely share a
+	// category (in PAAS, In Progress / In Review / Blocked / In Test all sit in
+	// in_progress), so a category-keyed answer collapses distinct destinations
+	// into one and makes the reachable set unstatable.
 	//
 	// This must be a live per-issue read, not a lookup against a mined
 	// workflow.Graph. The graph is statistically observed changelog history, so
@@ -84,7 +112,7 @@ type TaskReader interface {
 	// A read that describes a write: it reports what a write *could* do
 	// without performing one, which is why it sits here and not beside
 	// SetStatus.
-	AvailableStatusCategories(key string) ([]StatusCategory, error)
+	AvailableTransitions(key string) ([]Transition, error)
 }
 
 // TaskWriter is the mutating surface — the executable counterparts of the
@@ -102,10 +130,15 @@ type TaskWriter interface {
 	// test.
 	AddComment(key, text string) error
 
-	// SetStatus moves an issue toward a normalized target category —
-	// deliberately coarser than Jira's named-transition model, since
-	// GitHub Issues only has open/closed.
-	SetStatus(key string, target StatusCategory) error
+	// SetStatus moves an issue to the named target status — the tracker's own
+	// name, matching a Transition.ToStatus the backend reported as available.
+	//
+	// Errors rather than guessing when no available transition lands on that
+	// name. A backend may legitimately have no transition to a status that
+	// existed a moment ago (someone else moved the issue, or an admin edited
+	// the workflow), and executing some other transition because it looked
+	// close would apply a change nobody approved.
+	SetStatus(key, targetStatus string) error
 
 	// CreateIssue creates an issue and returns its key.
 	CreateIssue(projectOrRepo, summary, issueType, description string, labels []string) (string, error)

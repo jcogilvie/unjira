@@ -3,7 +3,68 @@
 Replacing the three-category transition target with the tracker's own status names, and making
 `workflow.Graph` load-bearing for the first time.
 
-## Status: design
+## Status: partially landed 2026-09-01
+
+Sections 1, 2, and the prompt half of 3 have landed. Sections 3a (recency), 4 (the graph cache), and
+5 (multi-hop) have **not** — they are separate changes, and this section will be updated as each
+lands rather than describing them as done.
+
+**Landed:**
+
+- `SetStatus(key, targetStatus string)`, `AvailableTransitions` replacing
+  `AvailableStatusCategories`, the new `Transition` type. Both backends.
+- `reconciler.ProposedAction.TargetStatus` is a `string`; the persisted payload carries a name.
+- `gate.Applier` no longer validates the target against a closed enum. It could not: there is no
+  closed set of names. It checks only that the payload is non-empty and lets `SetStatus` do the live
+  check it already does. Deviation from the spec, which said to re-check against
+  `AvailableTransitions` here — that would issue a second identical request and open a window
+  between check and write, preventing nothing `SetStatus` does not already prevent (incident 16).
+- The drafting prompt names work-derived transition evidence, requires exact status names, and
+  forbids restating a status change somebody else made.
+- `rules/no-self-narration.md`.
+- `local_issues.status_category` renamed to `status`, with a real idempotent migration —
+  `CREATE TABLE IF NOT EXISTS` is a no-op against an existing database, so the rename alone would
+  have left every dev database failing at runtime on the first local-backend call. The repo had no
+  migration mechanism at all before this.
+
+**Not landed, and why:**
+
+- **Section 3a (recency)** needs `Issue.StatusChangedAt`, which needs the issue's last status change
+  from a changelog read. The field was written and then removed from this change rather than shipped
+  always-zero: a field nothing populates reads as "no status change on record," which under the
+  recency rule means "propose," i.e. exactly the handoff-fighting behavior the rule exists to stop.
+  The obvious cheap source (`statuscategorychangedate`) is wrong here — it moves only when the
+  *category* changes, so `In Progress -> In Review` would not update it. `expand=changelog` looks
+  free but Jira truncates embedded histories, and a truncated changelog yields a too-old timestamp,
+  which fails in the same unsafe direction.
+- **Sections 4 and 5** are in flight separately.
+
+**Verification:**
+
+```
+go test ./...                          # 23 packages ok, 749 tests
+go vet -tags=live ./internal/live/     # clean — the live tier is excluded from `go test ./...`
+                                       # and silently broke CI on #27 for exactly this reason
+golangci-lint run ./...                # 0 issues.
+```
+
+Both fixes were drilled by breaking them and confirming the guard fails:
+
+- Name matching disabled in `SetStatus` → `TestTracker_SetStatus_PicksTheTransitionMatchingTheName`
+  fails with `expected: "41" / actual: "31"`. 41 is In Review; 31 is In Progress and shares its
+  category. That is the wrong write, reproduced.
+- The migration's `ALTER TABLE` skipped → `TestMigrate_RenamesLocalIssueStatusCategory` fails on
+  `store.Open` against an old-shaped database.
+
+The regression guard is `TestTransition_DistinguishesTargetsSharingACategory` plus
+`TestTracker_SetStatus_PicksTheTransitionMatchingTheName`, both built on the real mined PAAS
+transition set. The second one fails by construction under the old category-matching code: all four
+destinations share `indeterminate`, so asking for In Review posted transition 31 (In Progress).
+
+Live-tier tests for the named write path are written and compile but have **not been run** against
+the dev instance in this change.
+
+## Original design follows
 
 ## The decision being revisited, and why it is not in any spec
 

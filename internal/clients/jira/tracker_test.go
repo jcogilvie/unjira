@@ -141,165 +141,244 @@ func TestTracker_CreateIssue_DelegatesToClient(t *testing.T) {
 	assert.Equal(t, "P-1", key)
 }
 
-func TestTracker_SetStatus_PicksTransitionMatchingCategory(t *testing.T) {
-	var gotPath string
+// paasTransitions is the response shape a real PAAS issue mid-flight returns:
+// four legal destinations, ALL in the indeterminate category. Mined 2026-09-01
+// via `dev workflow --project PAAS`.
+func paasTransitions() map[string]any {
+	return map[string]any{
+		"transitions": []map[string]any{
+			{"id": "31", "to": map[string]any{
+				"name": "In Progress", "statusCategory": map[string]any{"key": "indeterminate"},
+			}},
+			{"id": "41", "to": map[string]any{
+				"name": "In Review", "statusCategory": map[string]any{"key": "indeterminate"},
+			}},
+			{"id": "51", "to": map[string]any{
+				"name": "Blocked", "statusCategory": map[string]any{"key": "indeterminate"},
+			}},
+			{"id": "61", "to": map[string]any{
+				"name": "In Test", "statusCategory": map[string]any{"key": "indeterminate"},
+			}},
+		},
+	}
+}
+
+// TestTracker_SetStatus_PicksTheTransitionMatchingTheName is the wrong-write
+// regression, and the reason this whole change exists.
+//
+// All four destinations share the indeterminate category. The previous
+// category-matching implementation executed the FIRST transition whose category
+// matched, so asking for In Review would have posted transition 31 and moved the
+// ticket to In Progress; asking for Blocked would have done the same. Every
+// transition request in a real project would have hit the wrong status — not
+// occasionally, but by construction.
+func TestTracker_SetStatus_PicksTheTransitionMatchingTheName(t *testing.T) {
 	var gotBody map[string]any
 
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			writeJSON(t, w, http.StatusOK, map[string]any{
-				"transitions": []map[string]any{
-					{"id": "11", "to": map[string]any{"statusCategory": map[string]any{"key": "new"}}},
-					{"id": "31", "to": map[string]any{"statusCategory": map[string]any{"key": "indeterminate"}}},
-					{"id": "41", "to": map[string]any{"statusCategory": map[string]any{"key": "done"}}},
-				},
-			})
+			writeJSON(t, w, http.StatusOK, paasTransitions())
+
 			return
 		}
 
-		gotPath = r.URL.Path
 		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
 		w.WriteHeader(http.StatusNoContent)
 	})
 	tr := jira.NewTracker(client)
 
-	err := tr.SetStatus("P-1", tasktracker.StatusInProgress)
+	require.NoError(t, tr.SetStatus("P-1", "In Review"))
 
-	require.NoError(t, err)
-	assert.Contains(t, gotPath, "/issue/P-1/transitions")
 	transition, ok := gotBody["transition"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "31", transition["id"])
+	assert.Equal(t, "41", transition["id"],
+		"41 is In Review; 31 is In Progress and shares its category")
 }
 
-func TestTracker_SetStatus_NoMatchingTransitionReturnsError(t *testing.T) {
-	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, http.StatusOK, map[string]any{
-			"transitions": []map[string]any{
-				{"id": "11", "to": map[string]any{"statusCategory": map[string]any{"key": "new"}}},
-			},
-		})
-	})
-	tr := jira.NewTracker(client)
-
-	err := tr.SetStatus("P-1", tasktracker.StatusDone)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "P-1")
-}
-
-func TestTracker_SetStatus_RefusesUnknownCategoryTransition(t *testing.T) {
-	// Only an unmapped ("cosmic") category is offered. Folding that into
-	// StatusTodo (the read path's fallback) would let SetStatus execute an
-	// exotic transition when asked for Todo — an unintended state change.
-	// It must instead report no legal transition, and critically, never
-	// reach the transition endpoint to do so.
-	var sawPost bool
+// TestTracker_SetStatus_IsCaseInsensitive: the target name survives a round trip
+// through a model response and a persisted JSON payload before arriving here.
+// Refusing a legitimate transition over "in review" vs "In Review" would be a
+// self-inflicted failure, and Jira treats status names as display strings with
+// no casing guarantee.
+func TestTracker_SetStatus_IsCaseInsensitive(t *testing.T) {
+	var posted bool
 
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			writeJSON(t, w, http.StatusOK, map[string]any{
-				"transitions": []map[string]any{
-					{"id": "91", "to": map[string]any{"statusCategory": map[string]any{"key": "cosmic"}}},
-				},
-			})
+			writeJSON(t, w, http.StatusOK, paasTransitions())
+
 			return
 		}
 
-		sawPost = true
+		posted = true
 		w.WriteHeader(http.StatusNoContent)
 	})
 	tr := jira.NewTracker(client)
 
-	err := tr.SetStatus("P-1", tasktracker.StatusTodo)
+	require.NoError(t, tr.SetStatus("P-1", "  in review  "))
+	assert.True(t, posted)
+}
+
+// TestTracker_SetStatus_NoMatchingNameReturnsErrorNamingWhatWasAvailable: an
+// opaque refusal makes a typo, a workflow edit, and someone else having already
+// moved the issue indistinguishable. The available list is the diagnosis.
+func TestTracker_SetStatus_NoMatchingNameReturnsErrorNamingWhatWasAvailable(t *testing.T) {
+	var posted bool
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(t, w, http.StatusOK, paasTransitions())
+
+			return
+		}
+
+		posted = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	tr := jira.NewTracker(client)
+
+	err := tr.SetStatus("P-1", "Shipped")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "P-1")
-	assert.False(t, sawPost, "SetStatus must not execute a transition landing in an unrecognized category")
+	assert.Contains(t, err.Error(), "Shipped")
+	assert.Contains(t, err.Error(), "In Review", "the error must name what WAS available")
+	assert.False(t, posted, "an unresolvable name must never execute some other transition")
 }
 
-func TestTracker_AvailableStatusCategories_DropsUnknownCategory(t *testing.T) {
-	// A transition into an unmapped Jira category ("cosmic") must be
-	// dropped, not folded into StatusTodo — reporting Todo reachable when
-	// it isn't is the exact false positive this method exists to prevent.
+// TestTracker_SetStatus_DoesNotPrefixMatch: "In" is a prefix of three real
+// destinations. Matching loosely would pick one arbitrarily and apply a
+// transition nobody approved — worse than refusing, because it looks like it
+// worked.
+func TestTracker_SetStatus_DoesNotPrefixMatch(t *testing.T) {
+	var posted bool
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(t, w, http.StatusOK, paasTransitions())
+
+			return
+		}
+
+		posted = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	tr := jira.NewTracker(client)
+
+	require.Error(t, tr.SetStatus("P-1", "In"))
+	assert.False(t, posted)
+}
+
+// TestTracker_AvailableTransitions_KeepsDestinationsSharingACategory is the
+// read-side half of the same regression. The old category-keyed version
+// deduplicated these four PAAS destinations down to ONE entry, so the reconciler
+// could not tell that In Review was reachable and Blocked was too.
+func TestTracker_AvailableTransitions_KeepsDestinationsSharingACategory(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, paasTransitions())
+	})
+	tr := jira.NewTracker(client)
+
+	got, err := tr.AvailableTransitions("PROJ-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, []tasktracker.Transition{
+		{ToStatus: "In Progress", ToCategory: tasktracker.StatusInProgress},
+		{ToStatus: "In Review", ToCategory: tasktracker.StatusInProgress},
+		{ToStatus: "Blocked", ToCategory: tasktracker.StatusInProgress},
+		{ToStatus: "In Test", ToCategory: tasktracker.StatusInProgress},
+	}, got, "four distinct destinations, not one category")
+}
+
+// TestTracker_AvailableTransitions_KeepsAnUnrecognizedCategoryAsANamedTarget is
+// a deliberate REVERSAL of the old behavior, which dropped such a transition
+// entirely.
+//
+// Dropping it was defensible when the category WAS the target — reporting a
+// category nothing verified would license a wrong write. Now the name is the
+// target, and the name was verified: it came from the live endpoint. Dropping it
+// suppressed three real PAAS statuses (Open, Paused, To Do, all `unknown`
+// category), which is a false negative refusing a legal move. An empty category
+// weakens only the advisory direction check.
+func TestTracker_AvailableTransitions_KeepsAnUnrecognizedCategoryAsANamedTarget(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, map[string]any{
 			"transitions": []map[string]any{
 				{"id": "31", "to": map[string]any{
-					"name":           "In Progress",
-					"statusCategory": map[string]any{"key": "indeterminate"},
+					"name": "In Progress", "statusCategory": map[string]any{"key": "indeterminate"},
 				}},
+				// Jira reports "Paused" in PAAS with a category this package
+				// does not map.
 				{"id": "91", "to": map[string]any{
-					"name":           "Weird",
-					"statusCategory": map[string]any{"key": "cosmic"},
+					"name": "Paused", "statusCategory": map[string]any{"key": "cosmic"},
 				}},
 			},
 		})
 	})
 	tr := jira.NewTracker(client)
 
-	got, err := tr.AvailableStatusCategories("PROJ-1")
+	got, err := tr.AvailableTransitions("PROJ-1")
 	require.NoError(t, err)
 
-	assert.Equal(t, []tasktracker.StatusCategory{tasktracker.StatusInProgress}, got)
-	assert.NotContains(t, got, tasktracker.StatusTodo,
-		"an unrecognized category must be dropped, not folded into Todo")
+	assert.Equal(t, []tasktracker.Transition{
+		{ToStatus: "In Progress", ToCategory: tasktracker.StatusInProgress},
+		{ToStatus: "Paused", ToCategory: ""},
+	}, got)
+	assert.NotEqual(t, tasktracker.StatusTodo, got[1].ToCategory,
+		"an unrecognized category must stay empty, not default to Todo")
 }
 
-func TestTracker_AvailableStatusCategories_NormalizesLiveTransitions(t *testing.T) {
-	// Two legal transitions: one landing in an in-progress status, one in done.
-	// "new" is deliberately absent — the point of this method is that the
-	// reconciler learns Todo is NOT reachable from here.
-	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, http.StatusOK, map[string]any{
-			"transitions": []map[string]any{
-				{"id": "11", "to": map[string]any{
-					"name":           "In Progress",
-					"statusCategory": map[string]any{"key": "indeterminate"},
-				}},
-				{"id": "31", "to": map[string]any{
-					"name":           "Done",
-					"statusCategory": map[string]any{"key": "done"},
-				}},
-			},
-		})
-	})
-	tr := jira.NewTracker(client)
-
-	got, err := tr.AvailableStatusCategories("PROJ-1")
-	require.NoError(t, err)
-
-	assert.ElementsMatch(t,
-		[]tasktracker.StatusCategory{tasktracker.StatusInProgress, tasktracker.StatusDone},
-		got)
-	assert.NotContains(t, got, tasktracker.StatusTodo,
-		"no transition lands in a 'new' status, so Todo must not be reported reachable")
-}
-
-func TestTracker_AvailableStatusCategories_DeduplicatesSameCategory(t *testing.T) {
-	// Several named Jira transitions routinely land in the same category
-	// (e.g. "Resolve" and "Close" both landing in "done"). This must not
-	// produce duplicate entries.
+// TestTracker_AvailableTransitions_DeduplicatesByName: two transitions to the
+// same named status are one destination. A reviewer offered the same move twice
+// would reasonably think they were different.
+func TestTracker_AvailableTransitions_DeduplicatesByName(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, map[string]any{
 			"transitions": []map[string]any{
 				{"id": "41", "to": map[string]any{
-					"name":           "Resolve",
-					"statusCategory": map[string]any{"key": "done"},
+					"name": "Done", "statusCategory": map[string]any{"key": "done"},
 				}},
+				// A second workflow path to the same status — routine in Jira.
 				{"id": "51", "to": map[string]any{
-					"name":           "Close",
-					"statusCategory": map[string]any{"key": "done"},
+					"name": "Done", "statusCategory": map[string]any{"key": "done"},
 				}},
 			},
 		})
 	})
 	tr := jira.NewTracker(client)
 
-	got, err := tr.AvailableStatusCategories("PROJ-1")
+	got, err := tr.AvailableTransitions("PROJ-1")
 	require.NoError(t, err)
 
-	assert.Equal(t, []tasktracker.StatusCategory{tasktracker.StatusDone}, got)
+	assert.Equal(t, []tasktracker.Transition{
+		{ToStatus: "Done", ToCategory: tasktracker.StatusDone},
+	}, got)
+}
+
+// TestTracker_AvailableTransitions_SkipsANamelessDestination: a destination with
+// no name cannot be targeted, since the name IS the target. Returning it with an
+// empty ToStatus would put an unselectable entry in front of the reconciler.
+func TestTracker_AvailableTransitions_SkipsANamelessDestination(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"transitions": []map[string]any{
+				{"id": "11", "to": map[string]any{
+					"statusCategory": map[string]any{"key": "new"},
+				}},
+				{"id": "31", "to": map[string]any{
+					"name": "In Progress", "statusCategory": map[string]any{"key": "indeterminate"},
+				}},
+			},
+		})
+	})
+	tr := jira.NewTracker(client)
+
+	got, err := tr.AvailableTransitions("PROJ-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, []tasktracker.Transition{
+		{ToStatus: "In Progress", ToCategory: tasktracker.StatusInProgress},
+	}, got)
 }
 
 func TestTracker_WorkflowGraph_DelegatesToMineProject(t *testing.T) {

@@ -265,9 +265,17 @@ data/                   SQLite database lives here (gitignored)
 - **Pluggable apply-target backend, decided before phase 1 needs it.** `clients/jira.Tracker` and
   `clients/local.Tracker` both implement the interface, config-selected via `tracker.backend`. The local backend lets unjira run with no real
   tracker reachable (e.g. a hosted control plane with no Jira auth) while still deriving value
-  from event clustering, persisting its own issue state locally. `SetStatus` is deliberately
-  categorical (todo/in_progress/done), not Jira's named-transition model, since GitHub Issues —
-  a real future backend — has only open/closed. Workflow-graph mining is a separate
+  from event clustering, persisting its own issue state locally. `SetStatus` takes the tracker's own
+  **status name** ("In Review"), not a normalized category. It was categorical until 2026-09-01, on
+  the reasoning that GitHub Issues has only open/closed; measurement inverted that argument. In the
+  PAAS project both edges unjira exists to propose — `Ready for Dev -> In Progress` and
+  `In Progress -> In Review` — are `indeterminate -> indeterminate`, so a category could express
+  neither, and "move to In Review" was the same request as "move to Blocked". A named target
+  degrades gracefully to a two-name backend (open and closed *are* names) while a category target
+  cannot upgrade to a nineteen-status one, so the common denominator belongs as the fallback rather
+  than the representation. `StatusCategory` survives for reporting and coarse direction checks.
+  Legality is `AvailableTransitions`, a live per-issue read — there is no closed set of names to
+  validate against, so `gate.Applier` does not try. Workflow-graph mining is a separate
   `workflow.GraphProvider` capability (type-asserted, not part of `TaskTracker`), since only
   backends with an admin-configurable workflow to mine (Jira) need it. `Config.Jira` is a list of
   named connections, not a single global site, so one project set can span more than one Jira

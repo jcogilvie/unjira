@@ -236,13 +236,31 @@ Body text, but the frontmatter never closed.
 }
 
 func TestLoad_RealRulesDirectoryLoadsWithoutError(t *testing.T) {
-	// Catches drift between rules/README.md's declared format and the
-	// actual seeded files — the one check that exercises real content, not
-	// a fixture this test file controls.
+	// Catches drift between rules/README.md's declared format and the actual
+	// seeded files — the one check that exercises real content, not a fixture
+	// this test file controls.
 	got, err := rules.Load("../../rules")
-
 	require.NoError(t, err)
-	assert.Len(t, got, 5, "the five seeded rule files, README.md skipped")
+
+	// The expected count is DERIVED from the directory rather than hardcoded.
+	// A literal ("the five seeded rule files") makes every future rule a test
+	// failure, which trains whoever adds one to bump the number without reading
+	// why it was five — and the number was never the property under test. What
+	// matters is that every .md file except README.md parses.
+	entries, err := os.ReadDir("../../rules")
+	require.NoError(t, err)
+
+	want := 0
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".md" || e.Name() == "README.md" {
+			continue
+		}
+		want++
+	}
+
+	require.Positive(t, want, "precondition: the repo seeds at least one rule")
+	assert.Len(t, got, want,
+		"every seeded rule file must parse; README.md is skipped (it has no frontmatter)")
 }
 
 func TestForScope_FiltersAndDoesNotMutateInput(t *testing.T) {

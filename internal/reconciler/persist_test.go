@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/jcogilvie/unjira/internal/store"
-	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
 func TestPersistWritesEveryProposedActionAsProposed(t *testing.T) {
@@ -23,7 +22,7 @@ func TestPersistWritesEveryProposedActionAsProposed(t *testing.T) {
 			},
 			{
 				Type: ActionTransition, IssueKey: "PROJ-1",
-				TargetStatus: tasktracker.StatusDone, Confidence: 0.6, Rationale: "finished",
+				TargetStatus: "In Review", Confidence: 0.6, Rationale: "finished",
 			},
 		},
 	}})
@@ -43,7 +42,9 @@ func TestPersistWritesEveryProposedActionAsProposed(t *testing.T) {
 	assert.Equal(t, "comment", got[0].Type)
 	assert.JSONEq(t, `{"body":"the work landed"}`, got[0].Payload)
 	assert.Equal(t, "transition", got[1].Type)
-	assert.JSONEq(t, `{"target_status":"done"}`, got[1].Payload)
+	assert.JSONEq(t, `{"target_status":"In Review"}`, got[1].Payload,
+		"the persisted payload carries the status NAME: this is the exact string "+
+			"gate.Applier hands to SetStatus, which matches on it")
 
 	// Persist's return value is watch's auto-commit seam: the exact rows THIS
 	// call wrote, with real ids, so a caller need not re-derive "which actions

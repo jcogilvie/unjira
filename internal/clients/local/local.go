@@ -12,6 +12,20 @@ import (
 	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
+// The local backend's three canonical status names — one per normalized
+// category, and the same names its static WorkflowGraph observes.
+//
+// Names rather than category strings ("To Do", not "todo") because a status is a
+// name on every real backend, and a double whose statuses were spelled like
+// categories would let a bug that confuses the two pass offline and fail live.
+// LocalStatusTodo matches the local_issues.status schema default, so a freshly
+// created issue is already at a status this list contains.
+const (
+	LocalStatusTodo       = "To Do"
+	LocalStatusInProgress = "In Progress"
+	LocalStatusDone       = "Done"
+)
+
 // Tracker implements tasktracker.TaskTracker against a *store.Store.
 type Tracker struct {
 	store *store.Store
@@ -46,26 +60,36 @@ func (t *Tracker) AddComment(key, text string) error {
 	return nil
 }
 
-// SetStatus updates the issue's status category.
-func (t *Tracker) SetStatus(key string, target tasktracker.StatusCategory) error {
-	if err := t.store.SetLocalIssueStatus(key, string(target)); err != nil {
+// SetStatus records the named target status verbatim.
+//
+// Accepts any name, including one AvailableTransitions did not offer. The local
+// backend has no workflow to violate, and refusing an unlisted name would make
+// this stricter than the thing it doubles: on a real backend, legality is
+// whatever the live per-issue read says, and a test that could not set an
+// arbitrary status could not exercise the reconciler against a workflow that
+// does not resemble this one.
+func (t *Tracker) SetStatus(key, targetStatus string) error {
+	if err := t.store.SetLocalIssueStatus(key, targetStatus); err != nil {
 		return fmt.Errorf("setting status for local issue %s: %w", key, err)
 	}
 
 	return nil
 }
 
-// AvailableStatusCategories reports every category as reachable.
+// AvailableTransitions reports the three canonical status names, one per
+// category, matching the static graph WorkflowGraph returns.
 //
-// The local backend is a test/offline double with no workflow restrictions —
-// SetStatus accepts any target — so reporting everything reachable is the
-// honest answer, not a stub. A narrower answer would make offline tests
-// disagree with the backend's actual behaviour.
-func (t *Tracker) AvailableStatusCategories(_ string) ([]tasktracker.StatusCategory, error) {
-	return []tasktracker.StatusCategory{
-		tasktracker.StatusTodo,
-		tasktracker.StatusInProgress,
-		tasktracker.StatusDone,
+// The local backend has no workflow restrictions, so a complete answer is the
+// honest one rather than a stub. It is deliberately NOT the union of every
+// status any real tracker might have: these three are the ones this backend's
+// own graph observes, so its two methods agree with each other. Since SetStatus
+// accepts any name regardless, a test needing PAAS-shaped statuses sets them
+// directly rather than being constrained by this list.
+func (t *Tracker) AvailableTransitions(_ string) ([]tasktracker.Transition, error) {
+	return []tasktracker.Transition{
+		{ToStatus: LocalStatusTodo, ToCategory: tasktracker.StatusTodo},
+		{ToStatus: LocalStatusInProgress, ToCategory: tasktracker.StatusInProgress},
+		{ToStatus: LocalStatusDone, ToCategory: tasktracker.StatusDone},
 	}, nil
 }
 
@@ -102,11 +126,11 @@ func (t *Tracker) SearchIssues(query string, limit int) ([]tasktracker.Issue, er
 // GitHub Issues' open/closed model would take.
 func (t *Tracker) WorkflowGraph(_ string) (*workflow.Graph, error) {
 	g := workflow.NewGraph()
-	g.AddStatus("To Do", string(tasktracker.StatusTodo))
-	g.AddStatus("In Progress", string(tasktracker.StatusInProgress))
-	g.AddStatus("Done", string(tasktracker.StatusDone))
-	g.Observe("To Do", "In Progress")
-	g.Observe("In Progress", "Done")
+	g.AddStatus(LocalStatusTodo, string(tasktracker.StatusTodo))
+	g.AddStatus(LocalStatusInProgress, string(tasktracker.StatusInProgress))
+	g.AddStatus(LocalStatusDone, string(tasktracker.StatusDone))
+	g.Observe(LocalStatusTodo, LocalStatusInProgress)
+	g.Observe(LocalStatusInProgress, LocalStatusDone)
 
 	return g, nil
 }
@@ -115,9 +139,30 @@ func toIssue(issue store.LocalIssue) tasktracker.Issue {
 	return tasktracker.Issue{
 		Key:            issue.Key,
 		Summary:        issue.Summary,
-		StatusCategory: tasktracker.StatusCategory(issue.StatusCategory),
-		StatusName:     issue.StatusCategory,
+		StatusCategory: localStatusCategory(issue.Status),
+		StatusName:     issue.Status,
 		Labels:         issue.Labels,
 		Description:    issue.Description,
+	}
+}
+
+// localStatusCategory buckets one of this backend's three canonical status
+// names.
+//
+// An unrecognized name yields the empty category rather than a guess. SetStatus
+// accepts any name, so an arbitrary status genuinely has no category here — and
+// StatusTodo would be a claim about direction that nothing established. The
+// empty value weakens only the coarse direction check, which is advisory;
+// StatusName still carries the truth.
+func localStatusCategory(name string) tasktracker.StatusCategory {
+	switch name {
+	case LocalStatusTodo:
+		return tasktracker.StatusTodo
+	case LocalStatusInProgress:
+		return tasktracker.StatusInProgress
+	case LocalStatusDone:
+		return tasktracker.StatusDone
+	default:
+		return ""
 	}
 }

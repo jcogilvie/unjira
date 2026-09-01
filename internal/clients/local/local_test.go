@@ -42,7 +42,7 @@ func TestTracker_CreateThenGetIssue_RoundTrips(t *testing.T) {
 		Key:            key,
 		Summary:        "Do the thing",
 		StatusCategory: tasktracker.StatusTodo,
-		StatusName:     "todo",
+		StatusName:     local.LocalStatusTodo,
 		Labels:         []string{"bug"},
 		Description:    "a description",
 	}, issue)
@@ -56,23 +56,45 @@ func TestTracker_GetIssue_MissingReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestTracker_SetStatus_UpdatesCategory(t *testing.T) {
+func TestTracker_SetStatus_SetsTheNameAndDerivesTheCategory(t *testing.T) {
 	tr := openTracker(t)
 	key, err := tr.CreateIssue("PROJ", "Do the thing", "Task", "", nil)
 	require.NoError(t, err)
 
-	err = tr.SetStatus(key, tasktracker.StatusInProgress)
+	err = tr.SetStatus(key, local.LocalStatusInProgress)
 	require.NoError(t, err)
 
 	issue, err := tr.GetIssue(key)
 	require.NoError(t, err)
-	assert.Equal(t, tasktracker.StatusInProgress, issue.StatusCategory)
+	assert.Equal(t, local.LocalStatusInProgress, issue.StatusName,
+		"the name is what was set and what a later transition targets")
+	assert.Equal(t, tasktracker.StatusInProgress, issue.StatusCategory,
+		"and the category is still derived, since reporting and direction checks want it")
+}
+
+// TestTracker_SetStatus_AcceptsAnArbitraryName: the local backend doubles for
+// trackers whose workflows do not resemble its own. If it refused a status it
+// had not enumerated, no offline test could exercise a PAAS-shaped workflow —
+// which is exactly the shape that motivated named targets.
+func TestTracker_SetStatus_AcceptsAnArbitraryName(t *testing.T) {
+	tr := openTracker(t)
+	key, err := tr.CreateIssue("PROJ", "Do the thing", "Task", "", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, tr.SetStatus(key, "Waiting for customer"))
+
+	issue, err := tr.GetIssue(key)
+	require.NoError(t, err)
+	assert.Equal(t, "Waiting for customer", issue.StatusName)
+	assert.Empty(t, issue.StatusCategory,
+		"an unrecognized name has no category, and StatusTodo would be a claim "+
+			"about direction that nothing established")
 }
 
 func TestTracker_SetStatus_MissingReturnsError(t *testing.T) {
 	tr := openTracker(t)
 
-	err := tr.SetStatus("PROJ-1", tasktracker.StatusDone)
+	err := tr.SetStatus("PROJ-1", local.LocalStatusDone)
 
 	require.Error(t, err)
 }
@@ -138,17 +160,29 @@ func TestLocalGetIssue_CarriesDescription(t *testing.T) {
 		"store.LocalIssue.Description already exists; it was only dropped at the tasktracker boundary")
 }
 
-func TestTracker_AvailableStatusCategories_ReportsEveryCategory(t *testing.T) {
+// TestTracker_AvailableTransitions_ReportsNamesMatchingItsOwnGraph: the two
+// methods must agree. If AvailableTransitions offered names WorkflowGraph does
+// not know, a path computed from the graph would name hops the transitions list
+// rejects — a disagreement inside one backend, which is worse than either
+// answer being narrow.
+func TestTracker_AvailableTransitions_ReportsNamesMatchingItsOwnGraph(t *testing.T) {
 	tracker := openTracker(t)
 
-	got, err := tracker.AvailableStatusCategories("anything")
+	got, err := tracker.AvailableTransitions("anything")
 	require.NoError(t, err)
 
-	assert.ElementsMatch(t, []tasktracker.StatusCategory{
-		tasktracker.StatusTodo,
-		tasktracker.StatusInProgress,
-		tasktracker.StatusDone,
-	}, got, "the local backend imposes no workflow, and SetStatus accepts any target")
+	assert.ElementsMatch(t, []tasktracker.Transition{
+		{ToStatus: local.LocalStatusTodo, ToCategory: tasktracker.StatusTodo},
+		{ToStatus: local.LocalStatusInProgress, ToCategory: tasktracker.StatusInProgress},
+		{ToStatus: local.LocalStatusDone, ToCategory: tasktracker.StatusDone},
+	}, got)
+
+	graph, err := tracker.WorkflowGraph("PROJ")
+	require.NoError(t, err)
+	for _, transition := range got {
+		assert.Contains(t, graph.StatusCategories(), transition.ToStatus,
+			"every offered destination must be a status this backend's graph knows")
+	}
 }
 
 func TestTracker_WorkflowGraph_ReturnsStaticThreeCategoryGraph(t *testing.T) {

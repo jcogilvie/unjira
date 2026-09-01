@@ -188,7 +188,13 @@ CREATE TABLE IF NOT EXISTS local_issues (
     summary         TEXT NOT NULL,
     description     TEXT,
     issue_type      TEXT NOT NULL,
-    status_category TEXT NOT NULL DEFAULT 'todo',
+    -- The tracker's own status NAME, not a normalized category. Held as a name
+    -- because tasktracker.TaskWriter.SetStatus targets a name: a category
+    -- cannot distinguish "In Review" from "Blocked" (see
+    -- docs/superpowers/specs/2026-09-01-named-status-transitions-design.md),
+    -- and a local backend that could not represent the distinction would make
+    -- offline tests disagree with every real one.
+    status          TEXT NOT NULL DEFAULT 'To Do',
     labels          TEXT NOT NULL DEFAULT '[]',
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -280,7 +286,68 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrating %s: %w", dbPath, err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// migrate applies changes the CREATE TABLE IF NOT EXISTS schema above cannot:
+// that statement is a no-op on a database whose tables already exist, so a
+// column rename or addition needs explicit handling or an existing database
+// keeps the old shape and every query against the new one fails at runtime.
+//
+// Each step must be idempotent and safe to run against both a fresh database
+// (where the schema just created the new shape) and an old one.
+func migrate(db *sql.DB) error {
+	// local_issues.status_category -> status. The column held a normalized
+	// category when a transition target was a category; it now holds the
+	// tracker's own status name, so the old name would misdescribe its
+	// contents. Existing values ("todo"/"in_progress"/"done") are left as-is:
+	// the local backend does not validate status names, so they remain
+	// perfectly usable names, and mapping them to invented display strings
+	// would rewrite recorded state to something no caller ever set.
+	hasOld, err := hasColumn(db, "local_issues", "status_category")
+	if err != nil {
+		return err
+	}
+	if hasOld {
+		if _, err := db.Exec(`ALTER TABLE local_issues RENAME COLUMN status_category TO status`); err != nil {
+			return fmt.Errorf("renaming local_issues.status_category to status: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// hasColumn reports whether table has a column named column, via
+// PRAGMA table_info. Errors are returned rather than treated as absence: a
+// failed probe would otherwise silently skip a migration and leave the database
+// in the shape the code no longer expects.
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("reading columns of %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, fmt.Errorf("scanning column name of %s: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterating columns of %s: %w", table, err)
+	}
+
+	return false, nil
 }
 
 // sqliteDSN turns a plain filesystem path into a modernc.org/sqlite DSN that
@@ -497,13 +564,16 @@ func (s *Store) CursorCounts() ([]CollectorCount, error) {
 
 // LocalIssue is one row of local_issues.
 type LocalIssue struct {
-	Key            string
-	Project        string
-	Summary        string
-	Description    string
-	IssueType      string
-	StatusCategory string
-	Labels         []string
+	Key         string
+	Project     string
+	Summary     string
+	Description string
+	IssueType   string
+	// Status is the tracker's own status name (e.g. "In Progress"), matching
+	// what SetStatus targets. Named, not a category, for the reason on the
+	// local_issues.status column.
+	Status string
+	Labels []string
 }
 
 // InsertLocalIssue creates a local issue, assigning it the next sequential
@@ -546,10 +616,10 @@ func (s *Store) GetLocalIssue(key string) (LocalIssue, error) {
 	)
 
 	err := s.db.QueryRow(
-		`SELECT key, project, summary, description, issue_type, status_category, labels
+		`SELECT key, project, summary, description, issue_type, status, labels
 		 FROM local_issues WHERE key = ?`,
 		key,
-	).Scan(&issue.Key, &issue.Project, &issue.Summary, &description, &issue.IssueType, &issue.StatusCategory, &labelsJSON)
+	).Scan(&issue.Key, &issue.Project, &issue.Summary, &description, &issue.IssueType, &issue.Status, &labelsJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LocalIssue{}, fmt.Errorf("getting local issue %s: %w", key, ErrLocalIssueNotFound)
 	}
@@ -566,14 +636,18 @@ func (s *Store) GetLocalIssue(key string) (LocalIssue, error) {
 	return issue, nil
 }
 
-// SetLocalIssueStatus updates the status category for the local issue with
-// the given key, or returns ErrLocalIssueNotFound if none exists.
-func (s *Store) SetLocalIssueStatus(key, statusCategory string) error {
+// SetLocalIssueStatus sets the status NAME for the local issue with the given
+// key, or returns ErrLocalIssueNotFound if none exists.
+//
+// Unvalidated by design: the local backend has no workflow, so any name is
+// legal. Validating against a fixed list would make offline tests disagree with
+// a real backend, whose legal names come from a live per-issue read.
+func (s *Store) SetLocalIssueStatus(key, status string) error {
 	res, err := s.db.Exec(
 		`UPDATE local_issues
-		 SET status_category = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 		 WHERE key = ?`,
-		statusCategory, key,
+		status, key,
 	)
 	if err != nil {
 		return fmt.Errorf("setting status for local issue %s: %w", key, err)
@@ -635,7 +709,7 @@ func (s *Store) LocalIssueComments(issueKey string) ([]string, error) {
 // ordered by key.
 func (s *Store) SearchLocalIssues(query string, limit int) ([]LocalIssue, error) {
 	rows, err := s.db.Query(
-		`SELECT key, project, summary, description, issue_type, status_category, labels
+		`SELECT key, project, summary, description, issue_type, status, labels
 		 FROM local_issues WHERE summary LIKE '%' || ? || '%' COLLATE NOCASE
 		 ORDER BY key LIMIT ?`,
 		query, limit,
@@ -654,7 +728,7 @@ func (s *Store) SearchLocalIssues(query string, limit int) ([]LocalIssue, error)
 		)
 		if err := rows.Scan(
 			&issue.Key, &issue.Project, &issue.Summary, &description,
-			&issue.IssueType, &issue.StatusCategory, &labelsJSON,
+			&issue.IssueType, &issue.Status, &labelsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scanning local issue row: %w", err)
 		}

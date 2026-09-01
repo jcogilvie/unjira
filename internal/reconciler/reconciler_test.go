@@ -25,9 +25,9 @@ import (
 // proposes actions and must never apply them, so a test needs to be able to
 // assert that no write happened — a silent no-op cannot express that.
 type fakeTracker struct {
-	issues     map[string]tasktracker.Issue
-	getErr     map[string]error
-	categories map[string][]tasktracker.StatusCategory
+	issues      map[string]tasktracker.Issue
+	getErr      map[string]error
+	transitions map[string][]tasktracker.Transition
 
 	getCalls   []string
 	writeCalls []string // any mutating call, for the never-writes assertion
@@ -48,9 +48,9 @@ func (f *fakeTracker) GetIssue(key string) (tasktracker.Issue, error) {
 	return issue, nil
 }
 
-func (f *fakeTracker) AvailableStatusCategories(key string) ([]tasktracker.StatusCategory, error) {
-	if c, ok := f.categories[key]; ok {
-		return c, nil
+func (f *fakeTracker) AvailableTransitions(key string) ([]tasktracker.Transition, error) {
+	if t, ok := f.transitions[key]; ok {
+		return t, nil
 	}
 
 	return nil, nil
@@ -64,7 +64,7 @@ func (f *fakeTracker) AddComment(key, _ string) error {
 	return nil
 }
 
-func (f *fakeTracker) SetStatus(key string, _ tasktracker.StatusCategory) error {
+func (f *fakeTracker) SetStatus(key, _ string) error {
 	f.writeCalls = append(f.writeCalls, "SetStatus:"+key)
 
 	return nil

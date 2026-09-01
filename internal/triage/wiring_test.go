@@ -37,7 +37,7 @@ func (w *wireTracker) GetIssue(key string) (tasktracker.Issue, error) {
 	return issue, nil
 }
 
-func (w *wireTracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
+func (w *wireTracker) AvailableTransitions(string) ([]tasktracker.Transition, error) {
 	return nil, nil
 }
 
