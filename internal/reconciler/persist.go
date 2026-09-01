@@ -55,7 +55,7 @@ func Persist(s *store.Store, results []ReconcileResult) ([]store.ActionRow, erro
 					Payload:     payload,
 					Confidence:  action.Confidence,
 					Rationale:   action.Rationale,
-					Status:      "proposed",
+					Status:      StatusProposed,
 				}
 
 				id, err := tx.InsertAction(row)

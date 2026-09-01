@@ -33,6 +33,11 @@ const (
 	ActionCreate ActionType = "create"
 )
 
+// StatusProposed is the actions.status value every freshly drafted action lands
+// at. Named because three call sites in this package write or compare it, and a
+// typo in one would be a row nothing ever selects.
+const StatusProposed = "proposed"
+
 // ProposedAction is one drafted, not-yet-persisted action.
 type ProposedAction struct {
 	Type ActionType

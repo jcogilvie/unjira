@@ -3,10 +3,15 @@
     {
       "name": "default",
       "site": "https://yourorg.atlassian.net",
-      "project_keys": ["PROJ"],
+      "project_keys": [
+        "PROJ"
+      ],
       "max_issues_per_query": 200,
       "queries": [
-        { "name": "mine", "jql": "assignee = currentUser() AND updated >= -14d" }
+        {
+          "name": "mine",
+          "jql": "assignee = currentUser() AND updated >= -14d"
+        }
       ]
     }
   ],
@@ -17,17 +22,24 @@
     },
     "github": {
       "enabled": false,
-      "repos": ["yourorg/yourrepo"]
+      "repos": [
+        "yourorg/yourrepo"
+      ]
     },
     "slack": {
       "enabled": false,
-      "channels": ["#my-team"]
+      "channels": [
+        "#my-team"
+      ]
     },
     "jira": {
       "enabled": false
     }
   },
-  "exclude_from_linking": ["-0$", "-1$"],
+  "exclude_from_linking": [
+    "-0$",
+    "-1$"
+  ],
   "tracker": {
     "backend": "jira",
     "default_project": "PROJ"
