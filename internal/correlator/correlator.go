@@ -151,7 +151,8 @@ func (s *Stats) AddUsage(u llm.Usage) {
 // ClusterOption so Cluster's positional signature doesn't grow every time a
 // new knob is needed — the same pattern Match uses for matchOptions.
 type clusterOptions struct {
-	rules []rules.Rule
+	rules       []rules.Rule
+	instruction string
 }
 
 // ClusterOption configures an optional Cluster behaviour.
@@ -166,6 +167,27 @@ type ClusterOption func(*clusterOptions)
 func WithClusterRules(learnedRules []rules.Rule) ClusterOption {
 	return func(o *clusterOptions) {
 		o.rules = learnedRules
+	}
+}
+
+// WithInstruction appends a caller's directive to the system prompt — today,
+// triage's [s]plit telling the model that a reviewer has judged these events to be
+// more than one story.
+//
+// Separate from WithClusterRules even though both append to the same prompt,
+// because they are different kinds of claim with different lifetimes. A rule is a
+// standing constraint distilled from many past corrections and applies to every
+// pass; an instruction is one reviewer's judgment about one narrative, right now.
+// Passing a split directive through WithClusterRules would file a single
+// observation as durable policy, and rules.Render's formatting says "learned
+// rules", which this is not.
+//
+// Appended AFTER the rules so a conflict resolves toward the human present in the
+// loop: the reviewer is looking at this narrative, and a distilled rule was written
+// about others.
+func WithInstruction(instruction string) ClusterOption {
+	return func(o *clusterOptions) {
+		o.instruction = instruction
 	}
 }
 
@@ -195,7 +217,7 @@ func Cluster(
 	// the prompt numbered a longer slice would make an eligible event's index
 	// resolve to the wrong event, silently.
 	assignable := assignableEvents(filtered, relevant)
-	systemPrompt, userPrompt := buildClusterPrompt(assignable, relevant, o.rules)
+	systemPrompt, userPrompt := buildClusterPrompt(assignable, relevant, o.rules, o.instruction)
 
 	var stats Stats
 	estimated := estimateTokens(systemPrompt + userPrompt)
@@ -302,10 +324,17 @@ func assignableEvents(inWindow []Event, existing []Narrative) []Event {
 	return out
 }
 
-func buildClusterPrompt(evts []Event, existing []Narrative, learnedRules []rules.Rule) (systemPrompt, userPrompt string) {
+func buildClusterPrompt(
+	evts []Event, existing []Narrative, learnedRules []rules.Rule, instruction string,
+) (systemPrompt, userPrompt string) {
 	systemPrompt = clusterSystemPrompt
 	if rendered := rules.Render(learnedRules); rendered != "" {
 		systemPrompt += "\n\n" + rendered
+	}
+	// After the rules deliberately — see WithInstruction. A reviewer's judgment
+	// about the narrative in front of them outranks a rule distilled from others.
+	if instruction != "" {
+		systemPrompt += "\n\n" + instruction
 	}
 
 	var b strings.Builder

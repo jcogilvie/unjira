@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/reconciler"
@@ -99,6 +100,14 @@ type StoreHandler struct {
 	tracker tasktracker.TaskReader
 	client  llm.Client
 	rules   []rules.Rule
+	// correlator and contextTokens are split's inputs: it re-runs
+	// correlator.Cluster and correlator.Persist, which need the compaction
+	// thresholds and the model's context window respectively. Held as resolved
+	// values rather than a whole config.Config, matching how every other
+	// consumer of these takes them — internal/pipeline reads config, and the
+	// packages below it see only what they use.
+	correlator    config.CorrelatorConfig
+	contextTokens int
 }
 
 // NewStoreHandler builds the production Handler.
@@ -120,8 +129,17 @@ func NewStoreHandler(
 	tracker tasktracker.TaskReader,
 	client llm.Client,
 	learnedRules []rules.Rule,
+	correlatorCfg config.CorrelatorConfig,
+	contextTokens int,
 ) *StoreHandler {
-	return &StoreHandler{store: s, tracker: tracker, client: client, rules: learnedRules}
+	return &StoreHandler{
+		store:         s,
+		tracker:       tracker,
+		client:        client,
+		rules:         learnedRules,
+		correlator:    correlatorCfg,
+		contextTokens: contextTokens,
+	}
 }
 
 // MergeNarratives moves the source narrative's eligible events onto the target,
@@ -371,26 +389,64 @@ func (h *StoreHandler) relinkPrimary(narrativeID int64, oldKey, newKey string) e
 	return nil
 }
 
-// Restructure satisfies Handler, dispatching merge/split/retarget.
+// Restructure satisfies Handler, dispatching merge and split.
 //
-// Split is the one verb still unwired: unlike merge (which moves existing links)
-// and retarget (which replaces one), splitting requires re-running Cluster with
-// an instruction and persisting new narratives, so it is a correlator operation
-// rather than a store one. It reports itself unavailable rather than silently
-// doing nothing — a reviewer must not believe a restructure happened when it did
-// not.
+// Both return no replacement actions, and that is the shared reason they belong
+// here rather than alongside redraft: a restructure invalidates the affected
+// narrative's actions by changing which events it holds, and re-deriving text
+// requires verified links this handler does not hold. Dropping the action lets the
+// next reconcile pass draft against the new shape.
 func (h *StoreHandler) Restructure(
-	_ context.Context, d Decision, batch []store.ActionRow,
+	ctx context.Context, d Decision, batch []store.ActionRow,
 ) ([]store.ActionRow, error) {
-	if d.Verb == VerbTarget {
+	switch d.Verb {
+	case VerbTarget:
 		return nil, fmt.Errorf(
 			"target is dispatched by Session directly, not through Restructure: this is a bug")
+
+	case VerbSplit:
+		return h.restructureSplit(ctx, d, batch)
+
+	case VerbMerge:
+		return h.restructureMerge(d, batch)
+
+	case VerbApprove, VerbReject, VerbEdit, VerbSkip, VerbQuit:
+		return nil, fmt.Errorf("%s is not a restructure", d.Verb)
 	}
 
-	if d.Verb != VerbMerge {
-		return nil, fmt.Errorf("%s is not wired yet", d.Verb)
+	return nil, fmt.Errorf("unknown verb %q", d.Verb)
+}
+
+// restructureSplit resolves the reviewer's batch position and splits that
+// narrative.
+//
+// Returns no replacement actions: every action on the source described a story
+// that no longer exists as one story. The next reconcile pass drafts for the
+// narratives the split produced, which is the only way the text can match the new
+// clustering.
+func (h *StoreHandler) restructureSplit(
+	ctx context.Context, d Decision, batch []store.ActionRow,
+) ([]store.ActionRow, error) {
+	if len(d.Positions) != 1 {
+		return nil, fmt.Errorf("split needs one batch position, got %d", len(d.Positions))
 	}
 
+	idx := d.Positions[0] - 1
+	if idx < 0 || idx >= len(batch) {
+		return nil, fmt.Errorf("split position must be within 1..%d", len(batch))
+	}
+
+	if _, err := h.SplitNarrative(ctx, batch[idx].NarrativeID); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+// restructureMerge resolves two batch positions and merges those narratives.
+func (h *StoreHandler) restructureMerge(
+	d Decision, batch []store.ActionRow,
+) ([]store.ActionRow, error) {
 	if len(d.Positions) != 2 {
 		return nil, fmt.Errorf("merge needs two batch positions, got %d", len(d.Positions))
 	}

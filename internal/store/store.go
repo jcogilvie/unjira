@@ -1012,15 +1012,29 @@ func (s *Store) UnlinkedEventsInRange(start, end time.Time) ([]events.Event, err
 // clustering signal, so a narrative ending exactly when this window opens is
 // the most likely thing an early event extends.
 //
-// status is not filtered: every narrative is 'open' today and nothing sets
-// otherwise, so filtering would be speculative. When status becomes
-// meaningful, the predicate belongs here.
+// status IS filtered now, excluding StatusSplit. This is the change the previous
+// version of this comment anticipated ("when status becomes meaningful, the
+// predicate belongs here") — triage's [s]plit moves every event off a narrative
+// and marks it split, and without this predicate that emptied row keeps being
+// returned here. Probed before adding it: after an all-new split the source held
+// 0 events and was still selected.
+//
+// The consequence of not filtering is not cosmetic. buildClusterPrompt renders
+// each of these as an existing narrative under "CONTEXT ONLY", so the model would
+// be shown a titled narrative with no events and asked whether the numbered events
+// extend it — reasoning about a story whose substance moved elsewhere. Every
+// subsequent pass would carry the same dead weight.
+//
+// Only 'split' is excluded, not "anything that is not open": a status this query
+// has never seen should not silently drop a narrative from clustering. An unknown
+// value is more likely a new lifecycle state than a reason to hide work.
 func (s *Store) NarrativesOverlapping(start, end time.Time) ([]NarrativeRow, error) {
 	rows, err := s.db.Query(
 		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
 		        compaction_boundary, compaction_boundary_event_id
 		 FROM narratives
 		 WHERE window_end >= ? AND window_start <= ?
+		   AND status != '`+StatusSplit+`'
 		 ORDER BY window_start, id`,
 		start.Format(time.RFC3339), end.Format(time.RFC3339),
 	)

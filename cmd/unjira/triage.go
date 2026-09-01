@@ -338,21 +338,24 @@ func (a *appContext) triageHandler() (triage.Handler, error) {
 	if err != nil {
 		noteUnavailable("no default project is configured (tracker.default_project)")
 
-		return triage.NewStoreHandler(a.store, nil, nil, nil), nil
+		return triage.NewStoreHandler(
+			a.store, nil, nil, nil, a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
 	}
 
 	tracker, err := a.taskTracker(project)
 	if err != nil {
 		noteUnavailable("the tracker could not be resolved (check tracker.backend and credentials)")
 
-		return triage.NewStoreHandler(a.store, nil, nil, nil), nil
+		return triage.NewStoreHandler(
+			a.store, nil, nil, nil, a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
 	}
 
 	client, err := a.llmClient()
 	if err != nil {
 		noteUnavailable("no LLM client could be built (check the llm block and its credential)")
 
-		return triage.NewStoreHandler(a.store, tracker, nil, nil), nil
+		return triage.NewStoreHandler(
+			a.store, tracker, nil, nil, a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
 	}
 
 	// The SAME rules a watch pass would have used. A redraft prompted without
@@ -363,7 +366,9 @@ func (a *appContext) triageHandler() (triage.Handler, error) {
 		return nil, err
 	}
 
-	return triage.NewStoreHandler(a.store, tracker, client, learnedRules), nil
+	return triage.NewStoreHandler(
+		a.store, tracker, client, learnedRules,
+		a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
 }
 
 // noteUnavailable tells the reviewer that edit and target will not work this

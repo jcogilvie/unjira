@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
@@ -52,10 +53,15 @@ func (e *notFoundError) Error() string { return "issue " + e.key + " does not ex
 type wireLLM struct {
 	responses []string
 	prompts   []string
+	// systemPrompts mirrors prompts for the system half, so split's tests can
+	// assert the reviewer's instruction actually reached the model rather than
+	// only that a call happened.
+	systemPrompts []string
 }
 
-func (c *wireLLM) Complete(_ context.Context, _, userPrompt string) (string, llm.Usage, error) {
+func (c *wireLLM) Complete(_ context.Context, systemPrompt, userPrompt string) (string, llm.Usage, error) {
 	c.prompts = append(c.prompts, userPrompt)
+	c.systemPrompts = append(c.systemPrompts, systemPrompt)
 
 	idx := len(c.prompts) - 1
 	if idx >= len(c.responses) {
@@ -121,7 +127,7 @@ func TestStoreHandlerRedraft_PersistsTheReplacementSoItCanBeApplied(t *testing.T
 		`[{"issue_key":"DEVSBX-9","type":"comment","body":"Shorter.","confidence":0.9,"rationale":"r"}]`,
 	}}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	got, err := h.Redraft(context.Background(), action, "make it shorter")
 
@@ -147,7 +153,7 @@ func TestStoreHandlerRedraft_RulesOnTheSupersededRow(t *testing.T) {
 		`[{"issue_key":"DEVSBX-9","type":"comment","body":"Shorter.","confidence":0.9,"rationale":"r"}]`,
 	}}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	_, err := h.Redraft(context.Background(), action, "make it shorter")
 	require.NoError(t, err)
@@ -179,7 +185,7 @@ func TestStoreHandlerRedraft_PayloadIsReadableByTheApplier(t *testing.T) {
 		`[{"issue_key":"DEVSBX-9","type":"comment","body":"He said \"ship it\".\nThen we did.","confidence":0.9,"rationale":"r"}]`,
 	}}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	got, err := h.Redraft(context.Background(), action, "quote him")
 	require.NoError(t, err)
@@ -216,7 +222,7 @@ func TestStoreHandlerRedraft_RefusesWhenTheRedraftSkipsTheEditedIssue(t *testing
 		`[{"issue_key":"DEVSBX-77","type":"comment","body":"for the other audience","confidence":0.9,"rationale":"r"}]`,
 	}}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	_, err := h.Redraft(context.Background(), action, "reword")
 
@@ -237,7 +243,7 @@ func TestStoreHandlerRedraft_RefusesWhenTheRedraftSkipsTheEditedIssue(t *testing
 func TestStoreHandlerRedraft_ReportsUnavailableWithoutDependencies(t *testing.T) {
 	s, _, action := wireStore(t)
 
-	h := NewStoreHandler(s, nil, nil, nil)
+	h := NewStoreHandler(s, nil, nil, nil, testCorrelatorConfig(), 100000)
 
 	_, err := h.Redraft(context.Background(), action, "reword")
 
@@ -258,7 +264,7 @@ func TestStoreHandlerRetarget_VerifiesTheNewIssueBeforeLinkingIt(t *testing.T) {
 	}}
 	client := &wireLLM{}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	_, err := h.Retarget(context.Background(), action, "DEVSBX-404")
 
@@ -286,7 +292,7 @@ func TestStoreHandlerRetarget_ReplacesThePrimaryLink(t *testing.T) {
 		`[{"issue_key":"DEVSBX-42","type":"comment","body":"on the right ticket","confidence":0.9,"rationale":"r"}]`,
 	}}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	got, err := h.Retarget(context.Background(), action, "DEVSBX-42")
 
@@ -314,7 +320,7 @@ func TestStoreHandlerRetarget_RecordsReviewerProvenance(t *testing.T) {
 		`[{"issue_key":"DEVSBX-42","type":"comment","body":"b","confidence":0.9,"rationale":"r"}]`,
 	}}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	_, err := h.Retarget(context.Background(), action, "DEVSBX-42")
 	require.NoError(t, err)
@@ -340,7 +346,7 @@ func TestStoreHandlerRetarget_RulesRejectedNotEdited(t *testing.T) {
 		`[{"issue_key":"DEVSBX-42","type":"comment","body":"b","confidence":0.9,"rationale":"r"}]`,
 	}}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	_, err := h.Retarget(context.Background(), action, "DEVSBX-42")
 	require.NoError(t, err)
@@ -362,11 +368,21 @@ func TestStoreHandlerRetarget_RefusesANoOp(t *testing.T) {
 	}}
 	client := &wireLLM{}
 
-	h := NewStoreHandler(s, tracker, client, nil)
+	h := NewStoreHandler(s, tracker, client, nil, testCorrelatorConfig(), 100000)
 
 	_, err := h.Retarget(context.Background(), action, "DEVSBX-9")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already targets")
 	assert.Empty(t, client.prompts)
+}
+
+// testCorrelatorConfig is a valid CorrelatorConfig for handler tests. Thresholds
+// high enough that compaction never triggers: these tests are about split's own
+// behaviour, not about Persist's tail summarization.
+func testCorrelatorConfig() config.CorrelatorConfig {
+	return config.CorrelatorConfig{
+		TailSummarizeThresholdTokens: 1000000,
+		RecentEventsKept:             50,
+	}
 }

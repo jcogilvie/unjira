@@ -156,11 +156,52 @@ no primary at all, reading as untracked work and re-entering matching's backlog.
 decided this" from "we guessed this". Rules the old row `rejected`, not `edited`: it named the wrong
 issue, so it was not reworded.
 
-### Split, still unwired
+### Split (landed 2026-08-29)
 
-Unlike merge (moves existing links) and retarget (replaces one), split needs `Cluster` re-run with
-an instruction and new narratives persisted — a correlator operation rather than a store one. It
-reports itself unavailable.
+The last unwired verb. Unlike merge (moves existing links) and retarget (replaces one), split needs
+`Cluster` re-run and its results persisted as new narratives.
+
+Two things the design did not anticipate, both found by probing before writing:
+
+**`Cluster` had no way to carry an instruction.** `WithClusterRules` appends learned rules, which is
+a different kind of claim: a rule is standing policy distilled from many corrections, an instruction
+is one reviewer's judgment about one narrative right now. Passing a split directive through the rules
+option would file a single observation as durable policy, and `rules.Render` labels its output
+"learned rules". So `WithInstruction` is a new option, appended *after* the rules so a conflict
+resolves toward the human present in the loop. A first draft of this slice declared the instruction
+text and never passed it anywhere — caught by `go vet` finding it unused, which is the whole feature
+being silently absent.
+
+**Persist already empties the source, and that is not sufficient.** Probed:
+
+```
+BEFORE: narrative 1 holds 2 events
+AFTER:  narrative 1 holds 0 events; 2 narratives created
+```
+
+`relinkEvents` moves the events off, correctly. What remained was an emptied narrative still at
+`status='open'` and still returned by `NarrativesOverlapping` — so `buildClusterPrompt` would render
+it into every later pass as an existing narrative holding zero events, asking the model to reason
+about a story whose substance moved. Hence `store.StatusSplit` and a predicate excluding it, which is
+precisely the change `NarrativesOverlapping`'s own comment anticipated ("when status becomes
+meaningful, the predicate belongs here").
+
+Marked **conditionally**: a narrative that kept committed events is still a live story with a tracker
+mutation describing it, and hiding it from clustering while its issue is being worked would be wrong.
+
+**Mixed state splits rather than refusing**, matching merge. A narrative holding one committed and
+two uncommitted events keeps the committed one — the posted comment stays true about exactly what it
+described — and the rest move. Refusing was considered and rejected: it would make the reviewer's
+correction impossible precisely when the narrative has already been partly acted on.
+
+Committed events are never even *offered* to the model, not merely excluded from the result. Drilled:
+swapping `EligibleEvents` for `AllNarrativeEvents` fails with "the committed event's summary must
+never reach the clusterer".
+
+**Every result is forced to `ClusterNew`.** `Cluster` is given no existing narratives, so a
+`narrative_id` in the response is fabricated — and trusting it would have `Persist` extend an
+unrelated narrative, moving this work somewhere nobody asked for. Drilled with a real bystander
+narrative: without the normalization it gains an event ("Should be zero, but was 1").
 
 ### Also: heeded a linter rather than suppressing it
 
