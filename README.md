@@ -51,7 +51,10 @@ queued or lands `failed` with a persisted reason:
 1. **`auto_commit.<type>.graduated`** — false for every action type, and nothing in unjira can
    write this field. Autonomy is granted by a human editing config, never earned by the system.
 2. **`jira[].writable_project_keys`** — which projects may be written to, declared separately from
-   `project_keys` (what may be *read*). Absent means nothing on that connection is writable.
+   `project_keys` (what may be *read*). Absent means nothing on that connection is writable. A
+   project no connection lists in `project_keys` at all is refused with a *different* message,
+   because it needs a different fix: unjira does not track it, so the likely remedy is retargeting
+   the action rather than widening write scope.
 3. **`auto_commit.<type>.confidence_floor`** — the action's own confidence must clear it.
 
 A fresh clone has none of these configured, so a fresh clone applies nothing. `config/unjira.example.json`

@@ -551,3 +551,110 @@ type keylessWriter struct{ fakeWriter }
 func (w *keylessWriter) CreateIssue(string, string, string, string, []string) (string, error) {
 	return "", nil
 }
+
+// TestApplier_UntrackedProjectRefusalNamesTheRightRemedy is the distinction an
+// earlier version of checkProjectWritable deliberately collapsed, arguing that
+// "no connection says yes" and "a connection says no" are the same outcome. They
+// are the same OUTCOME and different REMEDIES, which is what the message is for.
+//
+// The old message sent a reader to edit writable_project_keys for connection
+// "none" — a connection that does not exist, so following the advice was
+// impossible.
+func TestApplier_UntrackedProjectRefusalNamesTheRightRemedy(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "SUMO-287220", Payload: `{"body":"b"}`,
+	})
+
+	// PROJ is tracked and writable; SUMO is not tracked at all.
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not tracked by unjira",
+		"an untracked project must not be reported as a writable_project_keys problem")
+	assert.Contains(t, err.Error(), "project_keys",
+		"the message must name the config key that would actually change this")
+	assert.Contains(t, err.Error(), "retarget",
+		"the likely remedy is retargeting, since unjira attributed work to a project it does not track")
+	assert.NotContains(t, err.Error(), `connection "none"`,
+		"the old message pointed at a connection that does not exist")
+
+	assert.Empty(t, w.calls, "nothing may reach the tracker")
+}
+
+// TestApplier_ReadableButUnwritableRefusalNamesTheConnection: this one IS a scope
+// decision someone made, so the message names the connection to edit.
+func TestApplier_ReadableButUnwritableRefusalNamesTheConnection(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "comment", IssueKey: "PAAS-4038", Payload: `{"body":"b"}`,
+	})
+
+	// PAAS is readable on connection "test" but absent from writable_project_keys.
+	applier := gate.NewApplier(s, w, "DEVSBX", []config.JiraConnection{{
+		Name:                "test",
+		ProjectKeys:         []string{"PAAS", "DEVSBX"},
+		WritableProjectKeys: []string{"DEVSBX"},
+	}})
+
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "readable but not writable")
+	assert.Contains(t, err.Error(), `connection "test"`,
+		"a scope decision names where to change it")
+	assert.Contains(t, err.Error(), "writable_project_keys")
+	assert.NotContains(t, err.Error(), "not tracked",
+		"a tracked-but-unwritable project must not read as untracked")
+
+	assert.Empty(t, w.calls)
+}
+
+// TestApplier_BothRefusalsPersistTheirReasonForTriage: a reviewer sees these in
+// `actions list --status failed`, which is the surface that has to answer WHY.
+func TestApplier_BothRefusalsPersistTheirReasonForTriage(t *testing.T) {
+	cases := []struct {
+		name      string
+		issueKey  string
+		conns     []config.JiraConnection
+		wantPhras string
+	}{
+		{
+			name:      "untracked project",
+			issueKey:  "SUMO-1",
+			conns:     writableConnections("PROJ"),
+			wantPhras: "not tracked by unjira",
+		},
+		{
+			name:     "readable but unwritable",
+			issueKey: "PAAS-1",
+			conns: []config.JiraConnection{{
+				Name: "test", ProjectKeys: []string{"PAAS"}, WritableProjectKeys: nil,
+			}},
+			wantPhras: "readable but not writable",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := applierStore(t)
+			w := &fakeWriter{}
+			action := insertAction(t, s, store.ActionRow{
+				Type: "comment", IssueKey: tc.issueKey, Payload: `{"body":"b"}`,
+			})
+
+			applier := gate.NewApplier(s, w, "PROJ", tc.conns)
+			require.Error(t, applier.Apply(action))
+
+			stored, err := s.GetAction(action.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "failed", stored.Status)
+			assert.Contains(t, stored.Error, tc.wantPhras,
+				"the persisted reason is what a reviewer reads later, so it must carry the distinction")
+		})
+	}
+}
