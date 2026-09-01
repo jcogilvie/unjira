@@ -309,6 +309,62 @@ check whether an existing gate already prevents it. A gate that reads as safety 
 the real defect nearby — it is usually a cost, a missing memory, or an unbounded loop, and fixing that
 is both cheaper and reversible where a gate tends to be permanent.
 
+## 17. One symptom can be two bugs, and a passing unit test is the tell
+
+Discovered 2026-09-01, running the pipeline over 300 real events for the first
+time since several changes landed (`internal/correlator/match.go`).
+
+A narrative whose events named `PAAS-4038` three times ended with zero
+`narrative_issues` rows, so the create path proposed a brand-new ticket for work
+that ticket already tracked. One symptom, and it took two fixes.
+
+**First bug: the classifier could not see the events.** `buildMatchPrompt` sent the
+narrative's title and summary plus each candidate's Jira metadata, while
+`classifySystemPrompt` instructed the model to "judge from each candidate's
+summary, description, and status, not from provenance strength alone" — asking for
+evidence-based judgment and withholding the evidence. The two Jira events that
+settled which of four candidates owned the work reached the model only as the word
+`jira_event` on a candidate line. It returned an empty array; `resolveVerified`
+discarded all four candidates with no error and no log.
+
+**Second bug, found because the first fix appeared not to work.** After the prompt
+fix, a real pass still left the work unlinked. The instinct was to keep re-running
+and reading output. What actually resolved it was a unit test driving `matchOne` on
+that narrative's exact events — which **passed**, linking the candidate
+deterministically at 1.0 with no model call. A unit test that passes while the
+pipeline disagrees is not a failed diagnosis; it is the diagnosis. The difference
+had to be the pass, not the matching logic.
+
+It was: `correlator.Match` used the candidate cap as the narrative cap.
+
+```go
+limit := cfg.CandidateLimit()                          // candidates per narrative
+narratives, err := s.NarrativesWithoutIssueKey(limit)   // narratives per pass
+```
+
+`max_candidates_per_narrative=10` therefore examined ten narratives per pass, and
+the corroborating evidence was in the data: linked narrative ids formed a
+**contiguous block** (2–18) rather than a scatter. Genuine per-narrative
+classification failures do not arrive in id order.
+
+Compounding it, matching truncated **silently**, while `Reconcile` had logged its
+own cap since it shipped. Twelve unexamined narratives therefore presented as
+twelve matching failures.
+
+**Generalizations worth carrying:**
+
+- When a targeted unit test passes but the real pipeline disagrees, stop re-running
+  the pipeline. The gap between them *is* the finding, and it is usually
+  environmental: a limit, a config value, a selection query.
+- Distribution is evidence. Contiguous ids mean a batch boundary; scattered ids
+  mean per-item judgment. Read the shape of a failure before theorizing a cause.
+- Two config values that share a variable will eventually be confused, whatever the
+  variable is called. `limit` serving both "candidates per narrative" and
+  "narratives per pass" is the whole bug.
+- Every stage that caps a batch must log reaching the cap, and diagnostic parity
+  across stages is a real property: one stage logging and its neighbour not is how
+  a batch limit masquerades as a correctness failure.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

@@ -207,7 +207,15 @@ data/                   SQLite database lives here (gitignored)
   patterns in config, empty by default) tells unjira which ticket-shaped matches are placeholders
   rather than real links, without discarding the fact that one was seen — an event whose only
   candidate keys are all excluded still shows up as untracked, annotated with which key was
-  excluded, so it stays visible for later triage instead of vanishing.
+  excluded, so it stays visible for later triage instead of vanishing. Those patterns are
+  unanchored, so anchor them: `-0$` is right; a bare `-0` would also swallow `PROJ-10` and
+  `PROJ-100` as "placeholders".
+- **Every stage caps its own batch, and says when it hits the cap.** `match.max_narratives_per_pass`
+  and `reconciler.max_narratives_per_pass` are separate numbers because the per-narrative costs
+  differ — matching resolves a lone candidate for free and only calls a model when two or more
+  survive, while the reconciler drafts for everything it examines. Both log when the backlog
+  exceeds the cap: a stage that truncates silently makes unexamined work look like failed work,
+  which is exactly how a matching batch limit once read as a matching bug.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.

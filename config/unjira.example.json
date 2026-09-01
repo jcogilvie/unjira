@@ -56,6 +56,7 @@
   },
   "match": {
     "max_candidates_per_narrative": 10,
+    "max_narratives_per_pass": 20,
     "confidence_floor": 0.7
   },
   "reconciler": {
