@@ -8,6 +8,9 @@ Guidance for anyone (human or agent) editing this codebase. This is distinct fro
   behavioral norms here.
 - **`docs/design-notes.md`** — *why* unjira is shaped this way: the failure modes that drove the
   architecture. Read it before changing the pipeline's structure.
+- **`docs/architecture.md`** — *what* is actually there: the pipeline, write-authority graph, action
+  lifecycle and package dependencies as mermaid diagrams, plus open findings from the 2026-09-02
+  scan. Kept current in the PR that invalidates it, same as the README.
 - **`docs/go-conventions.md`** — how unjira's Go is written: CLI/DI (Kong), error handling,
   testing (testify + go-cmp + fluent builders), package layout, linting, build (Earthfile). Read
   it before writing or reviewing any Go in this repo.
@@ -67,6 +70,10 @@ So, in the same PR:
   of what was uncertain is worth more than a doc that looks prescient.
 - **`docs/design-notes.md`** — only when you hit a *new* failure mode worth a numbered incident.
   This file is why-we-are-shaped-this-way, not a changelog.
+- **`docs/architecture.md`** — if you changed a pipeline stage, who holds write authority, the action
+  lifecycle, or a package's dependencies. The diagrams are load-bearing for a newcomer's mental
+  model, so a stale one misleads in the same way a stale Status section does. Also strike a finding
+  when you fix it, rather than leaving a resolved problem described as open.
 - **This file** — when an architecture invariant changes.
 
 A doc claim that can be checked should be checked. "602 assertions pass" and "the write path is
