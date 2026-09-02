@@ -189,6 +189,18 @@ func (ic IssueContext) annotate(evt *events.Event, authorAccountID string) {
 	evt.Artifacts["project_key"] = ic.ProjectKey
 	evt.Artifacts["connection"] = ic.Connection
 	evt.Artifacts["authored_by_unjira"] = ic.SelfAccountID != "" && authorAccountID == ic.SelfAccountID
+
+	// Every event this collector emits is the tracker's own account of itself: a
+	// changelog entry, a tracked field edit, or a comment already on the issue.
+	// None of it is evidence that work happened outside Jira, so a comment drafted
+	// from these alone would paraphrase the issue back onto the issue — see
+	// events.ArtifactTrackerRecord and reconciler.suppressTrackerEcho.
+	//
+	// Set here, in the one function every emitted event passes through, rather
+	// than at each call site: a future event type added to this collector is a
+	// tracker record too, and having to remember to mark it is how the marker
+	// silently stops covering the collector it was written for.
+	events.SetTrackerRecord(evt)
 }
 
 // author pulls the accountId and display name out of a Jira author object.

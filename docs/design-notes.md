@@ -555,6 +555,54 @@ a lint message that names the *victim* rather than the cause.
 - The lint message names the wrong file position for this class of defect. Read what moved, not what
   was flagged.
 
+## 24. A prompt rule cannot express a structural precondition
+
+The first triage pass over real data (2026-09-02, 173 events, 62 narratives) produced 21 proposed
+comments. **18 of them were unjira paraphrasing Jira back onto Jira.** The worst was a long,
+genuinely well-argued RCA comment proposed on PAAS-4000 — whose narrative contained exactly [status
+`Discovery → In Progress`, that issue's own description ×4, status `In Progress → Done`]. Every
+sentence in the proposed comment came from the description of the issue it would be posted on.
+
+The tempting diagnosis was "the rules aren't wired up." That was wrong twice over.
+`rules/no-self-narration.md` existed, had been written the day before *from this exact class of
+observation*, and **was** loaded into the drafting prompt (`rules.Render` in `draft.go` and
+`create.go`). It was also being obeyed. Its content is a constraint on how to *lead* a comment:
+"never make a status change you did not perform the subject of what you write." It says nothing
+about whether a narrative with no work evidence should produce a comment **at all** — and no amount
+of rewording gets it there, because the model cannot see the provenance of its own inputs. Asked to
+judge whether all of its context is tracker bookkeeping, it has only the text, which reads like
+perfectly good source material.
+
+An earlier related claim of mine was also wrong, and checking it mattered: I asserted that fixing
+the correlator's clustering (#179) would later make "some of the suppressed comments legitimate."
+Measured, 17 of the 18 issues had **zero** non-tracker evidence anywhere in the store; the 18th had
+three incidental key mentions scraped from a session about unjira itself. There was no rescue
+population. The mechanism was plausible and the data said no.
+
+The fix is a precondition in code — `events.AnyWorkEvidence` over the delta, consumed by
+`reconciler.suppressTrackerEcho` — keyed on a marker the *producing collector* declares
+(`events.SetTrackerRecord`), because only the producer knows whether it read a tracker's own
+bookkeeping or observed work.
+
+**Generalizations worth carrying:**
+
+- **A rule about phrasing and a rule about eligibility are different artifacts.** When a norm in
+  `rules/` is being followed and the bad output persists, ask whether the norm can even express the
+  constraint. Prompt rules shape *how* the model says something; only code can decide *whether* it
+  gets to.
+- **Don't infer provenance from a source name or an incidental field.** "Is this the jira collector?"
+  is #21 again. "Does it have an `issue_key`?" is worse — a CI run or a commit can name an issue
+  truthfully while being real work evidence. Declared capability, set by the producer, in the one
+  function every emitted event passes through.
+- **A plausible mechanism is not a finding.** "Some of these become legitimate later" survived
+  because it sounded like systems thinking. One query killed it. The same defect class as a stale
+  status line, just wearing better clothes.
+- **Mark it where every event passes, not at each call site.** `annotate` is the single choke point
+  in the Jira collector; a future event type is a tracker record too, and needing to remember is how
+  a marker silently stops covering the collector it was written for. The test that pins this
+  (`TestEveryEmittedEventIsMarkedATrackerRecord`) is in the *collector* package, because every
+  reconciler test constructs its own events and would stay green while the marker vanished.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

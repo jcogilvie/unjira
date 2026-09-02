@@ -322,6 +322,19 @@ data/                   SQLite database lives here (gitignored)
   name check, so a future GitHub tracker's own status collector is recognized the same way. Silent on
   the `local` tracker backend, which has no real external tracker for anyone to move a ticket behind
   unjira's back. See `docs/design-notes.md` incident 19.
+- **A comment requires evidence of work the tracker has no record of.** A narrative whose delta holds
+  only the tracker's own account of itself — changelog entries, field edits, comments already on the
+  issue — produces no comment, because every sentence available would restate the issue onto the
+  issue. Measured on the first real triage pass: 18 of 21 proposed comments were exactly that, one of
+  them a long RCA that paraphrased its own ticket's description. `rules/no-self-narration.md` already
+  forbade *leading* with a status change and was being obeyed; a prompt rule cannot express a
+  precondition about provenance the model cannot see, so this is code
+  (`reconciler.suppressTrackerEcho` over `events.AnyWorkEvidence`). The signal is a marker the
+  **producing collector** declares (`events.SetTrackerRecord`) — not a source name (incident 21) and
+  not the presence of an issue key, which a CI run or commit can carry while being real work
+  evidence. Transitions and creates are untouched: a transition asserts no prose and has its own
+  guard above, and a create concerns work with no issue to restate. Suppressions are reported, never
+  silent. See `docs/design-notes.md` incident 24.
 
 ## Writing a collector
 
