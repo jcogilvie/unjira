@@ -499,6 +499,31 @@ func (r AutoCommitRule) Validate() error {
 	return nil
 }
 
+// WorkflowConfig tunes internal/workflow's per-project graph cache. See
+// docs/superpowers/specs/2026-09-01-named-status-transitions-design.md,
+// "workflow.Graph becomes load-bearing, with a cache".
+//
+// Deliberately just this one field, and no Validate method: config.Span's
+// own UnmarshalText already rejects an empty, unparseable, or non-positive
+// value at decode time (internal/config/span_test.go), so by the time a
+// *Config exists there is no further post-parse invariant left to check —
+// unlike, say, MatchConfig.ConfidenceFloor, a bare float64 that needs its
+// own range check because nothing upstream of it already validated.
+type WorkflowConfig struct {
+	// CacheTTL bounds how long workflow.Cached trusts a mined graph before
+	// re-mining. Zero (the field's default when the key is absent from
+	// config, which is expected — most operators never need to touch this)
+	// means workflow.DefaultCacheTTL: internal/config must not import
+	// internal/workflow (that would invert the dependency direction
+	// workflow.StatusChange's own doc comment locks in — clients/jira ->
+	// workflow, never the reverse — and config sits below workflow in that
+	// same direction), so the actual default value is workflow's to own, not
+	// duplicated here. A caller wires this straight into
+	// workflow.CacheOptions.TTL, which already treats <= 0 as "use my
+	// default".
+	CacheTTL Span `json:"cache_ttl"`
+}
+
 // Config is unjira's top-level configuration.
 type Config struct {
 	Jira       []JiraConnection          `json:"jira"`
@@ -514,6 +539,7 @@ type Config struct {
 	Correlator         CorrelatorConfig `json:"correlator"`
 	Match              MatchConfig      `json:"match"`
 	Reconciler         ReconcilerConfig `json:"reconciler"`
+	Workflow           WorkflowConfig   `json:"workflow"`
 	// AutoCommit keys the auto-commit gate's rules by actions.type
 	// ("comment" | "transition" | "create"). Absent from config entirely
 	// (nil map) is the common case and the safe default: every action type

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -588,6 +589,39 @@ func TestLoad_ParsesRulesBlock(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "/etc/unjira/rules", cfg.Rules.Dir)
+}
+
+// TestLoad_ParsesWorkflowCacheTTL asserts workflow.cache_ttl round-trips
+// through config.Span the same way every other duration-ish key does
+// (config.Span already covers day/week units and positivity in
+// internal/config/span_test.go) — this only needs to prove the new field is
+// actually wired into Config's JSON tags, not re-prove Span's own parsing.
+func TestLoad_ParsesWorkflowCacheTTL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"workflow": {"cache_ttl": "48h"}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, 48*time.Hour, cfg.Workflow.CacheTTL.Duration())
+}
+
+// TestLoad_WorkflowCacheTTLDefaultsToZeroWhenUnset documents the "0 means
+// use the package default" contract explicitly: internal/config
+// deliberately does not duplicate workflow.DefaultCacheTTL as its own
+// fallback value (that constant lives in internal/workflow, and config must
+// not import it — see workflow.StatusChange's own doc comment on why the
+// dependency direction stays clients/jira -> workflow, never the reverse,
+// which extends to config here too). A caller wires
+// cfg.Workflow.CacheTTL.Duration() straight into workflow.CacheOptions.TTL,
+// and workflow.Cached treats <= 0 as "use my own default".
+func TestLoad_WorkflowCacheTTLDefaultsToZeroWhenUnset(t *testing.T) {
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "missing.json"))
+
+	require.NoError(t, err)
+	assert.Zero(t, cfg.Workflow.CacheTTL.Duration())
 }
 
 func TestLoad_ParsesJiraQueries(t *testing.T) {

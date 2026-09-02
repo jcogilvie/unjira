@@ -6,8 +6,14 @@
 // out statistically, and rare edges are a proxy for "unusual move, gate it" —
 // a sharper rerouting guardrail than status-category direction alone.
 //
-// Staleness: cache the graph per project; when the live transitions endpoint
-// returns an edge the graph doesn't predict, mark it dirty and re-mine.
+// Staleness: the graph is cached per project (see Cached, CacheOptions) with
+// three invalidation triggers — a TTL (CacheOptions.TTL /
+// internal/config.WorkflowConfig.CacheTTL, DefaultCacheTTL if unset), an
+// explicit forced refresh (CacheOptions.Refresh), and MarkDirty, which a
+// caller invokes when the live transitions endpoint returns an edge the
+// graph doesn't predict — nothing calls MarkDirty yet; that lands with the
+// named-status-transition work (see
+// docs/superpowers/specs/2026-09-01-named-status-transitions-design.md).
 package workflow
 
 import (

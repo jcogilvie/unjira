@@ -129,7 +129,9 @@ plist for install steps).
 
 Dev-instance tools (need credentials in `.env`): `unjira dev seed` creates labeled test
 issues and walks them through transitions to generate changelog history; `unjira dev reset`
-deletes exactly what seed created; `unjira dev workflow` prints the mined workflow graph;
+deletes exactly what seed created; `unjira dev workflow` prints the workflow graph, mining it
+only when there's no usable per-project cache (`--refresh` forces a re-mine regardless;
+`workflow.cache_ttl` in config controls how long a mined graph is trusted otherwise);
 `unjira dev narrate` runs one collect+narrate+match+reconcile pass and prints what it found
 and proposed. It lives under `dev` rather than as a top-level verb because narration is a
 stage inside `watch`, so a top-level `narrate` would be scaffolding awaiting deletion.
@@ -176,7 +178,8 @@ internal/
   triage/               the interactive review session as a state machine, with
                         Prompter and Handler seams so it never touches a terminal
   rules/                load, scope-filter, and render rules/*.md into prompts
-  workflow/             observed workflow graphs mined from changelogs; BFS path planning
+  workflow/             observed workflow graphs mined from changelogs; BFS path planning;
+                        a per-project on-disk cache (TTL + explicit + dirty-flag invalidation)
   pipeline/             stage orchestration: RunCollect / RunNarrate / RunMatch /
                         RunReconcile / RunAutoCommit, plus the digest renderer
   devtools/             seed/reset labeled test data on the dev instance
