@@ -2,12 +2,14 @@
 
 Corrections from the review queue get distilled into markdown rules here — one file per
 rule, human-auditable and diffable. `internal/rules` (`rules.Load`) reads every file here
-and hands the `scope: correlator` subset to `internal/pipeline`, which appends it to
-`Cluster`'s and `Match`'s system prompts each pass — see `internal/correlator`'s
-`WithClusterRules`/`WithRules` options. `scope: reconciler` and `scope: estimator` rules
+and hands each scope's subset to `internal/pipeline`.
+
+`scope: correlator` rules are appended to `Cluster`'s and `Match`'s system prompts each pass
+(see `internal/correlator`'s `WithClusterRules`/`WithRules` options). `scope: reconciler`
+rules are appended to the drafting prompt — `internal/pipeline`'s `loadReconcilerRules`
+feeds `reconciler.Reconcile`, which passes them through `draft`. `scope: estimator` rules
 are parsed and preserved by the loader (so nothing here is rejected ahead of the code that
-will consume it) but are not yet wired into any prompt: `internal/reconciler` does not
-exist yet, and there is no estimator.
+will consume it) but reach no prompt: there is no estimator.
 
 The directory `rules.Load` reads defaults to `rules/` (this directory, relative to the
 working directory) and is configurable via `rules.dir` in `unjira.config.json` — see

@@ -2,6 +2,7 @@ package jira
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/workflow"
@@ -52,11 +53,9 @@ var jiraStatusCategories = map[string]tasktracker.StatusCategory{
 }
 
 // normalizedStatusCategory maps key to its normalized bucket, reporting
-// whether key was recognized. Legality-facing callers (SetStatus,
-// AvailableStatusCategories) must check ok themselves rather than fold an
-// unrecognized key into some bucket: doing so would let unjira report a
-// category reachable — or, in SetStatus, actually execute a transition into
-// one — that Jira never actually offered.
+// whether key was recognized. Callers must check ok rather than fold an
+// unrecognized key into some bucket: StatusTodo would read as a verified claim
+// about a status Jira described with a category this package has never seen.
 func normalizedStatusCategory(key string) (tasktracker.StatusCategory, bool) {
 	category, ok := jiraStatusCategories[key]
 
@@ -151,82 +150,122 @@ func (t *Tracker) AddComment(key, text string) error {
 	return nil
 }
 
-// SetStatus resolves target to a legal transition (one landing in that
-// status category) and executes it. Errors loudly if no available
-// transition lands in the target category, rather than guessing. A
-// transition into a status category Jira reports but this package doesn't
-// recognize never matches any target, StatusTodo included — an unrecognized
-// category must never be treated as equivalent to a caller's request, since
-// that would execute a transition unjira never actually verified.
-func (t *Tracker) SetStatus(key string, target tasktracker.StatusCategory) error {
+// SetStatus finds the transition landing on the named target status and
+// executes it. Errors loudly rather than guessing when nothing lands there.
+//
+// Matched on the destination's NAME, not its category. Jira routinely offers
+// several transitions whose destinations share a category — in the PAAS project,
+// In Progress, In Review, Blocked, and In Test are all indeterminate — so a
+// category match would execute whichever of them the API happened to list first.
+// That is a wrong write, not a near miss: "move to In Review" would sometimes
+// block the ticket.
+//
+// Comparison is case-insensitive on a trimmed name, since the target travels
+// through a persisted JSON payload and a model's response before arriving here,
+// and "in review" versus "In Review" is not a distinction worth refusing a
+// legitimate transition over. It is not fuzzy beyond that: no prefix matching,
+// no closest-match. An unresolvable name means the workflow changed or the
+// status was never real, and both deserve the error.
+func (t *Tracker) SetStatus(key, targetStatus string) error {
 	transitions, err := t.client.GetTransitions(key)
 	if err != nil {
 		return fmt.Errorf("fetching transitions for jira issue %s: %w", key, err)
 	}
 
+	want := normalizeStatusName(targetStatus)
+
+	available := make([]string, 0, len(transitions))
+
 	for _, transition := range transitions {
 		to, ok := transition["to"].(map[string]any)
 		if !ok {
 			continue
 		}
-		category, ok := to["statusCategory"].(map[string]any)
-		if !ok {
+		name, _ := to["name"].(string)
+		if name == "" {
 			continue
 		}
-		categoryKey, _ := category["key"].(string)
+		available = append(available, name)
 
-		normalized, ok := normalizedStatusCategory(categoryKey)
-		if !ok || normalized != target {
+		if normalizeStatusName(name) != want {
 			continue
 		}
 
 		transitionID, _ := transition["id"].(string)
 		if err := t.client.TransitionIssue(key, transitionID, nil); err != nil {
-			return fmt.Errorf("transitioning jira issue %s: %w", key, err)
+			return fmt.Errorf("transitioning jira issue %s to %q: %w", key, name, err)
 		}
 
 		return nil
 	}
 
-	return fmt.Errorf("no available transition for jira issue %s lands in status category %q", key, target)
+	// Naming what WAS available turns an opaque refusal into a diagnosis: a
+	// typo, a workflow edit, and someone else having already moved the issue
+	// look identical without it.
+	return fmt.Errorf(
+		"no available transition for jira issue %s lands on status %q (available: %s)",
+		key, targetStatus, strings.Join(available, ", "),
+	)
 }
 
-// AvailableStatusCategories maps the issue's currently-legal transitions to
-// normalized categories, deduplicated (several named transitions routinely
-// land in the same category). A transition into a status category this
-// package doesn't recognize is dropped rather than folded into StatusTodo:
-// this method's whole purpose is telling the reconciler which categories
-// are actually reachable, and reporting one that was never verified would
-// be a false positive licensing an unverified write.
-func (t *Tracker) AvailableStatusCategories(key string) ([]tasktracker.StatusCategory, error) {
+// AvailableTransitions reports every destination the issue can currently move
+// to, by name, with its normalized category alongside.
+//
+// Deduplicated by name, not by category: two transitions to the same named
+// status are one destination, but two transitions to differently-named statuses
+// are two destinations even when their categories match. Deduplicating by
+// category is what the previous StatusCategory-based version did, and it
+// collapsed PAAS's four indeterminate destinations into one.
+//
+// A destination whose category Jira reports but this package doesn't recognize
+// is still returned, with an empty ToCategory. That is deliberate and is a
+// change from the category-only version, which dropped it: the name is what
+// authorizes a transition, and it was verified. Dropping the destination made
+// three real PAAS statuses (Open, Paused, To Do — all `unknown` category)
+// invisible to the reconciler, which is a false NEGATIVE suppressing a legal
+// move. An empty category only weakens the coarse direction check, which is
+// advisory.
+func (t *Tracker) AvailableTransitions(key string) ([]tasktracker.Transition, error) {
 	transitions, err := t.client.GetTransitions(key)
 	if err != nil {
 		return nil, fmt.Errorf("fetching transitions for jira issue %s: %w", key, err)
 	}
 
-	seen := make(map[tasktracker.StatusCategory]bool, len(transitions))
-	var out []tasktracker.StatusCategory
+	seen := make(map[string]bool, len(transitions))
+	out := make([]tasktracker.Transition, 0, len(transitions))
 
 	for _, transition := range transitions {
 		to, ok := transition["to"].(map[string]any)
 		if !ok {
 			continue
 		}
-		category, ok := to["statusCategory"].(map[string]any)
-		if !ok {
-			continue
-		}
-		categoryKey, _ := category["key"].(string)
 
-		normalized, ok := normalizedStatusCategory(categoryKey)
-		if !ok || seen[normalized] {
+		name, _ := to["name"].(string)
+		if name == "" || seen[normalizeStatusName(name)] {
 			continue
 		}
-		seen[normalized] = true
-		out = append(out, normalized)
+		seen[normalizeStatusName(name)] = true
+
+		// An unrecognized or absent category leaves ToCategory empty rather
+		// than defaulting: StatusTodo would read as a real claim about
+		// direction that nothing verified.
+		var normalized tasktracker.StatusCategory
+		if category, ok := to["statusCategory"].(map[string]any); ok {
+			categoryKey, _ := category["key"].(string)
+			normalized, _ = normalizedStatusCategory(categoryKey)
+		}
+
+		out = append(out, tasktracker.Transition{ToStatus: name, ToCategory: normalized})
 	}
 
 	return out, nil
+}
+
+// normalizeStatusName folds a status name for comparison: trimmed and
+// case-insensitive. Jira treats status names as display strings and does not
+// guarantee the casing a caller saw earlier is the casing it will report later.
+func normalizeStatusName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 // CreateIssue creates an issue and returns its key.

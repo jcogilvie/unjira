@@ -5,8 +5,8 @@
 // This package proposes and never applies. It holds no authorization to write
 // to a tracker: per CLAUDE.md's architecture invariants, "writes are gated by
 // the pipeline, not the client." Its only tracker calls are reads (GetIssue,
-// AvailableStatusCategories) used to verify current state before drafting
-// anything, per rules/intent-not-outcome.md.
+// AvailableTransitions) used to verify current state before drafting anything,
+// per rules/intent-not-outcome.md.
 //
 // See docs/superpowers/specs/2026-08-25-reconciler-design.md.
 package reconciler
@@ -25,7 +25,7 @@ type ActionType string
 const (
 	// ActionComment posts narrative prose to an existing issue.
 	ActionComment ActionType = "comment"
-	// ActionTransition moves an existing issue to a new status category.
+	// ActionTransition moves an existing issue to a new named status.
 	ActionTransition ActionType = "transition"
 	// ActionCreate opens a new issue. Proposed only when a narrative has no
 	// verified link at all — never alongside one, or unjira would manufacture
@@ -48,8 +48,15 @@ type ProposedAction struct {
 	Body string
 	// Summary is the issue title, set only for ActionCreate.
 	Summary string
-	// TargetStatus is set only for ActionTransition.
-	TargetStatus tasktracker.StatusCategory
+	// TargetStatus is the tracker's own name for the destination ("In Review"),
+	// set only for ActionTransition.
+	//
+	// A name rather than a normalized category because several legal
+	// destinations routinely share one: in PAAS, In Progress / In Review /
+	// Blocked / In Test are all indeterminate, so a category could not state
+	// which move was being proposed. Validated against the live
+	// AvailableTransitions result, never against a closed set — there isn't one.
+	TargetStatus string
 	// Confidence is the model's self-reported score AFTER deterministic
 	// flooring (see floorConfidence). Never the raw model number.
 	Confidence float64
@@ -58,12 +65,26 @@ type ProposedAction struct {
 
 // verifiedLink pairs a stored narrative→issue link with the live issue read
 // while verifying it, so drafting never needs a second GetIssue for the same
-// key. AvailableStatus is the live transition legality for this issue,
-// populated only when a transition is plausible.
+// key. Transitions is the live transition legality for this issue.
 type verifiedLink struct {
-	Link            store.NarrativeIssue
-	Issue           tasktracker.Issue
-	AvailableStatus []tasktracker.StatusCategory
+	Link  store.NarrativeIssue
+	Issue tasktracker.Issue
+	// Transitions is every destination the issue can currently move to, by
+	// name. Empty means no transition is proposable, which floorConfidence
+	// enforces.
+	Transitions []tasktracker.Transition
+}
+
+// targetNames lists the legal destination names, for the prompt and for the
+// legality check. Kept as a method so the two cannot disagree about what
+// "legal" means.
+func (v verifiedLink) targetNames() []string {
+	out := make([]string, 0, len(v.Transitions))
+	for _, transition := range v.Transitions {
+		out = append(out, transition.ToStatus)
+	}
+
+	return out
 }
 
 // ReconcileResult is one narrative's outcome, for rendering and tests.

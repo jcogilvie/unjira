@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -14,7 +14,6 @@ import (
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
-	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
 // draftSystemPrompt instructs the model to produce one action per actionable
@@ -30,12 +29,21 @@ Draft exactly one action per issue shown. Roles:
 
 Action types:
 - "comment": post prose describing what changed. The default.
-- "transition": move the issue to a different status. ONLY propose a target listed under "legal transitions" for that issue. If the status you believe is correct is not listed, propose a comment instead.
+- "transition": move the issue to a different status. ONLY propose a target listed under "legal transitions" for that issue, spelled EXACTLY as listed. If the status you believe is correct is not listed, propose a comment instead.
+
+When to propose a transition. A transition needs evidence in the delta that the WORK reached a new stage:
+- the delta shows substantive work on the issue's subject, and the issue is not yet in a working status -> propose the working status (e.g. "In Progress")
+- the delta shows a pull request opened or marked ready for review -> propose the review status (e.g. "In Review")
+- the delta shows the work blocked on something external -> propose the blocked status, if one is listed
+
+Evidence of work is the ONLY basis for a transition. The issue's current status is never itself a reason to move it: current status tells you a move is unnecessary, not that one is due. In particular, do not propose a transition merely because the current status looks early or looks stale.
+
+Do not restate a status change somebody else already made. If the delta contains a status change, that move is already done; treat it as context for what to say, never as the subject of what you say, and never propose repeating or reversing it.
 
 Report confidence honestly in 0.0-1.0. Do not describe work that is not evidenced in the delta.
 
 Return ONLY a bare JSON array, no prose, no markdown fences:
-[{"issue_key":"...","type":"comment"|"transition","body":"...","target_status":"todo"|"in_progress"|"done","confidence":0.0-1.0,"rationale":"..."}]`
+[{"issue_key":"...","type":"comment"|"transition","body":"...","target_status":"<exact status name from legal transitions>","confidence":0.0-1.0,"rationale":"..."}]`
 
 // draftVerdict is one entry of the model's response.
 type draftVerdict struct {
@@ -105,7 +113,7 @@ func toProposedAction(verdict draftVerdict, v verifiedLink) ProposedAction {
 	}
 
 	if action.Type == ActionTransition {
-		action.TargetStatus = tasktracker.StatusCategory(verdict.TargetStatus)
+		action.TargetStatus = strings.TrimSpace(verdict.TargetStatus)
 	}
 
 	action.Confidence = floorConfidence(action, v)
@@ -121,7 +129,7 @@ func toProposedAction(verdict draftVerdict, v verifiedLink) ProposedAction {
 // high-confidence." So deterministic checks can only ever LOWER it, never
 // raise it.
 //
-// A transition to a category the live issue does not offer is floored to zero
+// A transition to a status the live issue does not offer is floored to zero
 // rather than merely reduced: the backend would refuse it outright, so there is
 // no confidence level at which proposing it is correct.
 func floorConfidence(action ProposedAction, v verifiedLink) float64 {
@@ -139,8 +147,15 @@ func floorConfidence(action ProposedAction, v verifiedLink) float64 {
 		return confidence
 	}
 
-	if slices.Contains(v.AvailableStatus, action.TargetStatus) {
-		return confidence
+	// Compared case-insensitively for the same reason the Jira backend matches
+	// that way: the name round-trips through a model response, and refusing a
+	// legal move over casing would be a self-inflicted false negative. Anything
+	// beyond that is a genuine mismatch — the model named a status the issue does
+	// not offer, which the backend would refuse.
+	for _, name := range v.targetNames() {
+		if strings.EqualFold(strings.TrimSpace(name), action.TargetStatus) {
+			return confidence
+		}
 	}
 
 	return 0
@@ -221,15 +236,18 @@ func buildDraftPrompt(narrative store.NarrativeRow, delta []events.Event, verifi
 		fmt.Fprintf(&b, "  summary: %q\n", v.Issue.Summary)
 		fmt.Fprintf(&b, "  description: %q\n", v.Issue.Description)
 
-		if len(v.AvailableStatus) == 0 {
+		if len(v.Transitions) == 0 {
 			b.WriteString("  legal transitions: none available — propose a comment, not a transition\n")
 
 			continue
 		}
 
-		targets := make([]string, 0, len(v.AvailableStatus))
-		for _, c := range v.AvailableStatus {
-			targets = append(targets, string(c))
+		// Names, quoted, because they contain spaces and must be reproduced
+		// exactly: the applier passes the string straight through to the
+		// backend, which matches on it.
+		targets := make([]string, 0, len(v.Transitions))
+		for _, name := range v.targetNames() {
+			targets = append(targets, strconv.Quote(name))
 		}
 		fmt.Fprintf(&b, "  legal transitions: %s\n", strings.Join(targets, ", "))
 	}

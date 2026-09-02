@@ -544,17 +544,17 @@ func TestLiveUnresolvableKeyIsNotTransport(t *testing.T) {
 			"its narrative on every pass instead of being reported unresolved")
 }
 
-// TestLiveAvailableStatusCategoriesReflectsTheRealWorkflow is why
-// AvailableStatusCategories exists. The offline fakes assert what we BELIEVE
-// Jira reports as legal; only a live call establishes that a freshly-created
-// issue genuinely cannot reach every category, which is what makes
-// floorConfidence's transition check meaningful rather than vacuous.
+// TestLiveAvailableTransitionsReflectsTheRealWorkflow is why
+// AvailableTransitions exists. The offline fakes assert what we BELIEVE Jira
+// reports as legal; only a live call establishes that a freshly-created issue
+// genuinely cannot reach every status, which is what makes floorConfidence's
+// transition check meaningful rather than vacuous.
 //
-// Asserted as a property, not against a hardcoded category list: a Jira
-// project's workflow is admin-configurable, so pinning "a new Task cannot go
-// straight to Done" would be pinning this instance's configuration rather than
-// the behaviour under test.
-func TestLiveAvailableStatusCategoriesReflectsTheRealWorkflow(t *testing.T) {
+// Asserted as a property, not against a hardcoded status list: a Jira project's
+// workflow is admin-configurable, so pinning "a new Task can go to In Progress"
+// would be pinning this instance's configuration rather than the behaviour under
+// test.
+func TestLiveAvailableTransitionsReflectsTheRealWorkflow(t *testing.T) {
 	client := testClient(t)
 	tracker := jira.NewTracker(client)
 
@@ -571,41 +571,138 @@ func TestLiveAvailableStatusCategoriesReflectsTheRealWorkflow(t *testing.T) {
 	// not create.
 	t.Cleanup(func() { _ = client.DeleteIssue(key) })
 
-	categories, err := tracker.AvailableStatusCategories(key)
+	transitions, err := tracker.AvailableTransitions(key)
 	require.NoError(t, err)
 
-	require.NotEmpty(t, categories,
+	require.NotEmpty(t, transitions,
 		"a new issue must offer at least one legal transition, or every transition proposal "+
 			"would be floored to zero and this check would be vacuous")
 
-	// Cross-check against the raw API: every category reported must trace back
-	// to a real transition Jira offers. This is what catches a normalization
-	// bug that invented a category.
+	// Cross-check against the raw API: every NAME reported must trace back to a
+	// real transition Jira offers. This is what catches a normalization bug that
+	// invented a destination.
 	raw, err := client.GetTransitions(key)
 	require.NoError(t, err)
 
-	rawCategories := make(map[string]bool, len(raw))
+	rawNames := make(map[string]bool, len(raw))
 	for _, transition := range raw {
 		to, ok := transition["to"].(map[string]any)
 		require.True(t, ok, "a transition with no 'to' object: %v", transition)
-		category, ok := to["statusCategory"].(map[string]any)
-		if !ok {
+		if name, _ := to["name"].(string); name != "" {
+			rawNames[name] = true
+		}
+	}
+
+	require.NotEmpty(t, rawNames,
+		"GetTransitions returned transitions but none carried a to.name — the shape "+
+			"AvailableTransitions depends on has changed")
+
+	for _, transition := range transitions {
+		assert.NotEmpty(t, transition.ToStatus,
+			"a nameless destination cannot be targeted, since the name IS the target")
+		assert.True(t, rawNames[transition.ToStatus],
+			"reported destination %q is not one Jira offered — normalization invented it",
+			transition.ToStatus)
+	}
+
+	assert.LessOrEqual(t, len(transitions), len(rawNames)+1,
+		"destinations are deduplicated by name, so there cannot be more of them than "+
+			"distinct names Jira offered")
+
+	// The load-bearing property this whole change exists for: names must survive
+	// as distinct values even when they share a category. Asserted only when the
+	// live workflow actually offers such a pair, so it never fails on a project
+	// whose configuration happens not to.
+	byCategory := make(map[tasktracker.StatusCategory][]string)
+	for _, transition := range transitions {
+		byCategory[transition.ToCategory] = append(byCategory[transition.ToCategory], transition.ToStatus)
+	}
+	for category, names := range byCategory {
+		if len(names) < 2 {
 			continue
 		}
-		categoryKey, _ := category["key"].(string)
-		rawCategories[categoryKey] = true
+		assert.Len(t, uniqueStrings(names), len(names),
+			"category %q holds %v: these must stay distinguishable, which is exactly what "+
+				"the old category-keyed result could not do", category, names)
+	}
+}
+
+// TestLiveSetStatusMovesToTheNamedStatus is the write-side half, and the only
+// place the name-matching claim is checked against a real workflow rather than a
+// fake's canned response.
+func TestLiveSetStatusMovesToTheNamedStatus(t *testing.T) {
+	client := testClient(t)
+	tracker := jira.NewTracker(client)
+
+	key, err := client.CreateIssue(
+		testProject(),
+		"[seed] live named transition probe",
+		"Task",
+		"Created by internal/live; deleted by this test's cleanup.",
+		[]string{jira.SeedLabel},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+
+	transitions, err := tracker.AvailableTransitions(key)
+	require.NoError(t, err)
+	require.NotEmpty(t, transitions)
+
+	// Whatever this workflow offers first — not a hardcoded status, since the
+	// project's workflow is admin-configurable.
+	target := transitions[0].ToStatus
+
+	require.NoError(t, tracker.SetStatus(key, target))
+
+	moved, err := tracker.GetIssue(key)
+	require.NoError(t, err)
+	assert.Equal(t, target, moved.StatusName,
+		"the issue must land on the status that was NAMED; landing on a different status "+
+			"with the same category is the exact wrong write this change fixes")
+}
+
+// TestLiveSetStatusRefusesAnUnofferedName: the error path, live. A fake can be
+// made to return anything; only a real call proves Jira does not quietly accept
+// an unknown target and pick something.
+func TestLiveSetStatusRefusesAnUnofferedName(t *testing.T) {
+	client := testClient(t)
+	tracker := jira.NewTracker(client)
+
+	key, err := client.CreateIssue(
+		testProject(),
+		"[seed] live unoffered transition probe",
+		"Task",
+		"Created by internal/live; deleted by this test's cleanup.",
+		[]string{jira.SeedLabel},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+
+	before, err := tracker.GetIssue(key)
+	require.NoError(t, err)
+
+	err = tracker.SetStatus(key, "Definitely Not A Real Status")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), key)
+
+	after, err := tracker.GetIssue(key)
+	require.NoError(t, err)
+	assert.Equal(t, before.StatusName, after.StatusName,
+		"a refused transition must leave the issue where it was")
+}
+
+// uniqueStrings returns in with duplicates removed, preserving order.
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
 	}
 
-	require.NotEmpty(t, rawCategories,
-		"GetTransitions returned transitions but none carried a statusCategory — the shape "+
-			"AvailableStatusCategories depends on has changed")
-
-	for _, c := range categories {
-		assert.Contains(t, []tasktracker.StatusCategory{
-			tasktracker.StatusTodo, tasktracker.StatusInProgress, tasktracker.StatusDone,
-		}, c, "normalization produced a category outside the closed set")
-	}
-
-	assert.LessOrEqual(t, len(categories), len(rawCategories),
-		"categories are deduplicated from raw transitions, so there cannot be more of them")
+	return out
 }

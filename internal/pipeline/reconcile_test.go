@@ -275,7 +275,7 @@ func TestRenderReconcileResultShowsEveryOutcomeKind(t *testing.T) {
 			{NarrativeID: 5, Proposed: []reconciler.ProposedAction{
 				{
 					Type: reconciler.ActionTransition, IssueKey: "PROJ-2",
-					TargetStatus: tasktracker.StatusDone, Confidence: 0.95,
+					TargetStatus: "In Review", Confidence: 0.95,
 				},
 			}},
 			{NarrativeID: 6, Proposed: []reconciler.ProposedAction{
@@ -288,7 +288,9 @@ func TestRenderReconcileResultShowsEveryOutcomeKind(t *testing.T) {
 	})
 
 	assert.Contains(t, out, "PROJ-2")
-	assert.Contains(t, out, "done", "a transition target must render")
+	assert.Contains(t, out, "In Review",
+		"a transition target must render as the status NAME a reviewer recognizes, "+
+			"not a category that could mean four different destinations")
 	assert.Contains(t, out, "PROJ-3")
 	assert.Contains(t, out, "min_confidence_to_propose")
 }

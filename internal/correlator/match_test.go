@@ -57,7 +57,7 @@ func (f *fakeTracker) GetIssue(key string) (tasktracker.Issue, error) {
 func (f *fakeTracker) SearchIssues(string, int) ([]tasktracker.Issue, error) { return nil, nil }
 
 // Matching never proposes transitions, so legality is never consulted.
-func (f *fakeTracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
+func (f *fakeTracker) AvailableTransitions(string) ([]tasktracker.Transition, error) {
 	return nil, nil
 }
 

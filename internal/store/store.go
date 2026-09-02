@@ -188,7 +188,13 @@ CREATE TABLE IF NOT EXISTS local_issues (
     summary         TEXT NOT NULL,
     description     TEXT,
     issue_type      TEXT NOT NULL,
-    status_category TEXT NOT NULL DEFAULT 'todo',
+    -- The tracker's own status NAME, not a normalized category, because
+    -- tasktracker.TaskWriter.SetStatus targets a name: a category cannot
+    -- distinguish "In Review" from "Blocked" (see
+    -- docs/superpowers/specs/2026-09-01-named-status-transitions-design.md),
+    -- and a local backend that could not represent the distinction would make
+    -- offline tests disagree with every real one.
+    status          TEXT NOT NULL DEFAULT 'To Do',
     labels          TEXT NOT NULL DEFAULT '[]',
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -497,13 +503,16 @@ func (s *Store) CursorCounts() ([]CollectorCount, error) {
 
 // LocalIssue is one row of local_issues.
 type LocalIssue struct {
-	Key            string
-	Project        string
-	Summary        string
-	Description    string
-	IssueType      string
-	StatusCategory string
-	Labels         []string
+	Key         string
+	Project     string
+	Summary     string
+	Description string
+	IssueType   string
+	// Status is the tracker's own status name (e.g. "In Progress"), matching
+	// what SetStatus targets. Named, not a category, for the reason on the
+	// local_issues.status column.
+	Status string
+	Labels []string
 }
 
 // InsertLocalIssue creates a local issue, assigning it the next sequential
@@ -546,10 +555,10 @@ func (s *Store) GetLocalIssue(key string) (LocalIssue, error) {
 	)
 
 	err := s.db.QueryRow(
-		`SELECT key, project, summary, description, issue_type, status_category, labels
+		`SELECT key, project, summary, description, issue_type, status, labels
 		 FROM local_issues WHERE key = ?`,
 		key,
-	).Scan(&issue.Key, &issue.Project, &issue.Summary, &description, &issue.IssueType, &issue.StatusCategory, &labelsJSON)
+	).Scan(&issue.Key, &issue.Project, &issue.Summary, &description, &issue.IssueType, &issue.Status, &labelsJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LocalIssue{}, fmt.Errorf("getting local issue %s: %w", key, ErrLocalIssueNotFound)
 	}
@@ -566,14 +575,18 @@ func (s *Store) GetLocalIssue(key string) (LocalIssue, error) {
 	return issue, nil
 }
 
-// SetLocalIssueStatus updates the status category for the local issue with
-// the given key, or returns ErrLocalIssueNotFound if none exists.
-func (s *Store) SetLocalIssueStatus(key, statusCategory string) error {
+// SetLocalIssueStatus sets the status NAME for the local issue with the given
+// key, or returns ErrLocalIssueNotFound if none exists.
+//
+// Unvalidated by design: the local backend has no workflow, so any name is
+// legal. Validating against a fixed list would make offline tests disagree with
+// a real backend, whose legal names come from a live per-issue read.
+func (s *Store) SetLocalIssueStatus(key, status string) error {
 	res, err := s.db.Exec(
 		`UPDATE local_issues
-		 SET status_category = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 		 WHERE key = ?`,
-		statusCategory, key,
+		status, key,
 	)
 	if err != nil {
 		return fmt.Errorf("setting status for local issue %s: %w", key, err)
@@ -635,7 +648,7 @@ func (s *Store) LocalIssueComments(issueKey string) ([]string, error) {
 // ordered by key.
 func (s *Store) SearchLocalIssues(query string, limit int) ([]LocalIssue, error) {
 	rows, err := s.db.Query(
-		`SELECT key, project, summary, description, issue_type, status_category, labels
+		`SELECT key, project, summary, description, issue_type, status, labels
 		 FROM local_issues WHERE summary LIKE '%' || ? || '%' COLLATE NOCASE
 		 ORDER BY key LIMIT ?`,
 		query, limit,
@@ -654,7 +667,7 @@ func (s *Store) SearchLocalIssues(query string, limit int) ([]LocalIssue, error)
 		)
 		if err := rows.Scan(
 			&issue.Key, &issue.Project, &issue.Summary, &description,
-			&issue.IssueType, &issue.StatusCategory, &labelsJSON,
+			&issue.IssueType, &issue.Status, &labelsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scanning local issue row: %w", err)
 		}

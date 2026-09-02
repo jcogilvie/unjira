@@ -57,8 +57,8 @@ func (f *autoCommitFakeWriter) AddComment(key, text string) error {
 	return f.errs[call]
 }
 
-func (f *autoCommitFakeWriter) SetStatus(key string, target tasktracker.StatusCategory) error {
-	call := fmt.Sprintf("SetStatus:%s:%s", key, target)
+func (f *autoCommitFakeWriter) SetStatus(key, targetStatus string) error {
+	call := fmt.Sprintf("SetStatus:%s:%s", key, targetStatus)
 	f.calls = append(f.calls, call)
 
 	return f.errs[call]

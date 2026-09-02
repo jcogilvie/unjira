@@ -365,6 +365,76 @@ twelve matching failures.
   across stages is a real property: one stage logging and its neighbour not is how
   a batch limit masquerades as a correctness failure.
 
+## 18. A normalization built for reading becomes a lie when reused for writing
+
+`tasktracker.StatusCategory` (`todo | in_progress | done`) was a **read-side** projection: it let
+`Issue` report state uniformly whether the backend was Jira or GitHub Issues. Correct, and it still
+does that.
+
+Then `TaskWriter.SetStatus` took it as the transition *target*, because the type was already there
+and looked like the right shape. Nothing revisited whether a projection adequate for reading is
+adequate for acting. The whole justification lived in three lines of code comment, arguing GitHub's
+open/closed as the common denominator across backends — and no spec ever recorded a decision.
+
+Measurement inverted the argument. Mining the real PAAS workflow (19 statuses):
+
+```
+Ready for Dev -> In Progress   (x36)
+In Progress   -> In Review     (x28)
+```
+
+Both are `indeterminate -> indeterminate`. So are `-> Blocked`, `-> In Test`,
+`-> Waiting for customer`. The two edges unjira exists to propose were **inexpressible**, and
+"move to In Review" was byte-identical to "move to Blocked" — so the Jira backend, matching on
+category, would execute whichever transition the API happened to list first. Not an edge case: every
+transition request in a real project would have hit the wrong status.
+
+The direction of degradation is the lesson. A named target degrades gracefully to a two-name backend
+(`open` and `closed` *are* names). A category target cannot upgrade to a nineteen-status one. **A
+common denominator belongs as the fallback, not the representation** — and the argument for the
+narrow type came from the least-capable backend, which is exactly the one whose needs generalize
+worst.
+
+**Generalizations worth carrying:**
+
+- A type that normalizes for *reporting* is not automatically fit for *acting*. Reading tolerates
+  lossiness because a human interprets the result; a write executes.
+- The check is cheap: name a distinction the real system makes and ask whether the type can state
+  it. Two statuses in one bucket answered this in one query.
+- Before arguing with an implementation choice, grep the specs for the decision. "We decided this"
+  is a claim, and it was false here — there was no decision to reverse, only an accident to correct.
+- A correct decision can be defeated by the type it is routed through. The reconciler spec's
+  "validate against the live issue's available transitions" was right and unchanged; implementing it
+  via `AvailableStatusCategories` quietly turned it into "validate against a lossy projection of
+  ground truth."
+- The strictness that protects a lossy type stops making sense when the type stops being lossy. The
+  old code *dropped* transitions whose category it did not recognize — right when a category
+  licensed the write, wrong once a verified name did, and it was silently hiding three real statuses.
+
+## 19. Monotonicity does not prevent fighting a handoff; it guarantees it
+
+The obvious guard on work-derived transitions is to never propose a status earlier in the workflow
+than where the ticket already sits. It fails on the case that matters most.
+
+Security scans a ticket unjira called done, finds the vulnerability still present, and moves it
+`In Review -> In Progress`. That is simultaneously evidence that work happened *and* that more work
+remains — exactly what a reconciler should represent. Now apply monotonicity: unjira still holds
+PR-created evidence, still concludes `In Review`, and proposes moving it forward again. Every pass,
+until the evidence ages out.
+
+Direction is not the discriminator. **Recency is:** propose only when the work evidence postdates the
+issue's last status change. One rule covers both cases, needs no notion of forward or backward, and
+generalizes to handoffs from systems unjira does not even collect from.
+
+**Generalizations worth carrying:**
+
+- When a guard is meant to prevent a conflict, check it against the conflict's real shape. This one
+  was derived from "don't walk tickets backwards" and never tested against "somebody else moved it."
+- "Never do X" guards are suspicious when X is something a human legitimately does. The question is
+  not whether the action is allowed but whether *this* actor has current information.
+- Prefer a freshness test to a direction test when reconciling against a system other agents also
+  write to. Direction encodes an assumption about who is right; freshness measures who knew last.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

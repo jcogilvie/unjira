@@ -3,6 +3,7 @@ package gate
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/store"
@@ -199,13 +200,13 @@ func (a *Applier) applyTransition(action store.ActionRow) error {
 		return fmt.Errorf("action %d: decoding transition payload %q: %w", action.ID, action.Payload, err)
 	}
 
-	target, err := normalizeStatusCategory(p.TargetStatus)
-	if err != nil {
-		return fmt.Errorf("action %d: %w", action.ID, err)
+	target := strings.TrimSpace(p.TargetStatus)
+	if target == "" {
+		return fmt.Errorf("action %d: transition action has no target_status", action.ID)
 	}
 
 	if err := a.writer.SetStatus(action.IssueKey, target); err != nil {
-		return fmt.Errorf("transitioning %s to %s: %w", action.IssueKey, target, err)
+		return fmt.Errorf("transitioning %s to %q: %w", action.IssueKey, target, err)
 	}
 
 	return nil
@@ -355,19 +356,22 @@ func (a *Applier) checkProjectWritable(project string) error {
 	return nil
 }
 
-// normalizeStatusCategory validates a decoded target_status string against
-// the three normalized categories tasktracker.StatusCategory offers. Unlike
-// a live legality check (that already happened in the reconciler, before
-// this action was ever persisted — see AvailableStatusCategories), this is
-// only a syntactic check: is the string one of the three values persist.go
-// could have written at all. An unrecognized string means the payload was
-// never valid for its declared type, which is this package's "malformed
-// payload" case, not a tracker call to attempt and let fail.
-func normalizeStatusCategory(raw string) (tasktracker.StatusCategory, error) {
-	switch tasktracker.StatusCategory(raw) {
-	case tasktracker.StatusTodo, tasktracker.StatusInProgress, tasktracker.StatusDone:
-		return tasktracker.StatusCategory(raw), nil
-	default:
-		return "", fmt.Errorf("unrecognized target_status %q", raw)
-	}
-}
+// There is deliberately no name-validating counterpart to the old
+// normalizeStatusCategory here.
+//
+// That function checked target_status against the three StatusCategory values,
+// which was possible because the target was drawn from a closed enum. A status
+// NAME has no closed set — it is whatever the project's admin configured — so the
+// only real check is "does this issue currently offer a transition to this name,"
+// which is a live per-issue read.
+//
+// TaskWriter.SetStatus already performs exactly that read and errors, naming what
+// was available, when nothing matches. Repeating it here would issue a second
+// identical request and open a window between the check and the write in which
+// the answer can change — while preventing nothing SetStatus does not already
+// prevent. See docs/design-notes.md incident 16: a gate is only a gate if it
+// stops something no other gate stops.
+//
+// What survives is the malformed-payload check inline in applyTransition: an
+// empty target_status means the payload was never valid for its declared type,
+// and is this package's business rather than a tracker round trip to spend.

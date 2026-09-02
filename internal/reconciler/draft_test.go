@@ -48,14 +48,16 @@ func TestDraftFloorsConfidenceForAnIllegalTransition(t *testing.T) {
 	// The model claims high confidence in a Done transition. The live issue
 	// offers only In Progress.
 	client := &fakeLLM{responses: []string{
-		`[{"issue_key":"PROJ-1","type":"transition","target_status":"done","confidence":0.95,"rationale":"work is finished"}]`,
+		`[{"issue_key":"PROJ-1","type":"transition","target_status":"Done","confidence":0.95,"rationale":"work is finished"}]`,
 	}}
 
 	narrative := store.NarrativeRow{ID: 1, Title: "t", Summary: "s"}
 	verified := []verifiedLink{{
-		Link:            store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
-		Issue:           tasktracker.Issue{Key: "PROJ-1", StatusCategory: tasktracker.StatusTodo},
-		AvailableStatus: []tasktracker.StatusCategory{tasktracker.StatusInProgress},
+		Link:  store.NarrativeIssue{IssueKey: "PROJ-1", Role: store.Role("primary")},
+		Issue: tasktracker.Issue{Key: "PROJ-1", StatusName: "To Do"},
+		Transitions: []tasktracker.Transition{
+			{ToStatus: "In Progress", ToCategory: tasktracker.StatusInProgress},
+		},
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
@@ -101,7 +103,9 @@ func TestDraftPromptCarriesTheDeltaAndEachLinksLiveState(t *testing.T) {
 		Issue: tasktracker.Issue{
 			Key: "PROJ-1", Summary: "live ticket summary", StatusName: "In Progress",
 		},
-		AvailableStatus: []tasktracker.StatusCategory{tasktracker.StatusDone},
+		Transitions: []tasktracker.Transition{
+			{ToStatus: "In Review", ToCategory: tasktracker.StatusInProgress},
+		},
 	}}
 
 	_, _, err := draft(t.Context(), client, narrative,
@@ -115,7 +119,10 @@ func TestDraftPromptCarriesTheDeltaAndEachLinksLiveState(t *testing.T) {
 	assert.Contains(t, prompt, "PROJ-1")
 	assert.Contains(t, prompt, "primary", "the role determines the framing")
 	assert.Contains(t, prompt, "In Progress", "live status, not inferred status")
-	assert.Contains(t, prompt, "done", "the legal transitions bound what may be proposed")
+	assert.Contains(t, prompt, `"In Review"`,
+		"the legal transitions bound what may be proposed, and must appear as quoted "+
+			"NAMES: the applier passes the string through to a backend that matches on it, "+
+			"so a name containing a space has to be reproducible exactly")
 }
 
 func TestDraftRejectsAnUnknownActionType(t *testing.T) {

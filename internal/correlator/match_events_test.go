@@ -64,7 +64,7 @@ func (t *narrative19Tracker) GetIssue(key string) (tasktracker.Issue, error) {
 	return byKey[key], nil
 }
 
-func (t *narrative19Tracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
+func (t *narrative19Tracker) AvailableTransitions(string) ([]tasktracker.Transition, error) {
 	return nil, nil
 }
 
@@ -468,7 +468,7 @@ func (anyKeyTracker) GetIssue(key string) (tasktracker.Issue, error) {
 	return tasktracker.Issue{Key: key, StatusName: "Ready for Dev", Summary: key + " summary"}, nil
 }
 
-func (anyKeyTracker) AvailableStatusCategories(string) ([]tasktracker.StatusCategory, error) {
+func (anyKeyTracker) AvailableTransitions(string) ([]tasktracker.Transition, error) {
 	return nil, nil
 }
 

@@ -101,7 +101,7 @@ func ActionPayload(action ProposedAction) (string, error) {
 	case ActionComment:
 		payload = map[string]any{"body": action.Body}
 	case ActionTransition:
-		payload = map[string]any{"target_status": string(action.TargetStatus)}
+		payload = map[string]any{"target_status": action.TargetStatus}
 	case ActionCreate:
 		payload = map[string]any{"summary": action.Summary, "description": action.Body}
 	default:
