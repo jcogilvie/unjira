@@ -63,6 +63,9 @@
     "max_narratives_per_pass": 20,
     "min_confidence_to_propose": 0.5
   },
+  "workflow": {
+    "cache_ttl": "24h"
+  },
   "rules": {
     "dir": "rules"
   },

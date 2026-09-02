@@ -307,8 +307,19 @@ func (c *devResetCmd) Run(app *appContext) error {
 
 type devWorkflowCmd struct {
 	Project string `help:"Project key (default: first in config)."`
+	Refresh bool   `help:"Force a re-mine, bypassing the cache even if it is fresh."`
 }
 
+// Run goes through workflow.Cached rather than calling workflow.MineProject
+// directly — this command was, until this PR, the graph's only caller,
+// exercising the mining path but never the cache workflow's own package doc
+// has described since it was written. jira.NewTracker adapts the plain
+// *jira.Client this app builds into a workflow.GraphProvider (its
+// WorkflowGraph method mines internally); Cached decides whether that mine
+// actually needs to run.
+//
+// Reports which it got and why: a cache you can't observe is a cache you
+// can't debug.
 func (c *devWorkflowCmd) Run(app *appContext) error {
 	projectKey, err := app.projectKey(c.Project)
 	if err != nil {
@@ -320,9 +331,18 @@ func (c *devWorkflowCmd) Run(app *appContext) error {
 		return err
 	}
 
-	graph, err := workflow.MineProject(client, projectKey, 200)
+	graph, status, err := workflow.Cached(jira.NewTracker(client), projectKey, workflow.CacheOptions{
+		TTL:     app.config.Workflow.CacheTTL.Duration(),
+		Refresh: c.Refresh,
+	})
 	if err != nil {
 		return err
+	}
+
+	if status.Cached {
+		fmt.Printf("Workflow graph for %s: cached (age %s)\n", projectKey, status.Age.Round(time.Second))
+	} else {
+		fmt.Printf("Workflow graph for %s: freshly mined (%s)\n", projectKey, status.Reason)
 	}
 
 	fmt.Println("Statuses:")
@@ -491,7 +511,7 @@ func (a *appContext) releasePipelineLease(runID string) {
 type devCmd struct {
 	Seed     devSeedCmd     `cmd:"" help:"Create labeled test issues and generate changelog history."`
 	Reset    devResetCmd    `cmd:"" help:"Delete every seed-labeled issue in the project."`
-	Workflow devWorkflowCmd `cmd:"" help:"Mine and print the observed workflow graph for a project."`
+	Workflow devWorkflowCmd `cmd:"" help:"Print the observed workflow graph for a project (cached; --refresh to force a re-mine)."`
 	Narrate  devNarrateCmd  `cmd:"" help:"Run one collect+narrate+match+reconcile pass and print what it found and proposed."`
 }
 

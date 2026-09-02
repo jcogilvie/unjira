@@ -132,6 +132,50 @@ for judging what to say, never the subject of what is said.
 
 ### 4. `workflow.Graph` becomes load-bearing, with a cache
 
+#### Status: landed 2026-09-01 (cache only — sections 1-3 and 5 are still design)
+
+Built `workflow.Cached`/`workflow.CacheOptions`/`workflow.CacheStatus`/`workflow.MarkDirty` in
+`internal/workflow/cache.go`, the `workflow.cache_ttl` config key
+(`internal/config.WorkflowConfig.CacheTTL`, a `config.Span`), and wired `dev workflow` through
+`Cached` with a `--refresh` flag, in `github.com/jcogilvie/unjira` PR (workflow-cache branch).
+
+All three invalidation triggers below are implemented and tested. `MarkDirty` has **no caller
+yet** — per this section's own scope, that lands with the `SetStatus`/`AvailableTransitions`
+work in sections 1-3, which a separate, parallel change is implementing. `MarkDirty` is exercised
+directly in `internal/workflow/cache_test.go` so the mechanism has coverage before it has a
+caller.
+
+Verification: `go test ./...` — `ok` for every package, including
+`github.com/jcogilvie/unjira/internal/workflow` and `github.com/jcogilvie/unjira/cmd/unjira`.
+`go vet -tags=live ./internal/live/` — clean. `golangci-lint run ./...` — `0 issues.`
+
+One deviation from the paragraph below: the cache does **not** call `workflow.MineProject`
+directly. It takes a `workflow.GraphProvider` (already existed) and calls `WorkflowGraph`, so the
+mining call count and its `maxIssues` cap stay entirely provider-owned (`jira.Tracker.WorkflowGraph`
+already hardcodes 200) rather than becoming a second parameter `Cached` would need to plumb through.
+This also means `internal/clients/jira` and `internal/clients/local` needed no changes — both
+already implement `GraphProvider`.
+
+`Graph.Save`/`workflow.Load` were **deleted** rather than used: a cache entry needs `mined_at` and
+`dirty` beside the graph, which their format cannot carry, so `cache.go` writes its own entry shape
+around `Graph.ToMap`. That left them at zero callers and zero tests after the change that was meant
+to give them a caller — uncalled, untested code that looks like the supported serialization path.
+
+The cache file lives at `data/workflow-cache/<sanitized-key>-<hash12>.json` (see
+`workflow.CachePath`, `workflow.DefaultCacheDir`): a `"data/"`-relative path matching
+`config.DBPath`'s own default, and a hashed filename suffix so two project/repo keys that
+sanitize to the same safe string (`"owner/repo"` vs `"owner-repo"`, or a deliberately
+path-traversal-shaped key) never collide or escape the cache directory — see
+`TestCachePath_DistinctProjectKeysNeverCollideEvenWhenSanitizedTheSame` and
+`TestCachePath_TraversalShapedKeyStaysInsideTheCacheDir`.
+
+`workflow.DefaultCacheTTL` is 24h, defended in its own doc comment: Jira workflows change on the
+order of months, but 24h means at most one "wasted" ~40s re-mine per calendar day of `watch`
+ticks even with no dirty-flag activity, since the dirty flag (once wired) is the real staleness
+detector.
+
+---
+
 Today `internal/workflow` mines real graphs, computes BFS paths, and has **exactly one caller** —
 `dev workflow`, a debug printer. `Save`/`Load` exist with zero callers.
 
@@ -157,6 +201,13 @@ That preserves the reconciler spec's decision exactly — the graph never licens
 
 `Save`/`Load` already handle serialization. What is missing is a cache path convention, the TTL
 check, and the dirty flag.
+
+**This turned out to be wrong, and `Save`/`Load` were deleted.** They serialize a bare graph, but a
+cache entry needs `mined_at` (for the TTL) and `dirty` (for the rejection trigger) alongside it —
+metadata `Save`'s format cannot carry. So `cache.go` writes its own entry shape wrapping
+`Graph.ToMap`, and `Save`/`Load` remained at zero callers and zero tests after the work that was
+supposed to give them one. Untested, uncalled code that looks like the supported path is worse than
+its absence: the next reader would reasonably use it and get a cache the TTL cannot read.
 
 ### 5. Multi-hop: batch the edges, coalesce only at presentation
 
