@@ -11,6 +11,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/reconciler"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
+	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
 // ReconcileOptions configures one reconcile pass.
@@ -18,6 +19,17 @@ type ReconcileOptions struct {
 	// DryRun runs the full pass — including the real LLM calls — but skips
 	// Persist, matching NarrateOptions.DryRun's treatment.
 	DryRun bool
+	// Graph is the project's observed workflow graph, when the caller could get
+	// one. It lets drafting propose a status several hops away and the action
+	// carry the route there — necessary because unjira has no guaranteed run
+	// cadence, so one delta routinely spans several statuses.
+	//
+	// Optional. Nil means single-hop, which is the pre-multi-hop behaviour, so a
+	// tracker that cannot supply a graph needs no special case here. Resolved by
+	// the caller (cmd/unjira) rather than here, for the same reason rules are:
+	// this layer takes resolved inputs and does not reach for a tracker
+	// capability itself.
+	Graph *workflow.Graph
 }
 
 // ReconcileRunResult is one reconcile pass, shaped for rendering.
@@ -86,15 +98,19 @@ func RunReconcile(
 		return ReconcileRunResult{}, err
 	}
 
+	reconcileOpts := []reconciler.ReconcileOption{reconciler.WithRules(reconcilerRules)}
+	if opts.Graph != nil {
+		reconcileOpts = append(reconcileOpts, reconciler.WithWorkflowGraph(opts.Graph))
+	}
+
 	results, stats, reconcileErr := reconciler.Reconcile(
-		ctx, s, tracker, client, cfg.Reconciler, reconciler.WithRules(reconcilerRules))
+		ctx, s, tracker, client, cfg.Reconciler, reconcileOpts...)
 
 	// Untracked narratives are a SEPARATE selection: Reconcile's backlog requires
 	// a narrative_issues link by construction, so a narrative with none is never
 	// examined by it at all. That is why untracked work produced no action even
 	// though every layer below supports `create` — the gap was a missing selection
-	// path, not a missing prompt option. No-ops unless
-	// reconciler.propose_creates is true.
+	// path, not a missing prompt option.
 	createResults, createStats, createErr := reconciler.ProposeCreates(
 		ctx, s, client, cfg.Reconciler, reconcilerRules)
 	results = append(results, createResults...)

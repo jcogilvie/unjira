@@ -5,9 +5,8 @@ Replacing the three-category transition target with the tracker's own status nam
 
 ## Status: partially landed 2026-09-01
 
-Sections 1, 2, the prompt half of 3, 3a (recency), and 4 (the graph cache) have landed. Section 5
-(multi-hop) has **not** — it is a separate change, and this section will be updated when it lands
-rather than describing it as done.
+**All sections have landed.** 1, 2, and the prompt half of 3 first; then 3a (recency) and 4 (the
+graph cache); then 5 (multi-hop).
 
 **Landed:**
 
@@ -406,6 +405,47 @@ retry machinery, and the failure mode degrades into the normal case.
 So coalescing is presentation-only, as suspected: **one row, one approval, one apply call, N tracker
 writes.** The reviewer sees "move to In Review (via In Progress)" rather than three actions to approve
 separately — two of which are mechanical consequences of the third.
+
+#### Status: landed 2026-09-02
+
+**Why this was worth building, which the section above states weakly.** The example here is
+`Discovery -> In Review`, which reads like an edge case. The real driver is that **unjira has no
+guaranteed run cadence.** Between two collects a ticket legitimately traverses several statuses:
+sprint planning moves it to Ready for Dev outside unjira, work starts, and a small change is submitted
+the same day. Interrupt-driven work — an oncall triage item discovered, worked, and sent for review —
+skips the planning transition entirely.
+
+That matters because the evidence for the whole journey is in **one delta**. Work-started and
+PR-opened arrive together. So the graph is not inventing a route the evidence does not support; it is
+supplying the legal ordering for a journey the evidence already covers. Without it the model is
+offered only the next hop, the In Review evidence is permanently unusable, and every later pass
+re-derives the same single step — so unjira trails reality by however many statuses the work crossed
+between runs.
+
+**Implementation, and one deviation.** `reachableTargets` widens the drafting prompt to the live-legal
+set plus anything `Graph.Path` reaches; `resolveRoute` returns the ordered hops. Two rules, in order:
+the live set wins (a directly-offered target is legal whether or not the mined graph has that edge —
+this is also the resolution of the nil-`Path` question), and a graph route's first hop must be
+live-legal (or the route cannot start, and proposing it would queue an action guaranteed to fail).
+
+The deviation: the spec implies each hop needs a live validation added at apply time. It does not.
+`TaskWriter.SetStatus` already reads the issue's own transitions and errors naming what was available,
+so the applier just walks the route — a second check would only add a window between check and write
+(design-notes incident 16). `actions.error` already captures the returned error via `Apply`, so
+recording how far it got needed only the right message.
+
+**A one-element route is a single hop**, deliberately: the common case is not a special case, so the
+applier has exactly one code path. And a nil graph means single-hop, which is precisely the
+pre-multi-hop behaviour — so a backend that cannot supply a graph (the local tracker's is static; a
+future GitHub backend's would be open/closed) needs no special case.
+
+**Not applied to `Redraft`.** That is triage's `[e]dit`, where a human is correcting the action in
+front of them; offering statuses several hops away would answer a specific request by widening its
+scope.
+
+Verification: 23 packages, 811 tests, `go vet -tags=live` clean, `golangci-lint` 0 issues. Each half
+drilled by breaking it and confirming the specific guard test fails. The fixture is the real mined
+PAAS graph, so a test cannot agree with a route no real project has.
 
 ## Scope
 

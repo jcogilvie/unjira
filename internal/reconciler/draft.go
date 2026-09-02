@@ -14,6 +14,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
 // draftSystemPrompt instructs the model to produce one action per actionable
@@ -29,7 +30,7 @@ Draft exactly one action per issue shown. Roles:
 
 Action types:
 - "comment": post prose describing what changed. The default.
-- "transition": move the issue to a different status. ONLY propose a target listed under "legal transitions" for that issue, spelled EXACTLY as listed. If the status you believe is correct is not listed, propose a comment instead.
+- "transition": move the issue to a different status. ONLY propose a target listed under "reachable statuses" for that issue, spelled EXACTLY as listed. If the status you believe is correct is not listed, propose a comment instead. Some listed statuses are several workflow steps away; propose the one the evidence supports and unjira will walk the intermediate steps itself.
 
 When to propose a transition. A transition needs evidence in the delta that the WORK reached a new stage:
 - the delta shows substantive work on the issue's subject, and the issue is not yet in a working status -> propose the working status (e.g. "In Progress")
@@ -75,10 +76,11 @@ func draft(
 	delta []events.Event,
 	verified []verifiedLink,
 	learnedRules []rules.Rule,
+	graph *workflow.Graph,
 ) ([]ProposedAction, correlator.Stats, error) {
 	var stats correlator.Stats
 
-	prompt := buildDraftPrompt(narrative, delta, verified)
+	prompt := buildDraftPrompt(narrative, delta, verified, graph)
 
 	systemPrompt := draftSystemPrompt
 	if rendered := rules.Render(learnedRules); rendered != "" {
@@ -98,12 +100,12 @@ func draft(
 		return nil, stats, err
 	}
 
-	return actionsFromVerdicts(narrative.ID, verdicts, verified, "draft"), stats, nil
+	return actionsFromVerdicts(narrative.ID, verdicts, verified, "draft", graph), stats, nil
 }
 
 // toProposedAction converts one verdict, flooring its confidence against
 // deterministic facts.
-func toProposedAction(verdict draftVerdict, v verifiedLink) ProposedAction {
+func toProposedAction(verdict draftVerdict, v verifiedLink, graph *workflow.Graph) ProposedAction {
 	action := ProposedAction{
 		Type:       ActionType(verdict.Type),
 		IssueKey:   verdict.IssueKey,
@@ -114,6 +116,22 @@ func toProposedAction(verdict draftVerdict, v verifiedLink) ProposedAction {
 
 	if action.Type == ActionTransition {
 		action.TargetStatus = strings.TrimSpace(verdict.TargetStatus)
+
+		// The route is resolved HERE, before flooring, because floorConfidence's
+		// verdict depends on it: a multi-hop target is by definition not in the
+		// live-legal set, so flooring against that set alone zeroes every
+		// legitimate multi-hop action.
+		//
+		// Resolving it in a later pass and flooring here is the bug this ordering
+		// prevents — and it is invisible to a unit test that calls either function
+		// directly, since each is correct in isolation. Only the end-to-end path
+		// shows it.
+		if route, ok := resolveRoute(v, graph, action.TargetStatus); ok {
+			action.Route = route
+			// The route's last hop IS the target, in the spelling the backend
+			// agrees with, which may differ in casing from what the model said.
+			action.TargetStatus = route[len(route)-1]
+		}
 	}
 
 	action.Confidence = floorConfidence(action, v)
@@ -147,11 +165,21 @@ func floorConfidence(action ProposedAction, v verifiedLink) float64 {
 		return confidence
 	}
 
-	// Compared case-insensitively for the same reason the Jira backend matches
-	// that way: the name round-trips through a model response, and refusing a
-	// legal move over casing would be a self-inflicted false negative. Anything
-	// beyond that is a genuine mismatch — the model named a status the issue does
-	// not offer, which the backend would refuse.
+	// A resolved route is strictly stronger evidence than the check below: it
+	// confirms a route to the target exists AND that its first hop is live-legal
+	// (see resolveRoute's two rules). Re-testing the target against the live set
+	// alone would floor every legitimate multi-hop action to zero, since a
+	// multi-hop target is by definition not directly offered.
+	if len(action.Route) > 0 {
+		return confidence
+	}
+
+	// No route resolved, which with a graph present means the target is
+	// unreachable. Fall back to the live set anyway: without a graph (the Redraft
+	// path passes nil) that IS the whole answer. Compared case-insensitively for
+	// the same reason the Jira backend matches that way — the name round-trips
+	// through a model response, and refusing a legal move over casing would be a
+	// self-inflicted false negative.
 	for _, name := range v.targetNames() {
 		if strings.EqualFold(strings.TrimSpace(name), action.TargetStatus) {
 			return confidence
@@ -218,7 +246,9 @@ func truncateForError(s string) string {
 //
 // The delta only — never the full cumulative narrative — so a reviewer sees
 // "what's new since you last saw this" rather than a repeated history.
-func buildDraftPrompt(narrative store.NarrativeRow, delta []events.Event, verified []verifiedLink) string {
+func buildDraftPrompt(
+	narrative store.NarrativeRow, delta []events.Event, verified []verifiedLink, graph *workflow.Graph,
+) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Narrative: title=%q\nsummary: %q\n\n", narrative.Title, narrative.Summary)
@@ -236,8 +266,12 @@ func buildDraftPrompt(narrative store.NarrativeRow, delta []events.Event, verifi
 		fmt.Fprintf(&b, "  summary: %q\n", v.Issue.Summary)
 		fmt.Fprintf(&b, "  description: %q\n", v.Issue.Description)
 
-		if len(v.Transitions) == 0 {
-			b.WriteString("  legal transitions: none available — propose a comment, not a transition\n")
+		// Reachable, not merely live-legal: the live set names only the NEXT hop,
+		// and unjira has no guaranteed run cadence, so one delta routinely holds
+		// evidence for a journey across several statuses. See reachableTargets.
+		reachable := reachableTargets(v, graph)
+		if len(reachable) == 0 {
+			b.WriteString("  reachable statuses: none — propose a comment, not a transition\n")
 
 			continue
 		}
@@ -245,11 +279,11 @@ func buildDraftPrompt(narrative store.NarrativeRow, delta []events.Event, verifi
 		// Names, quoted, because they contain spaces and must be reproduced
 		// exactly: the applier passes the string straight through to the
 		// backend, which matches on it.
-		targets := make([]string, 0, len(v.Transitions))
-		for _, name := range v.targetNames() {
+		targets := make([]string, 0, len(reachable))
+		for _, name := range reachable {
 			targets = append(targets, strconv.Quote(name))
 		}
-		fmt.Fprintf(&b, "  legal transitions: %s\n", strings.Join(targets, ", "))
+		fmt.Fprintf(&b, "  reachable statuses: %s\n", strings.Join(targets, ", "))
 	}
 
 	return b.String()
@@ -287,7 +321,11 @@ func Redraft(
 
 	var stats correlator.Stats
 
-	prompt := buildDraftPrompt(narrative, delta, verified) +
+	// nil graph: Redraft is triage's [e]dit, where a human is correcting the action
+	// in front of them. Offering statuses several hops away would answer a specific
+	// request by widening its scope, and the reviewer has the live state on screen.
+	// Single-hop here is the right answer, not a missing feature.
+	prompt := buildDraftPrompt(narrative, delta, verified, nil) +
 		"\n\nThe reviewer rejected the previous draft with this correction. " +
 		"Address it directly:\n" + feedback
 
@@ -312,7 +350,7 @@ func Redraft(
 	// Extract draft()'s loop into a shared helper and call it from both rather
 	// than copying it here — a divergence would mean triage's redrafts floor
 	// confidence differently from watch's drafts, which nothing would catch.
-	return actionsFromVerdicts(narrative.ID, verdicts, verified, "redraft"), stats, nil
+	return actionsFromVerdicts(narrative.ID, verdicts, verified, "redraft", nil), stats, nil
 }
 
 // actionsFromVerdicts maps the model's verdicts onto ProposedActions, dropping
@@ -330,6 +368,7 @@ func Redraft(
 // that were fine.
 func actionsFromVerdicts(
 	narrativeID int64, verdicts []draftVerdict, verified []verifiedLink, what string,
+	graph *workflow.Graph,
 ) []ProposedAction {
 	byKey := make(map[string]verifiedLink, len(verified))
 	for _, v := range verified {
@@ -348,7 +387,7 @@ func actionsFromVerdicts(
 			continue
 		}
 
-		out = append(out, toProposedAction(verdict, v))
+		out = append(out, toProposedAction(verdict, v, graph))
 	}
 
 	return out
