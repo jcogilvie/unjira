@@ -48,11 +48,17 @@ const (
 	pipelineLeasePoll = 2 * time.Second
 )
 
+// backendJira is the tracker.backend / collector name for Jira. Named because
+// three call sites now compare against it — the registry, taskTracker's switch,
+// and trackerResolver's per-connection path — and a typo in any one of them
+// silently selects the wrong branch.
+const backendJira = "jira"
+
 // registry maps collector names to factories, mirroring
 // internal/collectors.REGISTRY in the Python implementation.
 var registry = map[string]func() pipeline.Collector{
 	"claude_code": func() pipeline.Collector { return claudecode.New() },
-	"jira":        func() pipeline.Collector { return collectorjira.New() },
+	backendJira:   func() pipeline.Collector { return collectorjira.New() },
 }
 
 // appContext carries the loaded config, open store, and Jira credentials to
@@ -89,7 +95,7 @@ func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, erro
 // multi-connection limitation that implies.
 func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, error) {
 	switch a.config.TrackerBackend() {
-	case "jira":
+	case backendJira:
 		client, err := a.jiraClientForProject(projectKey)
 		if err != nil {
 			return nil, err
@@ -148,6 +154,81 @@ func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
 	}
 
 	return graph
+}
+
+// trackerResolver builds a correlator.TrackerResolver over the configured jira
+// connections, so a candidate is verified against the site that actually holds
+// it rather than whichever one the default project happened to select.
+//
+// That was the bug: matching took ONE tracker for a whole pass, so on a
+// multi-connection setup a candidate whose provenance recorded a different
+// connection was checked against the wrong site — reported "does not exist" for a
+// ticket that exists, or, if the key collided, silently resolved to an unrelated
+// issue. Both look identical to a genuinely stale key in the output.
+//
+// Non-jira backends get SingleTracker: the local backend ignores connections
+// entirely, and collapsing that into the general case keeps one code path through
+// Match rather than a special one.
+//
+// Trackers are built once and memoized per connection. Each is an HTTP client
+// with its own credentials, and matching resolves per candidate — rebuilding one
+// per candidate would construct the same client dozens of times in a pass.
+func (a *appContext) trackerResolver(defaultProject string) (correlator.TrackerResolver, error) {
+	if a.config.TrackerBackend() != backendJira {
+		tracker, err := a.taskTracker(defaultProject)
+		if err != nil {
+			return nil, err
+		}
+
+		return correlator.SingleTracker(tracker), nil
+	}
+
+	fallback, err := a.taskTracker(defaultProject)
+	if err != nil {
+		return nil, err
+	}
+
+	byName := make(map[string]tasktracker.TaskReader, len(a.config.Jira))
+
+	return func(connection string) (tasktracker.TaskReader, error) {
+		// No connection recorded: a branch- or prose-derived candidate, which is
+		// the common case since only jira-source events carry one. The default
+		// project's tracker is the best available guess, and it is a guess — see
+		// this function's own doc comment.
+		if connection == "" {
+			return fallback, nil
+		}
+
+		if tracker, ok := byName[connection]; ok {
+			return tracker, nil
+		}
+
+		conn, ok := a.config.JiraConnectionByName(connection)
+		if !ok {
+			// Not configured: renamed, removed, or a typo. An error rather than
+			// a silent fallback to the default site, because falling back is how
+			// the original bug behaved — it would check the wrong site and report
+			// a real ticket missing. verifyCandidates records this per candidate.
+			return nil, fmt.Errorf("no configured jira connection named %q", connection)
+		}
+
+		creds, ok := a.jiraCredentials.Set().For(conn.Name)
+		if !ok {
+			return nil, fmt.Errorf(
+				"no credentials for jira connection %q in %s", conn.Name, credentials.EnvVar,
+			)
+		}
+
+		client, err := jira.New(conn.Site, creds.Email, creds.Token)
+		if err != nil {
+			return nil, fmt.Errorf("building jira client for connection %q: %w", conn.Name, err)
+		}
+
+		tracker := jira.NewTracker(client)
+		byName[connection] = tracker
+
+		return tracker, nil
+	}, nil
 }
 
 // projectKey resolves --project, falling back to the first configured
@@ -476,13 +557,11 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 		return nil
 	}
 
-	// Matching uses ONE tracker, resolved from the default project. That is a
-	// real limitation on a multi-connection jira setup: a candidate key
-	// belonging to a different JiraConnection will be verified against the
-	// wrong site and reported unresolved. store.NarrativeIssue.Connection
-	// already records which connection each candidate came from, so resolving
-	// a tracker per candidate is a contained future change. The local backend
-	// ignores projectKey entirely, so it is unaffected.
+	// The default project selects the FALLBACK tracker — the one used for a
+	// candidate with no recorded connection, which is every branch- or
+	// prose-derived key. Candidates that do carry one are resolved per candidate
+	// by trackerResolver, so a multi-connection setup no longer verifies them
+	// against whichever site this project happens to name.
 	project, err := app.projectKey("")
 	if err != nil {
 		return err
@@ -493,7 +572,12 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 		return err
 	}
 
-	matchResult, matchErr := pipeline.RunMatch(ctx, app.store, tracker, client, app.config)
+	resolve, err := app.trackerResolver(project)
+	if err != nil {
+		return err
+	}
+
+	matchResult, matchErr := pipeline.RunMatch(ctx, app.store, resolve, client, app.config)
 
 	// Render before returning the error: RunMatch isolates failures per
 	// narrative, so the healthy narratives matched and the operator should see
@@ -508,9 +592,12 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	// matching's link set, so running it after a failed pass would draft
 	// against a half-updated one.
 	//
-	// It reuses the tracker matching resolved, so the single-tracker
-	// limitation described above applies identically here — a link whose
-	// Connection differs from this one is verified against the wrong site.
+	// NOTE: the reconciler still takes a single tracker, so the limitation
+	// matching just shed still applies HERE — a link whose Connection differs
+	// from this one is verified against the wrong site, and its transitions read
+	// from there too. store.NarrativeIssue.Connection is persisted and available;
+	// verifyLinks simply does not consult it yet. Tracked as task #177, and the
+	// seam it needs (correlator.TrackerResolver) now exists.
 	reconcileResult, reconcileErr := pipeline.RunReconcile(
 		ctx, app.store, tracker, client, app.config,
 		pipeline.ReconcileOptions{Graph: app.workflowGraph(project)})
@@ -677,6 +764,13 @@ func (c *watchCmd) Run(app *appContext) error {
 	// changed. A nil graph here simply means transitions stay single-hop.
 	graph := app.workflowGraph(project)
 
+	// Resolved once for the loop, like the graph: building it walks config and
+	// credentials, and neither changes between passes.
+	resolve, err := app.trackerResolver(project)
+	if err != nil {
+		return err
+	}
+
 	// ctx governs the LOOP — whether to acquire another lease, whether to
 	// keep waiting out the interval — but deliberately does NOT govern an
 	// in-flight PASS: watchLoop derives a non-cancelable context per pass via
@@ -692,7 +786,7 @@ func (c *watchCmd) Run(app *appContext) error {
 
 	return app.watchLoop(ctx, c.Interval.Duration(), c.Once, func(passCtx context.Context, _ string) error {
 		return app.runWatchPass(
-			passCtx, client, tracker, applier, linkExclusions, graph, since, c.DryRun)
+			passCtx, client, tracker, applier, linkExclusions, graph, resolve, since, c.DryRun)
 	})
 }
 
@@ -787,6 +881,7 @@ func (a *appContext) runWatchPass(
 	applier *gate.Applier,
 	linkExclusions []*regexp.Regexp,
 	graph *workflow.Graph,
+	resolve correlator.TrackerResolver,
 	since time.Duration,
 	dryRun bool,
 ) error {
@@ -812,7 +907,7 @@ func (a *appContext) runWatchPass(
 		return nil
 	}
 
-	matchResult, matchErr := pipeline.RunMatch(ctx, a.store, tracker, client, a.config)
+	matchResult, matchErr := pipeline.RunMatch(ctx, a.store, resolve, client, a.config)
 	fmt.Print(pipeline.RenderMatchResult(matchResult))
 
 	if matchErr != nil {
