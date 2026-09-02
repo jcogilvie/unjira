@@ -135,4 +135,17 @@ type ReconcileResult struct {
 	// still persisted — the threshold governs what unjira asserts, not what it
 	// records. See noteLowConfidence.
 	LowConfidence []string
+	// Unguarded names proposed transitions that reached Proposed without the
+	// staleness check ever running, because unjira has no collected status
+	// history for that issue (verifiedLink.HaveLastStatus false — see recency.go).
+	//
+	// A distinct fact from Suppressed, and the distinction is the point: a
+	// suppression WAS judged and rejected, while an unguarded transition was
+	// never judged at all. Reporting only the first makes an unchecked proposal
+	// look exactly like a cleared one, which is task #174's whole complaint —
+	// a guard that cannot run must be visible, not merely absent.
+	//
+	// Populated by noteUnguarded, from the same HaveLastStatus the guard itself
+	// reads, so the two cannot disagree about whether a check happened.
+	Unguarded []UnguardedTransition
 }

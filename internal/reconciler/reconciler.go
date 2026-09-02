@@ -253,6 +253,7 @@ func reconcileOne(
 	result.Proposed = kept
 	result.Suppressed = append(result.Suppressed, suppressed...)
 	noteLowConfidence(&result, cfg.MinConfidenceToPropose)
+	noteUnguarded(&result, verified)
 
 	return result, stats, nil
 }

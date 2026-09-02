@@ -232,8 +232,8 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 
 // writeReconciledNarrative writes one narrative's header line and every
 // outcome it carries — proposed actions, an empty delta, unverified links,
-// suppressed duplicates, and low-confidence flags — since a narrative can
-// legitimately carry any combination of these at once.
+// suppressed duplicates, low-confidence flags, and unguarded transitions —
+// since a narrative can legitimately carry any combination of these at once.
 func writeReconciledNarrative(b *strings.Builder, result reconciler.ReconcileResult) {
 	fmt.Fprintf(b, "\nnarrative %d\n", result.NarrativeID)
 
@@ -255,6 +255,10 @@ func writeReconciledNarrative(b *strings.Builder, result reconciler.ReconcileRes
 
 	for _, note := range result.LowConfidence {
 		fmt.Fprintf(b, "  low confidence: %s\n", note)
+	}
+
+	for _, u := range result.Unguarded {
+		fmt.Fprintf(b, "  unguarded: %s\n", u.Reason())
 	}
 }
 

@@ -9,6 +9,10 @@ Replacing the three-category transition target with the tracker's own status nam
 (recency) and 4 (the graph cache); then 5 (multi-hop). Each section below carries its own landed note
 with the deviations and evidence for that piece.
 
+Section 3a's own "known gap" — a work-derived transition proposed with no staleness check, and no
+signal that it happened — was closed separately on 2026-09-02 (task #174). See the "known gap, and
+its fix" subsection under 3a.
+
 **The first change (2026-09-01) landed sections 1, 2, and the prompt half of 3:**
 
 - `SetStatus(key, targetStatus string)`, `AvailableTransitions` replacing
@@ -289,9 +293,50 @@ name, so a status genuinely containing it parses to the wrong destination.
 The initiative is theirs and current by construction, so filtering the result would answer an explicit
 request with silence.
 
-**The known gap.** With no collected status history the guard cannot fire and transitions are
-unguarded — the pre-guard behavior, not something worse, but invisible. That is task #174: a guard that
-cannot run must be visible rather than merely absent.
+**The known gap, and its fix (task #174, landed 2026-09-02).** With no collected status history the
+guard cannot fire and transitions are unguarded — the pre-guard behavior, not something worse, but it
+used to be invisible. Two seams now make it visible, at the two altitudes the gap actually has:
+
+1. **Per-narrative.** `ReconcileResult.Unguarded` names every proposed transition whose issue has no
+   collected status change — i.e. every case where `suppressStaleTransitions`'s `HaveLastStatus` was
+   false. Populated by `noteUnguarded` beside `noteLowConfidence`, and rendered under its own narrative
+   alongside `Suppressed`/`LowConfidence`.
+
+   It reads the **same** `verifiedLink.HaveLastStatus` the guard itself branches on. That is not merely
+   cheaper than re-querying the store: it makes the annotation and the guard structurally unable to
+   disagree about whether a check happened, where two independent lookups could drift.
+   `TestNoteUnguarded_AgreesWithTheGuardItself` feeds one `verifiedLink` to both and asserts they
+   concur.
+
+   This landed in two steps, and the first shape is worth recording. Because
+   `internal/reconciler/{types,reconciler,draft,persist}.go` and `recency.go` were owned by a parallel
+   in-flight change, the field first went on `pipeline.ReconcileRunResult`, with a
+   `FindUnguardedTransitions` pass re-deriving the fact through a second `store.LatestStatusEvent`
+   call per transition. That worked and was correct. It was moved once the constraint lifted — a signal
+   about a per-narrative decision belongs in the struct holding that narrative's other "why" fields,
+   and the duplicate query was only ever a workaround for a temporary lock on a file.
+2. **Once, at startup, when the cause is configuration.** `pipeline.HasEnabledStatusHistorySource`
+   answers "can anything enabled ever supply this" from config and the collector registry alone, with
+   no store or narrative involved. It works via a new marker interface, `pipeline.StatusHistorySource`
+   (`SuppliesStatusHistory()`, a pure marker with no return value), which the jira collector implements and `claude_code` does not —
+   deliberately not a name check for `"jira"`, per incident 21's lesson about hardcoding one
+   collector's vocabulary into a general question. `cmd/unjira`'s `appContext.warnIfNoStatusHistorySource`
+   calls it once per `watch`/`dev narrate` invocation (not per pass, not per narrative) and logs when
+   nothing qualifies — silent on the `local` tracker backend, which has no real external tracker for
+   anyone to move behind unjira's back (`internal/clients/local`'s own package doc), so the guard's
+   premise does not apply and there is nothing to warn about. This is also what keeps `local`-backed
+   offline tests quiet.
+
+The two are deliberately not merged into one signal: "no history for THIS issue yet" is the ordinary
+case (nobody has moved the ticket), and "nothing in this configuration can EVER supply it" is a real
+gap. Conflating them would make the ordinary case read as alarming on every pass, or make the real gap
+sound as unremarkable as an ordinary unmoved ticket.
+
+Verified: `go test ./...` — 23 packages, 828 tests. `go vet -tags=live ./internal/live/` clean.
+`golangci-lint run ./...` — 0 issues. Both seams drilled by breaking them and confirming the specific
+test fails, then restoring: inverting `HaveLastStatus` in `noteUnguarded`, dropping its
+`ActionTransition` filter, never calling it at all, and the local-backend/registry checks in
+`warnIfNoStatusHistorySource`.
 
 Verification: 23 packages, 795 tests, `go vet -tags=live` clean, `golangci-lint` 0 issues. Each half
 drilled by breaking it and confirming the specific guard test fails.

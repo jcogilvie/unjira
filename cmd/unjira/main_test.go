@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"log"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -169,6 +172,77 @@ func TestWatchCmd_UnwritableDefaultProjectFailsFast(t *testing.T) {
 	require.Error(t, err, "an unwritable default_project must fail fast, before the first pass")
 	assert.Contains(t, err.Error(), "PAAS")
 	assert.Contains(t, err.Error(), "writable_project_keys")
+}
+
+// TestWarnIfNoStatusHistorySource_LogsOnceWhenNothingSuppliesHistory is
+// task #174's structural-gap half: a config where the tracker backend is
+// jira (transition-capable) but nothing enabled can ever supply status
+// history (registry has no matching entry here — the same shape as a real
+// deployment that enables claude_code only). If this regressed to silent,
+// the operator would have no way to learn that EVERY future transition on
+// this deployment is unguarded, short of noticing it in per-narrative
+// output one issue at a time.
+func TestWarnIfNoStatusHistorySource_LogsOnceWhenNothingSuppliesHistory(t *testing.T) {
+	app := &appContext{
+		config: config.Config{
+			Tracker:    config.TrackerConfig{Backend: "jira"},
+			Collectors: map[string]map[string]any{"claude_code": {"enabled": true}},
+		},
+	}
+
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	app.warnIfNoStatusHistorySource()
+
+	assert.Contains(t, logged.String(), "staleness guard",
+		"the operator must be told the guard can never run, not merely see nothing happen")
+}
+
+// TestWarnIfNoStatusHistorySource_SilentWhenTheJiraCollectorIsEnabled is the
+// case that must NOT warn: the jira collector is enabled and registered, so
+// the staleness guard can run once history is collected. A false positive
+// here would train operators to ignore the warning.
+func TestWarnIfNoStatusHistorySource_SilentWhenTheJiraCollectorIsEnabled(t *testing.T) {
+	app := &appContext{
+		config: config.Config{
+			Tracker:    config.TrackerConfig{Backend: "jira"},
+			Collectors: map[string]map[string]any{"jira": {"enabled": true}},
+		},
+	}
+
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	app.warnIfNoStatusHistorySource()
+
+	assert.Empty(t, logged.String(), "the real jira collector is enabled: nothing is missing")
+}
+
+// TestWarnIfNoStatusHistorySource_SilentOnTheLocalBackend: the local
+// backend has no real tracker for anyone else to move behind unjira's back
+// (internal/clients/local's own package doc — "no real tracker reachable"),
+// so the staleness guard's entire premise does not apply. This is also what
+// keeps the offline test suite quiet: local is the backend every automated
+// test uses, and warning on every one of them would be exactly the noise
+// task #174's brief says this must not become.
+func TestWarnIfNoStatusHistorySource_SilentOnTheLocalBackend(t *testing.T) {
+	app := &appContext{
+		config: config.Config{
+			Tracker:    config.TrackerConfig{Backend: "local"},
+			Collectors: map[string]map[string]any{"claude_code": {"enabled": true}},
+		},
+	}
+
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	app.warnIfNoStatusHistorySource()
+
+	assert.Empty(t, logged.String(), "the local backend has no external tracker to diverge from")
 }
 
 func TestTaskTracker_UnknownBackendErrors(t *testing.T) {
