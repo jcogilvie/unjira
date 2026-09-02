@@ -223,36 +223,18 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 		return b.String()
 	}
 
-	unguardedByNarrative := groupUnguardedByNarrative(r.Unguarded)
-
 	for _, result := range r.Results {
-		writeReconciledNarrative(&b, result, unguardedByNarrative[result.NarrativeID])
+		writeReconciledNarrative(&b, result)
 	}
 
 	return b.String()
-}
-
-// groupUnguardedByNarrative indexes ReconcileRunResult.Unguarded by
-// NarrativeID so writeReconciledNarrative can render each entry under its
-// own narrative, matching how Suppressed/LowConfidence already read —
-// task #174's per-narrative visibility has to land in the same place a
-// reviewer is already looking, not in a separate section they could miss.
-func groupUnguardedByNarrative(unguarded []reconciler.UnguardedTransition) map[int64][]reconciler.UnguardedTransition {
-	out := make(map[int64][]reconciler.UnguardedTransition, len(unguarded))
-	for _, u := range unguarded {
-		out[u.NarrativeID] = append(out[u.NarrativeID], u)
-	}
-
-	return out
 }
 
 // writeReconciledNarrative writes one narrative's header line and every
 // outcome it carries — proposed actions, an empty delta, unverified links,
 // suppressed duplicates, low-confidence flags, and unguarded transitions —
 // since a narrative can legitimately carry any combination of these at once.
-func writeReconciledNarrative(
-	b *strings.Builder, result reconciler.ReconcileResult, unguarded []reconciler.UnguardedTransition,
-) {
+func writeReconciledNarrative(b *strings.Builder, result reconciler.ReconcileResult) {
 	fmt.Fprintf(b, "\nnarrative %d\n", result.NarrativeID)
 
 	for _, a := range result.Proposed {
@@ -275,7 +257,7 @@ func writeReconciledNarrative(
 		fmt.Fprintf(b, "  low confidence: %s\n", note)
 	}
 
-	for _, u := range unguarded {
+	for _, u := range result.Unguarded {
 		fmt.Fprintf(b, "  unguarded: %s\n", u.Reason())
 	}
 }

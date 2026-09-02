@@ -20,10 +20,10 @@ import (
 func TestCollector_ImplementsStatusHistorySource(t *testing.T) {
 	c := collectorjira.New()
 
-	source, ok := any(c).(pipeline.StatusHistorySource)
+	// The type assertion IS the assertion: StatusHistorySource is a pure
+	// marker, so there is no return value to check and no way for the
+	// declaration to disagree with itself.
+	_, ok := any(c).(pipeline.StatusHistorySource)
 	assert.True(t, ok, "the jira collector emits events.SetStatusChange-tagged events "+
 		"(see EventsFromChangelogEntry) and must declare that capability")
-	if ok {
-		assert.True(t, source.SuppliesStatusHistory())
-	}
 }

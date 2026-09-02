@@ -23,12 +23,15 @@ import "github.com/jcogilvie/unjira/internal/config"
 // (HasEnabledStatusHistorySource), not part of the base Collector interface
 // every implementation is forced to have an opinion on.
 type StatusHistorySource interface {
-	// SuppliesStatusHistory is a marker method. Its return value is always
-	// true; implementing the method at all is the signal a caller
-	// type-asserts for, mirroring how a collector either can observe status
-	// changes (and implements this) or cannot (and does not implement it) —
-	// there is no meaningful false case for an implementor to return.
-	SuppliesStatusHistory() bool
+	// SuppliesStatusHistory is a pure marker: implementing it IS the signal,
+	// and callers type-assert rather than call it.
+	//
+	// It returns nothing on purpose. A bool would create a state — implement
+	// the method, return false — that type-asserts as "supplies history"
+	// while claiming it does not, so the assertion and the value could
+	// disagree about the same fact. A collector either can observe a tracked
+	// item's status changing, and implements this, or cannot, and does not.
+	SuppliesStatusHistory()
 }
 
 // HasEnabledStatusHistorySource reports whether any collector enabled in cfg

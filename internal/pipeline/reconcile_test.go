@@ -166,10 +166,10 @@ func TestRunReconcile_FlagsATransitionProposedWithNoCollectedStatusHistory(t *te
 	require.Len(t, result.Results[0].Proposed, 1,
 		"no collected history means the guard degrades to proposing, not to silence")
 
-	require.Len(t, result.Unguarded, 1,
+	require.Len(t, result.Results[0].Unguarded, 1,
 		"and that degradation must be reported, or it is indistinguishable from a checked proposal")
-	assert.Equal(t, "PROJ-1", result.Unguarded[0].IssueKey)
-	assert.Contains(t, result.Unguarded[0].Reason(), "In Review")
+	assert.Equal(t, "PROJ-1", result.Results[0].Unguarded[0].IssueKey)
+	assert.Contains(t, result.Results[0].Unguarded[0].Reason(), "In Review")
 }
 
 func TestRunReconcile_LoadsReconcilerRulesAndAppendsThemToTheDraftingSystemPrompt(t *testing.T) {
@@ -328,6 +328,8 @@ func TestRenderReconcileResult_ShowsAnUnguardedTransitionUnderItsOwnNarrative(t 
 					Type: reconciler.ActionTransition, IssueKey: "PROJ-7",
 					TargetStatus: "In Review", Confidence: 0.9,
 				},
+			}, Unguarded: []reconciler.UnguardedTransition{
+				{NarrativeID: 7, IssueKey: "PROJ-7", TargetStatus: "In Review"},
 			}},
 			{NarrativeID: 8, Proposed: []reconciler.ProposedAction{
 				{
@@ -335,9 +337,6 @@ func TestRenderReconcileResult_ShowsAnUnguardedTransitionUnderItsOwnNarrative(t 
 					Body: "unrelated narrative", Confidence: 0.9,
 				},
 			}},
-		},
-		Unguarded: []reconciler.UnguardedTransition{
-			{NarrativeID: 7, IssueKey: "PROJ-7", TargetStatus: "In Review"},
 		},
 	})
 

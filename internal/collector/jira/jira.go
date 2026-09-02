@@ -37,7 +37,7 @@ func (c *Collector) Name() string { return Name }
 // source for the reconciler's staleness guard whenever it is enabled. See
 // pipeline.StatusHistorySource's doc comment for why this is a marker
 // interface rather than a name check.
-func (c *Collector) SuppliesStatusHistory() bool { return true }
+func (c *Collector) SuppliesStatusHistory() {}
 
 var _ pipeline.StatusHistorySource = (*Collector)(nil)
 

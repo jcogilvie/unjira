@@ -57,6 +57,17 @@ type ProposedAction struct {
 	// which move was being proposed. Validated against the live
 	// AvailableTransitions result, never against a closed set — there isn't one.
 	TargetStatus string
+	// Route is the ordered hops that reach TargetStatus, excluding the status the
+	// issue is already at. Its last element IS TargetStatus, so a direct
+	// transition is a one-element route rather than a special case.
+	//
+	// More than one hop when the work crossed several statuses between collects —
+	// unjira has no guaranteed run cadence, so a ticket can go Ready for Dev ->
+	// In Progress -> In Review inside one delta. One approval authorizes the whole
+	// sequence; the applier walks it, and each hop is validated live by SetStatus
+	// immediately before it runs. See docs/superpowers/specs/
+	// 2026-09-01-named-status-transitions-design.md section 5.
+	Route []string
 	// Confidence is the model's self-reported score AFTER deterministic
 	// flooring (see floorConfidence). Never the raw model number.
 	Confidence float64
@@ -124,4 +135,17 @@ type ReconcileResult struct {
 	// still persisted — the threshold governs what unjira asserts, not what it
 	// records. See noteLowConfidence.
 	LowConfidence []string
+	// Unguarded names proposed transitions that reached Proposed without the
+	// staleness check ever running, because unjira has no collected status
+	// history for that issue (verifiedLink.HaveLastStatus false — see recency.go).
+	//
+	// A distinct fact from Suppressed, and the distinction is the point: a
+	// suppression WAS judged and rejected, while an unguarded transition was
+	// never judged at all. Reporting only the first makes an unchecked proposal
+	// look exactly like a cleared one, which is task #174's whole complaint —
+	// a guard that cannot run must be visible, not merely absent.
+	//
+	// Populated by noteUnguarded, from the same HaveLastStatus the guard itself
+	// reads, so the two cannot disagree about whether a check happened.
+	Unguarded []UnguardedTransition
 }

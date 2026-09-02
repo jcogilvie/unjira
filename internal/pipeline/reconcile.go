@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
@@ -12,6 +11,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/reconciler"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
+	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
 // ReconcileOptions configures one reconcile pass.
@@ -19,6 +19,17 @@ type ReconcileOptions struct {
 	// DryRun runs the full pass — including the real LLM calls — but skips
 	// Persist, matching NarrateOptions.DryRun's treatment.
 	DryRun bool
+	// Graph is the project's observed workflow graph, when the caller could get
+	// one. It lets drafting propose a status several hops away and the action
+	// carry the route there — necessary because unjira has no guaranteed run
+	// cadence, so one delta routinely spans several statuses.
+	//
+	// Optional. Nil means single-hop, which is the pre-multi-hop behaviour, so a
+	// tracker that cannot supply a graph needs no special case here. Resolved by
+	// the caller (cmd/unjira) rather than here, for the same reason rules are:
+	// this layer takes resolved inputs and does not reach for a tracker
+	// capability itself.
+	Graph *workflow.Graph
 }
 
 // ReconcileRunResult is one reconcile pass, shaped for rendering.
@@ -40,20 +51,6 @@ type ReconcileRunResult struct {
 	// auto-commit on a clean pass must check the returned error themselves —
 	// Persisted being non-empty is NOT evidence the pass succeeded.
 	Persisted []store.ActionRow
-	// Unguarded names every proposed transition that reached Results without
-	// ever passing through the staleness guard, because unjira has no
-	// collected status history for that issue — see
-	// reconciler.FindUnguardedTransitions and task #174. Distinct from any
-	// per-narrative Suppressed entry: a suppression is a transition that WAS
-	// judged and rejected; this is one that was never judged at all.
-	//
-	// Lives here rather than as a field on reconciler.ReconcileResult itself
-	// (which is where Suppressed/LowConfidence live, and where this would
-	// read most naturally) because internal/reconciler/types.go is owned by a
-	// parallel in-flight change this session must not conflict with. Each
-	// entry still carries its own NarrativeID, so RenderReconcileResult can
-	// group it back under the right narrative when printing.
-	Unguarded []reconciler.UnguardedTransition
 }
 
 // RunReconcile runs one reconcile pass: validate cfg.Reconciler, load
@@ -101,15 +98,19 @@ func RunReconcile(
 		return ReconcileRunResult{}, err
 	}
 
+	reconcileOpts := []reconciler.ReconcileOption{reconciler.WithRules(reconcilerRules)}
+	if opts.Graph != nil {
+		reconcileOpts = append(reconcileOpts, reconciler.WithWorkflowGraph(opts.Graph))
+	}
+
 	results, stats, reconcileErr := reconciler.Reconcile(
-		ctx, s, tracker, client, cfg.Reconciler, reconciler.WithRules(reconcilerRules))
+		ctx, s, tracker, client, cfg.Reconciler, reconcileOpts...)
 
 	// Untracked narratives are a SEPARATE selection: Reconcile's backlog requires
 	// a narrative_issues link by construction, so a narrative with none is never
 	// examined by it at all. That is why untracked work produced no action even
 	// though every layer below supports `create` — the gap was a missing selection
-	// path, not a missing prompt option. No-ops unless
-	// reconciler.propose_creates is true.
+	// path, not a missing prompt option.
 	createResults, createStats, createErr := reconciler.ProposeCreates(
 		ctx, s, client, cfg.Reconciler, reconcilerRules)
 	results = append(results, createResults...)
@@ -117,24 +118,6 @@ func RunReconcile(
 	reconcileErr = errors.Join(reconcileErr, createErr)
 
 	result := ReconcileRunResult{Results: results, Stats: stats, DryRun: opts.DryRun}
-
-	// Computed under DryRun too: this only reads collected history, never
-	// writes anything, so there is nothing for DryRun to protect here — and an
-	// operator inspecting a dry run wants to see an unguarded transition just
-	// as much as a real pass would show one.
-	//
-	// A failure here is logged and swallowed rather than failing the whole
-	// pass: this is a purely informational annotation on top of already-valid
-	// proposals (see reconciler.FindUnguardedTransitions' own doc comment on
-	// why it errors rather than guessing), and discarding a clean reconcile
-	// pass because this secondary check could not run would be a worse
-	// outcome than the pass simply not reporting which transitions are
-	// unguarded this time.
-	if unguarded, err := reconciler.FindUnguardedTransitions(s, results); err != nil {
-		log.Printf("reconciler: could not determine which transitions are unguarded (%v)", err)
-	} else {
-		result.Unguarded = unguarded
-	}
 
 	if opts.DryRun {
 		return result, reconcileErr

@@ -503,6 +503,36 @@ recorded, not if it carries a particular backend's field name.
   destination, which made the reader's own check undrillable until a test set the artifacts directly —
   and a store round trip or a future collector can do exactly that.
 
+## 22. Two correct functions in the wrong order are a bug no unit test can see
+
+Multi-hop needed two things: resolve a route to the target, and stop
+`floorConfidence` from zeroing an action whose target is not directly offered. Both were implemented
+correctly. Both had passing unit tests. The feature was still completely broken.
+
+`floorConfidence` runs inside `toProposedAction`, during drafting. The route was attached afterwards,
+in a separate filtering pass. So at the moment flooring ran, `action.Route` was always empty, the
+route-aware branch never fired, and every multi-hop action was floored to zero — then dutifully
+carried through the rest of the pipeline at confidence 0.
+
+No unit test could catch it. `resolveRoute` was tested directly and passed. `floorConfidence`'s
+route-aware branch was tested directly and passed. The bug lived entirely in the *sequence*, which is
+visible only from a caller that runs both.
+
+The fix was to move routing into `toProposedAction`, so the decision that depends on the route is made
+where the route is computed rather than one pass later.
+
+**Generalizations worth carrying:**
+
+- When B's correctness depends on A having run, put them in one function or make the dependency a
+  parameter. "A then B" enforced only by call-site ordering is an invariant with no enforcement.
+- A feature needs at least one test at the layer where its pieces compose. Unit tests prove each piece
+  works; they cannot prove the pieces are wired in the right order. This is the third time that gap
+  has cost real time here (see incidents 17 and 20) — the pattern is now: write the end-to-end test
+  FIRST when a change spans more than one function.
+- The tell was a suspiciously specific failure: not "no action proposed" but "action proposed at
+  confidence 0." A value that is exactly the floor, when a floor exists, means the floor fired — so
+  ask what the floor saw, not whether the feature ran.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

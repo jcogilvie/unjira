@@ -27,7 +27,7 @@ type statusHistoryCollector struct {
 	*fakeCollector
 }
 
-func (statusHistoryCollector) SuppliesStatusHistory() bool { return true }
+func (statusHistoryCollector) SuppliesStatusHistory() {}
 
 var _ pipeline.StatusHistorySource = statusHistoryCollector{}
 

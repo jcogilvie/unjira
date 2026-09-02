@@ -1,10 +1,6 @@
 package reconciler
 
-import (
-	"fmt"
-
-	"github.com/jcogilvie/unjira/internal/store"
-)
+import "fmt"
 
 // UnguardedTransition names one proposed transition that reached
 // ReconcileResult.Proposed without ever passing through
@@ -33,60 +29,39 @@ func (u UnguardedTransition) Reason() string {
 	)
 }
 
-// FindUnguardedTransitions scans results for every proposed ActionTransition
-// whose issue has no status change collected in s, so a caller can surface
-// "proposed, but the staleness guard could not run" distinctly from "not
-// proposed" (ReconcileResult.Suppressed) — making task #174's known gap
-// visible per narrative rather than merely absent.
+// noteUnguarded records every proposed transition whose issue has no collected
+// status history, so a reviewer can tell "proposed, but the staleness guard could
+// not run" from "proposed and cleared."
 //
-// It exists as a separate pass over an already-computed []ReconcileResult,
-// rather than as a field reconciler.Reconcile populates directly on
-// ReconcileResult, because internal/reconciler/{types,reconciler,draft,
-// persist}.go and recency.go are owned by a parallel in-flight change this
-// session must not conflict with — see this package's unguarded_test.go doc
-// comment. Recomputing via s.LatestStatusEvent(key), the exact call
-// verifyLinks already makes while building HaveLastStatus, reproduces that
-// same fact with no intervening collection between Reconcile returning and
-// this running in the same pass (RunReconcile calls this immediately after,
-// before Persist or any collector runs again) — so this sees precisely what
-// suppressStaleTransitions saw, at a small, one-time query-per-transition
-// cost, not a live tracker call.
+// Reads verifiedLink.HaveLastStatus — the same field suppressStaleTransitions
+// consults — rather than re-querying the store. That is not merely cheaper: it
+// makes the two structurally unable to disagree about whether a check happened,
+// where two independent lookups could drift if anything ever wrote between them.
 //
-// A store error aborts the whole call rather than silently treating the
-// failed lookup as "guarded" (which would hide the exact case this function
-// exists to surface) or "unguarded" (which would fabricate a finding from a
-// failure that says nothing about the issue itself). The caller decides how
-// to degrade — see RunReconcile, which logs and keeps the real proposals
-// rather than discarding a clean pass over a failure in this purely
-// informational annotation step.
-func FindUnguardedTransitions(s *store.Store, results []ReconcileResult) ([]UnguardedTransition, error) {
-	var out []UnguardedTransition
-
-	for _, result := range results {
-		for _, action := range result.Proposed {
-			if action.Type != ActionTransition {
-				continue
-			}
-
-			_, haveHistory, err := s.LatestStatusEvent(action.IssueKey)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"checking collected status history for %s on narrative %d: %w",
-					action.IssueKey, result.NarrativeID, err,
-				)
-			}
-
-			if haveHistory {
-				continue
-			}
-
-			out = append(out, UnguardedTransition{
-				NarrativeID:  result.NarrativeID,
-				IssueKey:     action.IssueKey,
-				TargetStatus: action.TargetStatus,
-			})
-		}
+// Called on the actions that SURVIVED filtering, since an action that was
+// suppressed or dropped as unroutable is not a proposal a reviewer will see.
+func noteUnguarded(result *ReconcileResult, verified []verifiedLink) {
+	byKey := make(map[string]verifiedLink, len(verified))
+	for _, v := range verified {
+		byKey[v.Link.IssueKey] = v
 	}
 
-	return out, nil
+	for _, action := range result.Proposed {
+		if action.Type != ActionTransition {
+			continue
+		}
+
+		v, ok := byKey[action.IssueKey]
+		if !ok || v.HaveLastStatus {
+			// Not a key this pass verified (actionsFromVerdicts already drops
+			// those), or the guard had what it needed and did run.
+			continue
+		}
+
+		result.Unguarded = append(result.Unguarded, UnguardedTransition{
+			NarrativeID:  result.NarrativeID,
+			IssueKey:     action.IssueKey,
+			TargetStatus: action.TargetStatus,
+		})
+	}
 }

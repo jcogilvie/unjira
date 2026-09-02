@@ -1,6 +1,7 @@
 package gate_test
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -693,4 +694,104 @@ func TestApplier_BothRefusalsPersistTheirReasonForTriage(t *testing.T) {
 				"the persisted reason is what a reviewer reads later, so it must carry the distinction")
 		})
 	}
+}
+
+// TestApplier_Transition_WalksEveryHopOfARoute is the multi-hop write path.
+//
+// unjira has no guaranteed run cadence, so one delta can hold evidence that a
+// ticket went Ready for Dev -> In Progress -> In Review inside a single day. The
+// reviewer approved reaching In Review; the intermediate hop is a mechanical
+// consequence of that, not a second decision. If this executed only the final hop,
+// the tracker would refuse it (In Review is not reachable from Ready for Dev) and
+// the approval would produce nothing.
+func TestApplier_Transition_WalksEveryHopOfARoute(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "transition", IssueKey: "PROJ-1", Confidence: 0.9,
+		Payload: `{"target_status":"In Review","route":["In Progress","In Review"]}`,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+
+	require.NoError(t, applier.Apply(action))
+	assert.Equal(t, []string{"SetStatus:PROJ-1:In Progress", "SetStatus:PROJ-1:In Review"}, w.calls,
+		"in order: a route walked out of order is not the route that was approved")
+}
+
+// TestApplier_Transition_NoRouteMeansASingleHop: every action persisted before
+// multi-hop existed has no route field, and must still apply. A missing route
+// meaning "do nothing" would silently strand the entire existing queue.
+func TestApplier_Transition_NoRouteMeansASingleHop(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "transition", IssueKey: "PROJ-1", Confidence: 0.9,
+		Payload: `{"target_status":"In Review"}`,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+
+	require.NoError(t, applier.Apply(action))
+	assert.Equal(t, []string{"SetStatus:PROJ-1:In Review"}, w.calls)
+}
+
+// TestApplier_Transition_MidRouteFailureRecordsHowFarItGot: a partial application
+// is a real state and must be legible as one.
+//
+// Without the reached-status prefix, a reviewer cannot distinguish a route that
+// never started from one that stopped halfway, and would have to infer the
+// ticket's position by going and looking. That is the "usable-looking partial
+// result" trap Persist was built to avoid.
+func TestApplier_Transition_MidRouteFailureRecordsHowFarItGot(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{errs: map[string]error{
+		"SetStatus:PROJ-1:In Review": errors.New("transition not available"),
+	}}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "transition", IssueKey: "PROJ-1", Confidence: 0.9,
+		Payload: `{"target_status":"In Review","route":["In Progress","In Review"]}`,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `reached "In Progress"`,
+		"the reached status must be named, or the partial state is invisible")
+	assert.Contains(t, err.Error(), `"In Review" refused`)
+
+	// And it is recorded, not just returned: actions.error is what a reviewer reads.
+	got, err := s.ActionsForNarrative(action.NarrativeID)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "failed", got[0].Status)
+	assert.Contains(t, got[0].Error, `reached "In Progress"`)
+
+	// The first hop DID happen. Nothing rolls it back — the next reconcile pass
+	// sees In Progress, computes a shorter route, and proposes the remainder.
+	assert.Equal(t, []string{"SetStatus:PROJ-1:In Progress", "SetStatus:PROJ-1:In Review"}, w.calls)
+}
+
+// TestApplier_Transition_FirstHopFailureReadsAsAPlainRefusal: when nothing moved,
+// the error must not claim progress. "reached X" for an X that was never reached
+// would send a reviewer looking for a state change that did not happen.
+func TestApplier_Transition_FirstHopFailureReadsAsAPlainRefusal(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{errs: map[string]error{
+		"SetStatus:PROJ-1:In Progress": errors.New("transition not available"),
+	}}
+	action := insertAction(t, s, store.ActionRow{
+		Type: "transition", IssueKey: "PROJ-1", Confidence: 0.9,
+		Payload: `{"target_status":"In Review","route":["In Progress","In Review"]}`,
+	})
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	err := applier.Apply(action)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "reached",
+		"nothing was reached, and saying otherwise sends a reviewer looking for it")
+	assert.Equal(t, []string{"SetStatus:PROJ-1:In Progress"}, w.calls,
+		"and the walk stops: hop 2 must not be attempted after hop 1 failed")
 }

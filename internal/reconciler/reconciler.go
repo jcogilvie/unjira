@@ -13,6 +13,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
+	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
 // selectionRoles is every role a narrative_issues row can carry. Reconcile
@@ -38,6 +39,7 @@ var selectionRoles = []store.Role{
 // exists despite Reconcile having exactly one option today.
 type reconcileOptions struct {
 	rules []rules.Rule
+	graph *workflow.Graph
 }
 
 // ReconcileOption configures an optional Reconcile behaviour.
@@ -83,6 +85,26 @@ type ReconcileOption func(*reconcileOptions)
 func WithRules(learnedRules []rules.Rule) ReconcileOption {
 	return func(o *reconcileOptions) {
 		o.rules = learnedRules
+	}
+}
+
+// WithWorkflowGraph supplies the project's observed transition graph, so drafting
+// can offer a status several hops away and the resulting action can carry the
+// route to it.
+//
+// Optional, and absent means single-hop: without a graph, only the live-legal
+// transitions are offered, which is exactly the behaviour before multi-hop
+// existed. A tracker with no graph to give (the local backend's is static; a
+// future GitHub backend's would be open/closed) therefore needs no special case.
+//
+// The graph PLANS and never authorizes. Every hop is validated against the live
+// per-issue transition set immediately before it executes, inside
+// TaskWriter.SetStatus — so a stale graph costs a refused hop, never a wrong
+// write. That boundary is why this is a planning input to the reconciler rather
+// than anything the gate consults.
+func WithWorkflowGraph(graph *workflow.Graph) ReconcileOption {
+	return func(o *reconcileOptions) {
+		o.graph = graph
 	}
 }
 
@@ -137,7 +159,7 @@ func Reconcile(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg, o.rules)
+		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg, o.rules, o.graph)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -163,6 +185,7 @@ func reconcileOne(
 	narrative store.NarrativeRow,
 	cfg config.ReconcilerConfig,
 	learnedRules []rules.Rule,
+	graph *workflow.Graph,
 ) (ReconcileResult, correlator.Stats, error) {
 	result := ReconcileResult{NarrativeID: narrative.ID}
 
@@ -207,7 +230,7 @@ func reconcileOne(
 		return result, correlator.Stats{}, nil
 	}
 
-	drafted, stats, err := draft(ctx, client, narrative, delta, verified, learnedRules)
+	drafted, stats, err := draft(ctx, client, narrative, delta, verified, learnedRules, graph)
 	if err != nil {
 		return result, stats, fmt.Errorf("drafting for narrative %d: %w", narrative.ID, err)
 	}
@@ -217,13 +240,20 @@ func reconcileOne(
 	// fact about the world, while a duplicate proposal is a fact about unjira's
 	// own queue — and there is no point reporting a queue collision for an action
 	// that should not exist at all.
-	fresh, stale := suppressStaleTransitions(delta, verified, drafted)
+	// An action whose target has no route is not a proposal at all, so drop it
+	// before the staleness or duplicate filters weigh in on something that cannot
+	// happen. (The routing itself ran during drafting — see toProposedAction.)
+	routed, unroutable := dropUnroutable(verified, drafted)
+	result.Suppressed = append(result.Suppressed, unroutable...)
+
+	fresh, stale := suppressStaleTransitions(delta, verified, routed)
 	result.Suppressed = append(result.Suppressed, stale...)
 
 	kept, suppressed := suppressDuplicates(s, narrative.ID, fresh)
 	result.Proposed = kept
 	result.Suppressed = append(result.Suppressed, suppressed...)
 	noteLowConfidence(&result, cfg.MinConfidenceToPropose)
+	noteUnguarded(&result, verified)
 
 	return result, stats, nil
 }
