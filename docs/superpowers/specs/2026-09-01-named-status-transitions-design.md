@@ -3,12 +3,13 @@
 Replacing the three-category transition target with the tracker's own status names, and making
 `workflow.Graph` load-bearing for the first time.
 
-## Status: partially landed 2026-09-01
+## Status: landed 2026-09-02
 
-**All sections have landed.** 1, 2, and the prompt half of 3 first; then 3a (recency) and 4 (the
-graph cache); then 5 (multi-hop).
+**All five sections have landed**, in three changes: 1, 2, and the prompt half of 3 first; then 3a
+(recency) and 4 (the graph cache); then 5 (multi-hop). Each section below carries its own landed note
+with the deviations and evidence for that piece.
 
-**Landed:**
+**The first change (2026-09-01) landed sections 1, 2, and the prompt half of 3:**
 
 - `SetStatus(key, targetStatus string)`, `AvailableTransitions` replacing
   `AvailableStatusCategories`, the new `Transition` type. Both backends.
@@ -27,19 +28,23 @@ graph cache); then 5 (multi-hop).
   is permanent clutter bought to avoid `rm data/unjira.db`, and the repo's own "greenfield schema, no
   migration" note in the Scope section below already said so.
 
-**Not landed, and why:**
+**Deliberately deferred out of that first change** (each has since landed, and each section's own
+note records how):
 
-- **Section 3a (recency)** needs `Issue.StatusChangedAt`, which needs the issue's last status change
-  from a changelog read. The field was written and then removed from this change rather than shipped
-  always-zero: a field nothing populates reads as "no status change on record," which under the
-  recency rule means "propose," i.e. exactly the handoff-fighting behavior the rule exists to stop.
-  The obvious cheap source (`statuscategorychangedate`) is wrong here — it moves only when the
-  *category* changes, so `In Progress -> In Review` would not update it. `expand=changelog` looks
-  free but Jira truncates embedded histories, and a truncated changelog yields a too-old timestamp,
-  which fails in the same unsafe direction.
-- **Sections 4 and 5** are in flight separately.
+- **Section 3a (recency)** looked like it needed `Issue.StatusChangedAt` from a live changelog read.
+  The field was written and then removed rather than shipped always-zero: a field nothing populates
+  reads as "no status change on record," which under the recency rule means "propose" — exactly the
+  handoff-fighting behavior the rule exists to stop. The cheap sources are also wrong.
+  `statuscategorychangedate` moves only when the *category* changes, so `In Progress -> In Review`
+  would not update it; `expand=changelog` looks free but Jira truncates embedded histories, and a
+  truncated changelog yields a too-old timestamp, failing the same unsafe way.
 
-**Verification:**
+  **This premise turned out to be false** — the field was never needed. See section 3a's landed note:
+  the Jira collector already ingests status changes as events, so the data was in unjira's own store
+  the whole time.
+- **Sections 4 and 5** landed as separate changes. See their own notes.
+
+**Verification of the first change:**
 
 ```
 go test ./...                          # 23 packages ok, 746 tests
@@ -302,7 +307,7 @@ for judging what to say, never the subject of what is said.
 
 ### 4. `workflow.Graph` becomes load-bearing, with a cache
 
-#### Status: landed 2026-09-01 (cache only — sections 1-3 and 5 are still design)
+#### Status: landed 2026-09-01 (the cache; other sections landed in their own changes)
 
 Built `workflow.Cached`/`workflow.CacheOptions`/`workflow.CacheStatus`/`workflow.MarkDirty` in
 `internal/workflow/cache.go`, the `workflow.cache_ttl` config key
