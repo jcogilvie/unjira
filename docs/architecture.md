@@ -47,7 +47,7 @@ flowchart TB
     subgraph reconcile["internal/reconciler"]
         VERIFY["verifyLinks<br/>live tracker read"]
         DRAFT["draft / Redraft / create<br/>LLM · proposes actions"]
-        FILTERS["deterministic filters:<br/>dropUnroutable<br/>suppressTrackerEcho<br/>suppressStaleTransitions<br/>suppressDuplicates"]
+        FILTERS["runSuppression — ordered chain:<br/>1 unroutable · 2 tracker-echo<br/>3 stale-transition · 4 duplicate"]
     end
 
     subgraph review["Human review"]
@@ -241,6 +241,71 @@ flowchart TD
 ```
 
 ---
+
+## 5. Patterns and principles
+
+Reviewed 2026-09-02 against SOLID and the pattern vocabulary of Gamma et al. and Bass's *Software
+Architecture in Practice*. Every row was checked against the source, not inferred from a doc comment.
+
+The **deliberate non-applications** below matter as much as the conformances: without a record, a
+future reader sees a `switch` where a registry "should" be and changes it without knowing the
+trade-off was weighed.
+
+### Where the code already conforms
+
+| Principle / pattern | Where | Evidence |
+|---|---|---|
+| **Interface Segregation** | every interface in `internal/` | **14 interfaces, all 1–3 methods.** `llm.Client` has one. No fat interface anywhere in the tree. |
+| **Dependency Inversion, used for safety** | `tasktracker.TaskReader` / `TaskWriter` | The split exists so "this code cannot write" is a compile error. `reconciler/create.go:107` states it outright: *"this takes no TaskReader — the parameter's absence is the guarantee."* DIP for a security property, not for testability. |
+| **Liskov substitution** | `clients/jira` vs `clients/local` | Both satisfy the full `TaskTracker` *and* `workflow.GraphProvider`, asserted at compile time (`_ workflow.GraphProvider = (*Tracker)(nil)`, `local/local.go:36`, `jira/tracker.go:27`). `local`'s graph is static, `jira`'s is mined — same postcondition, no weakening. |
+| **Strategy + registry (OCP)** | `cmd/unjira/main.go:59` | Adding a collector is one map entry. Verified: **nothing downstream switches on collector name.** |
+| **Adapter** | `internal/clients/*` | Thin facades, business logic one layer up. `clients/local` adapts two SQLite tables to a tracker interface. |
+| **Bass: "limit access to critical resources"** | `gate.Applier` | Exactly one `TaskWriter` holder in the tree, behind three independent gates. The tactic implemented as a type constraint rather than a review convention. |
+| **Command + audit log** | the `actions` table | Each action is a reified request carrying its own lifecycle and `actions.error`. Retry is re-execution on the next pass, not a separate path. |
+| **Chain of Responsibility** | `reconciler.suppressionChain` | Four filters, uniform contract, order asserted as data. Added 2026-09-02 — see below. |
+| **Marker interface for optional capability** | `pipeline.StatusHistorySource`, `workflow.GraphProvider` | Type-asserted, not name-checked. `status_history.go:25-34` explains why the marker returns nothing: a `bool` would let the assertion and the value disagree. |
+
+### The one gap that was worth closing
+
+Before 2026-09-02 the four suppression filters shared an identical **return** contract
+(`([]ProposedAction, []string)`) and four different **input** shapes, so they could not compose.
+`reconcileOne` hand-wired each call and repeated `result.Suppressed = append(...)` after each.
+
+The cost was not aesthetic. **Incident 22 was an ordering bug in exactly that code**, and the rule it
+produced — *"write the end-to-end test first when a change spans more than one function"* — is a
+**process workaround for a structural problem**: order lived only in the sequence of statements, so
+nothing could assert it.
+
+`internal/reconciler/filters.go` now defines `filterContext`, `suppressionFilter`, and
+`suppressionChain` as data, with `runSuppression` walking it. The order is asserted directly
+(`TestSuppressionChain_OrderIsExplicitAndLoadBearing`), and a dropped filter fails three tests
+including #180's end-to-end case. Behaviour is unchanged — every pre-existing test passed untouched.
+
+The remaining asymmetry is real and documented on the type: three filters are pure, `suppressDuplicates`
+needs the store. Uniformity costs it a parameter it mostly ignores; the alternative is the
+uncomposable chain that caused the incident.
+
+### Deliberate non-applications
+
+Recorded so they are not re-litigated as oversights.
+
+**Do not make the tracker backend a registry.** It is a `switch` (`cmd/unjira/main.go:97`) with five
+backend-aware sites total, all confined to `cmd` and `config` — an asymmetry with the collector
+registry, and an honest one at two backends, one of which exists only for tests. A registry pays off
+past roughly three variants. **Revisit when a third tracker lands, not before.**
+
+**Do not add a Repository interface over `internal/store`.** F4 finds two responsibilities there, and
+that is true — but the fix is splitting the *file*, not inserting an abstraction. There is one
+implementation and no second datastore in prospect; an interface with a single implementer is
+indirection without inversion.
+
+**`correlator.Stats` is not a Visitor and should not become one.** It is a plain accumulator with
+`Add`/`AddUsage` (`correlator.go:131`, `:144`). Naming it a pattern would rename, not improve.
+
+**Do not unify `Collector` and `TaskTracker` under a common "external system" interface.** They are
+opposites in the dependency graph: a collector is a *source* unjira reads without judgment, a tracker
+is a *sink* that only `gate.Applier` may write. Merging them would put read and write authority behind
+one type and dissolve the property section 2 depends on.
 
 ## What holds
 

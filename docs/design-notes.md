@@ -603,6 +603,42 @@ bookkeeping or observed work.
   (`TestEveryEmittedEventIsMarkedATrackerRecord`) is in the *collector* package, because every
   reconciler test constructs its own events and would stay green while the marker vanished.
 
+## 25. A process rule that compensates for a structural problem is a finding about the structure
+
+Incident 22 produced a rule: *write the end-to-end test first when a change spans more than one
+function.* Sound advice, and it has caught real bugs since. But it is worth asking what the rule was
+compensating for.
+
+The reconciler's four suppression filters shared an identical **return** contract —
+`([]ProposedAction, []string)` — and four different **input** shapes. `dropUnroutable` took
+`(verified, drafted)`, `suppressTrackerEcho` took `(delta, drafted)`, `suppressStaleTransitions` took
+`(delta, verified, drafted)`, `suppressDuplicates` took `(store, narrativeID, drafted)`. Because
+nothing unified them, `reconcileOne` hand-wired four calls in sequence and re-appended to
+`result.Suppressed` after each.
+
+So the *order* of suppression — which is load-bearing, and which each filter's doc comment argues for
+— existed only as the order of statements in one function. **No test could assert it, because there
+was nothing to assert it against.** That is precisely the gap incident 22 fell through: two correct
+functions, composed wrongly, invisible to every unit test.
+
+The fix was a uniform filter contract and the chain as data (`internal/reconciler/filters.go`), after
+which the order is a slice that a test reads directly, and a dropped filter fails three tests. The
+behaviour did not change; every pre-existing test passed untouched.
+
+**Generalizations worth carrying:**
+
+- **When a rule exists to compensate for a shape, fix the shape.** "Remember to test end-to-end
+  because composition is invisible here" is a standing tax on every future change. Making composition
+  visible pays it once. The rule stays useful — it is just no longer the only line of defense.
+- **A shared return type with unshared parameter types is a near-miss abstraction.** Four functions
+  agreeing on what they produce and disagreeing on what they consume is a strong signal that a context
+  object is missing, not that the functions are unrelated.
+- **Uniformity is worth an unused parameter.** Three of the four filters do not need the store. Giving
+  them one they ignore is cheaper than the uncomposable chain that caused an incident — and the cost
+  is documented on the type rather than left for a reader to wonder about.
+- **Order-as-data lets order be reviewed.** A reordering is now a test failure with a reason attached,
+  where before it was a diff that read as harmless.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
