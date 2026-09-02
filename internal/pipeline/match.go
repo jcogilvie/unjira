@@ -8,7 +8,6 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
-	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
 // MatchRunResult is one matching pass, shaped for rendering.
@@ -37,10 +36,15 @@ type MatchRunResult struct {
 // and a non-nil error: correlator.Match isolates failures per narrative, so
 // the narratives that resolved cleanly are still worth rendering even when
 // one narrative's tracker call failed.
+// resolve, rather than a single tracker, because a candidate's connection
+// decides which backend actually holds it — see correlator.TrackerResolver.
+// Resolution stays with the caller (cmd/unjira, which has the config); this
+// layer only passes it through, the same split it already uses for exclusion
+// patterns and rules.
 func RunMatch(
 	ctx context.Context,
 	s *store.Store,
-	tracker tasktracker.TaskReader,
+	resolve correlator.TrackerResolver,
 	client llm.Client,
 	cfg config.Config,
 ) (MatchRunResult, error) {
@@ -59,7 +63,7 @@ func RunMatch(
 	}
 
 	matched, stats, err := correlator.Match(
-		ctx, s, tracker, client, cfg.Match,
+		ctx, s, resolve, client, cfg.Match,
 		correlator.WithLinkExclusions(compiled), correlator.WithRules(correlatorRules))
 	result := MatchRunResult{Matched: matched, Stats: stats}
 	if err != nil {

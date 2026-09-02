@@ -533,6 +533,28 @@ where the route is computed rather than one pass later.
   confidence 0." A value that is exactly the floor, when a floor exists, means the floor fired — so
   ask what the floor saw, not whether the feature ran.
 
+## 23. Inserting above a function orphans its doc comment, and only the linter notices
+
+Twice in one change, adding a new declaration just above an existing function put the new code
+*between* that function and its doc comment. Go then treats the comment as a floating comment and the
+function as undocumented — `revive` flagged both as "exported function should have comment," which read
+like a nit about my new code and was actually a report that I had detached documentation from two
+pre-existing functions.
+
+Nothing else catches it. It compiles, every test passes, `gofmt` is happy, and reading the diff shows a
+sensible new function above a sensible old one. The damage is only visible in the rendered godoc, or in
+a lint message that names the *victim* rather than the cause.
+
+**Generalizations worth carrying:**
+
+- When inserting a declaration near an existing one, anchor on the existing **doc comment**, not on its
+  `func` line. Text-anchored edits land wherever the anchor is, and the anchor most people reach for is
+  the signature.
+- An "exported X should have comment" finding on code you did not write is usually not a missing
+  comment — it is a comment you separated from its owner.
+- The lint message names the wrong file position for this class of defect. Read what moved, not what
+  was flagged.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

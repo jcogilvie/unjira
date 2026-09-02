@@ -141,8 +141,40 @@ func IsTransportError(err error) bool {
 	return true
 }
 
+// TrackerResolver returns the tracker to verify a candidate against, given the
+// connection its provenance recorded (Candidate.Connection).
+//
+// A function rather than a map or a widened interface because the correlator must
+// not learn what a "connection" is: for the jira backend it selects which
+// configured site to talk to, for the local backend it means nothing at all, and
+// for a future GitHub backend it would mean something different again. Resolution
+// is the caller's business (cmd/unjira knows the config); this package only knows
+// that different candidates can need different trackers.
+//
+// An empty connection is the common case, not an error: a branch- or prose-derived
+// candidate carries no connection at all, since only jira-source events record one
+// (see Candidate.Connection). A resolver is expected to answer that with a default.
+//
+// Returning an error is how a resolver says "this connection is not configured" —
+// renamed, removed, or never present. verifyCandidates records that per candidate
+// rather than failing the narrative, since a config gap does not fix itself between
+// passes and failing forever would be worse than reporting it once per pass.
+type TrackerResolver func(connection string) (tasktracker.TaskReader, error)
+
+// SingleTracker adapts one tracker to a TrackerResolver, for a caller with nothing
+// to resolve — the local backend, which ignores connections entirely, and every
+// single-connection jira setup.
+//
+// Exists so those callers do not each write the same closure, and so the
+// single-tracker case stays a special case of the general one rather than a
+// separate code path through Match.
+func SingleTracker(tracker tasktracker.TaskReader) TrackerResolver {
+	return func(string) (tasktracker.TaskReader, error) { return tracker, nil }
+}
+
 // Match resolves narratives lacking an issue_key (per
-// store.NarrativesWithoutIssueKey) against tracker, promoting a primary
+// store.NarrativesWithoutIssueKey) against the tracker each candidate's
+// connection resolves to, promoting a primary
 // into narratives.issue_key when one is found with sufficient confidence.
 // See docs/superpowers/specs/2026-08-24-narrative-issue-matching-design.md
 // for the design this implements.
@@ -157,7 +189,7 @@ func IsTransportError(err error) bool {
 func Match(
 	ctx context.Context,
 	s *store.Store,
-	tracker tasktracker.TaskReader,
+	resolve TrackerResolver,
 	client llm.Client,
 	cfg config.MatchConfig,
 	opts ...MatchOption,
@@ -201,7 +233,7 @@ func Match(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := matchOne(ctx, s, tracker, client, n, o.linkExclusions, candidateLimit, cfg, o.rules)
+		result, oneStats, err := matchOne(ctx, s, resolve, client, n, o.linkExclusions, candidateLimit, cfg, o.rules)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -213,13 +245,14 @@ func Match(
 }
 
 // matchOne resolves a single narrative: gather candidates (recording
-// exclusions regardless of outcome), verify every survivor against tracker,
+// exclusions regardless of outcome), verify every survivor against its own
+// connection's tracker,
 // then either promote a lone survivor deterministically or ask the model to
 // classify 2+ of them, and persist whatever was decided in one transaction.
 func matchOne(
 	ctx context.Context,
 	s *store.Store,
-	tracker tasktracker.TaskReader,
+	resolve TrackerResolver,
 	client llm.Client,
 	narrative store.NarrativeRow,
 	linkExclusions []*regexp.Regexp,
@@ -247,7 +280,7 @@ func matchOne(
 		return result, Stats{}, nil
 	}
 
-	verified, unresolved, err := verifyCandidates(tracker, narrative.ID, candidates)
+	verified, unresolved, err := verifyCandidates(resolve, narrative.ID, candidates)
 	result.Unresolved = unresolved
 	if err != nil {
 		return result, Stats{}, err
@@ -274,7 +307,8 @@ func matchOne(
 	return result, stats, nil
 }
 
-// verifyCandidates confirms every candidate exists against tracker,
+// verifyCandidates confirms every candidate exists, each against the tracker its
+// own Connection resolves to,
 // regardless of provenance strength — rules/verify-correlations.md's
 // requirement, since even a branch-derived key can be a stale name. A
 // not-found key is dropped into unresolved and matching continues; a
@@ -282,11 +316,33 @@ func matchOne(
 // the next pass retries it rather than recording a wrong conclusion drawn
 // from an unreachable tracker.
 func verifyCandidates(
-	tracker tasktracker.TaskReader,
+	resolve TrackerResolver,
 	narrativeID int64,
 	candidates []Candidate,
 ) (verified []verifiedCandidate, unresolved []string, err error) {
 	for _, c := range candidates {
+		// Per candidate, not per pass. A candidate's Connection names which
+		// configured backend actually holds it, and verifying it against a
+		// different one silently reports a real ticket as nonexistent — or, worse,
+		// resolves a colliding key to an unrelated issue on the wrong site.
+		tracker, resolveErr := resolve(c.Connection)
+		if resolveErr != nil {
+			// A config gap, not a tracker answer: the connection is renamed,
+			// removed, or was never configured. Recorded per candidate rather
+			// than failing the narrative, because unlike a transport error this
+			// does not fix itself between passes — aborting would fail this
+			// narrative on every pass forever with no way to make progress.
+			//
+			// Carries the reason, unlike the not-found case below: a bare key
+			// would tell a reviewer a ticket is missing when the truth is that
+			// unjira never looked.
+			unresolved = append(unresolved, fmt.Sprintf(
+				"%s: %v", c.IssueKey, resolveErr,
+			))
+
+			continue
+		}
+
 		issue, getErr := tracker.GetIssue(c.IssueKey)
 		if getErr != nil {
 			if IsTransportError(getErr) {

@@ -282,7 +282,13 @@ data/                   SQLite database lives here (gitignored)
   `workflow.GraphProvider` capability (type-asserted, not part of `TaskTracker`), since only
   backends with an admin-configurable workflow to mine (Jira) need it. `Config.Jira` is a list of
   named connections, not a single global site, so one project set can span more than one Jira
-  instance (a migration, an acquisition); credentials come from one JSON-blob env var
+  instance (a migration, an acquisition). Matching resolves a tracker **per candidate** from the
+  connection its provenance recorded (`correlator.TrackerResolver`), so a cross-site candidate is
+  verified against the site that actually holds it rather than whichever one the default project
+  selects; a candidate naming an unconfigured connection is reported with the reason rather than
+  silently falling back, since falling back is how it used to check the wrong site. The reconciler
+  still reads through a single tracker — same gap, tracked separately. Credentials come from one
+  JSON-blob env var
   (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
   connection count.
 - **A transition may cross several statuses in one action, because unjira has no guaranteed run

@@ -580,6 +580,24 @@ func (c Config) RulesDir() string {
 	return c.Rules.Dir
 }
 
+// JiraConnectionByName finds a connection by its configured name, reporting
+// whether one exists.
+//
+// Distinct from JiraConnectionForProject, which searches by project key: an
+// event's provenance records the connection NAME it was collected through (see
+// events.ArtifactIssueKey's neighbours and correlator.Candidate.Connection), and
+// two connections can legitimately cover the same project key during a migration
+// — which is exactly when looking one up by project would pick the wrong site.
+func (c Config) JiraConnectionByName(name string) (JiraConnection, bool) {
+	for _, conn := range c.Jira {
+		if conn.Name == name {
+			return conn, true
+		}
+	}
+
+	return JiraConnection{}, false
+}
+
 // JiraConnectionForProject finds the connection whose ProjectKeys contains
 // projectKey. Returns false if no configured connection covers it.
 func (c Config) JiraConnectionForProject(projectKey string) (JiraConnection, bool) {

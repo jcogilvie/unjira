@@ -6,6 +6,45 @@ unreachable, every narrative is unlinked forever, and every drafted action would
 
 `README.md` assigns matching to the **correlator**, not the reconciler.
 
+## Amendment: per-candidate tracker resolution (landed 2026-09-02, task #130)
+
+As shipped, `Match` took ONE `tasktracker.TaskReader` for a whole pass, resolved by the caller from a
+single default project. For the jira backend that project selects which `JiraConnection` to talk to —
+so on a multi-connection setup, a candidate whose `Connection` named a different one was verified
+against the **wrong site**. It 404'd for a ticket that exists, or, if the key collided, resolved to an
+unrelated issue. Either way it landed in `Unresolved`, indistinguishable from a genuinely stale key.
+
+That is precisely the PAAS/SUMO cross-connection case the `same_work` role below exists for, so the
+design's own headline scenario was unreachable in practice.
+
+`Match` now takes a `correlator.TrackerResolver` — `func(connection string) (TaskReader, error)` —
+and `verifyCandidates` calls it **per candidate**. A function rather than a map or a widened
+interface, because the correlator must not learn what a "connection" is: it selects a site for jira,
+means nothing for the local backend, and would mean something else again for GitHub. Resolution stays
+with `cmd/unjira`, which has the config.
+
+Three cases, deliberately distinguished:
+
+| Candidate | Resolution |
+|---|---|
+| `Connection` names a configured connection | that connection's own tracker, built once and memoized |
+| `Connection` empty (branch- or prose-derived, the common case) | the default project's tracker — a documented guess |
+| `Connection` names something unconfigured (renamed, removed, typo) | recorded in `Unresolved` **with the reason**, per candidate |
+
+The third is the new failure mode this introduces, and it is deliberately *not* treated as a
+transport error. A config gap does not fix itself between passes, so aborting the narrative would fail
+it on every pass forever — the exact "genuinely deleted ticket misclassified as transport" trap
+`IsTransportError`'s doc comment warns about. It also carries the reason, unlike the ordinary
+not-found case which records a bare key: a bare key would tell a reviewer a ticket is missing when the
+truth is that unjira never looked.
+
+`correlator.SingleTracker` adapts one tracker to a resolver, so the local backend and every
+single-connection setup stay a special case of the general path rather than a second code path.
+
+**Still open (task #177):** the reconciler has the same shape. `verifyLinks` reads every link through
+one tracker regardless of `store.NarrativeIssue.Connection`, which is persisted and available. Out of
+scope here, and the seam it needs now exists.
+
 ## The problem is attribution, not extraction
 
 The obvious framing — "find the ticket key in the text" — is already solved.
