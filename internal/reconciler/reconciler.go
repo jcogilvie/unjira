@@ -246,7 +246,15 @@ func reconcileOne(
 	routed, unroutable := dropUnroutable(verified, drafted)
 	result.Suppressed = append(result.Suppressed, unroutable...)
 
-	fresh, stale := suppressStaleTransitions(delta, verified, routed)
+	// Before the transition filters, because this one asks whether the narrative
+	// had anything to say AT ALL. A comment sourced only from the tracker's own
+	// records restates the issue to itself (task #180, design-notes incident 24),
+	// and there is no point weighing staleness or duplication for prose that
+	// should not exist.
+	grounded, echoes := suppressTrackerEcho(delta, routed)
+	result.Suppressed = append(result.Suppressed, echoes...)
+
+	fresh, stale := suppressStaleTransitions(delta, verified, grounded)
 	result.Suppressed = append(result.Suppressed, stale...)
 
 	kept, suppressed := suppressDuplicates(s, narrative.ID, fresh)

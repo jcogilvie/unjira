@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
+	"github.com/jcogilvie/unjira/internal/events"
 )
 
 // testIssue is rebuilt per test rather than shared, so one test mutating a map
@@ -194,6 +195,46 @@ func TestEventFromComment_SelfAuthoredIsTagged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, true, got.Artifacts["authored_by_unjira"],
 		"this tag is what stops the reconciler proposing a comment we already posted")
+}
+
+// TestEveryEmittedEventIsMarkedATrackerRecord is what stops
+// reconciler.suppressTrackerEcho from silently ceasing to fire.
+//
+// That filter suppresses a comment when the delta holds nothing but records the
+// tracker produced about itself, and its ONLY signal is this marker. If annotate
+// stopped setting it, every Jira changelog entry and comment would read as work
+// evidence, the filter would pass everything, and the queue would refill with the
+// paraphrase-the-issue-onto-itself comments of docs/design-notes.md incident 24 —
+// with every reconciler test still green, because those construct their own events.
+//
+// Both emitters are covered in one test on purpose: the marker is set in annotate,
+// the single function both paths share, so a future event type that bypasses
+// annotate is exactly the regression worth catching here.
+func TestEveryEmittedEventIsMarkedATrackerRecord(t *testing.T) {
+	fromChangelog, err := collectorjira.EventsFromChangelogEntry(testIssue(), map[string]any{
+		"id":      "1",
+		"created": "2026-08-20T15:00:00.000+0000",
+		"author":  map[string]any{"accountId": "acct-alice", "displayName": "Alice"},
+		"items": []any{
+			map[string]any{"field": "status", "fromString": "To Do", "toString": "In Progress"},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, fromChangelog, 1)
+
+	fromComment, err := collectorjira.EventFromComment(testIssue(), map[string]any{
+		"id":      "9003",
+		"created": "2026-08-20T15:00:00.000+0000",
+		"body":    "a human's comment",
+		"author":  map[string]any{"accountId": "acct-alice", "displayName": "Alice"},
+	})
+	require.NoError(t, err)
+
+	for _, e := range append(fromChangelog, fromComment) {
+		assert.True(t, events.IsTrackerRecord(e),
+			"%s is the tracker's own account of itself, not evidence that work happened "+
+				"outside it", e.ExternalID)
+	}
 }
 
 // TestEventsFromChangelogEntry_StatusEventCarriesFromAndTo: the destination
