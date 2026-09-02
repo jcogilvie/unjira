@@ -31,6 +31,16 @@ func New() *Collector { return &Collector{} }
 // Source field of every event it emits.
 func (c *Collector) Name() string { return Name }
 
+// SuppliesStatusHistory implements pipeline.StatusHistorySource: a status
+// transition changelog entry becomes an events.SetStatusChange-tagged event
+// (see EventsFromChangelogEntry), so this collector is a status-event
+// source for the reconciler's staleness guard whenever it is enabled. See
+// pipeline.StatusHistorySource's doc comment for why this is a marker
+// interface rather than a name check.
+func (c *Collector) SuppliesStatusHistory() bool { return true }
+
+var _ pipeline.StatusHistorySource = (*Collector)(nil)
+
 // Collect walks every configured connection's queries.
 //
 // Failure is per query, not per pass: a 403 on one JQL (a revoked project

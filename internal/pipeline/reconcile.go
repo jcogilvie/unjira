@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
@@ -39,6 +40,20 @@ type ReconcileRunResult struct {
 	// auto-commit on a clean pass must check the returned error themselves —
 	// Persisted being non-empty is NOT evidence the pass succeeded.
 	Persisted []store.ActionRow
+	// Unguarded names every proposed transition that reached Results without
+	// ever passing through the staleness guard, because unjira has no
+	// collected status history for that issue — see
+	// reconciler.FindUnguardedTransitions and task #174. Distinct from any
+	// per-narrative Suppressed entry: a suppression is a transition that WAS
+	// judged and rejected; this is one that was never judged at all.
+	//
+	// Lives here rather than as a field on reconciler.ReconcileResult itself
+	// (which is where Suppressed/LowConfidence live, and where this would
+	// read most naturally) because internal/reconciler/types.go is owned by a
+	// parallel in-flight change this session must not conflict with. Each
+	// entry still carries its own NarrativeID, so RenderReconcileResult can
+	// group it back under the right narrative when printing.
+	Unguarded []reconciler.UnguardedTransition
 }
 
 // RunReconcile runs one reconcile pass: validate cfg.Reconciler, load
@@ -102,6 +117,24 @@ func RunReconcile(
 	reconcileErr = errors.Join(reconcileErr, createErr)
 
 	result := ReconcileRunResult{Results: results, Stats: stats, DryRun: opts.DryRun}
+
+	// Computed under DryRun too: this only reads collected history, never
+	// writes anything, so there is nothing for DryRun to protect here — and an
+	// operator inspecting a dry run wants to see an unguarded transition just
+	// as much as a real pass would show one.
+	//
+	// A failure here is logged and swallowed rather than failing the whole
+	// pass: this is a purely informational annotation on top of already-valid
+	// proposals (see reconciler.FindUnguardedTransitions' own doc comment on
+	// why it errors rather than guessing), and discarding a clean reconcile
+	// pass because this secondary check could not run would be a worse
+	// outcome than the pass simply not reporting which transitions are
+	// unguarded this time.
+	if unguarded, err := reconciler.FindUnguardedTransitions(s, results); err != nil {
+		log.Printf("reconciler: could not determine which transitions are unguarded (%v)", err)
+	} else {
+		result.Unguarded = unguarded
+	}
 
 	if opts.DryRun {
 		return result, reconcileErr

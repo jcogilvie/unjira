@@ -37,6 +37,13 @@ import (
 type pipelineFakeTracker struct {
 	issues   map[string]tasktracker.Issue
 	getCalls []string
+	// transitions is consulted by AvailableTransitions when set. Matching
+	// never proposes transitions, so every match_test.go caller leaves this
+	// nil and gets nil back (legality is never consulted there); a
+	// reconcile_test.go caller exercising a real proposed transition sets it,
+	// since reconciler.floorConfidence zeroes a transition's confidence
+	// unless its target name appears here.
+	transitions map[string][]tasktracker.Transition
 }
 
 func (f *pipelineFakeTracker) GetIssue(key string) (tasktracker.Issue, error) {
@@ -52,9 +59,8 @@ func (f *pipelineFakeTracker) GetIssue(key string) (tasktracker.Issue, error) {
 
 func (f *pipelineFakeTracker) SearchIssues(string, int) ([]tasktracker.Issue, error) { return nil, nil }
 
-// Matching never proposes transitions, so legality is never consulted.
-func (f *pipelineFakeTracker) AvailableTransitions(string) ([]tasktracker.Transition, error) {
-	return nil, nil
+func (f *pipelineFakeTracker) AvailableTransitions(key string) ([]tasktracker.Transition, error) {
+	return f.transitions[key], nil
 }
 
 var _ tasktracker.TaskReader = (*pipelineFakeTracker)(nil)

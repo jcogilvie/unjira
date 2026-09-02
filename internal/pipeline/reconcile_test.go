@@ -11,6 +11,7 @@ package pipeline_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,6 +129,49 @@ func TestRunReconcilePersistsWhenNotDryRun(t *testing.T) {
 // reach the actual system prompt RunReconcile's LLM call sends — not merely
 // survive rules.Load/ForScope, which internal/rules already tested before
 // this fix existed.
+// TestRunReconcile_FlagsATransitionProposedWithNoCollectedStatusHistory is
+// task #174's per-narrative visibility: suppressStaleTransitions degrades
+// to proposing when it has no collected status history for an issue
+// (internal/reconciler.recency.go's HaveLastStatus false branch), and that
+// degradation used to be silent — a reviewer could not tell "the guard
+// checked and cleared this" from "the guard never ran" just by looking at
+// Results[0].Proposed. If this regresses to empty, that distinction is gone
+// again and every unguarded transition looks identical to a checked one in
+// the CLI's own output.
+func TestRunReconcile_FlagsATransitionProposedWithNoCollectedStatusHistory(t *testing.T) {
+	s := matchPipelineStore(t)
+	seedReconcilableNarrative(t, s, "PROJ-1")
+
+	tracker := &pipelineFakeTracker{
+		issues: map[string]tasktracker.Issue{
+			"PROJ-1": {Key: "PROJ-1", Summary: "the ticket", StatusName: "In Progress"},
+		},
+		transitions: map[string][]tasktracker.Transition{
+			"PROJ-1": {{ToStatus: "In Review", ToCategory: tasktracker.StatusInProgress}},
+		},
+	}
+	llmFake := &pipelineFakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-1","type":"transition","target_status":"In Review",` +
+			`"confidence":0.9,"rationale":"a PR is open"}]`,
+	}}
+
+	cfg := config.Config{Reconciler: config.ReconcilerConfig{
+		MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5,
+	}}
+
+	result, err := pipeline.RunReconcile(t.Context(), s, tracker, llmFake, cfg, pipeline.ReconcileOptions{})
+	require.NoError(t, err)
+
+	require.Len(t, result.Results, 1)
+	require.Len(t, result.Results[0].Proposed, 1,
+		"no collected history means the guard degrades to proposing, not to silence")
+
+	require.Len(t, result.Unguarded, 1,
+		"and that degradation must be reported, or it is indistinguishable from a checked proposal")
+	assert.Equal(t, "PROJ-1", result.Unguarded[0].IssueKey)
+	assert.Contains(t, result.Unguarded[0].Reason(), "In Review")
+}
+
 func TestRunReconcile_LoadsReconcilerRulesAndAppendsThemToTheDraftingSystemPrompt(t *testing.T) {
 	s := matchPipelineStore(t)
 	seedReconcilableNarrative(t, s, "PROJ-1")
@@ -267,6 +311,45 @@ func TestRenderReconcileResultNamesWhatWasSuppressedAndWhy(t *testing.T) {
 	assert.Contains(t, out, "PROJ-404")
 	assert.Contains(t, out, "already has an open proposal",
 		"'nothing proposed' is otherwise indistinguishable from 'nothing considered'")
+}
+
+// TestRenderReconcileResult_ShowsAnUnguardedTransitionUnderItsOwnNarrative
+// proves the CLI's own output — what an operator running `dev narrate` or
+// `watch` actually reads — carries task #174's visibility, not just the
+// data structure. Without this, ReconcileRunResult.Unguarded could be
+// populated correctly and a human would still never see it: the rendered
+// text is what triage/CLAUDE.md's "keep the docs true" bar and an actual
+// reviewer both depend on.
+func TestRenderReconcileResult_ShowsAnUnguardedTransitionUnderItsOwnNarrative(t *testing.T) {
+	out := pipeline.RenderReconcileResult(pipeline.ReconcileRunResult{
+		Results: []reconciler.ReconcileResult{
+			{NarrativeID: 7, Proposed: []reconciler.ProposedAction{
+				{
+					Type: reconciler.ActionTransition, IssueKey: "PROJ-7",
+					TargetStatus: "In Review", Confidence: 0.9,
+				},
+			}},
+			{NarrativeID: 8, Proposed: []reconciler.ProposedAction{
+				{
+					Type: reconciler.ActionComment, IssueKey: "PROJ-8",
+					Body: "unrelated narrative", Confidence: 0.9,
+				},
+			}},
+		},
+		Unguarded: []reconciler.UnguardedTransition{
+			{NarrativeID: 7, IssueKey: "PROJ-7", TargetStatus: "In Review"},
+		},
+	})
+
+	assert.Contains(t, out, "narrative 7")
+	assert.Contains(t, out, "PROJ-7")
+	assert.Contains(t, out, "no staleness check",
+		"a reviewer must be told this transition bypassed the guard entirely, not merely see a proposal")
+
+	beforeNarrative8 := strings.Index(out, "narrative 8")
+	require.Positive(t, beforeNarrative8, "narrative 8 must render")
+	assert.Less(t, strings.Index(out, "no staleness check"), beforeNarrative8,
+		"the unguarded note must render under narrative 7, not narrative 8, which has no transition")
 }
 
 func TestRenderReconcileResultShowsEveryOutcomeKind(t *testing.T) {

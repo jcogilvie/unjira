@@ -103,6 +103,52 @@ func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, er
 	}
 }
 
+// warnIfNoStatusHistorySource logs, once at startup, when the configured
+// tracker backend can propose transitions but nothing enabled can ever
+// supply the reconciler's staleness guard with collected status history —
+// task #174's structural half. This is a fact about CONFIGURATION, knowable
+// before any narrative is processed, as opposed to
+// reconciler.FindUnguardedTransitions' per-narrative "nothing collected for
+// THIS issue yet" (an ordinary, ticket-by-ticket condition surfaced in
+// ReconcileRunResult.Unguarded — see pipeline.RunReconcile). Logging this 40
+// times, once per unguarded proposal, would bury the one thing worth telling
+// an operator once: nothing in this deployment will EVER clear the guard
+// until a collector like this is enabled.
+//
+// Silent on the local backend: internal/clients/local's own package doc
+// states it has "no real tracker reachable" — nothing external ever moves a
+// local issue behind unjira's back, so the guard's entire premise (someone
+// else moved the ticket via a channel unjira does not observe) does not
+// apply. This is also what keeps the offline test suite quiet, since local
+// is the backend every automated test uses; see this function's own tests
+// in main_test.go for the drill confirming both directions.
+//
+// Deliberately does not test for the jira collector by name: whether
+// anything qualifies is answered by pipeline.HasEnabledStatusHistorySource,
+// which type-asserts against the general pipeline.StatusHistorySource
+// marker interface — testing "is the jira collector enabled" directly would
+// repeat docs/design-notes.md incident 21's mistake in a new place, and
+// would never recognize a future GitHub tracker's own status-history
+// collector as qualifying.
+func (a *appContext) warnIfNoStatusHistorySource() {
+	if a.config.TrackerBackend() == "local" {
+		return
+	}
+
+	if pipeline.HasEnabledStatusHistorySource(a.config, registry) {
+		return
+	}
+
+	log.Printf(
+		"reconciler: no enabled collector supplies status-change history (see " +
+			"pipeline.StatusHistorySource); the staleness guard " +
+			"(suppressStaleTransitions, docs/design-notes.md incident 19) can never run for any " +
+			"issue on this tracker backend, and every work-derived transition will be proposed " +
+			"unguarded. Enable the jira collector — or a future equivalent for this backend — to " +
+			"restore it.",
+	)
+}
+
 // projectKey resolves --project, falling back to the first configured
 // project key.
 func (a *appContext) projectKey(flag string) (string, error) {
@@ -388,6 +434,10 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	if err := app.config.Reconciler.Validate(); err != nil {
 		return err
 	}
+	// Non-fatal, unlike the Validate calls above: a missing status-history
+	// source does not stop this pass from running, it only means the
+	// staleness guard cannot fire — see warnIfNoStatusHistorySource.
+	app.warnIfNoStatusHistorySource()
 
 	linkExclusions, err := app.config.CompiledLinkExclusions()
 	if err != nil {
@@ -576,6 +626,10 @@ func (c *watchCmd) Run(app *appContext) error {
 			return fmt.Errorf("auto_commit rule for %q: %w", actionType, err)
 		}
 	}
+	// Non-fatal, unlike the Validate calls above: a missing status-history
+	// source does not stop watch from running, it only means the staleness
+	// guard cannot fire — see warnIfNoStatusHistorySource.
+	app.warnIfNoStatusHistorySource()
 
 	// Write scope's startup layer (see
 	// docs/superpowers/specs/2026-08-27-write-scope-design.md, "Choke point:

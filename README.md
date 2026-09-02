@@ -296,8 +296,15 @@ data/                   SQLite database lives here (gitignored)
   reads. Disagreement means somebody moved it since the last collect; a collected change newer than
   the work means that work was superseded. Status changes on the subject issue are excluded from
   "work evidence," or a collected handoff would become its own justification. With no collected status
-  history the guard cannot fire and transitions are unguarded — the pre-guard behavior, tracked as a
-  known gap. See `docs/design-notes.md` incident 19.
+  history the guard cannot fire and transitions are unguarded — the pre-guard behavior, not something
+  worse, but never silent about it. Per narrative, `reconciler.FindUnguardedTransitions` names every
+  such proposal in `ReconcileRunResult.Unguarded`, rendered alongside `Suppressed`/`LowConfidence` in
+  `dev narrate`/`watch` output. Once, at startup, `cmd/unjira` warns when NOTHING enabled can ever
+  supply this history at all (a configuration gap, distinct from "no history for this one ticket yet")
+  — decided via a `pipeline.StatusHistorySource` marker interface the jira collector implements, not a
+  name check, so a future GitHub tracker's own status collector is recognized the same way. Silent on
+  the `local` tracker backend, which has no real external tracker for anyone to move a ticket behind
+  unjira's back. See `docs/design-notes.md` incident 19.
 
 ## Writing a collector
 

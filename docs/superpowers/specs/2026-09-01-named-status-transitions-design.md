@@ -3,11 +3,15 @@
 Replacing the three-category transition target with the tracker's own status names, and making
 `workflow.Graph` load-bearing for the first time.
 
-## Status: partially landed 2026-09-01
+## Status: partially landed 2026-09-01, task #174 landed 2026-09-02
 
 Sections 1, 2, the prompt half of 3, 3a (recency), and 4 (the graph cache) have landed. Section 5
 (multi-hop) has **not** — it is a separate change, and this section will be updated when it lands
 rather than describing it as done.
+
+Section 3a's own "known gap" — a work-derived transition proposed with no staleness check, and no
+signal that it happened — is closed as of 2026-09-02 (task #174). See the "known gap, and its fix"
+subsection under 3a below for what landed.
 
 **Landed:**
 
@@ -285,9 +289,43 @@ name, so a status genuinely containing it parses to the wrong destination.
 The initiative is theirs and current by construction, so filtering the result would answer an explicit
 request with silence.
 
-**The known gap.** With no collected status history the guard cannot fire and transitions are
-unguarded — the pre-guard behavior, not something worse, but invisible. That is task #174: a guard that
-cannot run must be visible rather than merely absent.
+**The known gap, and its fix (task #174, landed 2026-09-02).** With no collected status history the
+guard cannot fire and transitions are unguarded — the pre-guard behavior, not something worse, but it
+used to be invisible. Two seams now make it visible, at the two altitudes the gap actually has:
+
+1. **Per-narrative.** `reconciler.FindUnguardedTransitions` scans a completed pass's
+   `[]ReconcileResult` and names every proposed transition whose issue has no collected status change
+   — i.e. every case where `suppressStaleTransitions`'s `HaveLastStatus` was false. `RunReconcile`
+   (`internal/pipeline/reconcile.go`) calls it and attaches the result to
+   `ReconcileRunResult.Unguarded`, and `RenderReconcileResult` prints each entry under its own
+   narrative, alongside `Suppressed`/`LowConfidence`. This is deliberately NOT a field on
+   `reconciler.ReconcileResult` itself, which is where it reads most naturally: `internal/reconciler`'s
+   `types.go`/`reconciler.go`/`draft.go`/`persist.go` and `recency.go` were owned by a parallel
+   in-flight change this session could not touch, so the annotation is a second pass over the already-
+   computed result, re-deriving "was there collected history" via the same `store.LatestStatusEvent`
+   call `verifyLinks` already makes (no store writes happen between `Reconcile` returning and this
+   running, so it sees exactly what the guard saw).
+2. **Once, at startup, when the cause is configuration.** `pipeline.HasEnabledStatusHistorySource`
+   answers "can anything enabled ever supply this" from config and the collector registry alone, with
+   no store or narrative involved. It works via a new marker interface, `pipeline.StatusHistorySource`
+   (`SuppliesStatusHistory() bool`), which the jira collector implements and `claude_code` does not —
+   deliberately not a name check for `"jira"`, per incident 21's lesson about hardcoding one
+   collector's vocabulary into a general question. `cmd/unjira`'s `appContext.warnIfNoStatusHistorySource`
+   calls it once per `watch`/`dev narrate` invocation (not per pass, not per narrative) and logs when
+   nothing qualifies — silent on the `local` tracker backend, which has no real external tracker for
+   anyone to move behind unjira's back (`internal/clients/local`'s own package doc), so the guard's
+   premise does not apply and there is nothing to warn about. This is also what keeps `local`-backed
+   offline tests quiet.
+
+The two are deliberately not merged into one signal: "no history for THIS issue yet" is the ordinary
+case (nobody has moved the ticket), and "nothing in this configuration can EVER supply it" is a real
+gap. Conflating them would make the ordinary case read as alarming on every pass, or make the real gap
+sound as unremarkable as an ordinary unmoved ticket.
+
+Verified: `go test ./...` — 23 packages, 656 tests. `go vet -tags=live ./internal/live/` clean.
+`golangci-lint run ./...` — 0 issues. Both new seams drilled by breaking them (inverting the
+`haveHistory` check in `FindUnguardedTransitions`, and the local-backend/registry checks in
+`warnIfNoStatusHistorySource`) and confirming the specific test fails, then restoring.
 
 Verification: 23 packages, 795 tests, `go vet -tags=live` clean, `golangci-lint` 0 issues. Each half
 drilled by breaking it and confirming the specific guard test fails.
