@@ -190,7 +190,7 @@ func reconcileOne(
 		return result, correlator.Stats{}, nil
 	}
 
-	verified, unverified, err := verifyLinks(tracker, narrative.ID, actionable)
+	verified, unverified, err := verifyLinks(s, tracker, narrative.ID, actionable)
 	result.Unverified = unverified
 	if err != nil {
 		return result, correlator.Stats{}, err
@@ -212,7 +212,15 @@ func reconcileOne(
 		return result, stats, fmt.Errorf("drafting for narrative %d: %w", narrative.ID, err)
 	}
 
-	kept, suppressed := suppressDuplicates(s, narrative.ID, drafted)
+	// Order matters only for which reason a reviewer sees first; both filters are
+	// independent. Staleness runs first because "the tracker overtook this" is a
+	// fact about the world, while a duplicate proposal is a fact about unjira's
+	// own queue — and there is no point reporting a queue collision for an action
+	// that should not exist at all.
+	fresh, stale := suppressStaleTransitions(delta, verified, drafted)
+	result.Suppressed = append(result.Suppressed, stale...)
+
+	kept, suppressed := suppressDuplicates(s, narrative.ID, fresh)
 	result.Proposed = kept
 	result.Suppressed = append(result.Suppressed, suppressed...)
 	noteLowConfidence(&result, cfg.MinConfidenceToPropose)
@@ -293,6 +301,7 @@ func dropSelfAuthored(evts []events.Event) []events.Event {
 // backwards in either direction is a real failure mode documented at length on
 // that function.
 func verifyLinks(
+	s *store.Store,
 	tracker tasktracker.TaskReader,
 	narrativeID int64,
 	links []store.NarrativeIssue,
@@ -323,8 +332,30 @@ func verifyLinks(
 			transitions = nil
 		}
 
+		// The newest COLLECTED status change, paired with the live read above so
+		// suppressStaleTransitions can tell "unjira's history is current for this
+		// issue" from "somebody moved it since the last collect". A read from
+		// unjira's own store, so it costs no API call.
+		//
+		// A failure here does not fail the narrative: the guard degrades to
+		// proposing (HaveLastStatus stays false), which is the same disposition as
+		// an issue with no collected history. Logged rather than swallowed,
+		// because a store error is a real surprise and "the guard quietly stopped
+		// running" is precisely what must not be invisible.
+		lastStatus, haveLastStatus, statusErr := s.LatestStatusEvent(l.IssueKey)
+		if statusErr != nil {
+			log.Printf(
+				"reconciler: could not read collected status history for %s on narrative %d (%v); "+
+					"the staleness guard cannot run for this issue",
+				l.IssueKey, narrativeID, statusErr,
+			)
+
+			haveLastStatus = false
+		}
+
 		verified = append(verified, verifiedLink{
 			Link: l, Issue: issue, Transitions: transitions,
+			LastStatus: lastStatus, HaveLastStatus: haveLastStatus,
 		})
 	}
 

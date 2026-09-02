@@ -71,7 +71,7 @@ func ReworkOne(
 			narrativeID)
 	}
 
-	verified, _, err := verifyLinks(tracker, narrativeID, actionable)
+	verified, _, err := verifyLinks(s, tracker, narrativeID, actionable)
 	if err != nil {
 		return nil, correlator.Stats{}, err
 	}
@@ -99,5 +99,17 @@ func ReworkOne(
 				"already covered by an applied action", narrativeID)
 	}
 
+	// suppressStaleTransitions is deliberately NOT applied here, though
+	// verifyLinks populated the state for it.
+	//
+	// Reconcile's guard exists because unjira proposes transitions on its own
+	// initiative from work evidence that can go stale. Rework is a human at the
+	// triage prompt saying "redraft this, here is what was wrong with it" — the
+	// initiative is theirs and it is current by construction. Filtering the result
+	// would answer an explicit request with silence, and the reviewer would see
+	// their edit produce nothing with no way to tell why.
+	//
+	// They still approve whatever comes back, and the applier still validates
+	// every transition against live state before executing it.
 	return Redraft(ctx, client, narrative, delta, verified, learnedRules, feedback)
 }

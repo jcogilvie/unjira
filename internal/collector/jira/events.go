@@ -118,6 +118,26 @@ func EventsFromChangelogEntry(ic IssueContext, entry map[string]any) ([]events.E
 		evt.Actor = displayName
 		evt.RawRef = ic.browseURL()
 		evt.Artifacts["field"] = field
+
+		// The transition's endpoints as structured data, on status events only.
+		//
+		// status_to is what the reconciler's recency guard compares against the
+		// live issue's StatusName, to tell "our events are current for this
+		// issue" from "somebody moved it since our last collect." Reading that
+		// out of the summary instead would mean parsing a human-facing string on
+		// "→", which is not reserved in a Jira status name — a status genuinely
+		// called "A → B" would parse to the wrong destination, and a guard
+		// comparing against a status nobody set fails toward proposing.
+		//
+		// status_from has no reader yet. It is recorded because it is in the same
+		// changelog item, it makes the event self-describing without needing its
+		// predecessor, and a collector that discarded half of an observed
+		// transition would have thrown away something unrecoverable.
+		if field == fieldStatus {
+			evt.Artifacts["status_from"] = from
+			evt.Artifacts["status_to"] = to
+		}
+
 		ic.annotate(&evt, accountID)
 
 		out = append(out, evt)

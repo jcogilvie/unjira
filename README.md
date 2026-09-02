@@ -285,6 +285,19 @@ data/                   SQLite database lives here (gitignored)
   instance (a migration, an acquisition); credentials come from one JSON-blob env var
   (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
   connection count.
+- **A work-derived transition is suppressed when the tracker knows something newer, judged by
+  recency rather than direction.** The obvious guard — never move a ticket to an earlier status —
+  inverts: backward moves are legitimate (a security scan bouncing a ticket back after finding the
+  vulnerability still present, a failed test cycle), and applying monotonicity to that case makes
+  unjira re-propose its *forward* move every pass, undoing the handoff. So the rule is: propose only
+  when the work evidence postdates the issue's last status change. Two checks implement it, both from
+  data already in hand — the newest **collected** status event (the Jira collector already ingests
+  status changes, so no API call) compared against the **live** `StatusName` the reconciler already
+  reads. Disagreement means somebody moved it since the last collect; a collected change newer than
+  the work means that work was superseded. Status changes on the subject issue are excluded from
+  "work evidence," or a collected handoff would become its own justification. With no collected status
+  history the guard cannot fire and transitions are unguarded — the pre-guard behavior, tracked as a
+  known gap. See `docs/design-notes.md` incident 19.
 
 ## Writing a collector
 

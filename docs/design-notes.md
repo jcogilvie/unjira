@@ -435,6 +435,33 @@ generalizes to handoffs from systems unjira does not even collect from.
 - Prefer a freshness test to a direction test when reconciling against a system other agents also
   write to. Direction encodes an assumption about who is right; freshness measures who knew last.
 
+## 20. A drill that does not compile proves nothing, and a filtered test run hides that
+
+Verifying a fix by breaking it and confirming the guard test fails is the habit that has caught every
+real defect in this work. It has a failure mode.
+
+Two of three drills on the staleness guard were patched in a way that left an unused import, so the
+package did not build. The test command was filtered through `grep -E "^--- FAIL"` — and a build
+failure prints no `--- FAIL` lines at all. Both drills read as "no failures," which looks identical to
+"the code is fine" and is the opposite of what happened.
+
+The third drill then genuinely produced no failures while compiling, which was a real finding: the
+status-change exclusion it disabled was not load-bearing for any test written. `LatestStatusEvent`
+returns the *newest* status event, so a status event in the delta can only equal its timestamp, and
+ties suppress either way. The exclusion only bites for an event `LatestStatusEvent` *skipped* — one
+with `field=status` but no readable destination — which can be arbitrarily newer. That case got its own
+test, and the drill then failed as it should.
+
+**Generalizations worth carrying:**
+
+- Check the drill compiled before reading its result. `go vet` before `go test`, or grep for `FAIL`
+  rather than `--- FAIL`, which catches build failures too.
+- Filtering test output can invert its meaning. A filter tuned for one failure shape reports every
+  other shape as success.
+- A drill that produces no failure is information, not a formality to skip past. Either the guard is
+  not load-bearing, or the test does not discriminate — both worth knowing, and the second is a test
+  that would have passed against a broken implementation.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
