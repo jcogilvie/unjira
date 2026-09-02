@@ -146,40 +146,37 @@ func TestSuppressStaleTransitions_IgnoresACollectedStatusChangeAsEvidence(t *tes
 	require.Len(t, suppressed, 1)
 }
 
-// TestSuppressStaleTransitions_AStatusEventLatestStatusEventSkippedIsNotWork is
-// the case that makes the exclusion load-bearing, and it is narrower than it
-// first appears.
+// TestSuppressStaleTransitions_AnUncollectedStatusChangeIsNotWork is the case
+// that makes the exclusion load-bearing, and it is narrower than it looks.
 //
-// For a normally-collected status change the exclusion changes nothing:
-// LatestStatusEvent returns the NEWEST status event for the issue, so a status
-// event in the delta can only equal LastStatus.OccurredAt, never exceed it — and
-// ties suppress. The exclusion is therefore invisible on the main path.
+// For a status change unjira has ALREADY collected the exclusion changes nothing:
+// LatestStatusEvent returns the newest status event for the issue, so one in the
+// delta can only equal LastStatus.OccurredAt, never exceed it — and ties suppress.
 //
-// Where it matters is a status event LatestStatusEvent SKIPPED. It requires a
-// non-null status_to (see its doc comment and
-// TestLatestStatusEvent_ToleratesAMissingStatusToArtifact), so an event with
-// field=status but no recorded destination is absent from LastStatus while still
-// sitting in the delta — and it can be arbitrarily newer. Counted as work, a
-// status change unjira could not even read would license the very transition the
-// guard exists to suppress.
-func TestSuppressStaleTransitions_AStatusEventLatestStatusEventSkippedIsNotWork(t *testing.T) {
+// The gap is between the two reads. The delta is a per-narrative event query;
+// LastStatus is a per-ISSUE one. A status change linked to this narrative for an
+// issue whose history LastStatus describes at an older timestamp — a second
+// connection, a re-collected changelog, a manually seeded event — sits in the
+// delta while being newer than LastStatus. Counted as work, somebody else's
+// transition would license the very move the guard exists to suppress.
+//
+// Note this test constructs the state directly rather than through a store: that
+// is the point. The two reads CAN disagree, and the guard must not assume they
+// cannot.
+func TestSuppressStaleTransitions_AnUncollectedStatusChangeIsNotWork(t *testing.T) {
 	verified := []verifiedLink{recencyLink("PAAS-1", "In Progress",
 		store.StatusEvent{From: "In Review", To: "In Progress", OccurredAt: t1}, true)}
 
-	// field=status but no status_to: LatestStatusEvent skips it, so it is not
-	// what LastStatus describes, yet it is newer than LastStatus.
-	unreadable := events.NewEvent("jira", "PAAS-1:status:legacy", t2,
-		"PAAS-1 status: In Progress → somewhere")
-	unreadable.Artifacts["issue_key"] = "PAAS-1"
-	unreadable.Artifacts["field"] = "status"
+	// A status change on the subject issue, newer than what LastStatus describes.
+	newer := jiraStatusEvent("PAAS-1:status:99", "PAAS-1", "In Progress", "Blocked", t2)
 
 	kept, suppressed := suppressStaleTransitions(
-		[]events.Event{unreadable}, verified,
+		[]events.Event{newer}, verified,
 		[]ProposedAction{transitionTo("PAAS-1", "In Review")},
 	)
 
 	assert.Empty(t, kept,
-		"a status change with no readable destination is not evidence that WORK advanced")
+		"somebody else's transition is not evidence that OUR work advanced")
 	require.Len(t, suppressed, 1)
 	assert.Contains(t, suppressed[0], "none: the delta holds only status changes",
 		"and the reason must say the delta held no work, not name a bogus timestamp")

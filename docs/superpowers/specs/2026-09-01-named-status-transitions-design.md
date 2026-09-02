@@ -256,10 +256,30 @@ excludes status changes **on the subject issue** — not status events generally
 real activity in this narrative) and not the whole `jira` source (a comment or description edit is
 work).
 
-Implemented as `store.LatestStatusEvent` plus `reconciler.suppressStaleTransitions`, with
-`status_from`/`status_to` added to the collector's status events so the destination is structured data
-rather than something parsed back out of `"PAAS-1 status: A -> B"` — the real separator is not reserved
-in a Jira status name, so a status genuinely containing it would parse to the wrong destination.
+Implemented as `store.LatestStatusEvent` plus `reconciler.suppressStaleTransitions`, with the status
+change declared through a new contract in `internal/events`.
+
+**The contract had to move.** The first cut had the reconciler testing
+`Artifacts["field"] == "status"` — Jira's *changelog* vocabulary, redeclared in the reconciler as
+local constants with a comment asserting "any collector that supplies status history uses this
+contract." That claim was invented: no other collector existed to honor it, and the shape does not
+generalize. GitHub Issues has no `field` concept at all (open/closed arrives as a timeline event), so a
+GitHub collector would have had to emit a fake Jira-shaped artifact to be noticed, or the guard would
+silently never fire for it.
+
+Root cause, which predates this work: `events.Artifacts` is a bare `map[string]any` with **no declared
+keys**, so every key is a private convention between one collector and whichever consumer hardcoded the
+same string. The correlator already did this twice (`issue_key`, `git_branch`).
+
+So `internal/events` now declares the cross-package keys and two accessors — `SetStatusChange` /
+`StatusChangeOf` — and the test for "is this a status change" is whether a **destination** was
+recorded, not which backend vocabulary the event uses. Source-agnostic by construction: a consumer that
+switched on `Source` would need editing for every new collector. The store query interpolates the same
+named constants, so it and `StatusChangeOf` cannot drift.
+
+The endpoints still have to be structured data either way: recovering the destination from the summary
+means parsing a human-facing string on the transition arrow, which is not reserved in a Jira status
+name, so a status genuinely containing it parses to the wrong destination.
 
 **Deliberately not applied to `ReworkOne`.** That is triage's `[e]dit`: a human asking for a redraft.
 The initiative is theirs and current by construction, so filtering the result would answer an explicit
@@ -269,7 +289,7 @@ request with silence.
 unguarded — the pre-guard behavior, not something worse, but invisible. That is task #174: a guard that
 cannot run must be visible rather than merely absent.
 
-Verification: 23 packages, 788 tests, `go vet -tags=live` clean, `golangci-lint` 0 issues. Each half
+Verification: 23 packages, 795 tests, `go vet -tags=live` clean, `golangci-lint` 0 issues. Each half
 drilled by breaking it and confirming the specific guard test fails.
 
 **unjira narrates transitions it did not make.** The comment proposed for PAAS-4038 opened:

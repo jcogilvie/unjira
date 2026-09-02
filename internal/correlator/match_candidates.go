@@ -27,7 +27,7 @@ type Candidate struct {
 //
 // Three provenance tiers come out of today's artifacts:
 //
-//   - ProvenanceJiraEvent from artifacts["issue_key"] on a jira-source event —
+//   - ProvenanceJiraEvent from events.ArtifactIssueKey on a jira-source event —
 //     the event is already about that issue, so this is direct, not inferred.
 //   - ProvenanceBranch from re-running events.ExtractTicketKeys over
 //     artifacts["git_branch"]. This is re-derived rather than trusted from
@@ -80,7 +80,7 @@ func gatherCandidates(evts []Event, linkExclusions []*regexp.Regexp, limit int) 
 	}
 
 	for _, e := range evts {
-		if issueKey, ok := e.Artifacts["issue_key"].(string); ok && issueKey != "" {
+		if issueKey, ok := e.Artifacts[events.ArtifactIssueKey].(string); ok && issueKey != "" {
 			connection, _ := e.Artifacts["connection"].(string)
 			upsert(issueKey, ProvenanceJiraEvent, connection)
 		}
@@ -163,7 +163,7 @@ func excludedCandidates(evts []Event, linkExclusions []*regexp.Regexp) []string 
 	var keys []string
 
 	for _, e := range evts {
-		if issueKey, ok := e.Artifacts["issue_key"].(string); ok && issueKey != "" && !seen[issueKey] {
+		if issueKey, ok := e.Artifacts[events.ArtifactIssueKey].(string); ok && issueKey != "" && !seen[issueKey] {
 			seen[issueKey] = true
 			keys = append(keys, issueKey)
 		}

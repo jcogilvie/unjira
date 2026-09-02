@@ -8,17 +8,6 @@ import (
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
-// statusFieldArtifact is the artifacts key a collector sets to name which issue
-// field a change touched, and statusField is its value for a status change.
-// Matching internal/collector/jira's own constants; duplicated rather than
-// imported because internal/reconciler must not depend on a specific collector
-// — any collector that supplies status history uses this contract.
-const (
-	statusFieldArtifact = "field"
-	statusField         = "status"
-	issueKeyArtifact    = "issue_key"
-)
-
 // suppressStaleTransitions drops proposed transitions the tracker has already
 // overtaken, returning the survivors and a reason per suppression.
 //
@@ -139,14 +128,16 @@ func newestWorkEvidence(delta []events.Event, issueKey string) (newest time.Time
 }
 
 // isStatusChangeOn reports whether e is a collected status change on issueKey.
+//
+// Asks internal/events rather than testing artifact keys directly. Those keys are
+// a cross-package contract, and a consumer that spelled them itself would be
+// guessing at a string literal — which is how this function first read Jira's
+// `field: "status"` changelog vocabulary and would therefore never have noticed a
+// GitHub status change at all.
 func isStatusChangeOn(e events.Event, issueKey string) bool {
-	if field, _ := e.Artifacts[statusFieldArtifact].(string); field != statusField {
-		return false
-	}
+	change, ok := events.StatusChangeOf(e)
 
-	key, _ := e.Artifacts[issueKeyArtifact].(string)
-
-	return key == issueKey
+	return ok && change.IssueKey == issueKey
 }
 
 // workEvidenceLabel renders the newest work timestamp for a suppression reason,

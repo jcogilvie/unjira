@@ -119,23 +119,20 @@ func EventsFromChangelogEntry(ic IssueContext, entry map[string]any) ([]events.E
 		evt.RawRef = ic.browseURL()
 		evt.Artifacts["field"] = field
 
-		// The transition's endpoints as structured data, on status events only.
+		// Declare the status change through internal/events' shared contract
+		// rather than by leaving Jira's `field: "status"` changelog vocabulary for
+		// a consumer to interpret.
 		//
-		// status_to is what the reconciler's recency guard compares against the
-		// live issue's StatusName, to tell "our events are current for this
-		// issue" from "somebody moved it since our last collect." Reading that
-		// out of the summary instead would mean parsing a human-facing string on
+		// The endpoints have to be structured data either way: recovering the
+		// destination from the summary means parsing a human-facing string on
 		// "→", which is not reserved in a Jira status name — a status genuinely
-		// called "A → B" would parse to the wrong destination, and a guard
-		// comparing against a status nobody set fails toward proposing.
+		// called "A → B" parses to the wrong destination, and a consumer
+		// comparing live state against a status nobody set fails toward acting.
 		//
-		// status_from has no reader yet. It is recorded because it is in the same
-		// changelog item, it makes the event self-describing without needing its
-		// predecessor, and a collector that discarded half of an observed
-		// transition would have thrown away something unrecoverable.
+		// `field` stays as its own artifact: it distinguishes a description edit
+		// from a summary edit, which nothing else records.
 		if field == fieldStatus {
-			evt.Artifacts["status_from"] = from
-			evt.Artifacts["status_to"] = to
+			events.SetStatusChange(&evt, ic.Key, from, to)
 		}
 
 		ic.annotate(&evt, accountID)
@@ -188,7 +185,7 @@ func EventFromComment(ic IssueContext, comment map[string]any) (events.Event, er
 // non-map field assignment here would silently stop affecting the caller. A
 // pointer receiver removes that trap.
 func (ic IssueContext) annotate(evt *events.Event, authorAccountID string) {
-	evt.Artifacts["issue_key"] = ic.Key
+	evt.Artifacts[events.ArtifactIssueKey] = ic.Key
 	evt.Artifacts["project_key"] = ic.ProjectKey
 	evt.Artifacts["connection"] = ic.Connection
 	evt.Artifacts["authored_by_unjira"] = ic.SelfAccountID != "" && authorAccountID == ic.SelfAccountID

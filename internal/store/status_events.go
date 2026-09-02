@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jcogilvie/unjira/internal/events"
 )
 
 // StatusEvent is one observed status change on an issue, as recorded by a
@@ -58,22 +60,35 @@ func (s *Store) LatestStatusEvent(issueKey string) (StatusEvent, bool, error) {
 		occurredAt string
 	)
 
+	// The artifact keys are internal/events' declared cross-package contract
+	// (events.ArtifactStatusTo and friends), interpolated by name so this query
+	// and events.StatusChangeOf cannot drift apart — they are two readers of one
+	// contract, and a string literal here would make them independent guesses.
+	//
+	// A non-null status_to is what makes an event a status change, matching
+	// StatusChangeOf exactly. Deliberately NOT a backend-specific marker like
+	// Jira's `field = 'status'`: that would make this query blind to any
+	// collector whose backend has no `field` concept (GitHub Issues reports
+	// open/closed as timeline events), and the guard would silently never fire
+	// for it.
+	//
 	// json_extract rather than a LIKE over the artifacts blob: a substring match
 	// on a JSON document would also match an issue key appearing in some other
 	// field's value. The driver (modernc.org/sqlite) ships JSON1, verified by
 	// probe before this query was written.
-	err := s.db.QueryRow(
-		`SELECT json_extract(artifacts, '$.status_from'),
-		        json_extract(artifacts, '$.status_to'),
+	query := fmt.Sprintf(
+		`SELECT json_extract(artifacts, '$.%[1]s'),
+		        json_extract(artifacts, '$.%[2]s'),
 		        occurred_at
 		   FROM events
-		  WHERE json_extract(artifacts, '$.issue_key') = ?
-		    AND json_extract(artifacts, '$.field') = 'status'
-		    AND json_extract(artifacts, '$.status_to') IS NOT NULL
+		  WHERE json_extract(artifacts, '$.%[3]s') = ?
+		    AND json_extract(artifacts, '$.%[2]s') IS NOT NULL
 		  ORDER BY occurred_at DESC, id DESC
 		  LIMIT 1`,
-		issueKey,
-	).Scan(&from, &to, &occurredAt)
+		events.ArtifactStatusFrom, events.ArtifactStatusTo, events.ArtifactIssueKey,
+	)
+
+	err := s.db.QueryRow(query, issueKey).Scan(&from, &to, &occurredAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return StatusEvent{}, false, nil
