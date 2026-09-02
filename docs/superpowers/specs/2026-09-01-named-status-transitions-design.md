@@ -156,6 +156,11 @@ already hardcodes 200) rather than becoming a second parameter `Cached` would ne
 This also means `internal/clients/jira` and `internal/clients/local` needed no changes — both
 already implement `GraphProvider`.
 
+`Graph.Save`/`workflow.Load` were **deleted** rather than used: a cache entry needs `mined_at` and
+`dirty` beside the graph, which their format cannot carry, so `cache.go` writes its own entry shape
+around `Graph.ToMap`. That left them at zero callers and zero tests after the change that was meant
+to give them a caller — uncalled, untested code that looks like the supported serialization path.
+
 The cache file lives at `data/workflow-cache/<sanitized-key>-<hash12>.json` (see
 `workflow.CachePath`, `workflow.DefaultCacheDir`): a `"data/"`-relative path matching
 `config.DBPath`'s own default, and a hashed filename suffix so two project/repo keys that
@@ -196,6 +201,13 @@ That preserves the reconciler spec's decision exactly — the graph never licens
 
 `Save`/`Load` already handle serialization. What is missing is a cache path convention, the TTL
 check, and the dirty flag.
+
+**This turned out to be wrong, and `Save`/`Load` were deleted.** They serialize a bare graph, but a
+cache entry needs `mined_at` (for the TTL) and `dirty` (for the rejection trigger) alongside it —
+metadata `Save`'s format cannot carry. So `cache.go` writes its own entry shape wrapping
+`Graph.ToMap`, and `Save`/`Load` remained at zero callers and zero tests after the work that was
+supposed to give them one. Untested, uncalled code that looks like the supported path is worse than
+its absence: the next reader would reasonably use it and get a cache the TTL cannot read.
 
 ### 5. Multi-hop: batch the edges, coalesce only at presentation
 

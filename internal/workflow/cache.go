@@ -33,8 +33,8 @@ const DefaultCacheDir = "data/workflow-cache"
 // (MarkDirty) is the real staleness detector, reacting to an observed
 // contradiction rather than a clock, and every hop a cached graph plans is
 // re-validated against the live per-issue transitions endpoint before it
-// executes (see tasktracker.TaskReader.AvailableStatusCategories's own doc
-// comment) — so a stale graph can misdirect planning but can never license
+// executes (see the live-read method on tasktracker.TaskReader and its own
+// doc comment) — so a stale graph can misdirect planning but can never license
 // an illegal write. 24h means at most one re-mine per calendar day of
 // `watch` ticks, which is the number of "wasted" 40s mines this constant is
 // actually trying to avoid.

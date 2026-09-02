@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"sort"
 )
 
@@ -226,42 +224,6 @@ func GraphFromMap(data map[string]any) (*Graph, error) {
 	}
 
 	return g, nil
-}
-
-// Save writes the graph as JSON to path, creating parent directories as
-// needed.
-func (g *Graph) Save(path string) error {
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return fmt.Errorf("creating directory for %s: %w", path, err)
-		}
-	}
-
-	body, err := json.MarshalIndent(g.ToMap(), "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling graph: %w", err)
-	}
-
-	if err := os.WriteFile(path, body, 0o600); err != nil {
-		return fmt.Errorf("writing graph to %s: %w", path, err)
-	}
-
-	return nil
-}
-
-// Load reads a graph previously written by Save.
-func Load(path string) (*Graph, error) {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading graph from %s: %w", path, err)
-	}
-
-	var data map[string]any
-	if err := json.Unmarshal(body, &data); err != nil {
-		return nil, fmt.Errorf("unmarshaling graph from %s: %w", path, err)
-	}
-
-	return GraphFromMap(data)
 }
 
 // GraphProvider is an optional TaskTracker capability: backends whose
