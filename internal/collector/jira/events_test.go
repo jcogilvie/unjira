@@ -195,3 +195,82 @@ func TestEventFromComment_SelfAuthoredIsTagged(t *testing.T) {
 	assert.Equal(t, true, got.Artifacts["authored_by_unjira"],
 		"this tag is what stops the reconciler proposing a comment we already posted")
 }
+
+// TestEventsFromChangelogEntry_StatusEventCarriesFromAndTo: the destination
+// status must be structured data, not something a consumer parses back out of
+// the summary string.
+//
+// The reconciler's recency guard compares the live issue's StatusName against
+// what the newest collected status event says the status BECAME. Reading that
+// from `"PROJ-42 status: To Do → In Progress"` means re-parsing a
+// human-facing string — which breaks the moment a status name contains the
+// separator, and Jira permits arbitrary status names.
+//
+// `from` is recorded too, though nothing reads it yet: it is right there in the
+// same changelog item, it is what makes an event self-describing without its
+// predecessor, and discarding half a transition to save a map key is the kind
+// of collected-once, gone-forever loss the collector exists to prevent.
+func TestEventsFromChangelogEntry_StatusEventCarriesFromAndTo(t *testing.T) {
+	entry := map[string]any{
+		"id":      "10001",
+		"created": "2026-08-20T14:30:00.000+0000",
+		"author":  map[string]any{"accountId": "acct-alice", "displayName": "Alice"},
+		"items": []any{
+			map[string]any{"field": "status", "fromString": "To Do", "toString": "In Progress"},
+		},
+	}
+
+	got, err := collectorjira.EventsFromChangelogEntry(testIssue(), entry)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "In Progress", got[0].Artifacts["status_to"],
+		"the destination is what the guard compares against live state")
+	assert.Equal(t, "To Do", got[0].Artifacts["status_from"])
+}
+
+// TestEventsFromChangelogEntry_StatusNameContainingTheSeparator is why the
+// artifacts exist rather than a summary parser. "→" is not reserved in a Jira
+// status name, and a parser splitting on it would report the wrong destination
+// — which, fed to the recency guard, means comparing live state against a
+// status nobody ever set.
+func TestEventsFromChangelogEntry_StatusNameContainingTheSeparator(t *testing.T) {
+	entry := map[string]any{
+		"id":      "10002",
+		"created": "2026-08-20T14:30:00.000+0000",
+		"items": []any{
+			map[string]any{
+				"field": "status", "fromString": "A → B", "toString": "C → D",
+			},
+		},
+	}
+
+	got, err := collectorjira.EventsFromChangelogEntry(testIssue(), entry)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "C → D", got[0].Artifacts["status_to"],
+		"a status name containing the summary's own separator must survive intact")
+}
+
+// TestEventsFromChangelogEntry_NonStatusFieldsCarryNoStatusArtifacts: a
+// description edit is not a transition. Tagging it with status_to would make it
+// selectable by the guard's query and let a summary edit masquerade as a status
+// change.
+func TestEventsFromChangelogEntry_NonStatusFieldsCarryNoStatusArtifacts(t *testing.T) {
+	entry := map[string]any{
+		"id":      "10003",
+		"created": "2026-08-20T14:30:00.000+0000",
+		"items": []any{
+			map[string]any{"field": "description", "fromString": "old", "toString": "new"},
+		},
+	}
+
+	got, err := collectorjira.EventsFromChangelogEntry(testIssue(), entry)
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.NotContains(t, got[0].Artifacts, "status_to",
+		"only a status change may look like one to the guard's query")
+	assert.NotContains(t, got[0].Artifacts, "status_from")
+}

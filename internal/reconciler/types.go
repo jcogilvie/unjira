@@ -73,6 +73,22 @@ type verifiedLink struct {
 	// name. Empty means no transition is proposable, which floorConfidence
 	// enforces.
 	Transitions []tasktracker.Transition
+
+	// LastStatus is the newest status change unjira has COLLECTED for this
+	// issue, which is a different thing from Issue.StatusName's live read.
+	// Together they answer whether unjira's view of this issue is current: if
+	// LastStatus.To matches the live status, the collected history is up to
+	// date and LastStatus.OccurredAt can be trusted as "when this issue last
+	// moved". If they disagree, somebody moved it since the last collect.
+	//
+	// Only meaningful when HaveLastStatus is true.
+	LastStatus store.StatusEvent
+	// HaveLastStatus distinguishes "no status change has been collected for
+	// this issue" from "collected a move to the empty string". Without it a
+	// zero-valued LastStatus reads as a real destination of "", which no live
+	// status ever equals — silently suppressing every transition on every
+	// issue whose history unjira has not collected.
+	HaveLastStatus bool
 }
 
 // targetNames lists the legal destination names, for the prompt and for the
