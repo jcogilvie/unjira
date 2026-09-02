@@ -188,9 +188,9 @@ CREATE TABLE IF NOT EXISTS local_issues (
     summary         TEXT NOT NULL,
     description     TEXT,
     issue_type      TEXT NOT NULL,
-    -- The tracker's own status NAME, not a normalized category. Held as a name
-    -- because tasktracker.TaskWriter.SetStatus targets a name: a category
-    -- cannot distinguish "In Review" from "Blocked" (see
+    -- The tracker's own status NAME, not a normalized category, because
+    -- tasktracker.TaskWriter.SetStatus targets a name: a category cannot
+    -- distinguish "In Review" from "Blocked" (see
     -- docs/superpowers/specs/2026-09-01-named-status-transitions-design.md),
     -- and a local backend that could not represent the distinction would make
     -- offline tests disagree with every real one.
@@ -286,68 +286,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
-	if err := migrate(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrating %s: %w", dbPath, err)
-	}
-
 	return &Store{db: db}, nil
-}
-
-// migrate applies changes the CREATE TABLE IF NOT EXISTS schema above cannot:
-// that statement is a no-op on a database whose tables already exist, so a
-// column rename or addition needs explicit handling or an existing database
-// keeps the old shape and every query against the new one fails at runtime.
-//
-// Each step must be idempotent and safe to run against both a fresh database
-// (where the schema just created the new shape) and an old one.
-func migrate(db *sql.DB) error {
-	// local_issues.status_category -> status. The column held a normalized
-	// category when a transition target was a category; it now holds the
-	// tracker's own status name, so the old name would misdescribe its
-	// contents. Existing values ("todo"/"in_progress"/"done") are left as-is:
-	// the local backend does not validate status names, so they remain
-	// perfectly usable names, and mapping them to invented display strings
-	// would rewrite recorded state to something no caller ever set.
-	hasOld, err := hasColumn(db, "local_issues", "status_category")
-	if err != nil {
-		return err
-	}
-	if hasOld {
-		if _, err := db.Exec(`ALTER TABLE local_issues RENAME COLUMN status_category TO status`); err != nil {
-			return fmt.Errorf("renaming local_issues.status_category to status: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// hasColumn reports whether table has a column named column, via
-// PRAGMA table_info. Errors are returned rather than treated as absence: a
-// failed probe would otherwise silently skip a migration and leave the database
-// in the shape the code no longer expects.
-func hasColumn(db *sql.DB, table, column string) (bool, error) {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return false, fmt.Errorf("reading columns of %s: %w", table, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return false, fmt.Errorf("scanning column name of %s: %w", table, err)
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("iterating columns of %s: %w", table, err)
-	}
-
-	return false, nil
 }
 
 // sqliteDSN turns a plain filesystem path into a modernc.org/sqlite DSN that

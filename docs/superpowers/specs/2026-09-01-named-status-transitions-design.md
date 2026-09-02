@@ -22,10 +22,11 @@ lands rather than describing them as done.
 - The drafting prompt names work-derived transition evidence, requires exact status names, and
   forbids restating a status change somebody else made.
 - `rules/no-self-narration.md`.
-- `local_issues.status_category` renamed to `status`, with a real idempotent migration —
-  `CREATE TABLE IF NOT EXISTS` is a no-op against an existing database, so the rename alone would
-  have left every dev database failing at runtime on the first local-backend call. The repo had no
-  migration mechanism at all before this.
+- `local_issues.status_category` renamed to `status`, holding a name. **No migration.** Nothing is
+  live, so an existing dev database is deleted and recreated rather than migrated. I built an
+  idempotent `ALTER TABLE` path first and removed it: a migration target in the schema before launch
+  is permanent clutter bought to avoid `rm data/unjira.db`, and the repo's own "greenfield schema, no
+  migration" note in the Scope section below already said so.
 
 **Not landed, and why:**
 
@@ -42,19 +43,16 @@ lands rather than describing them as done.
 **Verification:**
 
 ```
-go test ./...                          # 23 packages ok, 749 tests
+go test ./...                          # 23 packages ok, 746 tests
 go vet -tags=live ./internal/live/     # clean — the live tier is excluded from `go test ./...`
                                        # and silently broke CI on #27 for exactly this reason
 golangci-lint run ./...                # 0 issues.
 ```
 
-Both fixes were drilled by breaking them and confirming the guard fails:
-
-- Name matching disabled in `SetStatus` → `TestTracker_SetStatus_PicksTheTransitionMatchingTheName`
-  fails with `expected: "41" / actual: "31"`. 41 is In Review; 31 is In Progress and shares its
-  category. That is the wrong write, reproduced.
-- The migration's `ALTER TABLE` skipped → `TestMigrate_RenamesLocalIssueStatusCategory` fails on
-  `store.Open` against an old-shaped database.
+The fix was drilled by breaking it and confirming the guard fails: name matching disabled in
+`SetStatus` → `TestTracker_SetStatus_PicksTheTransitionMatchingTheName` fails with
+`expected: "41" / actual: "31"`. 41 is In Review; 31 is In Progress and shares its category. That is
+the wrong write, reproduced.
 
 The regression guard is `TestTransition_DistinguishesTargetsSharingACategory` plus
 `TestTracker_SetStatus_PicksTheTransitionMatchingTheName`, both built on the real mined PAAS
