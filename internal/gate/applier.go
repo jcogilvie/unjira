@@ -85,6 +85,10 @@ type commentPayload struct {
 
 type transitionPayload struct {
 	TargetStatus string `json:"target_status"`
+	// Route is the ordered hops to TargetStatus, present only when reaching it
+	// takes more than one. Absent means a single hop to TargetStatus, which is
+	// what every action persisted before multi-hop existed looks like.
+	Route []string `json:"route,omitempty"`
 }
 
 type createPayload struct {
@@ -205,8 +209,38 @@ func (a *Applier) applyTransition(action store.ActionRow) error {
 		return fmt.Errorf("action %d: transition action has no target_status", action.ID)
 	}
 
-	if err := a.writer.SetStatus(action.IssueKey, target); err != nil {
-		return fmt.Errorf("transitioning %s to %q: %w", action.IssueKey, target, err)
+	// One row, one approval, N writes. The route is the whole journey the work
+	// crossed between collects; the reviewer approved reaching its end, and the
+	// intermediate hops are mechanical consequences of that — see the spec's
+	// "coalescing is presentation-only."
+	//
+	// Each hop is validated live by SetStatus immediately before it executes (it
+	// reads the issue's own transitions and errors naming what was available), so
+	// no separate per-hop check belongs here — a second one would only add a window
+	// between check and write. See docs/design-notes.md incident 16.
+	route := p.Route
+	if len(route) == 0 {
+		route = []string{target}
+	}
+
+	for i, hop := range route {
+		if err := a.writer.SetStatus(action.IssueKey, hop); err != nil {
+			// Name how far it got. A partial application is a real state and must
+			// be legible as one: without the reached-status prefix a reviewer
+			// cannot tell a route that never started from one that stopped
+			// halfway, and would have to infer position from the ticket. The next
+			// reconcile pass sees the new current status, computes a shorter
+			// route, and proposes the remainder — retry is the normal path, not
+			// machinery here.
+			if i == 0 {
+				return fmt.Errorf("transitioning %s to %q: %w", action.IssueKey, hop, err)
+			}
+
+			return fmt.Errorf(
+				"transitioning %s to %q: reached %q, then %q refused: %w",
+				action.IssueKey, target, route[i-1], hop, err,
+			)
+		}
 	}
 
 	return nil

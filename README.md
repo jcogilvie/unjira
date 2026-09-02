@@ -285,6 +285,16 @@ data/                   SQLite database lives here (gitignored)
   instance (a migration, an acquisition); credentials come from one JSON-blob env var
   (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
   connection count.
+- **A transition may cross several statuses in one action, because unjira has no guaranteed run
+  cadence.** Between two collects a ticket legitimately traverses `Ready for Dev -> In Progress ->
+  In Review` — sprint planning moves it outside unjira, work starts, and a small change is submitted
+  the same day; interrupt-driven work skips planning entirely. The evidence for the whole journey
+  arrives in **one delta**, so the observed workflow graph supplies the legal ordering for a journey
+  the evidence already covers rather than inventing a route. One row, one approval, N tracker writes;
+  the applier walks the hops and `actions.error` records how far it got, with retry being simply the
+  next reconcile pass. The graph only ever **plans** — every hop is validated against the live
+  per-issue transition set immediately before it executes, so a stale graph costs a refused hop and
+  never a wrong write. A backend with no graph to give degrades to single-hop.
 - **A work-derived transition is suppressed when the tracker knows something newer, judged by
   recency rather than direction.** The obvious guard — never move a ticket to an earlier status —
   inverts: backward moves are legitimate (a security scan bouncing a ticket back after finding the

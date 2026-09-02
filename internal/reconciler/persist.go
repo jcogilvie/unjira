@@ -102,6 +102,13 @@ func ActionPayload(action ProposedAction) (string, error) {
 		payload = map[string]any{"body": action.Body}
 	case ActionTransition:
 		payload = map[string]any{"target_status": action.TargetStatus}
+		if len(action.Route) > 1 {
+			// Only for a genuine multi-hop route. A one-element route carries
+			// no information the target does not already, and omitting it keeps
+			// the common payload identical to what shipped before multi-hop —
+			// so an action persisted by an older build stays readable.
+			payload["route"] = action.Route
+		}
 	case ActionCreate:
 		payload = map[string]any{"summary": action.Summary, "description": action.Body}
 	default:

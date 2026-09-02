@@ -3,13 +3,13 @@
 Replacing the three-category transition target with the tracker's own status names, and making
 `workflow.Graph` load-bearing for the first time.
 
-## Status: partially landed 2026-09-01
+## Status: landed 2026-09-02
 
-Sections 1, 2, the prompt half of 3, 3a (recency), and 4 (the graph cache) have landed. Section 5
-(multi-hop) has **not** — it is a separate change, and this section will be updated when it lands
-rather than describing it as done.
+**All five sections have landed**, in three changes: 1, 2, and the prompt half of 3 first; then 3a
+(recency) and 4 (the graph cache); then 5 (multi-hop). Each section below carries its own landed note
+with the deviations and evidence for that piece.
 
-**Landed:**
+**The first change (2026-09-01) landed sections 1, 2, and the prompt half of 3:**
 
 - `SetStatus(key, targetStatus string)`, `AvailableTransitions` replacing
   `AvailableStatusCategories`, the new `Transition` type. Both backends.
@@ -28,19 +28,23 @@ rather than describing it as done.
   is permanent clutter bought to avoid `rm data/unjira.db`, and the repo's own "greenfield schema, no
   migration" note in the Scope section below already said so.
 
-**Not landed, and why:**
+**Deliberately deferred out of that first change** (each has since landed, and each section's own
+note records how):
 
-- **Section 3a (recency)** needs `Issue.StatusChangedAt`, which needs the issue's last status change
-  from a changelog read. The field was written and then removed from this change rather than shipped
-  always-zero: a field nothing populates reads as "no status change on record," which under the
-  recency rule means "propose," i.e. exactly the handoff-fighting behavior the rule exists to stop.
-  The obvious cheap source (`statuscategorychangedate`) is wrong here — it moves only when the
-  *category* changes, so `In Progress -> In Review` would not update it. `expand=changelog` looks
-  free but Jira truncates embedded histories, and a truncated changelog yields a too-old timestamp,
-  which fails in the same unsafe direction.
-- **Sections 4 and 5** are in flight separately.
+- **Section 3a (recency)** looked like it needed `Issue.StatusChangedAt` from a live changelog read.
+  The field was written and then removed rather than shipped always-zero: a field nothing populates
+  reads as "no status change on record," which under the recency rule means "propose" — exactly the
+  handoff-fighting behavior the rule exists to stop. The cheap sources are also wrong.
+  `statuscategorychangedate` moves only when the *category* changes, so `In Progress -> In Review`
+  would not update it; `expand=changelog` looks free but Jira truncates embedded histories, and a
+  truncated changelog yields a too-old timestamp, failing the same unsafe way.
 
-**Verification:**
+  **This premise turned out to be false** — the field was never needed. See section 3a's landed note:
+  the Jira collector already ingests status changes as events, so the data was in unjira's own store
+  the whole time.
+- **Sections 4 and 5** landed as separate changes. See their own notes.
+
+**Verification of the first change:**
 
 ```
 go test ./...                          # 23 packages ok, 746 tests
@@ -303,7 +307,7 @@ for judging what to say, never the subject of what is said.
 
 ### 4. `workflow.Graph` becomes load-bearing, with a cache
 
-#### Status: landed 2026-09-01 (cache only — sections 1-3 and 5 are still design)
+#### Status: landed 2026-09-01 (the cache; other sections landed in their own changes)
 
 Built `workflow.Cached`/`workflow.CacheOptions`/`workflow.CacheStatus`/`workflow.MarkDirty` in
 `internal/workflow/cache.go`, the `workflow.cache_ttl` config key
@@ -406,6 +410,47 @@ retry machinery, and the failure mode degrades into the normal case.
 So coalescing is presentation-only, as suspected: **one row, one approval, one apply call, N tracker
 writes.** The reviewer sees "move to In Review (via In Progress)" rather than three actions to approve
 separately — two of which are mechanical consequences of the third.
+
+#### Status: landed 2026-09-02
+
+**Why this was worth building, which the section above states weakly.** The example here is
+`Discovery -> In Review`, which reads like an edge case. The real driver is that **unjira has no
+guaranteed run cadence.** Between two collects a ticket legitimately traverses several statuses:
+sprint planning moves it to Ready for Dev outside unjira, work starts, and a small change is submitted
+the same day. Interrupt-driven work — an oncall triage item discovered, worked, and sent for review —
+skips the planning transition entirely.
+
+That matters because the evidence for the whole journey is in **one delta**. Work-started and
+PR-opened arrive together. So the graph is not inventing a route the evidence does not support; it is
+supplying the legal ordering for a journey the evidence already covers. Without it the model is
+offered only the next hop, the In Review evidence is permanently unusable, and every later pass
+re-derives the same single step — so unjira trails reality by however many statuses the work crossed
+between runs.
+
+**Implementation, and one deviation.** `reachableTargets` widens the drafting prompt to the live-legal
+set plus anything `Graph.Path` reaches; `resolveRoute` returns the ordered hops. Two rules, in order:
+the live set wins (a directly-offered target is legal whether or not the mined graph has that edge —
+this is also the resolution of the nil-`Path` question), and a graph route's first hop must be
+live-legal (or the route cannot start, and proposing it would queue an action guaranteed to fail).
+
+The deviation: the spec implies each hop needs a live validation added at apply time. It does not.
+`TaskWriter.SetStatus` already reads the issue's own transitions and errors naming what was available,
+so the applier just walks the route — a second check would only add a window between check and write
+(design-notes incident 16). `actions.error` already captures the returned error via `Apply`, so
+recording how far it got needed only the right message.
+
+**A one-element route is a single hop**, deliberately: the common case is not a special case, so the
+applier has exactly one code path. And a nil graph means single-hop, which is precisely the
+pre-multi-hop behaviour — so a backend that cannot supply a graph (the local tracker's is static; a
+future GitHub backend's would be open/closed) needs no special case.
+
+**Not applied to `Redraft`.** That is triage's `[e]dit`, where a human is correcting the action in
+front of them; offering statuses several hops away would answer a specific request by widening its
+scope.
+
+Verification: 23 packages, 811 tests, `go vet -tags=live` clean, `golangci-lint` 0 issues. Each half
+drilled by breaking it and confirming the specific guard test fails. The fixture is the real mined
+PAAS graph, so a test cannot agree with a route no real project has.
 
 ## Scope
 

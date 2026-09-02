@@ -103,6 +103,53 @@ func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, er
 	}
 }
 
+// workflowGraph returns the observed transition graph for projectKey, or nil
+// when this configuration cannot supply one.
+//
+// Nil is an ordinary outcome, not a failure: only a backend with an
+// admin-configurable workflow implements workflow.GraphProvider (Jira mines its
+// changelog; the local backend returns a static graph; a future GitHub backend
+// would have open/closed), and the reconciler treats a nil graph as single-hop —
+// exactly the behaviour before multi-hop existed.
+//
+// A mining or cache failure is logged and yields nil rather than failing the
+// command. The graph only ever PLANS: every hop is validated live before it
+// executes, so its absence costs unjira the ability to propose a multi-hop move,
+// never correctness. Failing a whole reconcile pass because a planning aid was
+// unavailable would trade a real capability for a cosmetic one.
+func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
+	tracker, err := a.taskTracker(projectKey)
+	if err != nil {
+		log.Printf("workflow: no tracker for project %s (%v); transitions will be single-hop", projectKey, err)
+
+		return nil
+	}
+
+	provider, ok := tracker.(workflow.GraphProvider)
+	if !ok {
+		// Not every backend has a workflow to describe. Silent because this is a
+		// property of the configured backend, not an anomaly.
+		return nil
+	}
+
+	graph, status, err := workflow.Cached(provider, projectKey, workflow.CacheOptions{
+		TTL: a.config.Workflow.CacheTTL.Duration(),
+	})
+	if err != nil {
+		log.Printf(
+			"workflow: could not obtain a graph for %s (%v); transitions will be single-hop",
+			projectKey, err)
+
+		return nil
+	}
+
+	if !status.Cached {
+		log.Printf("workflow: mined %s (%s)", projectKey, status.Reason)
+	}
+
+	return graph
+}
+
 // projectKey resolves --project, falling back to the first configured
 // project key.
 func (a *appContext) projectKey(flag string) (string, error) {
@@ -465,7 +512,8 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	// limitation described above applies identically here — a link whose
 	// Connection differs from this one is verified against the wrong site.
 	reconcileResult, reconcileErr := pipeline.RunReconcile(
-		ctx, app.store, tracker, client, app.config, pipeline.ReconcileOptions{})
+		ctx, app.store, tracker, client, app.config,
+		pipeline.ReconcileOptions{Graph: app.workflowGraph(project)})
 
 	// Render before returning the error, matching the matching stage above:
 	// Reconcile isolates failures per narrative, so healthy narratives produced
@@ -623,6 +671,12 @@ func (c *watchCmd) Run(app *appContext) error {
 
 	applier := gate.NewApplier(app.store, tracker, app.config.Tracker.DefaultProject, app.config.Jira)
 
+	// Resolved once for the whole watch loop, not per pass: a workflow changes on
+	// the order of months and the cache TTL is measured in hours, so re-resolving
+	// every interval would re-read the cache file for an answer that cannot have
+	// changed. A nil graph here simply means transitions stay single-hop.
+	graph := app.workflowGraph(project)
+
 	// ctx governs the LOOP — whether to acquire another lease, whether to
 	// keep waiting out the interval — but deliberately does NOT govern an
 	// in-flight PASS: watchLoop derives a non-cancelable context per pass via
@@ -637,7 +691,8 @@ func (c *watchCmd) Run(app *appContext) error {
 	since := c.Since.Duration()
 
 	return app.watchLoop(ctx, c.Interval.Duration(), c.Once, func(passCtx context.Context, _ string) error {
-		return app.runWatchPass(passCtx, client, tracker, applier, linkExclusions, since, c.DryRun)
+		return app.runWatchPass(
+			passCtx, client, tracker, applier, linkExclusions, graph, since, c.DryRun)
 	})
 }
 
@@ -731,6 +786,7 @@ func (a *appContext) runWatchPass(
 	tracker tasktracker.TaskTracker,
 	applier *gate.Applier,
 	linkExclusions []*regexp.Regexp,
+	graph *workflow.Graph,
 	since time.Duration,
 	dryRun bool,
 ) error {
@@ -764,7 +820,8 @@ func (a *appContext) runWatchPass(
 	}
 
 	reconcileResult, reconcileErr := pipeline.RunReconcile(
-		ctx, a.store, tracker, client, a.config, pipeline.ReconcileOptions{})
+		ctx, a.store, tracker, client, a.config,
+		pipeline.ReconcileOptions{Graph: graph})
 	fmt.Print(pipeline.RenderReconcileResult(reconcileResult))
 
 	if reconcileErr != nil {
