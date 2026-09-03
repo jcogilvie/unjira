@@ -21,55 +21,40 @@ Every claim below was verified against the tree at scan time; findings carry `fi
 ## 1. The pipeline as data flow
 
 Deterministic stages are the load-bearing ones — the model never sees an event unless a pure
-function put it there.
+function put it there. Green is deterministic, yellow is LLM-backed, red holds write authority.
+
+**Drawn as a sequence, but every arrow goes through the store.** No stage hands another an in-memory
+value; each reads what the last one committed. The store is omitted from the diagram because drawing
+it as a hub with fifteen spokes obscured the stage order, which is the thing a newcomer needs first —
+but the mediation is the load-bearing property, not the adjacency. The loop back through
+`collector/jira` is real: unjira observes its own writes on the next pass, which is what
+`authored_by_unjira` exists to filter.
 
 ```mermaid
+---
+config:
+  nodeSpacing: 50
+  rankSpacing: 45
+---
 flowchart TB
-    subgraph sources["Event sources"]
-        CC["Claude Code transcripts<br/>(JSONL on disk)"]
-        JIRA["Jira Cloud<br/>(changelog + comments)"]
-    end
+    CC["Claude Code transcripts"] --> CCC["collector/claudecode"]
+    JIRA[("Jira Cloud")] --> JC["collector/jira"]
+    CCC --> CLUSTER
+    JC --> CLUSTER
+    CLUSTER["Cluster · LLM<br/>events to narratives"] --> PERSIST["Persist<br/>new / extend / compact"]
+    PERSIST --> CAND["gatherCandidates<br/>deterministic pre-filter"]
+    CAND --> MATCH["Match · LLM<br/>narrative to issue"]
+    MATCH --> VERIFY["verifyLinks<br/>live tracker read"]
+    VERIFY --> DRAFT["draft / create · LLM<br/>proposes actions"]
+    DRAFT --> FILTERS["runSuppression<br/>unroutable · tracker-echo<br/>stale · duplicate"]
+    FILTERS --> TRIAGE["triage<br/>human review"]
+    TRIAGE --> DECIDE["gate.Decide<br/>pure, no I/O"]
+    DECIDE --> APPLY["gate.Applier<br/>holds TaskWriter"]
+    APPLY -->|"AddComment · SetStatus · CreateIssue"| JIRA
 
-    subgraph collectors["Collectors — deterministic, no LLM, no judgment"]
-        CCC["collector/claudecode"]
-        JC["collector/jira"]
-    end
-
-    STORE[("internal/store<br/>SQLite")]
-
-    subgraph correlate["internal/correlator"]
-        CLUSTER["Cluster<br/>LLM · groups events into narratives"]
-        PERSIST["Persist<br/>deterministic · new / extend / compact"]
-        MATCH["Match<br/>LLM · narrative to issue"]
-        CAND["gatherCandidates<br/>deterministic · pre-filter"]
-    end
-
-    subgraph reconcile["internal/reconciler"]
-        VERIFY["verifyLinks<br/>live tracker read"]
-        DRAFT["draft / Redraft / create<br/>LLM · proposes actions"]
-        FILTERS["runSuppression — ordered chain:<br/>1 unroutable · 2 tracker-echo<br/>3 stale-transition · 4 duplicate"]
-    end
-
-    subgraph review["Human review"]
-        TRIAGE["internal/triage<br/>approve · reject · edit<br/>merge · split · target"]
-    end
-
-    subgraph write["internal/gate — the ONLY write authority"]
-        DECIDE["Decide<br/>pure, no I/O"]
-        APPLY["Applier<br/>holds TaskWriter"]
-    end
-
-    CC --> CCC --> STORE
-    JIRA --> JC --> STORE
-    STORE --> CLUSTER --> PERSIST --> STORE
-    STORE --> CAND --> MATCH --> STORE
-    STORE --> VERIFY --> DRAFT --> FILTERS --> STORE
-    STORE --> TRIAGE --> STORE
-    STORE --> DECIDE --> APPLY -->|"AddComment · SetStatus · CreateIssue"| JIRA
-
-    classDef llm fill:#f9e79f,stroke:#b7950b
-    classDef det fill:#d5f5e3,stroke:#1e8449
-    classDef danger fill:#fadbd8,stroke:#c0392b
+    classDef llm fill:#f9e79f,stroke:#b7950b,color:#1a1a1a
+    classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
+    classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,MATCH,DRAFT llm
     class CCC,JC,PERSIST,CAND,FILTERS,DECIDE det
     class APPLY danger
@@ -79,9 +64,9 @@ flowchart TB
 `correlator/match.go:556`, `reconciler/draft.go:90`, `:337`, `reconciler/create.go:235`. Nothing
 else in the tree calls a model.
 
-**The store is the only channel between stages.** No stage hands another stage an in-memory value;
-each reads what the last one committed. That is what makes a failed pass cost a retry and nothing
-else.
+Store-mediation is what makes a failed pass cost a retry and nothing else: a stage that dies has
+committed either everything or nothing, and the next pass picks up from the persisted state rather
+than from a lost in-memory value.
 
 ---
 
@@ -92,37 +77,43 @@ The safety-critical diagram. `TaskReader` and `TaskWriter` are separate interfac
 compiler checks rather than a claim a comment makes.
 
 ```mermaid
+---
+config:
+  nodeSpacing: 40
+  rankSpacing: 70
+---
 flowchart LR
-    subgraph readers["Hold TaskReader — structurally cannot write"]
+    subgraph readers["TaskReader only"]
         R1["reconciler.Reconcile"]
         R2["reconciler.Rework"]
-        R3["correlator.Match<br/>(via TrackerResolver)"]
+        R3["correlator.Match"]
         R4["triage.restructure"]
         R5["pipeline.RunReconcile"]
     end
 
-    subgraph writer["Holds TaskWriter — the only one"]
-        A["gate.Applier<br/>internal/gate/applier.go:42"]
+    subgraph gates["Deny-by-default gates"]
+        G1["auto_commit.graduated<br/>false by zero value"]
+        G2["confidence >= floor"]
+        G3["writable_project_keys<br/>empty denies all"]
     end
 
-    subgraph gates["Three deny-by-default gates"]
-        G1["auto_commit.graduated<br/>false by zero value<br/>gate/decide.go:66"]
-        G2["confidence >= confidence_floor<br/>gate/decide.go:66"]
-        G3["writable_project_keys<br/>empty denies everything<br/>gate/applier.go:382"]
-    end
-
+    HUMAN["Human approval<br/>triage / actions decide"]
+    A["gate.Applier<br/>the ONLY TaskWriter"]
     TRACKER[("Jira / local tracker")]
 
-    R1 & R2 & R3 & R4 & R5 -->|"read only"| TRACKER
-    A -->|"write"| TRACKER
+    R1 --> TRACKER
+    R2 --> TRACKER
+    R3 --> TRACKER
+    R4 --> TRACKER
+    R5 --> TRACKER
     G1 --> A
     G2 --> A
     G3 --> A
+    HUMAN --> A
+    A ==>|"the only write path"| TRACKER
 
-    HUMAN["Human approval<br/>via triage / actions decide"] --> A
-
-    classDef danger fill:#fadbd8,stroke:#c0392b
-    classDef gate fill:#fdebd0,stroke:#ca6f1e
+    classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
+    classDef gate fill:#fdebd0,stroke:#ca6f1e,color:#1a1a1a
     class A danger
     class G1,G2,G3 gate
 ```
@@ -143,38 +134,45 @@ action trusted" but "is this project one we may write to at all."
 ## 3. Action lifecycle
 
 ```mermaid
+---
+config:
+  nodeSpacing: 60
+  rankSpacing: 80
+---
 stateDiagram-v2
+    direction LR
     [*] --> proposed: reconciler drafts
-    [*] --> declined: model judged<br/>not worth tracking<br/>(create only)
+    [*] --> declined: not worth tracking
 
-    proposed --> approved: triage [a]pprove<br/>or auto_commit
-    proposed --> rejected: triage [r]eject<br/>or [t]arget (wrong issue)
-    proposed --> edited: triage [e]dit / [m]erge
-    proposed --> proposed: triage [s]kip
+    proposed --> approved: approve / auto_commit
+    proposed --> rejected: reject / retarget
+    proposed --> edited: edit / merge
+    proposed --> proposed: skip
 
-    approved --> applied: Applier wrote it
-    approved --> failed: tracker refused<br/>actions.error records<br/>how far it got
+    approved --> applied
+    approved --> failed: tracker refused
 
-    failed --> proposed: next reconcile pass
-    edited --> proposed: replacement row
-    rejected --> proposed: replacement row<br/>([t]arget only)
+    failed --> proposed: next pass
+    edited --> proposed: supersede
+    rejected --> proposed: supersede
 
     applied --> [*]
     rejected --> [*]
     declined --> [*]
-
-    note right of declined
-        Distinct from rejected:
-        no human ruled.
-        reconciler/create.go:67
-    end note
-
-    note right of failed
-        Retry is simply the
-        next pass — no
-        separate retry path.
-    end note
 ```
+
+Reading the transitions, since a state diagram cannot carry this much without the labels colliding:
+
+- **`declined`** is the model judging work not worth a ticket — creates only, and **distinct from
+  `rejected`, which is a human's ruling** (`reconciler/create.go:67`). Conflating them would teach
+  slice 7's distiller that unjira's own taste and a reviewer's are the same signal.
+- **`reject / retarget`** are both recorded `rejected`, but only retarget produces a replacement row:
+  the old action named the wrong issue, so it was ruled against rather than reworded
+  (`triage/restructure.go:364`).
+- **`edit / merge`** supersede with a replacement row and status `edited`.
+- **`failed`** carries `actions.error` recording how far a multi-hop route got. **Retry is simply the
+  next reconcile pass** — there is no separate retry path.
+- **`skip`** leaves the action `proposed` for the next session.
 
 **Finding — the lifecycle vocabulary is half-declared.** `StatusProposed`
 (`reconciler/types.go:39`) and `StatusDeclined` (`reconciler/create.go:67`) are constants;
@@ -190,22 +188,41 @@ spread across five packages — `gate/applier.go:124`, `:127`, `triage/triage.go
 Acyclic (it compiles). Direction is downward; no `internal/` package imports `cmd/`.
 
 ```mermaid
-flowchart TD
-    CMD["cmd/unjira"]
-    PIPE["pipeline"]
-    TRIAGE["triage"]
-    RECON["reconciler"]
-    CORR["correlator"]
-    GATE["gate"]
-    STORE["store"]
-    CONFIG["config"]
-    CJIRA["clients/jira"]
-    CLOCAL["clients/local"]
-    COAI["clients/openai"]
-    COLLJ["collector/jira"]
-    COLLC["collector/claudecode"]
+---
+config:
+  nodeSpacing: 45
+  rankSpacing: 60
+---
+flowchart TB
+    subgraph L1["Entrypoint"]
+        CMD["cmd/unjira"]
+    end
 
-    subgraph contracts["Shared contracts — few or no imports"]
+    subgraph L2["Orchestration"]
+        PIPE["pipeline"]
+        TRIAGE["triage"]
+    end
+
+    subgraph L3["Domain logic"]
+        RECON["reconciler"]
+        CORR["correlator"]
+        GATE["gate"]
+    end
+
+    subgraph L4["Adapters"]
+        CJIRA["clients/jira"]
+        CLOCAL["clients/local"]
+        COAI["clients/openai"]
+        COLLJ["collector/jira"]
+        COLLC["collector/claudecode"]
+    end
+
+    subgraph L5["Persistence + config"]
+        STORE["store"]
+        CONFIG["config"]
+    end
+
+    subgraph L6["Shared contracts"]
         EVENTS["events"]
         TT["tasktracker"]
         LLM["llm"]
@@ -213,31 +230,20 @@ flowchart TD
         RULES["rules"]
     end
 
-    subgraph orphans["Pure, tested, and CALLED BY NOTHING"]
-        REFS["correlator/refs"]
-        FANOUT["correlator/fanout"]
-    end
+    ORPHAN["correlator/refs · correlator/fanout<br/>pure, tested, CALLED BY NOTHING"]
 
-    CMD --> PIPE & TRIAGE & GATE & CORR & STORE & CONFIG
-    CMD --> CJIRA & CLOCAL & COAI & COLLJ & COLLC
-    PIPE --> RECON & CORR & GATE & STORE & CONFIG
-    TRIAGE --> RECON & CORR & STORE
-    RECON --> CORR & STORE & CONFIG & WF & LLM & RULES & EVENTS & TT
-    CORR --> STORE & CONFIG & LLM & RULES & EVENTS & TT
+    CMD --> L2
+    CMD --> L4
+    L2 --> L3
+    L3 --> L5
+    L3 --> L6
+    L4 --> L5
+    L4 --> L6
+    L5 --> EVENTS
     CORR -.->|"F3: concrete backend"| CJIRA
-    GATE --> STORE & CONFIG & TT
-    STORE --> EVENTS
-    CONFIG --> EVENTS
-    CJIRA --> TT & WF
-    CLOCAL --> STORE & TT & WF
-    COAI --> LLM
-    COLLJ --> CJIRA & CONFIG & EVENTS & PIPE
-    COLLC --> EVENTS & PIPE
 
-    classDef orphan fill:#eaeaea,stroke:#888,stroke-dasharray: 5 5
-    classDef tension fill:#fdebd0,stroke:#ca6f1e
-    class REFS,FANOUT orphan
-    class CORR tension
+    classDef orphan fill:#eaeaea,stroke:#888,stroke-dasharray: 5 5,color:#1a1a1a
+    class ORPHAN orphan
 ```
 
 ---
