@@ -337,10 +337,14 @@ registry, and a defensible one at two backends — one of which exists only for 
 paying off around three variants. *Revisit when a third tracker lands*, or if backend-aware sites
 begin appearing outside `cmd`/`config`.
 
-**A Repository interface over `internal/store`.** Finding F4 identifies two responsibilities there and
-that holds up, but the cheaper fix is splitting the *file*. With one implementation and no second datastore in
-prospect, an interface adds indirection without inversion. *Revisit if a second store implementation
-becomes real* — an in-memory store for tests, or a non-SQLite backend.
+**A Repository interface over `internal/store`.** The package holds two responsibilities — unjira's own
+records (events, narratives, actions, cursors, `pipeline_lock`) and the local tasktracker backend's
+mimicked issue store (`local_issues`/`local_issue_comments`, `localissues.go`) — sharing one `*Store`
+handle and one `Open` because both need exactly one SQLite file, not because they share query logic.
+That split is expressed at the file level (each concern has its own file; §4's dependency graph is
+unaffected, since both stay inside `internal/store`), not via an interface: with one implementation and
+no second datastore in prospect, an interface would add indirection without inversion. *Revisit if a
+second store implementation becomes real* — an in-memory store for tests, or a non-SQLite backend.
 
 **`correlator.Stats` as a Visitor.** It is a plain accumulator with `Add`/`AddUsage`
 (`correlator.go:131`, `:144`), and the pattern name would not change the code. *Revisit if traversal

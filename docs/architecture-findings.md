@@ -84,28 +84,6 @@ would need cannot recognize its errors, and `correlator` — which otherwise tal
 `tasktracker` interfaces — has a concrete backend in its import list. This is incident 21's shape at
 the package level. The comment names the cycle as the blocker, which is the actionable part.
 
-### F4 — internal/store is two responsibilities sharing a connection
-
-2423 non-test lines, of which `store.go` alone is **2008** — about 5× the point at which a file stops
-fitting in one head.
-
-Two groups, and no group-(a) function touches group (b)'s tables or vice versa:
-
-- **(a) unjira's own records** — ~2209 lines. Events, narratives, actions, cursors, links,
-  `pipeline_lock`. Consumed by nearly every package.
-- **(b) a mimicked issue tracker** — 214 lines (`store.go:502-684` plus schema at `:182-208`).
-  `local_issues` / `local_issue_comments`, with exactly **one** production consumer,
-  `internal/clients/local`.
-
-They share the `*Store` handle, `Open`, and one monolithic `schema` string — but **not** the
-transaction machinery: all twelve `*Tx` methods are group (a), and group (b)'s six accessors call
-`s.db` directly. Shared plumbing, not shared logic.
-
-`Open(dbPath)` takes no backend parameter (`store.go:272`), so **`local_issues` is created in every
-database even when the `jira` backend is configured** — which is the default. The only boundary
-between the two groups is a section comment of the same visual weight as the ones separating
-`events` from `cursors`.
-
 ### F5 — Three tables are created and never used
 
 `ledger` (`store.go:174`) and `estimates` (`store.go:164`) are in the schema. **No Go code reads or
@@ -210,7 +188,6 @@ store would break the renderers' no-I/O property, which is probably the wrong tr
 | F1 — dead primitives | **#181**, which blocks **#179** |
 | F2 — undeclared vocabularies | **#182** |
 | F3 — concrete backend in the correlator | **#183** |
-| F4 — store's two responsibilities | **#183** |
 | F5, F6 — dead schema, unread artifacts | **#176** |
 | F7 — connection/identity model | **#178** |
 | F8 — resolver's home | **#177** |
