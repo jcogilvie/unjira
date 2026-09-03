@@ -23,34 +23,60 @@ Every claim below was verified against the tree at scan time; findings carry `fi
 Deterministic stages are the load-bearing ones — the model never sees an event unless a pure
 function put it there. Green is deterministic, yellow is LLM-backed, red holds write authority.
 
-**Drawn as a sequence, but every arrow goes through the store.** No stage hands another an in-memory
-value; each reads what the last one committed. The store is omitted from the diagram because drawing
-it as a hub with fifteen spokes obscured the stage order, which is the thing a newcomer needs first —
-but the mediation is the load-bearing property, not the adjacency. The loop back through
-`collector/jira` is real: unjira observes its own writes on the next pass, which is what
-`authored_by_unjira` exists to filter.
+**The store at the centre is the point, not clutter.** Every arrow passes through it: no stage hands
+another an in-memory value, each reads what the last one committed. That is why a failed pass costs a
+retry and nothing else.
+
+These diagrams are drawn for **zoom**, not for a thumbnail — GitHub gives rendered mermaid its own
+zoom and pan controls, so the constraint that matters is label *overlap*, never pixel count. Prefer
+generous `nodeSpacing`/`rankSpacing` and full labels over abbreviation.
 
 ```mermaid
 ---
 config:
-  nodeSpacing: 50
-  rankSpacing: 45
+  nodeSpacing: 100
+  rankSpacing: 120
 ---
 flowchart TB
-    CC["Claude Code transcripts"] --> CCC["collector/claudecode"]
-    JIRA[("Jira Cloud")] --> JC["collector/jira"]
-    CCC --> CLUSTER
-    JC --> CLUSTER
-    CLUSTER["Cluster · LLM<br/>events to narratives"] --> PERSIST["Persist<br/>new / extend / compact"]
-    PERSIST --> CAND["gatherCandidates<br/>deterministic pre-filter"]
-    CAND --> MATCH["Match · LLM<br/>narrative to issue"]
-    MATCH --> VERIFY["verifyLinks<br/>live tracker read"]
-    VERIFY --> DRAFT["draft / create · LLM<br/>proposes actions"]
-    DRAFT --> FILTERS["runSuppression<br/>unroutable · tracker-echo<br/>stale · duplicate"]
-    FILTERS --> TRIAGE["triage<br/>human review"]
-    TRIAGE --> DECIDE["gate.Decide<br/>pure, no I/O"]
-    DECIDE --> APPLY["gate.Applier<br/>holds TaskWriter"]
-    APPLY -->|"AddComment · SetStatus · CreateIssue"| JIRA
+    subgraph sources["Event sources"]
+        CC["Claude Code transcripts<br/>(JSONL on disk)"]
+        JIRA["Jira Cloud<br/>(changelog + comments)"]
+    end
+
+    subgraph collectors["Collectors"]
+        CCC["collector/claudecode"]
+        JC["collector/jira"]
+    end
+
+    STORE[("internal/store<br/>SQLite")]
+
+    subgraph correlate["internal/correlator"]
+        CLUSTER["Cluster<br/>LLM · groups events<br/>into narratives"]
+        PERSIST["Persist<br/>deterministic · new /<br/>extend / compact"]
+        CAND["gatherCandidates<br/>deterministic · pre-filter"]
+        MATCH["Match<br/>LLM · narrative to issue"]
+    end
+
+    subgraph reconcile["internal/reconciler"]
+        VERIFY["verifyLinks<br/>live tracker read"]
+        DRAFT["draft / Redraft / create<br/>LLM · proposes actions"]
+        FILTERS["runSuppression · ordered chain<br/>1 unroutable · 2 tracker-echo<br/>3 stale-transition · 4 duplicate"]
+    end
+
+    TRIAGE["internal/triage<br/>approve · reject · edit<br/>merge · split · target"]
+
+    subgraph write["internal/gate"]
+        DECIDE["Decide<br/>pure, no I/O"]
+        APPLY["Applier<br/>holds TaskWriter"]
+    end
+
+    CC --> CCC --> STORE
+    JIRA --> JC --> STORE
+    STORE --> CLUSTER --> PERSIST --> STORE
+    STORE --> CAND --> MATCH --> STORE
+    STORE --> VERIFY --> DRAFT --> FILTERS --> STORE
+    STORE --> TRIAGE --> STORE
+    STORE --> DECIDE --> APPLY -->|"AddComment · SetStatus · CreateIssue"| JIRA
 
     classDef llm fill:#f9e79f,stroke:#b7950b,color:#1a1a1a
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
@@ -79,33 +105,33 @@ compiler checks rather than a claim a comment makes.
 ```mermaid
 ---
 config:
-  nodeSpacing: 40
-  rankSpacing: 70
+  nodeSpacing: 70
+  rankSpacing: 130
 ---
 flowchart LR
-    subgraph readers["TaskReader only"]
+    subgraph readers["Hold TaskReader"]
         R1["reconciler.Reconcile"]
         R2["reconciler.Rework"]
-        R3["correlator.Match"]
+        R3["correlator.Match<br/>(via TrackerResolver)"]
         R4["triage.restructure"]
         R5["pipeline.RunReconcile"]
     end
 
     subgraph gates["Deny-by-default gates"]
-        G1["auto_commit.graduated<br/>false by zero value"]
-        G2["confidence >= floor"]
-        G3["writable_project_keys<br/>empty denies all"]
+        G1["auto_commit.graduated<br/>false by zero value<br/>gate/decide.go:66"]
+        G2["confidence >= confidence_floor<br/>gate/decide.go:66"]
+        G3["writable_project_keys<br/>empty denies everything<br/>gate/applier.go:382"]
     end
 
-    HUMAN["Human approval<br/>triage / actions decide"]
-    A["gate.Applier<br/>the ONLY TaskWriter"]
+    HUMAN["Human approval<br/>via triage / actions decide"]
+    A["gate.Applier<br/>internal/gate/applier.go:42<br/>the ONLY TaskWriter holder"]
     TRACKER[("Jira / local tracker")]
 
-    R1 --> TRACKER
-    R2 --> TRACKER
-    R3 --> TRACKER
-    R4 --> TRACKER
-    R5 --> TRACKER
+    R1 -->|"read only"| TRACKER
+    R2 -->|"read only"| TRACKER
+    R3 -->|"read only"| TRACKER
+    R4 -->|"read only"| TRACKER
+    R5 -->|"read only"| TRACKER
     G1 --> A
     G2 --> A
     G3 --> A
@@ -136,32 +162,38 @@ action trusted" but "is this project one we may write to at all."
 ```mermaid
 ---
 config:
-  nodeSpacing: 60
-  rankSpacing: 80
+  nodeSpacing: 110
+  rankSpacing: 140
 ---
 stateDiagram-v2
     direction LR
     [*] --> proposed: reconciler drafts
-    [*] --> declined: not worth tracking
+    [*] --> declined: model judged<br/>not worth tracking<br/>(create only)
 
-    proposed --> approved: approve / auto_commit
-    proposed --> rejected: reject / retarget
-    proposed --> edited: edit / merge
-    proposed --> proposed: skip
+    proposed --> approved: triage [a]pprove<br/>or auto_commit
+    proposed --> rejected: triage [r]eject<br/>or [t]arget
+    proposed --> edited: triage [e]dit / [m]erge
+    proposed --> proposed: triage [s]kip
 
-    approved --> applied
-    approved --> failed: tracker refused
+    approved --> applied: Applier wrote it
+    approved --> failed: tracker refused<br/>actions.error records<br/>how far it got
 
-    failed --> proposed: next pass
-    edited --> proposed: supersede
-    rejected --> proposed: supersede
+    failed --> proposed: next reconcile pass
+    edited --> proposed: replacement row
+    rejected --> proposed: replacement row<br/>([t]arget only)
 
     applied --> [*]
     rejected --> [*]
     declined --> [*]
+
+    note right of declined
+        Distinct from rejected:
+        no human ruled.
+        reconciler/create.go:67
+    end note
 ```
 
-Reading the transitions, since a state diagram cannot carry this much without the labels colliding:
+Reading the transitions, since some distinctions matter more than an edge label can carry:
 
 - **`declined`** is the model judging work not worth a ticket — creates only, and **distinct from
   `rejected`, which is a human's ruling** (`reconciler/create.go:67`). Conflating them would teach
@@ -190,39 +222,25 @@ Acyclic (it compiles). Direction is downward; no `internal/` package imports `cm
 ```mermaid
 ---
 config:
-  nodeSpacing: 45
-  rankSpacing: 60
+  nodeSpacing: 90
+  rankSpacing: 130
 ---
 flowchart TB
-    subgraph L1["Entrypoint"]
-        CMD["cmd/unjira"]
-    end
+    CMD["cmd/unjira"]
+    PIPE["pipeline"]
+    TRIAGE["triage"]
+    RECON["reconciler"]
+    CORR["correlator"]
+    GATE["gate"]
+    STORE["store"]
+    CONFIG["config"]
+    CJIRA["clients/jira"]
+    CLOCAL["clients/local"]
+    COAI["clients/openai"]
+    COLLJ["collector/jira"]
+    COLLC["collector/claudecode"]
 
-    subgraph L2["Orchestration"]
-        PIPE["pipeline"]
-        TRIAGE["triage"]
-    end
-
-    subgraph L3["Domain logic"]
-        RECON["reconciler"]
-        CORR["correlator"]
-        GATE["gate"]
-    end
-
-    subgraph L4["Adapters"]
-        CJIRA["clients/jira"]
-        CLOCAL["clients/local"]
-        COAI["clients/openai"]
-        COLLJ["collector/jira"]
-        COLLC["collector/claudecode"]
-    end
-
-    subgraph L5["Persistence + config"]
-        STORE["store"]
-        CONFIG["config"]
-    end
-
-    subgraph L6["Shared contracts"]
+    subgraph contracts["Shared contracts"]
         EVENTS["events"]
         TT["tasktracker"]
         LLM["llm"]
@@ -230,20 +248,29 @@ flowchart TB
         RULES["rules"]
     end
 
-    ORPHAN["correlator/refs · correlator/fanout<br/>pure, tested, CALLED BY NOTHING"]
+    subgraph orphans["Uncalled — see F1"]
+        REFS["correlator/refs"]
+        FANOUT["correlator/fanout"]
+    end
 
-    CMD --> L2
-    CMD --> L4
-    L2 --> L3
-    L3 --> L5
-    L3 --> L6
-    L4 --> L5
-    L4 --> L6
-    L5 --> EVENTS
+    CMD --> PIPE & TRIAGE & GATE & CORR & STORE & CONFIG
+    CMD --> CJIRA & CLOCAL & COAI & COLLJ & COLLC
+    PIPE --> RECON & CORR & GATE & STORE & CONFIG
+    TRIAGE --> RECON & CORR & STORE
+    RECON --> CORR & STORE & CONFIG & WF & LLM & RULES & EVENTS & TT
+    CORR --> STORE & CONFIG & LLM & RULES & EVENTS & TT
     CORR -.->|"F3: concrete backend"| CJIRA
+    GATE --> STORE & CONFIG & TT
+    STORE --> EVENTS
+    CONFIG --> EVENTS
+    CJIRA --> TT & WF
+    CLOCAL --> STORE & TT & WF
+    COAI --> LLM
+    COLLJ --> CJIRA & CONFIG & EVENTS & PIPE
+    COLLC --> EVENTS & PIPE
 
     classDef orphan fill:#eaeaea,stroke:#888,stroke-dasharray: 5 5,color:#1a1a1a
-    class ORPHAN orphan
+    class REFS,FANOUT orphan
 ```
 
 ---
