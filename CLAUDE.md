@@ -8,6 +8,14 @@ Guidance for anyone (human or agent) editing this codebase. This is distinct fro
   behavioral norms here.
 - **`docs/design-notes.md`** — *why* unjira is shaped this way: the failure modes that drove the
   architecture. Read it before changing the pipeline's structure.
+- **`docs/architecture.md`** — *what* is actually there: the pipeline, write-authority graph, action
+  lifecycle and package dependencies as mermaid diagrams, plus a SOLID/patterns read. Present tense
+  only — it describes the current tree, never how it got here. Kept current in the PR that
+  invalidates it, same as the README.
+- **`docs/architecture-findings.md`** — where that shape falls **short**, as numbered `F<n>` entries.
+  Separate from `architecture.md` because the two have different lifecycles: a description is true
+  until the code changes, a finding is open until somebody closes it. Delete a finding when it is
+  fixed; never renumber, since the labels are cross-referenced from tasks and commits.
 - **`docs/go-conventions.md`** — how unjira's Go is written: CLI/DI (Kong), error handling,
   testing (testify + go-cmp + fluent builders), package layout, linting, build (Earthfile). Read
   it before writing or reviewing any Go in this repo.
@@ -67,6 +75,15 @@ So, in the same PR:
   of what was uncertain is worth more than a doc that looks prescient.
 - **`docs/design-notes.md`** — only when you hit a *new* failure mode worth a numbered incident.
   This file is why-we-are-shaped-this-way, not a changelog.
+- **`docs/architecture.md`** — if you changed a pipeline stage, who holds write authority, the action
+  lifecycle, or a package's dependencies. The diagrams are load-bearing for a newcomer's mental
+  model, so a stale one misleads in the same way a stale Status section does. Edit it in the **present
+  tense**: replace the description, don't append "previously X, now Y" — that file says what the code
+  is, and `git log` already holds what it was.
+- **`docs/architecture-findings.md`** — **delete** the finding you just fixed. Not strike it through,
+  not annotate it as resolved: a stale finding sends the next reader to fix something already fixed.
+  If the fix taught a general lesson, that lesson goes to `design-notes.md` as an incident. Add a
+  finding here whenever you notice a problem you are not fixing in this PR.
 - **This file** — when an architecture invariant changes.
 
 A doc claim that can be checked should be checked. "602 assertions pass" and "the write path is

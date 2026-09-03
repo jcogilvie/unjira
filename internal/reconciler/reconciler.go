@@ -235,29 +235,18 @@ func reconcileOne(
 		return result, stats, fmt.Errorf("drafting for narrative %d: %w", narrative.ID, err)
 	}
 
-	// Order matters only for which reason a reviewer sees first; both filters are
-	// independent. Staleness runs first because "the tracker overtook this" is a
-	// fact about the world, while a duplicate proposal is a fact about unjira's
-	// own queue — and there is no point reporting a queue collision for an action
-	// that should not exist at all.
-	// An action whose target has no route is not a proposal at all, so drop it
-	// before the staleness or duplicate filters weigh in on something that cannot
-	// happen. (The routing itself ran during drafting — see toProposedAction.)
-	routed, unroutable := dropUnroutable(verified, drafted)
-	result.Suppressed = append(result.Suppressed, unroutable...)
+	// The suppression chain — four filters in a load-bearing order, defined as
+	// data in filters.go rather than hand-wired here. Ordering used to live in the
+	// sequence of statements at this spot, which is how docs/design-notes.md
+	// incident 22 happened: two correct functions composed wrongly, invisible to
+	// every unit test. filters_test.go now asserts the order.
+	kept, suppressed := runSuppression(filterContext{
+		NarrativeID: narrative.ID,
+		Store:       s,
+		Delta:       delta,
+		Verified:    verified,
+	}, drafted)
 
-	// Before the transition filters, because this one asks whether the narrative
-	// had anything to say AT ALL. A comment sourced only from the tracker's own
-	// records restates the issue to itself (task #180, design-notes incident 24),
-	// and there is no point weighing staleness or duplication for prose that
-	// should not exist.
-	grounded, echoes := suppressTrackerEcho(delta, routed)
-	result.Suppressed = append(result.Suppressed, echoes...)
-
-	fresh, stale := suppressStaleTransitions(delta, verified, grounded)
-	result.Suppressed = append(result.Suppressed, stale...)
-
-	kept, suppressed := suppressDuplicates(s, narrative.ID, fresh)
 	result.Proposed = kept
 	result.Suppressed = append(result.Suppressed, suppressed...)
 	noteLowConfidence(&result, cfg.MinConfidenceToPropose)
