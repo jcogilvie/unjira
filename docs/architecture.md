@@ -1,11 +1,16 @@
 # unjira's architecture, as built
 
-**Scanned 2026-09-02**, at the close of phase 1 and before the distiller.
+What is actually here, in the present tense. Phase 1 has shipped; the distiller has not.
 
 This file is a **living doc**, held to the same standard as `README.md` and `docs/design-notes.md`:
 if a PR changes the pipeline's shape, a package boundary, the write-authority graph, or the action
 lifecycle, it updates the relevant diagram *in that PR*. A diagram that has drifted is worse than no
 diagram, because it is trusted.
+
+**Describe, do not narrate.** This is not a changelog — it says what the code is, never what it used
+to be or when it changed. `git log` holds the history and `docs/design-notes.md` holds the reasoning;
+a "before X, we used to…" paragraph here rots the moment the next change lands and teaches a reader to
+distrust the rest.
 
 Companion docs, none of which this duplicates:
 
@@ -14,7 +19,7 @@ Companion docs, none of which this duplicates:
 - `docs/go-conventions.md` — how the Go is written.
 - `CLAUDE.md` — the architecture invariants, stated as rules.
 
-Every claim below was verified against the tree at scan time; findings carry `file:line`.
+Every claim below is checkable against the tree, and findings carry `file:line` so they can be.
 
 ---
 
@@ -277,8 +282,8 @@ flowchart TB
 
 ## 5. Patterns and principles
 
-Reviewed 2026-09-02 against SOLID and the pattern vocabulary of Gamma et al. and Bass's *Software
-Architecture in Practice*. Every row was checked against the source, not inferred from a doc comment.
+Read against SOLID and the pattern vocabulary of Gamma et al. and Bass's *Software Architecture in
+Practice*. Every row below was checked against the source, not inferred from a doc comment.
 
 The **deliberate non-applications** below matter as much as the conformances: without a record, a
 future reader sees a `switch` where a registry "should" be and changes it without knowing the
@@ -295,50 +300,57 @@ trade-off was weighed.
 | **Adapter** | `internal/clients/*` | Thin facades, business logic one layer up. `clients/local` adapts two SQLite tables to a tracker interface. |
 | **Bass: "limit access to critical resources"** | `gate.Applier` | Exactly one `TaskWriter` holder in the tree, behind three independent gates. The tactic implemented as a type constraint rather than a review convention. |
 | **Command + audit log** | the `actions` table | Each action is a reified request carrying its own lifecycle and `actions.error`. Retry is re-execution on the next pass, not a separate path. |
-| **Chain of Responsibility** | `reconciler.suppressionChain` | Four filters, uniform contract, order asserted as data. Added 2026-09-02 — see below. |
+| **Chain of Responsibility** | `reconciler.suppressionChain` | Four filters, uniform contract, order asserted as data — see below. |
 | **Marker interface for optional capability** | `pipeline.StatusHistorySource`, `workflow.GraphProvider` | Type-asserted, not name-checked. `status_history.go:25-34` explains why the marker returns nothing: a `bool` would let the assertion and the value disagree. |
 
-### The one gap that was worth closing
+### Chain of Responsibility, and why the chain is data
 
-Before 2026-09-02 the four suppression filters shared an identical **return** contract
-(`([]ProposedAction, []string)`) and four different **input** shapes, so they could not compose.
-`reconcileOne` hand-wired each call and repeated `result.Suppressed = append(...)` after each.
+`internal/reconciler/filters.go` defines `filterContext`, `suppressionFilter`, and
+`suppressionChain`; `runSuppression` walks it, feeding each filter what survived the last. All four
+filters share one context type and one return contract, so the chain is a slice rather than four
+hand-wired calls.
 
-The cost was not aesthetic. **Incident 22 was an ordering bug in exactly that code**, and the rule it
-produced — *"write the end-to-end test first when a change spans more than one function"* — is a
-**process workaround for a structural problem**: order lived only in the sequence of statements, so
-nothing could assert it.
+**The order is asserted, not implied** — `TestSuppressionChain_OrderIsExplicitAndLoadBearing` reads it
+directly, and a dropped filter fails three tests including the tracker-echo end-to-end case. That is
+the property worth having: a reordering is a test failure with a reason attached, where a sequence of
+statements would make it a diff that reads as harmless. `docs/design-notes.md` incident 25 records the
+reasoning, including the ordering bug (incident 22) that a hand-wired chain permitted.
 
-`internal/reconciler/filters.go` now defines `filterContext`, `suppressionFilter`, and
-`suppressionChain` as data, with `runSuppression` walking it. The order is asserted directly
-(`TestSuppressionChain_OrderIsExplicitAndLoadBearing`), and a dropped filter fails three tests
-including #180's end-to-end case. Behaviour is unchanged — every pre-existing test passed untouched.
+One asymmetry is deliberate and documented on the type: three filters are pure, `suppressDuplicates`
+needs the store to ask whether another narrative already holds an open proposal. Uniformity costs it a
+parameter the others ignore, which is cheaper than an uncomposable chain.
 
-The remaining asymmetry is real and documented on the type: three filters are pure, `suppressDuplicates`
-needs the store. Uniformity costs it a parameter it mostly ignores; the alternative is the
-uncomposable chain that caused the incident.
+### Patterns considered and not currently applied
 
-### Deliberate non-applications
+These are places a pattern would plausibly fit and where the case for adopting it is not yet strong
+enough to act on. **None of them are settled against** — each is recorded with the condition that
+would change the answer, so a later reader can check whether that condition now holds rather than
+re-deriving the analysis from scratch. Where a note says "revisit when X," X arriving is a reason to
+act, not a reason to argue.
 
-Recorded so they are not re-litigated as oversights.
+**A registry for tracker backends.** Today it is a `switch` (`cmd/unjira/main.go:97`) with five
+backend-aware sites, all confined to `cmd` and `config`. That is an asymmetry with the collector
+registry, and a defensible one at two backends — one of which exists only for tests. Registries start
+paying off around three variants. *Revisit when a third tracker lands*, or if backend-aware sites
+begin appearing outside `cmd`/`config`.
 
-**Do not make the tracker backend a registry.** It is a `switch` (`cmd/unjira/main.go:97`) with five
-backend-aware sites total, all confined to `cmd` and `config` — an asymmetry with the collector
-registry, and an honest one at two backends, one of which exists only for tests. A registry pays off
-past roughly three variants. **Revisit when a third tracker lands, not before.**
+**A Repository interface over `internal/store`.** F4 finds two responsibilities there and that holds
+up, but the cheaper fix is splitting the *file*. With one implementation and no second datastore in
+prospect, an interface adds indirection without inversion. *Revisit if a second store implementation
+becomes real* — an in-memory store for tests, or a non-SQLite backend.
 
-**Do not add a Repository interface over `internal/store`.** F4 finds two responsibilities there, and
-that is true — but the fix is splitting the *file*, not inserting an abstraction. There is one
-implementation and no second datastore in prospect; an interface with a single implementer is
-indirection without inversion.
+**`correlator.Stats` as a Visitor.** It is a plain accumulator with `Add`/`AddUsage`
+(`correlator.go:131`, `:144`), and the pattern name would not change the code. *Revisit if traversal
+logic accumulates* — several stats types over one event walk, say, where double-dispatch would earn
+its keep.
 
-**`correlator.Stats` is not a Visitor and should not become one.** It is a plain accumulator with
-`Add`/`AddUsage` (`correlator.go:131`, `:144`). Naming it a pattern would rename, not improve.
-
-**Do not unify `Collector` and `TaskTracker` under a common "external system" interface.** They are
-opposites in the dependency graph: a collector is a *source* unjira reads without judgment, a tracker
-is a *sink* that only `gate.Applier` may write. Merging them would put read and write authority behind
-one type and dissolve the property section 2 depends on.
+**A common "external system" interface over `Collector` and `TaskTracker`.** These sit at opposite ends
+of the dependency graph: a collector is a *source* unjira reads without judgment, a tracker is a *sink*
+only `gate.Applier` may write. Unifying them would put read and write authority behind one type, which
+is the property §2 rests on — so this one carries a real cost, not just insufficient benefit. If a
+future system is genuinely both (a tracker unjira both collects from and writes to — Jira already is,
+via two separate seams), the shape worth reaching for is probably two interfaces on one adapter, not
+one interface over both.
 
 ## What holds
 
@@ -358,8 +370,9 @@ Stated plainly, because a scan that only lists problems misrepresents the codeba
 
 ## Findings
 
-Ordered by consequence. None are prescriptions — #175 was scoped as *describe what is there*, and
-the follow-ups (#177, #178, #179) are where shape decisions belong.
+Open problems in the current tree, ordered by consequence. **Strike one when it is fixed** — a
+resolved problem left described as open is the same defect as a stale diagram. None are
+prescriptions; the linked tasks are where shape decisions belong.
 
 ### F1 — The invariant CLAUDE.md calls load-bearing describes dead code
 
@@ -372,14 +385,13 @@ They are pure, and they are thoroughly tested. **They have zero production calle
 outside their own packages except in two doc comments citing them as exemplars
 (`clients/openai/openai.go:136`, `docs/go-conventions.md:48`).
 
-Both survived the Python→Go port with tests intact and were never rewired. The invariant is true of
-code that does not run — so whatever protection it describes, the pipeline does not currently have.
-The deterministic pre-filter that *does* run is `correlator/match_candidates.go`'s
+So the invariant is true of code that does not run, and whatever protection it describes, the pipeline
+does not have. The deterministic pre-filter that *does* run is `correlator/match_candidates.go`'s
 `gatherCandidates`, which the invariant does not mention.
 
 This interacts directly with **#179**: `fanout` groups mirrored work (the 12-region-change case) and
 `refs` parses PR references. Both are plausibly relevant to why the two event streams cluster into
-disjoint narratives — a scan finding that lands on an open question rather than resolving it.
+disjoint narratives, so the two are entangled and #181 blocks #179.
 
 ### F2 — Two vocabularies are half-declared, which is incident 21 unresolved
 
@@ -465,16 +477,18 @@ One struct (`config/config.go:57-86`) holds: **endpoint** (`Site`), **identity**
 `Name` → credential lookup), **read scope** (`ProjectKeys`), **write scope**
 (`WritableProjectKeys`), and **collection config** (`Queries`, `MaxIssuesPerQuery`).
 
-Stating it as a judgment, since the task asked for one either way: the **write-scope separation is
-correct and should not be collapsed** — `WritableProjectKeys` deliberately does not default to
-`ProjectKeys`, and that is a safety property with a spec behind it. The tension is that *identity* is
-the one concern with no field of its own: it is carried by `Name`, which is also the config key, also
-the cursor key prefix, and also the credential lookup key. One string doing four jobs is why
-renaming a connection has non-obvious consequences.
+One part of this is not up for reconsideration: **write-scope separation is a safety property.**
+`WritableProjectKeys` deliberately does not default to `ProjectKeys`, because defaulting would arm
+every readable project for writes the moment a connection is configured — the exact bug write scope
+exists to prevent. Collapsing the two fields would undo that, spec and all.
 
-This is exactly the territory of **#178** (does the connection/identity model want a kubeconfig
-shape?), which was deliberately sequenced *after* this scan so it could not bias it. No
-recommendation here.
+The rest is a genuine open question. *Identity* is the one concern with no field of its own: it rides
+on `Name`, which is simultaneously the config key, the cursor key prefix, and the credential lookup
+key. One string doing four jobs is why renaming a connection has non-obvious consequences.
+
+**#178** asks whether this model wants a kubeconfig-like shape (contexts referencing a server and a
+user by name, with per-endpoint auth). No recommendation here — deliberately, so the question stays
+open on its own terms.
 
 ### F8 — correlator.TrackerResolver may be in the wrong package
 
@@ -483,7 +497,8 @@ recommendation here.
 consumer today (`correlator.Match`) and **#177** proposes two more, on the reconciler and applier
 paths. When it has three consumers in three packages, the resolver living in one of them is arbitrary.
 
-Reported as tension, per the task's explicit instruction not to prescribe.
+At one consumer this is not worth moving. `tasktracker` is the obvious home if it grows, and #177 is
+the natural moment to decide.
 
 ---
 
