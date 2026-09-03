@@ -232,9 +232,9 @@ func updateActionStatusImpl(c dbConn, id int64, status string, feedback, errText
 	}
 
 	switch status {
-	case "approved", "edited", "rejected":
+	case StatusApproved, StatusEdited, StatusRejected:
 		query += `, decided_at = COALESCE(decided_at, ` + ts + `)`
-	case "applied", "failed":
+	case StatusApplied, StatusFailed:
 		// An applied action was necessarily decided, but decided_at may
 		// already be set from an earlier approval — COALESCE preserves the
 		// original ruling time rather than overwriting it.

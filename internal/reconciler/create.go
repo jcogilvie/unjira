@@ -48,10 +48,11 @@ Return ONLY a bare JSON object, no prose, no markdown fences:
 
 // StatusDeclined marks a create the MODEL judged not worth tracking.
 //
-// A distinct status from "rejected", which is a HUMAN's ruling: conflating them
-// would let slice 7's rules.Distill learn from unjira's own refusals as though a
-// reviewer had made them, teaching the model from its own output. It also keeps
-// `actions list --status rejected` meaning "a person said no".
+// A distinct status from store.StatusRejected, which is a HUMAN's ruling:
+// conflating them would let slice 7's rules.Distill learn from unjira's own
+// refusals as though a reviewer had made them, teaching the model from its
+// own output. It also keeps `actions list --status rejected` meaning "a
+// person said no".
 //
 // The row exists to be a memory. Without it a declined narrative is re-judged on
 // every pass forever — measured before this existed, one LLM call per untracked
@@ -64,7 +65,11 @@ Return ONLY a bare JSON object, no prose, no markdown fences:
 // with no memory of the refusal. Remembering the answer is the whole fix: a
 // narrative unjira has already judged costs nothing until something about it
 // changes.
-const StatusDeclined = "declined"
+//
+// An alias for store.StatusDeclined (see actionstatus.go), for the same
+// ergonomic reason as StatusProposed above: this package already spells
+// StatusDeclined unqualified in several places, including its own tests.
+const StatusDeclined = store.StatusDeclined
 
 // createVerdict is the model's answer.
 type createVerdict struct {
@@ -318,11 +323,11 @@ func hasDecline(s *store.Store, narrativeID int64) (bool, error) {
 // openOrAppliedCreate reports whether this narrative already has a create action
 // that must not be duplicated, and why.
 //
-// "rejected" and "failed" are deliberately NOT blockers. A rejected create means a
-// human said no — but they said no to that draft, and a later pass with more
-// events may be right; the reviewer can reject again cheaply. A failed create
-// wrote nothing, so there is nothing to duplicate. Only a live proposal or a
-// successful write blocks.
+// store.StatusRejected and store.StatusFailed are deliberately NOT blockers. A
+// rejected create means a human said no — but they said no to that draft, and
+// a later pass with more events may be right; the reviewer can reject again
+// cheaply. A failed create wrote nothing, so there is nothing to duplicate.
+// Only a live proposal or a successful write blocks.
 func openOrAppliedCreate(actions []store.ActionRow) (reason string, found bool) {
 	for _, a := range actions {
 		if a.Type != string(ActionCreate) {
@@ -330,11 +335,11 @@ func openOrAppliedCreate(actions []store.ActionRow) (reason string, found bool) 
 		}
 
 		switch a.Status {
-		case "applied":
+		case store.StatusApplied:
 			return fmt.Sprintf(
 				"action %d already created an issue for this narrative; proposing another would "+
 					"open a duplicate", a.ID), true
-		case StatusProposed, "approved":
+		case StatusProposed, store.StatusApproved:
 			return fmt.Sprintf(
 				"action %d already proposes creating an issue for this narrative and is awaiting "+
 					"review", a.ID), true

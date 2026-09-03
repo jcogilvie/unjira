@@ -145,7 +145,7 @@ func (s *Session) Approved() []store.ActionRow {
 // Ruling is one recorded disposition that must be written to the store.
 type Ruling struct {
 	ActionID int64
-	// Status is the actions.status value to record: "rejected" today.
+	// Status is the actions.status value to record: store.StatusRejected today.
 	Status string
 	// Feedback is the reviewer's free text, read later by slice 7's
 	// rules.Distill.
@@ -178,7 +178,7 @@ func (s *Session) Rulings() []Ruling {
 	for _, a := range s.batch {
 		d := s.decisions[a.ID]
 		if d.Verb == VerbReject {
-			out = append(out, Ruling{ActionID: a.ID, Status: "rejected", Feedback: d.Text})
+			out = append(out, Ruling{ActionID: a.ID, Status: store.StatusRejected, Feedback: d.Text})
 		}
 	}
 

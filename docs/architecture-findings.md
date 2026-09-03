@@ -47,28 +47,6 @@ This interacts directly with **#179**: `fanout` groups mirrored work (the 12-reg
 `refs` parses PR references. Both are plausibly relevant to why the two event streams cluster into
 disjoint narratives, so the two are entangled and #181 blocks #179.
 
-### F2 — Two vocabularies are half-declared, which is incident 21 unresolved
-
-Incident 21 established: an undeclared map key or string vocabulary is a contract nobody signed.
-Both instances below are the same defect at different scales.
-
-**Artifact keys.** Four are declared constants in `internal/events` and read through them —
-`issue_key`, `status_from`, `status_to`, `tracker_record`. Four more are **bare literals written in
-one package and read in another**:
-
-| key | written | read | packages |
-|---|---|---|---|
-| `connection` | `collector/jira/events.go:190` | `correlator/match_candidates.go:84` | jira → correlator |
-| `authored_by_unjira` | `collector/jira/events.go:191` | `reconciler/reconciler.go:324` | jira → reconciler |
-| `git_branch` | `collector/claudecode/claudecode.go:238` | `correlator/match_candidates.go:88`, `:171` | claudecode → correlator |
-| `ticket_keys` | `collector/claudecode/claudecode.go:239` | `correlator/match_candidates.go:200`, `pipeline/collect.go:119`, `pipeline/digest.go:34` | claudecode → correlator **and** pipeline |
-
-`authored_by_unjira` is the sharpest case: `reconciler/reconciler.go:315-320` documents that the
-artifact *"has been written since the collector landed and read by nothing — this is its first
-consumer."* The repo already noticed the pattern and did not close it.
-
-**Action statuses.** Half constants, half literals across five packages — see §3.
-
 ### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
 
 `internal/correlator` imports `internal/clients/jira` for one function: `IsTransportError`
@@ -185,8 +163,7 @@ store would break the renderers' no-I/O property, which is probably the wrong tr
 
 | Finding | Task |
 |---|---|
-| F1 — dead primitives | **#181**, which blocks **#179** |
-| F2 — undeclared vocabularies | **#182** |
+| F1 — uncalled primitives | **#181** (does *not* block #179 — see the finding) |
 | F3 — concrete backend in the correlator | **#183** |
 | F5, F6 — dead schema, unread artifacts | **#176** |
 | F7 — connection/identity model | **#178** |

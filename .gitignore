@@ -5,3 +5,6 @@ unjira.config.json
 # Go build artifacts
 /unjira
 /_output/
+
+# Agent worktrees and local settings — never committed.
+.claude/

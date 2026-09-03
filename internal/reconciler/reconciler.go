@@ -301,16 +301,16 @@ func actionableLinks(links []store.NarrativeIssue) []store.NarrativeIssue {
 
 // dropSelfAuthored removes events unjira itself produced.
 //
-// The Jira collector sets artifacts["authored_by_unjira"], and its doc comment
-// states exactly why: "without it the reconciler proposes the same comment
-// every pass." That artifact has been written since the collector landed and
+// The Jira collector sets events.ArtifactAuthoredByUnjira, and its doc comment
+// states exactly why: without it the reconciler proposes the same comment
+// every pass. That artifact has been written since the collector landed and
 // read by nothing — this is its first consumer. Without this step the loop is
 // unstable: unjira comments, collects its own comment, and proposes commenting
 // about it.
 func dropSelfAuthored(evts []events.Event) []events.Event {
 	var out []events.Event
 	for _, e := range evts {
-		if authored, _ := e.Artifacts["authored_by_unjira"].(bool); authored {
+		if authored, _ := e.Artifacts[events.ArtifactAuthoredByUnjira].(bool); authored {
 			continue
 		}
 		out = append(out, e)
@@ -456,7 +456,7 @@ func openProposalFromAnother(
 		}
 
 		for _, a := range actions {
-			if a.IssueKey == issueKey && a.Status == "proposed" {
+			if a.IssueKey == issueKey && a.Status == StatusProposed {
 				return true
 			}
 		}

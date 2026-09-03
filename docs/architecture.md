@@ -214,12 +214,17 @@ Reading the transitions, since some distinctions matter more than an edge label 
   next reconcile pass** — there is no separate retry path.
 - **`skip`** leaves the action `proposed` for the next session.
 
-**Finding — the lifecycle vocabulary is half-declared.** `StatusProposed`
-(`reconciler/types.go:39`) and `StatusDeclined` (`reconciler/create.go:67`) are constants;
-`"applied"`, `"failed"`, `"approved"`, `"rejected"`, `"edited"`, and `"open"` are bare literals
-spread across five packages — `gate/applier.go:124`, `:127`, `triage/triage.go:181`,
-`triage/restructure.go:245`, `:364`, `reconciler/create.go:337`, `reconciler/reconciler.go:470`,
-`store/supersede.go:32` — see **F2** in `docs/architecture-findings.md`.
+**The seven `actions.status` values are named constants in one place.** `internal/store/actionstatus.go`
+declares `StatusProposed`, `StatusApproved`, `StatusEdited`, `StatusRejected`, `StatusApplied`,
+`StatusFailed`, `StatusDeclined` — `store` rather than `reconciler`, `triage`, or `gate` (each of
+which writes or compares at least one) because `store` is the only package none of the other three
+import, so every writer reaches the constants through an import edge it already has. `gate` and
+`triage` reference them as `store.StatusX`; `reconciler.StatusProposed` and
+`reconciler.StatusDeclined` are aliases to the same constants, kept because this package already
+spells both unqualified in several places, including its own tests. No `actions.status` comparison
+or assignment anywhere in `internal/` or `cmd/` uses a bare string literal for one of these seven
+values. `"open"`/`"split"` (`store.StatusOpen`/`store.StatusSplit`) are a separate, narrative-level
+enum and are declared the same way, in `internal/store/narrativestatus.go`.
 
 ---
 
