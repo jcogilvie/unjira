@@ -647,8 +647,9 @@ The assertion is about cursor logic, so the symptom pointed at the reconciler's 
 The cause was Jira's search index.
 
 **The shape.** The test creates an issue, then runs the collector, which finds issues by JQL. Jira's
-search index lags issue creation by ~3.3 seconds on this instance, so the test already had a
-readiness probe: poll until the issue is findable, *then* collect. That probe was not enough, and the
+search index lags issue creation, so the test already had a readiness probe: poll until the issue is
+findable, *then* collect. **The lag's median is ~3s and its tail reaches 24s** — measured on this
+instance, seven create-then-poll samples: 1, 2, 3, 4, 9, 12, 24 seconds. That probe was not enough, and the
 reason generalizes past this test:
 
 > **Eventual consistency is not monotonic.** A document can become findable, then transiently stop
@@ -690,6 +691,23 @@ because the fix belongs in exactly one place:
   converting a permanent bug into a slow timeout with no explanation.
 - **Bound tries and elapsed time independently.** Tries bound cost; elapsed time bounds how long a
   human waits. A slow dependency should fail on the clock, not after N slow attempts.
+- **Size a timeout for the TAIL, not the median — and know which bound actually binds.** The lag's
+  median (~3s) was measured correctly and written down correctly; every timeout in this tier was then
+  sized against it. The tail is 24s. The original 20x1s poll gave exactly 20s and failed ~1 run in 3;
+  an 8-try exponential budget exhausted at ~24.6s, landing *on* the worst observed value, which
+  improved the rate enough to look fixed without being fixed. Separately: `WithMaxTries(8)` and
+  `WithMaxElapsedTime(45s)` were set as independent bounds, but tries always tripped first, so the
+  elapsed-time ceiling was dead code that read like protection.
+- **Re-measure before enlarging a budget.** A steadily-growing tail is a fact about the dependency
+  worth knowing; raising the number without re-measuring converts a diagnosable trend into a
+  permanently-oversized timeout.
+- **A check that could not RUN must not produce a verdict.** The failure diagnostic classified a
+  failure as infrastructure-or-real-bug by re-searching without the watermark — and swallowed the
+  re-search's own error, so a check that never ran resolved to a confident "infrastructure, re-run".
+  A deliberately-broken `watermarkClause` reported exactly that. Confidently wrong is worse than
+  ambiguous, especially for a contributor deciding whether their PR is at fault; the default is now
+  UNDETERMINED, with distinct wording for "could not build the query" and "the re-search itself
+  failed".
 - **Don't reach for long-lived test fixtures to dodge a timing problem.** It trades a timing bug for a
   state bug: fixtures accumulate transitions and comments from every prior run, so tests start
   depending on where the last run left off, and a freshly-created fixture still races anyway.
