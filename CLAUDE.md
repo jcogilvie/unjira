@@ -47,9 +47,20 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   `cmd/unjira/main.go`'s registry, enable it in config.
 - **All verification lives in the reconciler.** Never emit a state-bearing action from transcript
   intent; confirm current state against live Jira/GitHub first (see `rules/intent-not-outcome.md`).
-- **The correlator's deterministic primitives run before any model.** `internal/correlator/refs`
-  and `internal/correlator/fanout` are pure functions with no I/O and no Jira dependency — keep
-  them that way; they're what keeps the LLM's review queue signal-rich.
+- **A deterministic pre-filter runs before every model call.** In the correlator that is
+  `match_candidates.go`'s `gatherCandidates`: it extracts and ranks issue-key candidates by
+  provenance (Jira event > branch name > first-mention prose > later-mention prose) before Match's
+  prompt is built. In the reconciler it is `runSuppression`'s four-filter chain, plus route
+  resolution. Keep judgment the model's job and extraction a pure function's — that separation is
+  what keeps the review queue signal-rich.
+- **`internal/correlator/refs` and `internal/correlator/fanout` have no callers yet, and that is
+  deliberate.** They are pure, tested implementations of two GitHub-PR-shaped problems: env-mirror
+  fan-out (one infra change becoming ~12 near-identical per-region PRs — see
+  `rules/env-mirror-fanout.md`, still live) and bare-`#N` reference ambiguity. Both await the
+  `(GitHub)` collector the README's pipeline diagram lists as planned. Keep them pure and keep the
+  tests green; do not wire them into the Jira/Claude Code path, where they do not fit — `fanout.Item`
+  is `{Repo, Author, Title, Number}` and `refs` matches only `#N` syntax, so neither can see a Jira
+  issue key.
 - **Never silently drop data.** Prefer erroring loudly over truncating (e.g. `refs.ParsePRRefs`
   errors on an over-`max_span` range). Silent data loss is the hardest class of bug to notice here.
 - **Writes are gated by the pipeline, not the client.** `clients/jira.Client` has write methods,

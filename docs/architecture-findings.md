@@ -28,24 +28,35 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
-### F1 — The invariant CLAUDE.md calls load-bearing describes dead code
+### F1 — refs and fanout await a collector that does not exist yet
 
-`CLAUDE.md` states: *"The correlator's deterministic primitives run before any model.
-`internal/correlator/refs` and `internal/correlator/fanout` are pure functions with no I/O and no
-Jira dependency — keep them that way; they're what keeps the LLM's review queue signal-rich."*
-
-They are pure, and they are thoroughly tested. **They have zero production callers.**
-`refs.ParsePRRefs`, `fanout.ClusterFanout`, and `fanout.NormalizeTitle` are referenced nowhere
-outside their own packages except in two doc comments citing them as exemplars
+`internal/correlator/refs` and `internal/correlator/fanout` are pure, thoroughly tested, and have
+**zero production callers**. `refs.ParsePRRefs`, `fanout.ClusterFanout` and `fanout.NormalizeTitle`
+are referenced nowhere outside their own packages except two doc comments citing them as exemplars
 (`clients/openai/openai.go:136`, `docs/go-conventions.md:48`).
 
-So the invariant is true of code that does not run, and whatever protection it describes, the pipeline
-does not have. The deterministic pre-filter that *does* run is `correlator/match_candidates.go`'s
-`gatherCandidates`, which the invariant does not mention.
+This is **not** dead code awaiting deletion, and it is **not** relevant to the clustering problem.
+Both facts are settled:
 
-This interacts directly with **#179**: `fanout` groups mirrored work (the 12-region-change case) and
-`refs` parses PR references. Both are plausibly relevant to why the two event streams cluster into
-disjoint narratives, so the two are entangled and #181 blocks #179.
+- They solve **GitHub-PR-shaped** problems. `fanout.Item` is `{Repo, Author, Title, Number}`
+  (`fanout/fanout.go:67-72`) and groups on `(repo, author, normalizedTitle)`; `refs.refRE`
+  (`refs/refs.go:33`) requires a literal `#`. Neither can match a Jira issue key like `PAAS-4001`, so
+  neither can join a Jira event to a Claude Code session. Anything proposing them as the fix for
+  disjoint clustering is mistaken about their shape.
+- The problems are real and still expected. `rules/env-mirror-fanout.md` is live at
+  `confidence: high`, drawn from predecessor operational experience, and the README's pipeline
+  diagram lists `(GitHub)` among the planned collectors. Deleting working implementations of a rule
+  the repo still holds would leave the rule describing nothing.
+
+Two commits ever, both from the Python→Go port (`git log -- internal/correlator/refs
+internal/correlator/fanout`), recovered from a never-merged predecessor PR — so they were never
+wired in any version, rather than lost in the port.
+
+**What remains open:** nothing in the code. CLAUDE.md's invariant used to claim these two were
+load-bearing today, which was false; it now names `gatherCandidates` and `runSuppression` as the
+pre-filters that actually run, and records these two as awaiting the GitHub collector. This entry
+stays only so a future reader who greps for uncalled packages finds the reasoning instead of
+re-deriving it.
 
 ### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
 
@@ -163,7 +174,7 @@ store would break the renderers' no-I/O property, which is probably the wrong tr
 
 | Finding | Task |
 |---|---|
-| F1 — uncalled primitives | **#181** (does *not* block #179 — see the finding) |
+| F1 — refs/fanout await the GitHub collector | resolved: keep, invariant corrected. Not a blocker. |
 | F3 — concrete backend in the correlator | **#183** |
 | F5, F6 — dead schema, unread artifacts | **#176** |
 | F7 — connection/identity model | **#178** |
