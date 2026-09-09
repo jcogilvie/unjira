@@ -366,12 +366,14 @@ func TestLiveCollectorSeesSeededCommentAndTransition(t *testing.T) {
 	// is empty, and the assertion loop below simply never executes — so the
 	// sawComment/sawStatus flags carry the whole test. The require calls after the
 	// loop are what keep an empty collection from reading as success.
+	// collectUntilMatched already fatals if nothing matched, with a message that
+	// distinguishes index lag from a real regression — so the old
+	// require.NotEmpty here could never fire, and keeping it would suggest the
+	// empty case is still guarded HERE when the guard has moved. The
+	// sawComment/sawStatus requires at the end remain load-bearing: they are what
+	// stop a non-empty-but-wrong collection from passing vacuously.
 	cc := liveCollectContext(t, key)
 	got := collectUntilMatched(t, collectorjira.New(), cc)
-
-	require.NotEmpty(t, got,
-		"the collector matched no events at all; every per-event assertion below would "+
-			"vacuously pass on an empty slice")
 
 	var sawComment, sawStatus bool
 	for _, e := range got {
@@ -461,11 +463,33 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 	err = collector.Collect(cc, func(e events.Event) { secondPass = append(secondPass, e) })
 	require.NoError(t, err)
 
-	require.NotEmpty(t, secondPass,
-		"the watermark-bounded query matched nothing, but the issue's updated time is at or after "+
-			"the watermark. Jira returns 200-with-zero-results for a bad date literal rather than "+
-			"400, so this is what a wrong `updated >= %%q` format in collectQuery looks like — and "+
-			"it is invisible to every offline test.")
+	// Diagnostics gathered BEFORE asserting, so a failure explains itself instead
+	// of requiring a re-run to reproduce. The collector logs neither the JQL it
+	// ran nor the watermark it decoded, so without this a CI failure here is a
+	// bare "empty slice" with no way to tell a wrong date format from an index
+	// that transiently lost the issue — which is exactly how much time this test's
+	// first intermittent failure cost.
+	if len(secondPass) == 0 {
+		effective, jqlErr := cc.Config.Jira[0].EffectiveJQL(cc.Config.Jira[0].Queries[0])
+		live, getErr := client.GetIssue(key, "updated")
+
+		var liveUpdated any
+		if fields, ok := live["fields"].(map[string]any); ok {
+			liveUpdated = fields["updated"]
+		}
+
+		t.Fatalf("the watermark-bounded query matched nothing.\n"+
+			"  stored position: %q\n"+
+			"  effective JQL:   %q (err: %v)\n"+
+			"  issue's live updated: %v (err: %v)\n"+
+			"Jira returns 200-with-zero-results for a date literal it cannot use rather "+
+			"than 400, so a wrong `updated >= %%q` format in watermarkClause looks exactly "+
+			"like this and is invisible to every offline test. If the position and JQL look "+
+			"right and the issue's updated time is at or after the bound, this is instead "+
+			"Jira's search index having transiently lost the issue — see "+
+			"docs/design-notes.md incident 26.",
+			position, effective, jqlErr, liveUpdated, getErr)
+	}
 }
 
 // TestLiveMatchingSignalIsAvailable verifies the two things matching depends on
