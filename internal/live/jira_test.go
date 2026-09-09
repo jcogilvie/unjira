@@ -11,6 +11,7 @@
 package live
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -245,44 +247,86 @@ func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 	}
 }
 
-// waitUntilSearchable blocks until key is findable by JQL, not merely fetchable
-// by key.
+// USE THIS whenever a live test CREATES data and then expects a COLLECTOR to
+// find it. Fetching by key (GetIssue) needs none of this — that reads the
+// document store and is immediately consistent. It is the search index that
+// lags, so the hazard is specific: create-then-SEARCH is racy, create-then-
+// FETCH-BY-KEY is not. See docs/design-notes.md incident 26.
+//
+// collectUntilMatched runs collector until its query actually matches something,
+// then returns every event it emitted on that successful pass.
 //
 // Jira's search index is eventually consistent — measured at roughly 3 seconds
-// on this instance — so a test that creates an issue and immediately searches
-// for it races the index. Polling rather than sleeping a fixed duration keeps
-// the common case fast and the slow case correct.
+// on this instance — AND non-monotonic: a document can become findable and then
+// transiently stop being findable while replicas converge. That second property
+// is why a one-shot readiness probe before collecting is not enough, and why
+// this retries the collector itself rather than pre-checking. A probe can only
+// ever report that the index WAS ready.
 //
-// This exists because the collector's first pass must actually match the issue:
-// if it does not, no watermark is stored and a following pass quietly reverts to
-// an unbounded query, which would make the watermark assertion vacuous.
-func waitUntilSearchable(t *testing.T, client *jira.Client, key string) {
+// Only the create-then-search seam is retried. Assertions are not: they still
+// fail on the first wrong answer, because this tier exists to catch collector
+// regressions and a blanket retry would mask exactly those.
+//
+// Production does not have this race, so this is a test-framework concern rather
+// than a missing production retry: watch's pass collects FIRST and applies LAST
+// (cmd/unjira/main.go's runWatchPass), so a write and the next search are a full
+// interval apart — 5 minutes by default against a ~3 second lag. And the
+// reconciler deliberately DISCARDS unjira's own writes (dropSelfAuthored), so a
+// self-authored event arriving late is the desired outcome either way. A pass
+// that matches nothing simply leaves the watermark alone and retries next pass,
+// which is correct behaviour, not a failure.
+func collectUntilMatched(
+	t *testing.T, collector pipeline.Collector, cc pipeline.CollectContext, opts ...backoff.RetryOption,
+) []events.Event {
 	t.Helper()
 
-	const (
-		attempts = 20
-		interval = time.Second
-	)
+	// Exponential with jitter, from the library rather than hand-rolled: its
+	// defaults (500ms initial, 1.5x, RandomizationFactor 0.5) clear the measured
+	// ~3.3s lag in about four tries, where a fixed 1s poll spends four full
+	// seconds to learn the same thing.
+	//
+	// Try count and elapsed time are bounded INDEPENDENTLY on purpose. Tries bound
+	// how much this costs; elapsed time bounds how long a human or CI waits. A
+	// slow Jira should fail on the clock rather than after N slow attempts.
+	settings := append([]backoff.RetryOption{
+		backoff.WithMaxTries(8),
+		backoff.WithMaxElapsedTime(45 * time.Second),
+	}, opts...)
 
-	jql := fmt.Sprintf("key = %s", key)
+	// Captured across attempts so the failure message can distinguish "never
+	// matched" from "matched but emitted nothing".
+	var attempts int
 
-	for range attempts {
-		var found bool
-		if err := client.SearchIssues(jql, []string{"key"}, 1, func(map[string]any) {
-			found = true
+	got, err := backoff.Retry(t.Context(), func() ([]events.Event, error) {
+		attempts++
+
+		var collected []events.Event
+		if err := collector.Collect(cc, func(e events.Event) {
+			collected = append(collected, e)
 		}); err != nil {
-			t.Fatalf("searching for %s while waiting for the index: %v", key, err)
+			// A transport or config error is not an index race and will not fix
+			// itself — stop immediately rather than burning the whole budget on
+			// a failure that is already decided.
+			return nil, backoff.Permanent(err)
 		}
 
-		if found {
-			return
+		if len(collected) == 0 {
+			return nil, errors.New("collector matched nothing")
 		}
 
-		time.Sleep(interval)
+		return collected, nil
+	}, settings...)
+
+	if err != nil {
+		// BOTH possibilities named, because only one of them is Jira's fault. If
+		// this ever fires for the second reason, the retry has not masked a
+		// regression — it has reported one.
+		t.Fatalf("collector matched nothing across %d attempts: either Jira's search "+
+			"index is unusually far behind, or the collector genuinely does not match "+
+			"this issue (a real regression). Last error: %v", attempts, err)
 	}
 
-	t.Fatalf("%s was still not findable by JQL after %s; the search index is unusually far behind",
-		key, time.Duration(attempts)*interval)
+	return got
 }
 
 // TestLiveCollectorSeesSeededCommentAndTransition is the first real check that
@@ -318,18 +362,12 @@ func TestLiveCollectorSeesSeededCommentAndTransition(t *testing.T) {
 	require.NoError(t, err)
 
 	// The collector finds issues by JQL, and Jira's search index lags issue
-	// creation by a few seconds. Without waiting, Collect matches nothing, `got`
+	// creation by a few seconds. Without retrying, Collect matches nothing, `got`
 	// is empty, and the assertion loop below simply never executes — so the
-	// sawComment/sawStatus flags carry the whole test. Those final require calls
-	// are what keep an empty collection from reading as success.
-	waitUntilSearchable(t, client, key)
-
+	// sawComment/sawStatus flags carry the whole test. The require calls after the
+	// loop are what keep an empty collection from reading as success.
 	cc := liveCollectContext(t, key)
-
-	var got []events.Event
-	require.NoError(t, collectorjira.New().Collect(cc, func(e events.Event) {
-		got = append(got, e)
-	}))
+	got := collectUntilMatched(t, collectorjira.New(), cc)
 
 	require.NotEmpty(t, got,
 		"the collector matched no events at all; every per-event assertion below would "+
@@ -384,20 +422,20 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 	_, err = client.AddComment(key, "watermark probe")
 	require.NoError(t, err)
 
-	// Jira's search index is eventually consistent: a just-created issue is
-	// fetchable by key immediately but takes a few seconds to become findable
-	// by JQL (measured at ~3.3s on this instance). Without waiting, the first
-	// pass searches, matches nothing, stores no watermark, and the second pass
-	// silently degrades into another unbounded query — proving nothing. This is
-	// a property of Jira, not of the collector.
-	waitUntilSearchable(t, client, key)
-
 	cc := liveCollectContext(t, key)
 	collector := collectorjira.New()
 
 	// First pass: no cursor, so a plain unbounded query. This is what every
 	// offline test already covers.
-	require.NoError(t, collector.Collect(cc, func(events.Event) {}))
+	//
+	// Retried rather than run once, because the collector storing a watermark is
+	// this test's PRECONDITION, not its subject. Jira's index is eventually
+	// consistent AND non-monotonic (measured ~3.3s lag; observed to flap), so a
+	// single pass can match nothing, store no watermark, and leave the second pass
+	// silently degraded into another unbounded query — the assertion below would
+	// then fail for a reason that has nothing to do with the JQL quoting this test
+	// exists to prove. That is exactly how this test failed intermittently in CI.
+	collectUntilMatched(t, collector, cc)
 
 	position, err := cc.Store.GetCursor("jira", collectorjira.CursorResource(liveConnectionName(), "probe"))
 	require.NoError(t, err)

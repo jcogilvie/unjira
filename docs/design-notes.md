@@ -639,6 +639,61 @@ behaviour did not change; every pre-existing test passed untouched.
 - **Order-as-data lets order be reviewed.** A reordering is now a test failure with a reason attached,
   where before it was a diff that read as harmless.
 
+## 26. Eventual consistency is non-monotonic, so a readiness probe cannot fix a race
+
+An integration test failed intermittently — roughly one run in three — with
+`a successful first pass must store a watermark, or the second pass proves nothing`.
+The assertion is about cursor logic, so the symptom pointed at the reconciler's watermark handling.
+The cause was Jira's search index.
+
+**The shape.** The test creates an issue, then runs the collector, which finds issues by JQL. Jira's
+search index lags issue creation by ~3.3 seconds on this instance, so the test already had a
+readiness probe: poll until the issue is findable, *then* collect. That probe was not enough, and the
+reason generalizes past this test:
+
+> **Eventual consistency is not monotonic.** A document can become findable, then transiently stop
+> being findable, while replicas converge. A probe can only ever establish that the index *was*
+> ready — never that it will still be ready one HTTP call later.
+
+So no amount of pre-checking fixes it. The retry has to wrap the operation that can lose the race,
+not run before it.
+
+**A wrong turn worth recording.** The first diagnosis was that the probe polled `key = X` while the
+collector's query goes through `EffectiveJQL` as `project IN ("SCRUM") AND (key = X)` — two different
+index paths, one satisfied before the other. That is *true* and it is *not the cause*: with the probe
+fixed to poll the collector's own effective JQL, the failure reproduced on the second run. A plausible
+mechanism confirmed by reading code is still a hypothesis until it is run.
+
+**This is a test-framework hazard, not a production one**, and the distinction is worth stating
+because the fix belongs in exactly one place:
+
+- `watch`'s pass collects FIRST and applies LAST (`cmd/unjira/main.go`'s `runWatchPass`), so a write
+  and the next search are a full interval apart — 5 minutes by default against a ~3 second lag.
+- The reconciler deliberately *discards* unjira's own writes (`dropSelfAuthored`), so a self-authored
+  event arriving late is the desired outcome either way.
+- A pass that matches nothing leaves the watermark alone and retries next pass
+  (`if highest.IsZero() { return nil }`). Correct behaviour; the test turned it into a failure only by
+  asserting within one pass.
+
+**Generalizations worth carrying:**
+
+- **create-then-SEARCH is racy; create-then-FETCH-BY-KEY is not.** `GET /issue/{key}` reads the
+  document store and is immediately consistent. Only 2 of 17 live tests were exposed, and both were
+  collector tests — but that ratio is an artifact of having two collectors, not of the problem being
+  rare. Every collector's live test has to create data and then find it by query, so this is the
+  shape *every future collector* will hit.
+- **Retry the operation, never the assertion.** `collectUntilMatched` retries the collector; the
+  assertions after it still fail on the first wrong answer. A blanket retry around assertions would
+  mask the collector regressions this tier exists to catch.
+- **A retry's failure message must name both possibilities.** "Either Jira's index is far behind, or
+  the collector genuinely does not match this issue (a real regression)" is what keeps the retry from
+  converting a permanent bug into a slow timeout with no explanation.
+- **Bound tries and elapsed time independently.** Tries bound cost; elapsed time bounds how long a
+  human waits. A slow dependency should fail on the clock, not after N slow attempts.
+- **Don't reach for long-lived test fixtures to dodge a timing problem.** It trades a timing bug for a
+  state bug: fixtures accumulate transitions and comments from every prior run, so tests start
+  depending on where the last run left off, and a freshly-created fixture still races anyway.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

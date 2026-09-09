@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/alecthomas/kong v1.16.0
 	github.com/andygrunwald/go-jira/v2 v2.0.0-20260614144923-204ada8a4252
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/joho/godotenv v1.5.1
 	github.com/openai/openai-go/v3 v3.50.0
 	github.com/stretchr/testify v1.11.1
