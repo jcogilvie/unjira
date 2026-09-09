@@ -156,6 +156,53 @@ the natural moment to decide.
 
 ---
 
+### F9 — a low-precision candidate list truncates on an alphabetical tiebreak
+
+`gatherCandidates` (`internal/correlator/match_candidates.go:55-122`) ranks issue-key candidates by
+provenance — Jira event, then branch name, then first-mention prose, then later-mention prose — and
+truncates to `match.max_candidates_per_narrative`. Within the `ProvenanceProseLater` tier, ties break
+**alphabetically**, which has no relationship to relevance.
+
+Measured on real data: narrative 60 is a Claude Code session whose `ticket_keys` holds **67
+text-scraped keys** (including `UTF-8`, `Z0-9`, `CP-01`..`CP-15`). Running the real ranking logic
+against it, `PAAS-4001` — a key with genuine recent Jira activity — lands at **rank 41 of 65** and is
+truncated away, while alphabetically-earlier noise survives.
+
+The collector is right to scrape broadly and defer judgment (that is the dumb-collector invariant).
+The defect is that the *discriminator* is alphabetical.
+
+**Candidate fix, not yet chosen:** a deterministic corroboration tier ranked between `JiraEvent` and
+`ProseFirst` — promote a prose key whose issue has Jira activity inside a bounded recent window. It
+stays deterministic and pre-model, and the window is a new config knob independent of the clustering
+window. Cost when wrong: a false join costs one `GetIssue` verification plus a classifier call that
+can assign `mentioned`; a missed join is exactly today's behaviour. It changes
+`gatherCandidates`' signature, so `match_candidates_test.go` needs new cases — a real behaviour
+change, honestly flagged rather than sold as a refactor.
+
+---
+
+### F10 — a truncated pass ends with a clean-looking summary
+
+Both `match.max_narratives_per_pass` and `reconciler.max_narratives_per_pass` (default 20) log to
+**stderr** when they truncate, naming the config key. The rendered pass summary goes to **stdout** and
+says nothing about the remainder.
+
+So a pass that examined 20 of 62 narratives ends looking complete. This is not hypothetical: it is how
+a 42-narrative backlog was misread as a clustering defect, and the misreading survived three drain
+passes because the diagnosing session piped output through `tail`, discarding the very warning that
+would have explained it.
+
+The cap itself is right — it bounds LLM spend and blast radius per pass, and it is configurable. The
+gap is that draining requires re-running, and nothing on the happy path tells an operator that.
+
+**Candidate fix, not yet chosen:** return the remainder as data (`MatchRunResult.Remaining`, and the
+reconciler's equivalent) and render it in the pass summary, so `watch` can also act on it — a loop
+that knows it is behind can drain rather than sleep. Threading it touches `correlator.Match`'s return
+signature, `RunMatch`, and both renderers; the cheaper alternative of having the renderer query the
+store would break the renderers' no-I/O property, which is probably the wrong trade.
+
+---
+
 ## Task cross-references
 
 | Finding | Task |
@@ -167,3 +214,5 @@ the natural moment to decide.
 | F5, F6 — dead schema, unread artifacts | **#176** |
 | F7 — connection/identity model | **#178** |
 | F8 — resolver's home | **#177** |
+| F9 — alphabetical candidate tiebreak | new; the real residue of #179 |
+| F10 — truncated pass looks complete | new |
