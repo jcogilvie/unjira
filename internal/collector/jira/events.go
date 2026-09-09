@@ -187,8 +187,8 @@ func EventFromComment(ic IssueContext, comment map[string]any) (events.Event, er
 func (ic IssueContext) annotate(evt *events.Event, authorAccountID string) {
 	evt.Artifacts[events.ArtifactIssueKey] = ic.Key
 	evt.Artifacts["project_key"] = ic.ProjectKey
-	evt.Artifacts["connection"] = ic.Connection
-	evt.Artifacts["authored_by_unjira"] = ic.SelfAccountID != "" && authorAccountID == ic.SelfAccountID
+	evt.Artifacts[events.ArtifactConnection] = ic.Connection
+	evt.Artifacts[events.ArtifactAuthoredByUnjira] = ic.SelfAccountID != "" && authorAccountID == ic.SelfAccountID
 
 	// Every event this collector emits is the tracker's own account of itself: a
 	// changelog entry, a tracked field edit, or a comment already on the issue.

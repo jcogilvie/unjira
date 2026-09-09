@@ -121,10 +121,10 @@ type createPayload struct {
 func (a *Applier) Apply(action store.ActionRow) error {
 	err := a.write(action)
 
-	status := "applied"
+	status := store.StatusApplied
 	reason := ""
 	if err != nil {
-		status = "failed"
+		status = store.StatusFailed
 		reason = err.Error()
 	}
 

@@ -214,12 +214,17 @@ Reading the transitions, since some distinctions matter more than an edge label 
   next reconcile pass** — there is no separate retry path.
 - **`skip`** leaves the action `proposed` for the next session.
 
-**Finding — the lifecycle vocabulary is half-declared.** `StatusProposed`
-(`reconciler/types.go:39`) and `StatusDeclined` (`reconciler/create.go:67`) are constants;
-`"applied"`, `"failed"`, `"approved"`, `"rejected"`, `"edited"`, and `"open"` are bare literals
-spread across five packages — `gate/applier.go:124`, `:127`, `triage/triage.go:181`,
-`triage/restructure.go:245`, `:364`, `reconciler/create.go:337`, `reconciler/reconciler.go:470`,
-`store/supersede.go:32` — see **F2** in `docs/architecture-findings.md`.
+**The seven `actions.status` values are named constants in one place.** `internal/store/actionstatus.go`
+declares `StatusProposed`, `StatusApproved`, `StatusEdited`, `StatusRejected`, `StatusApplied`,
+`StatusFailed`, `StatusDeclined` — `store` rather than `reconciler`, `triage`, or `gate` (each of
+which writes or compares at least one) because `store` is the only package none of the other three
+import, so every writer reaches the constants through an import edge it already has. `gate` and
+`triage` reference them as `store.StatusX`; `reconciler.StatusProposed` and
+`reconciler.StatusDeclined` are aliases to the same constants, kept because this package already
+spells both unqualified in several places, including its own tests. No `actions.status` comparison
+or assignment anywhere in `internal/` or `cmd/` uses a bare string literal for one of these seven
+values. `"open"`/`"split"` (`store.StatusOpen`/`store.StatusSplit`) are a separate, narrative-level
+enum and are declared the same way, in `internal/store/narrativestatus.go`.
 
 ---
 
@@ -337,10 +342,14 @@ registry, and a defensible one at two backends — one of which exists only for 
 paying off around three variants. *Revisit when a third tracker lands*, or if backend-aware sites
 begin appearing outside `cmd`/`config`.
 
-**A Repository interface over `internal/store`.** Finding F4 identifies two responsibilities there and
-that holds up, but the cheaper fix is splitting the *file*. With one implementation and no second datastore in
-prospect, an interface adds indirection without inversion. *Revisit if a second store implementation
-becomes real* — an in-memory store for tests, or a non-SQLite backend.
+**A Repository interface over `internal/store`.** The package holds two responsibilities — unjira's own
+records (events, narratives, actions, cursors, `pipeline_lock`) and the local tasktracker backend's
+mimicked issue store (`local_issues`/`local_issue_comments`, `localissues.go`) — sharing one `*Store`
+handle and one `Open` because both need exactly one SQLite file, not because they share query logic.
+That split is expressed at the file level (each concern has its own file; §4's dependency graph is
+unaffected, since both stay inside `internal/store`), not via an interface: with one implementation and
+no second datastore in prospect, an interface would add indirection without inversion. *Revisit if a
+second store implementation becomes real* — an in-memory store for tests, or a non-SQLite backend.
 
 **`correlator.Stats` as a Visitor.** It is a plain accumulator with `Add`/`AddUsage`
 (`correlator.go:131`, `:144`), and the pattern name would not change the code. *Revisit if traversal

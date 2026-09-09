@@ -33,10 +33,17 @@ const (
 	ActionCreate ActionType = "create"
 )
 
-// StatusProposed is the actions.status value every freshly drafted action lands
-// at. Named because three call sites in this package write or compare it, and a
-// typo in one would be a row nothing ever selects.
-const StatusProposed = "proposed"
+// StatusProposed is the actions.status value every freshly drafted action
+// lands at.
+//
+// An alias for store.StatusProposed, not a second declaration: the action
+// status enum is declared once, in internal/store (see actionstatus.go's doc
+// comment for why store is the cycle-free home — gate, triage, and this
+// package all already import store, and store imports neither of them). This
+// alias exists purely so the ~10 unqualified uses already in this package
+// (types.go, create.go, persist.go, and their tests) do not all need a
+// store. qualifier for a value this package treats as core vocabulary.
+const StatusProposed = store.StatusProposed
 
 // ProposedAction is one drafted, not-yet-persisted action.
 type ProposedAction struct {

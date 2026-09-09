@@ -64,7 +64,7 @@ func resolveMergeTarget(a, b commitState) (target, source int64, err error) {
 // hasCommittedAction reports whether any action for this narrative actually
 // reached the tracker.
 //
-// Filters on status == "applied", NOT on executed_at being set:
+// Filters on status == store.StatusApplied, NOT on executed_at being set:
 // UpdateActionStatus stamps executed_at for both applied AND failed, because a
 // failed attempt still attempted a write. But a failed write mutated nothing,
 // so it must not make a narrative the workstream of record.
@@ -75,7 +75,7 @@ func hasCommittedAction(s *store.Store, narrativeID int64) (bool, error) {
 	}
 
 	for _, a := range actions {
-		if a.Status == "applied" {
+		if a.Status == store.StatusApplied {
 			return true, nil
 		}
 	}
@@ -242,7 +242,7 @@ func (h *StoreHandler) Redraft(
 		return store.ActionRow{}, err
 	}
 
-	row, err := h.persistReplacement(action, "edited", feedback, replacement)
+	row, err := h.persistReplacement(action, store.StatusEdited, feedback, replacement)
 	if err != nil {
 		return store.ActionRow{}, err
 	}
@@ -291,7 +291,7 @@ func (h *StoreHandler) persistReplacement(
 		Payload:     payload,
 		Confidence:  replacement.Confidence,
 		Rationale:   replacement.Rationale,
-		Status:      "proposed",
+		Status:      store.StatusProposed,
 	}
 
 	id, err := h.store.SupersedeAction(old.ID, ruling, feedback, row)
@@ -358,10 +358,11 @@ func (h *StoreHandler) Retarget(
 		return store.ActionRow{}, err
 	}
 
-	// "rejected", not "edited": the old action named the wrong issue, so it was
-	// not reworded — it was ruled against. slice 7 should learn from that
-	// distinction rather than seeing every triage correction as a wording tweak.
-	return h.persistReplacement(action, "rejected",
+	// store.StatusRejected, not store.StatusEdited: the old action named the
+	// wrong issue, so it was not reworded — it was ruled against. slice 7
+	// should learn from that distinction rather than seeing every triage
+	// correction as a wording tweak.
+	return h.persistReplacement(action, store.StatusRejected,
 		fmt.Sprintf("retargeted from %s to %s", action.IssueKey, newKey), replacement)
 }
 

@@ -235,8 +235,8 @@ func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.E
 	)
 	event.Artifacts["session_id"] = sessionID
 	event.Artifacts["cwd"] = meta.cwd
-	event.Artifacts["git_branch"] = meta.gitBranch
-	event.Artifacts["ticket_keys"] = toAnySlice(meta.orderedKeys)
+	event.Artifacts[events.ArtifactGitBranch] = meta.gitBranch
+	events.SetTicketKeys(&event, meta.orderedKeys)
 	event.Artifacts["user_message_count"] = len(meta.userTexts)
 	event.Artifacts["started_at"] = meta.firstTS
 	event.RawRef = path
@@ -398,13 +398,4 @@ func stringSliceOption(options map[string]any, key string) []string {
 	default:
 		return nil
 	}
-}
-
-func toAnySlice(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
-	}
-
-	return out
 }

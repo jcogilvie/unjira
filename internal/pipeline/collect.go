@@ -46,9 +46,10 @@ type Collector interface {
 // config but not present in registry reports -1.
 //
 // linkExclusions (from config.CompiledLinkExclusions, compiled once by the
-// caller) is applied to every event's ticket_keys artifact before insert: a
-// matching key is recorded in a new excluded_ticket_keys artifact, never
-// removed from ticket_keys itself. A nil/empty linkExclusions is a no-op.
+// caller) is applied to every event's events.ArtifactTicketKeys artifact
+// before insert: a matching key is recorded in a new excluded_ticket_keys
+// artifact, never removed from events.ArtifactTicketKeys itself. A nil/empty
+// linkExclusions is a no-op.
 //
 // creds is passed to every collector via CollectContext.Credentials, so a
 // remote collector can authenticate without reading the environment itself.
@@ -109,23 +110,17 @@ func RunCollect(
 }
 
 // annotateExcludedTicketKeys sets event.Artifacts["excluded_ticket_keys"]
-// when any of its ticket_keys match a configured link-exclusion pattern.
-// ticket_keys itself is left untouched — nothing is ever removed from it.
+// when any of its events.ArtifactTicketKeys match a configured link-exclusion
+// pattern. events.ArtifactTicketKeys itself is left untouched — nothing is
+// ever removed from it.
 func annotateExcludedTicketKeys(event events.Event, linkExclusions []*regexp.Regexp) {
 	if len(linkExclusions) == 0 {
 		return
 	}
 
-	raw, ok := event.Artifacts["ticket_keys"].([]any)
-	if !ok || len(raw) == 0 {
+	keys := events.TicketKeysOf(event)
+	if len(keys) == 0 {
 		return
-	}
-
-	keys := make([]string, 0, len(raw))
-	for _, k := range raw {
-		if s, ok := k.(string); ok && s != "" {
-			keys = append(keys, s)
-		}
 	}
 
 	_, excluded := events.PartitionExcludedKeys(keys, linkExclusions)

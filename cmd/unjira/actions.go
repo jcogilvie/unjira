@@ -118,14 +118,14 @@ func (c *actionsDecideCmd) Run(app *appContext) error {
 	case c.Approve:
 		return app.approveAction(c.ID)
 	case c.Reject:
-		return app.store.UpdateActionStatus(c.ID, "rejected")
+		return app.store.UpdateActionStatus(c.ID, store.StatusRejected)
 	default:
 		// Kong's xor+required guarantee (see the struct's own doc comment)
 		// means reaching here implies Edit was the flag actually supplied,
 		// even if its value happens to be the empty string — an operator
 		// clearing feedback back to nothing is a legitimate, if unusual,
 		// edit, not a parse ambiguity to guess at.
-		return app.store.UpdateActionStatusAndFeedback(c.ID, "edited", c.Edit)
+		return app.store.UpdateActionStatusAndFeedback(c.ID, store.StatusEdited, c.Edit)
 	}
 }
 
@@ -159,7 +159,7 @@ func (a *appContext) approveAction(id int64) error {
 		return err
 	}
 
-	if action.Status == "applied" {
+	if action.Status == store.StatusApplied {
 		return fmt.Errorf(
 			"action %d is already applied: approving it again would repeat its tracker write "+
 				"(comment/transition/create) a second time", id,

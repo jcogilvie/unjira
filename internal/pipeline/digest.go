@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -31,7 +32,7 @@ func RenderDigest(s *store.Store, day time.Time) (string, error) {
 
 	var linked, unlinked []string
 	for _, row := range rows {
-		keys := stringArtifact(row.Artifacts, "ticket_keys")
+		keys := events.TicketKeysOf(row)
 		excluded := stringArtifact(row.Artifacts, "excluded_ticket_keys")
 		realKeys := subtractKeys(keys, excluded)
 

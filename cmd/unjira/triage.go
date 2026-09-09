@@ -241,7 +241,7 @@ func (c *triageCmd) Run(app *appContext) error {
 		}()
 	}
 
-	batch, err := app.store.ActionsByStatus("proposed")
+	batch, err := app.store.ActionsByStatus(store.StatusProposed)
 	if err != nil {
 		return err
 	}

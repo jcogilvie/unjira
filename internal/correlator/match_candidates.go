@@ -30,18 +30,18 @@ type Candidate struct {
 //   - ProvenanceJiraEvent from events.ArtifactIssueKey on a jira-source event —
 //     the event is already about that issue, so this is direct, not inferred.
 //   - ProvenanceBranch from re-running events.ExtractTicketKeys over
-//     artifacts["git_branch"]. This is re-derived rather than trusted from
-//     ticket_keys because the claudecode collector flattens branch-derived and
-//     prose-derived keys into that one artifact, losing exactly the
-//     branch-vs-prose distinction that matters most for attribution — the
-//     branch is an explicit human act of naming the ticket for this work,
-//     prose is not.
-//   - ProvenanceProseFirst / ProvenanceProseLater from walking ticket_keys in
-//     order: index 0 is "first mentioned", everything after is "later
-//     mentioned". No finer split exists because the collector already
-//     deduped mentions into one order-preserving slice — "which of the later
-//     mentions" is information that was discarded before this function ever
-//     saw it.
+//     events.ArtifactGitBranch. This is re-derived rather than trusted from
+//     ArtifactTicketKeys because the claudecode collector flattens
+//     branch-derived and prose-derived keys into that one artifact, losing
+//     exactly the branch-vs-prose distinction that matters most for
+//     attribution — the branch is an explicit human act of naming the ticket
+//     for this work, prose is not.
+//   - ProvenanceProseFirst / ProvenanceProseLater from walking
+//     events.TicketKeysOf in order: index 0 is "first mentioned", everything
+//     after is "later mentioned". No finer split exists because the collector
+//     already deduped mentions into one order-preserving slice — "which of
+//     the later mentions" is information that was discarded before this
+//     function ever saw it.
 //
 // The same key can surface at multiple tiers across events (mentioned in
 // prose in one session, then named in a branch in another); only the
@@ -81,17 +81,17 @@ func gatherCandidates(evts []Event, linkExclusions []*regexp.Regexp, limit int) 
 
 	for _, e := range evts {
 		if issueKey, ok := e.Artifacts[events.ArtifactIssueKey].(string); ok && issueKey != "" {
-			connection, _ := e.Artifacts["connection"].(string)
+			connection, _ := e.Artifacts[events.ArtifactConnection].(string)
 			upsert(issueKey, ProvenanceJiraEvent, connection)
 		}
 
-		if branch, ok := e.Artifacts["git_branch"].(string); ok && branch != "" {
+		if branch, ok := e.Artifacts[events.ArtifactGitBranch].(string); ok && branch != "" {
 			for _, key := range events.ExtractTicketKeys(branch) {
 				upsert(key, ProvenanceBranch, "")
 			}
 		}
 
-		for i, key := range ticketKeys(e) {
+		for i, key := range events.TicketKeysOf(e) {
 			provenance := ProvenanceProseLater
 			if i == 0 {
 				provenance = ProvenanceProseFirst
@@ -168,7 +168,7 @@ func excludedCandidates(evts []Event, linkExclusions []*regexp.Regexp) []string 
 			keys = append(keys, issueKey)
 		}
 
-		if branch, ok := e.Artifacts["git_branch"].(string); ok && branch != "" {
+		if branch, ok := e.Artifacts[events.ArtifactGitBranch].(string); ok && branch != "" {
 			for _, key := range events.ExtractTicketKeys(branch) {
 				if !seen[key] {
 					seen[key] = true
@@ -177,7 +177,7 @@ func excludedCandidates(evts []Event, linkExclusions []*regexp.Regexp) []string 
 			}
 		}
 
-		for _, key := range ticketKeys(e) {
+		for _, key := range events.TicketKeysOf(e) {
 			if !seen[key] {
 				seen[key] = true
 				keys = append(keys, key)
@@ -188,26 +188,4 @@ func excludedCandidates(evts []Event, linkExclusions []*regexp.Regexp) []string 
 	_, excluded := events.PartitionExcludedKeys(keys, linkExclusions)
 
 	return excluded
-}
-
-// ticketKeys reads e's ticket_keys artifact, which is always []any (the
-// claudecode collector converts before assigning, and the shape survives a
-// JSON round-trip through SQLite the same way) — never []string. Keeping only
-// non-empty strings tolerates absence and any malformed element without
-// erroring, since a corrupt artifact here should degrade to "no prose
-// candidates", not fail the whole gather.
-func ticketKeys(e Event) []string {
-	raw, ok := e.Artifacts["ticket_keys"].([]any)
-	if !ok {
-		return nil
-	}
-
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if s, ok := v.(string); ok && s != "" {
-			out = append(out, s)
-		}
-	}
-
-	return out
 }

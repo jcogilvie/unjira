@@ -28,46 +28,35 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
-### F1 — The invariant CLAUDE.md calls load-bearing describes dead code
+### F1 — refs and fanout await a collector that does not exist yet
 
-`CLAUDE.md` states: *"The correlator's deterministic primitives run before any model.
-`internal/correlator/refs` and `internal/correlator/fanout` are pure functions with no I/O and no
-Jira dependency — keep them that way; they're what keeps the LLM's review queue signal-rich."*
-
-They are pure, and they are thoroughly tested. **They have zero production callers.**
-`refs.ParsePRRefs`, `fanout.ClusterFanout`, and `fanout.NormalizeTitle` are referenced nowhere
-outside their own packages except in two doc comments citing them as exemplars
+`internal/correlator/refs` and `internal/correlator/fanout` are pure, thoroughly tested, and have
+**zero production callers**. `refs.ParsePRRefs`, `fanout.ClusterFanout` and `fanout.NormalizeTitle`
+are referenced nowhere outside their own packages except two doc comments citing them as exemplars
 (`clients/openai/openai.go:136`, `docs/go-conventions.md:48`).
 
-So the invariant is true of code that does not run, and whatever protection it describes, the pipeline
-does not have. The deterministic pre-filter that *does* run is `correlator/match_candidates.go`'s
-`gatherCandidates`, which the invariant does not mention.
+This is **not** dead code awaiting deletion, and it is **not** relevant to the clustering problem.
+Both facts are settled:
 
-This interacts directly with **#179**: `fanout` groups mirrored work (the 12-region-change case) and
-`refs` parses PR references. Both are plausibly relevant to why the two event streams cluster into
-disjoint narratives, so the two are entangled and #181 blocks #179.
+- They solve **GitHub-PR-shaped** problems. `fanout.Item` is `{Repo, Author, Title, Number}`
+  (`fanout/fanout.go:67-72`) and groups on `(repo, author, normalizedTitle)`; `refs.refRE`
+  (`refs/refs.go:33`) requires a literal `#`. Neither can match a Jira issue key like `PAAS-4001`, so
+  neither can join a Jira event to a Claude Code session. Anything proposing them as the fix for
+  disjoint clustering is mistaken about their shape.
+- The problems are real and still expected. `rules/env-mirror-fanout.md` is live at
+  `confidence: high`, drawn from predecessor operational experience, and the README's pipeline
+  diagram lists `(GitHub)` among the planned collectors. Deleting working implementations of a rule
+  the repo still holds would leave the rule describing nothing.
 
-### F2 — Two vocabularies are half-declared, which is incident 21 unresolved
+Two commits ever, both from the Python→Go port (`git log -- internal/correlator/refs
+internal/correlator/fanout`), recovered from a never-merged predecessor PR — so they were never
+wired in any version, rather than lost in the port.
 
-Incident 21 established: an undeclared map key or string vocabulary is a contract nobody signed.
-Both instances below are the same defect at different scales.
-
-**Artifact keys.** Four are declared constants in `internal/events` and read through them —
-`issue_key`, `status_from`, `status_to`, `tracker_record`. Four more are **bare literals written in
-one package and read in another**:
-
-| key | written | read | packages |
-|---|---|---|---|
-| `connection` | `collector/jira/events.go:190` | `correlator/match_candidates.go:84` | jira → correlator |
-| `authored_by_unjira` | `collector/jira/events.go:191` | `reconciler/reconciler.go:324` | jira → reconciler |
-| `git_branch` | `collector/claudecode/claudecode.go:238` | `correlator/match_candidates.go:88`, `:171` | claudecode → correlator |
-| `ticket_keys` | `collector/claudecode/claudecode.go:239` | `correlator/match_candidates.go:200`, `pipeline/collect.go:119`, `pipeline/digest.go:34` | claudecode → correlator **and** pipeline |
-
-`authored_by_unjira` is the sharpest case: `reconciler/reconciler.go:315-320` documents that the
-artifact *"has been written since the collector landed and read by nothing — this is its first
-consumer."* The repo already noticed the pattern and did not close it.
-
-**Action statuses.** Half constants, half literals across five packages — see §3.
+**What remains open:** nothing in the code. CLAUDE.md's invariant used to claim these two were
+load-bearing today, which was false; it now names `gatherCandidates` and `runSuppression` as the
+pre-filters that actually run, and records these two as awaiting the GitHub collector. This entry
+stays only so a future reader who greps for uncalled packages finds the reasoning instead of
+re-deriving it.
 
 ### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
 
@@ -83,28 +72,6 @@ The reasoning is sound and the consequence is still real: the classifier a *futu
 would need cannot recognize its errors, and `correlator` — which otherwise talks only to
 `tasktracker` interfaces — has a concrete backend in its import list. This is incident 21's shape at
 the package level. The comment names the cycle as the blocker, which is the actionable part.
-
-### F4 — internal/store is two responsibilities sharing a connection
-
-2423 non-test lines, of which `store.go` alone is **2008** — about 5× the point at which a file stops
-fitting in one head.
-
-Two groups, and no group-(a) function touches group (b)'s tables or vice versa:
-
-- **(a) unjira's own records** — ~2209 lines. Events, narratives, actions, cursors, links,
-  `pipeline_lock`. Consumed by nearly every package.
-- **(b) a mimicked issue tracker** — 214 lines (`store.go:502-684` plus schema at `:182-208`).
-  `local_issues` / `local_issue_comments`, with exactly **one** production consumer,
-  `internal/clients/local`.
-
-They share the `*Store` handle, `Open`, and one monolithic `schema` string — but **not** the
-transaction machinery: all twelve `*Tx` methods are group (a), and group (b)'s six accessors call
-`s.db` directly. Shared plumbing, not shared logic.
-
-`Open(dbPath)` takes no backend parameter (`store.go:272`), so **`local_issues` is created in every
-database even when the `jira` backend is configured** — which is the default. The only boundary
-between the two groups is a section comment of the same visual weight as the ones separating
-`events` from `cursors`.
 
 ### F5 — Three tables are created and never used
 
@@ -207,10 +174,8 @@ store would break the renderers' no-I/O property, which is probably the wrong tr
 
 | Finding | Task |
 |---|---|
-| F1 — dead primitives | **#181**, which blocks **#179** |
-| F2 — undeclared vocabularies | **#182** |
+| F1 — refs/fanout await the GitHub collector | resolved: keep, invariant corrected. Not a blocker. |
 | F3 — concrete backend in the correlator | **#183** |
-| F4 — store's two responsibilities | **#183** |
 | F5, F6 — dead schema, unread artifacts | **#176** |
 | F7 — connection/identity model | **#178** |
 | F8 — resolver's home | **#177** |
