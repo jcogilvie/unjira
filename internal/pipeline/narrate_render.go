@@ -116,6 +116,7 @@ func RenderMatchResult(r MatchRunResult) string {
 
 	if len(r.Matched) == 0 {
 		b.WriteString("\nno narratives considered\n")
+		writeRemainder(&b, r.Remaining, "unmatched")
 
 		return b.String()
 	}
@@ -128,7 +129,33 @@ func RenderMatchResult(r MatchRunResult) string {
 		}
 	}
 
+	writeRemainder(&b, r.Remaining, "unmatched")
+
 	return b.String()
+}
+
+// writeRemainder reports a backlog this pass did not drain, or writes nothing.
+//
+// SILENT AT ZERO, deliberately. "0 narratives remaining" on every ordinary pass
+// would train an operator to skip the line — which is exactly how the existing
+// stderr cap warning came to be ignored, so printing it unconditionally would
+// reproduce the bug this exists to fix.
+//
+// Says what to DO, not just the count. A bare number is a fact; "re-run to
+// continue" is the instruction, and the reason this is on stdout at all is that an
+// operator reading a pass summary should not have to already know that per-pass
+// caps exist.
+//
+// Written on BOTH paths of RenderMatchResult, including the no-narratives early
+// return: a pass that considered nothing while a backlog waits is precisely the
+// case worth reporting, and it is the one an early return would have hidden.
+func writeRemainder(b *strings.Builder, remaining int, what string) {
+	if remaining <= 0 {
+		return
+	}
+
+	fmt.Fprintf(b, "\n%d narrative(s) still %s — re-run to continue draining "+
+		"(per-pass cap; see max_narratives_per_pass)\n", remaining, what)
 }
 
 // writeMatchHeader writes the narrative count and LLM call/token stats that
@@ -219,6 +246,7 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 
 	if len(r.Results) == 0 {
 		b.WriteString("\nno linked narratives to reconcile\n")
+		writeRemainder(&b, r.Remaining, "eligible to reconcile")
 
 		return b.String()
 	}
@@ -226,6 +254,8 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 	for _, result := range r.Results {
 		writeReconciledNarrative(&b, result)
 	}
+
+	writeRemainder(&b, r.Remaining, "eligible to reconcile")
 
 	return b.String()
 }

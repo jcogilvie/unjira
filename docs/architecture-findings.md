@@ -146,29 +146,6 @@ can assign `mentioned`; a missed join is exactly today's behaviour. It changes
 `gatherCandidates`' signature, so `match_candidates_test.go` needs new cases — a real behaviour
 change, honestly flagged rather than sold as a refactor.
 
----
-
-### F10 — a truncated pass ends with a clean-looking summary
-
-Both `match.max_narratives_per_pass` and `reconciler.max_narratives_per_pass` (default 20) log to
-**stderr** when they truncate, naming the config key. The rendered pass summary goes to **stdout** and
-says nothing about the remainder.
-
-So a pass that examined 20 of 62 narratives ends looking complete. This is not hypothetical: it is how
-a 42-narrative backlog was misread as a clustering defect, and the misreading survived three drain
-passes because the diagnosing session piped output through `tail`, discarding the very warning that
-would have explained it.
-
-The cap itself is right — it bounds LLM spend and blast radius per pass, and it is configurable. The
-gap is that draining requires re-running, and nothing on the happy path tells an operator that.
-
-**Candidate fix, not yet chosen:** return the remainder as data (`MatchRunResult.Remaining`, and the
-reconciler's equivalent) and render it in the pass summary, so `watch` can also act on it — a loop
-that knows it is behind can drain rather than sleep. Threading it touches `correlator.Match`'s return
-signature, `RunMatch`, and both renderers; the cheaper alternative of having the renderer query the
-store would break the renderers' no-I/O property, which is probably the wrong trade.
-
----
 
 ## Task cross-references
 
@@ -180,4 +157,4 @@ store would break the renderers' no-I/O property, which is probably the wrong tr
 | F7 — connection/identity model | **#178** |
 | F8 — resolver's home | **#177** |
 | F9 — alphabetical candidate tiebreak | new; the real residue of #179 |
-| F10 — truncated pass looks complete | new |
+| F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |

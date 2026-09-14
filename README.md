@@ -219,9 +219,11 @@ data/                   SQLite database lives here (gitignored)
 - **Every stage caps its own batch, and says when it hits the cap.** `match.max_narratives_per_pass`
   and `reconciler.max_narratives_per_pass` are separate numbers because the per-narrative costs
   differ — matching resolves a lone candidate for free and only calls a model when two or more
-  survive, while the reconciler drafts for everything it examines. Both log when the backlog
-  exceeds the cap: a stage that truncates silently makes unexamined work look like failed work,
-  which is exactly how a matching batch limit once read as a matching bug.
+  survive, while the reconciler drafts for everything it examines. Both report the remainder in
+  the pass summary on stdout — not only in a stderr log line — and say to re-run: a stage that
+  truncates silently makes unexamined work look like failed work, which is exactly how a matching
+  batch limit once read as a matching bug. A drained pass says nothing, so the line means
+  something when it appears.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.
