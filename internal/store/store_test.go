@@ -272,7 +272,6 @@ func TestNarrative_InsertGetRoundTrip(t *testing.T) {
 	assert.Equal(t, "open", row.Status)
 	assert.True(t, ws.Equal(row.WindowStart))
 	assert.True(t, we.Equal(row.WindowEnd))
-	assert.Empty(t, row.IssueKey)
 	assert.Nil(t, row.CompactionBoundary)
 }
 
@@ -738,17 +737,17 @@ func insertNarrativeForTest(t *testing.T, s *store.Store, title string) int64 {
 	return id
 }
 
-func TestNarrativesWithoutIssueKey_ExcludesLinkedOnes(t *testing.T) {
+func TestNarrativesWithoutPrimaryLink_ExcludesLinkedOnes(t *testing.T) {
 	s := openStore(t)
 
 	unlinked := insertNarrativeForTest(t, s, "unlinked work")
 	linked := insertNarrativeForTest(t, s, "linked work")
 
-	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
-		return tx.SetNarrativeIssueLink(linked, "PROJ-1", 0.9)
+	require.NoError(t, s.AddNarrativeIssues(linked, []store.NarrativeIssue{
+		{IssueKey: "PROJ-1", Role: store.RolePrimary, Provenance: "test", Confidence: 0.9},
 	}))
 
-	got, err := s.NarrativesWithoutIssueKey(10)
+	got, err := s.NarrativesWithoutPrimaryLink(10)
 
 	require.NoError(t, err)
 	ids := make([]int64, 0, len(got))
@@ -759,31 +758,16 @@ func TestNarrativesWithoutIssueKey_ExcludesLinkedOnes(t *testing.T) {
 		"a narrative with a primary must not be re-matched every pass")
 }
 
-func TestNarrativesWithoutIssueKey_RespectsLimit(t *testing.T) {
+func TestNarrativesWithoutPrimaryLink_RespectsLimit(t *testing.T) {
 	s := openStore(t)
 	for i := range 5 {
 		insertNarrativeForTest(t, s, fmt.Sprintf("narrative %d", i))
 	}
 
-	got, err := s.NarrativesWithoutIssueKey(3)
+	got, err := s.NarrativesWithoutPrimaryLink(3)
 
 	require.NoError(t, err)
 	assert.Len(t, got, 3)
-}
-
-func TestSetNarrativeIssueLink_SetsKeyAndConfidence(t *testing.T) {
-	s := openStore(t)
-	id := insertNarrativeForTest(t, s, "work")
-
-	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
-		return tx.SetNarrativeIssueLink(id, "PROJ-42", 0.83)
-	}))
-
-	row, err := s.GetNarrative(id)
-
-	require.NoError(t, err)
-	assert.Equal(t, "PROJ-42", row.IssueKey)
-	assert.InDelta(t, 0.83, row.Confidence, 1e-9)
 }
 
 func TestAddNarrativeIssues_RoundTrips(t *testing.T) {
@@ -1705,43 +1689,50 @@ func TestRemoveNarrativeIssue_MissingLinkErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "NOPE-1")
 }
 
-// TestNarrativesWithNoIssueLink_IsStricterThanWithoutIssueKey is the distinction
-// the create path depends on. NarrativesWithoutIssueKey selects on the
-// denormalized narratives.issue_key, which MatchConfig.ConfidenceFloor only
-// promotes above the floor — so a narrative with a REAL but low-confidence primary
-// has narrative_issues rows and a NULL issue_key, and appears in its results.
-// Proposing a create for one would open a duplicate ticket for work that IS
-// tracked.
+// TestNarrativesWithNoIssueLink_IsStricterThanWithoutPrimaryLink pins the
+// distinction the create path depends on, and it survived finding F11 in a
+// different form.
+//
+// It used to be column-vs-table: NarrativesWithoutIssueKey selected on the
+// denormalized narratives.issue_key while this one asked the link table, so a
+// low-confidence primary appeared in the former and not the latter. That column is
+// gone and both now ask the link table — but they still differ, on ROLE:
+//
+//   - NarrativesWithoutPrimaryLink: "no PRIMARY link". A `mentioned` citation is
+//     not an attribution, so matching still has work to do.
+//   - NarrativesWithNoIssueLink: "no link of ANY role". Stricter, because the
+//     create path must not open a ticket for work that names any issue at all —
+//     even one it only cited.
 //
 // Both accessors are asserted on one fixture so the contrast is the assertion.
-func TestNarrativesWithNoIssueLink_IsStricterThanWithoutIssueKey(t *testing.T) {
+func TestNarrativesWithNoIssueLink_IsStricterThanWithoutPrimaryLink(t *testing.T) {
 	s := openStore(t)
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 
-	// Linked, but issue_key never promoted (the low-confidence-primary case).
-	linked, err := s.InsertNarrative(base, base.Add(time.Hour), "tracked", "has a link")
+	// Cites a ticket without being attributed to it — the case that separates the two.
+	mentionedOnly, err := s.InsertNarrative(base, base.Add(time.Hour), "cites", "mentioned only")
 	require.NoError(t, err)
-	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
-		return tx.AddNarrativeIssues(linked, []store.NarrativeIssue{{
-			IssueKey: "PROJ-1", Role: store.Role("primary"),
-			Provenance: "branch", Confidence: 0.3, Connection: "test",
-		}})
+	require.NoError(t, s.AddNarrativeIssues(mentionedOnly, []store.NarrativeIssue{
+		{
+			IssueKey: "PROJ-1", Role: store.Role("mentioned"),
+			Provenance: "prose_later", Confidence: 0.3, Connection: "test",
+		},
 	}))
 
 	// Genuinely untracked: no link of any role.
 	unlinked, err := s.InsertNarrative(base, base.Add(time.Hour), "untracked", "no link at all")
 	require.NoError(t, err)
 
-	byKey, err := s.NarrativesWithoutIssueKey(10)
+	byPrimary, err := s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)
-	assert.Len(t, byKey, 2,
-		"selecting on issue_key includes the linked-but-unpromoted narrative")
+	assert.Len(t, byPrimary, 2,
+		"a mentioned-only narrative is unattributed, so matching still owns it")
 
-	byLink, err := s.NarrativesWithNoIssueLink(10)
+	byAnyLink, err := s.NarrativesWithNoIssueLink(10)
 	require.NoError(t, err)
-	require.Len(t, byLink, 1,
-		"selecting on link existence excludes it, which is what the create path needs")
-	assert.Equal(t, unlinked, byLink[0].ID)
+	require.Len(t, byAnyLink, 1,
+		"but the create path must skip it: it names an issue, and a create would duplicate")
+	assert.Equal(t, unlinked, byAnyLink[0].ID)
 }
 
 // TestNarrativesWithNoIssueLink_AnyRoleCounts: a `mentioned`-only narrative is not

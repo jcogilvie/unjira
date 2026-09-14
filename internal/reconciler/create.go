@@ -89,7 +89,7 @@ type createVerdict struct {
 // reconcileOne is never invoked for it —
 //
 //	NarrativesWithActionableLinks (reconciler's backlog) -> 0 rows
-//	NarrativesWithoutIssueKey (matching's backlog)       -> 1 rows
+//	NarrativesWithoutPrimaryLink (matching's backlog)    -> 1 rows
 //
 // meaning adding "create" to draftSystemPrompt would have changed nothing at all.
 // The missing piece was a selection path, not a prompt option.

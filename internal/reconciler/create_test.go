@@ -84,18 +84,22 @@ func TestProposeCreates_RespectsARefusal(t *testing.T) {
 }
 
 // TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink: a narrative with a real
-// but LOW-confidence primary has narrative_issues rows and a NULL issue_key.
-// Selecting on issue_key (as NarrativesWithoutIssueKey does) would include it, and
-// proposing a create would open a duplicate for work that IS tracked.
+// but LOW-confidence primary is still tracked, and proposing a create for it would
+// open a duplicate ticket for work an issue already covers.
+//
+// This test used to assert the opposite precondition — that such a narrative was
+// still in matching's backlog — because that backlog selected on the denormalized
+// narratives.issue_key, which the confidence floor left NULL below the floor. That
+// column is gone (finding F11) and the backlog now asks the link table, so the
+// precondition is inverted here: a primary link at any confidence means attributed.
 func TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink(t *testing.T) {
 	s := reconcileStore(t)
-	// seedLinkedNarrative attaches a link WITHOUT promoting narratives.issue_key.
-	seedLinkedNarrative(t, s, "DEVSBX-9", store.Role("primary"), codeEvent("cr:1", "work"))
+	seedLinkedNarrative(t, s, "DEVSBX-9", store.RolePrimary, codeEvent("cr:1", "work"))
 
-	unpromoted, err := s.NarrativesWithoutIssueKey(10)
+	backlog, err := s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)
-	require.Len(t, unpromoted, 1,
-		"precondition: a linked narrative can still have a NULL issue_key")
+	require.Empty(t, backlog,
+		"precondition: a narrative with a primary link is not matching's work any more")
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 

@@ -93,7 +93,7 @@ func RunMatch(
 	// results are worth returning. Remaining stays 0, which reads as "caught up" —
 	// the wrong answer, but a quieter one than discarding a completed pass over a
 	// COUNT(*).
-	remaining, countErr := s.CountNarrativesWithoutIssueKey()
+	remaining, countErr := s.CountNarrativesWithoutPrimaryLink()
 	if countErr != nil {
 		log.Printf("pipeline: could not count the remaining unmatched narratives (%v); "+
 			"this pass's summary will not report a backlog", countErr)

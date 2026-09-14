@@ -24,6 +24,30 @@ import (
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
+// primaryOf reports the narrative's primary issue key as STORED, or "" when it has
+// none.
+//
+// Reads the narrative_issues link table, which is the single source of truth for
+// attribution. These assertions previously read narratives.issue_key, a
+// denormalized column that finding F11 removed: the confidence floor decided
+// whether to write it while the link row was written regardless, so the two
+// disagreed and matching's backlog — which selected on the column — re-matched the
+// narrative forever.
+func primaryOf(t *testing.T, s *store.Store, narrativeID int64) string {
+	t.Helper()
+
+	links, err := s.NarrativeIssues(narrativeID)
+	require.NoError(t, err)
+
+	for _, l := range links {
+		if l.Role == store.RolePrimary {
+			return l.IssueKey
+		}
+	}
+
+	return ""
+}
+
 // fakeTracker satisfies tasktracker.TaskReader without a network call.
 //
 // issues is the set of keys that resolve; anything else returns a not-found
@@ -120,9 +144,7 @@ func TestMatch_SingleCandidateNeedsNoLLM(t *testing.T) {
 	assert.Equal(t, 0, stats.Calls)
 	assert.Empty(t, llmFake.prompts, "one survivor is not a judgment call; no LLM spend")
 
-	row, err := s.GetNarrative(id)
-	require.NoError(t, err)
-	assert.Equal(t, "PROJ-42", row.IssueKey)
+	assert.Equal(t, "PROJ-42", primaryOf(t, s, id))
 }
 
 func TestMatch_ZeroCandidatesTouchesNothing(t *testing.T) {
@@ -142,9 +164,7 @@ func TestMatch_ZeroCandidatesTouchesNothing(t *testing.T) {
 	assert.Empty(t, tracker.getCalls, "untracked work is the default path, not a special case")
 	assert.Equal(t, 0, stats.Calls)
 
-	row, err := s.GetNarrative(id)
-	require.NoError(t, err)
-	assert.Empty(t, row.IssueKey)
+	assert.Empty(t, primaryOf(t, s, id))
 }
 
 func TestMatch_VerifiesEveryCandidateAndDropsUnresolvable(t *testing.T) {
@@ -288,7 +308,7 @@ func TestMatch_PromptCarriesSummaryAndDescription(t *testing.T) {
 	assert.Contains(t, prompt, "branch", "provenance must be stated as a prior in the prompt")
 }
 
-func TestMatch_ConfidenceFloorBlocksPromotionButNotRecording(t *testing.T) {
+func TestMatch_ConfidenceFloorWithholdsTheAssertionNotTheRecord(t *testing.T) {
 	s := matchStore(t)
 	id := seedNarrative(t, s, "Feature + change task", "engineering plus change management",
 		claudeEvent(t, "s1", "feature/PAAS-1", "SUMO-2"))
@@ -307,20 +327,29 @@ func TestMatch_ConfidenceFloorBlocksPromotionButNotRecording(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
-	assert.Empty(t, results[0].Primary)
-
-	row, err := s.GetNarrative(id)
-	require.NoError(t, err)
-	assert.Empty(t, row.IssueKey)
+	assert.Empty(t, results[0].Primary,
+		"the floor withholds the ASSERTION: MatchResult.Primary is what the renderer prints, and "+
+			"an empty one makes it say \"no primary promoted — below confidence floor\"")
 
 	links, err := s.NarrativeIssues(id)
 	require.NoError(t, err)
 	assert.Len(t, links, 2, "every narrative_issues row must still be written, including the primary")
+	assert.Equal(t, "PAAS-1", primaryOf(t, s, id),
+		"...and RECORDING is unaffected, which is the distinction the floor draws: dropping the row "+
+			"would make a low-confidence match indistinguishable from finding nothing at all")
 
-	backlog, err := s.NarrativesWithoutIssueKey(10)
+	// The narrative must NOT come back. This assertion is inverted from what it
+	// was, and the inversion is finding F11: it used to require the narrative
+	// remain "selectable for a later pass", which sounds prudent and was the bug.
+	// A re-match that picked a different primary tripped one_primary_per_narrative
+	// and aborted the whole pass — it crashed a real drain. A primary link at any
+	// confidence means attributed; the floor governs what unjira asserts, not
+	// whether matching is done with it.
+	backlog, err := s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)
-	require.Len(t, backlog, 1, "a below-floor narrative must remain selectable for a later pass")
-	assert.Equal(t, id, backlog[0].ID)
+	assert.Empty(t, backlog,
+		"a recorded primary takes the narrative out of matching's backlog whatever its confidence; "+
+			"re-matching it forever is what F11 fixed")
 }
 
 func TestMatch_ExcludedKeysAreRecordedNotSilentlyDropped(t *testing.T) {
@@ -366,13 +395,8 @@ func TestMatch_OneNarrativeFailingDoesNotStopTheOthers(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "BOOM-1")
 
-	healthyRow, err := s.GetNarrative(healthyID)
-	require.NoError(t, err)
-	assert.Equal(t, "OK-1", healthyRow.IssueKey, "the healthy narrative must still resolve")
-
-	failingRow, err := s.GetNarrative(failingID)
-	require.NoError(t, err)
-	assert.Empty(t, failingRow.IssueKey, "the failing narrative must stay unmatched for a retry")
+	assert.Equal(t, "OK-1", primaryOf(t, s, healthyID), "the healthy narrative must still resolve")
+	assert.Empty(t, primaryOf(t, s, failingID), "the failing narrative must stay unmatched for a retry")
 }
 
 func TestMatch_IsIdempotent(t *testing.T) {

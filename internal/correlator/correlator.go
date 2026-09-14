@@ -50,8 +50,6 @@ type Narrative struct {
 	WindowEnd   time.Time
 	Title       string
 	Summary     string
-	IssueKey    string
-	Confidence  float64
 	Status      string
 	// Events is the narrative's context events, hydrated by the caller
 	// (see store.NarrativeEventsForContext) before Cluster is called —

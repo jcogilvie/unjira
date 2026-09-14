@@ -23,8 +23,6 @@ type NarrativeRow struct {
 	WindowEnd          time.Time
 	Title              string
 	Summary            string
-	IssueKey           string
-	Confidence         float64
 	Status             string
 	CompactionBoundary *time.Time
 	// CompactionBoundaryEventID pairs with CompactionBoundary to break ties:
@@ -75,7 +73,7 @@ func (t *Tx) GetNarrative(id int64) (NarrativeRow, error) {
 
 func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
 	row, err := scanNarrativeRow(c.QueryRow(
-		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
+		`SELECT id, window_start, window_end, title, summary, status,
 		        compaction_boundary, compaction_boundary_event_id
 		 FROM narratives WHERE id = ?`, id,
 	))
@@ -101,14 +99,12 @@ func scanNarrativeRow(row scanRow) (NarrativeRow, error) {
 		out                NarrativeRow
 		windowStart        string
 		windowEnd          string
-		issueKey           sql.NullString
-		confidence         sql.NullFloat64
 		compactionBoundary sql.NullString
 		compactionEventID  sql.NullInt64
 	)
 
 	if err := row.Scan(&out.ID, &windowStart, &windowEnd, &out.Title, &out.Summary,
-		&issueKey, &confidence, &out.Status, &compactionBoundary, &compactionEventID); err != nil {
+		&out.Status, &compactionBoundary, &compactionEventID); err != nil {
 		return NarrativeRow{}, err
 	}
 
@@ -120,10 +116,6 @@ func scanNarrativeRow(row scanRow) (NarrativeRow, error) {
 		return NarrativeRow{}, fmt.Errorf("parsing window_end for narrative %d: %w", out.ID, err)
 	}
 
-	out.IssueKey = issueKey.String
-	if confidence.Valid {
-		out.Confidence = confidence.Float64
-	}
 	if compactionBoundary.Valid {
 		parsed, perr := time.Parse(time.RFC3339, compactionBoundary.String)
 		if perr != nil {
@@ -345,7 +337,7 @@ func (s *Store) UnlinkedEventsInRange(start, end time.Time) ([]events.Event, err
 // value is more likely a new lifecycle state than a reason to hide work.
 func (s *Store) NarrativesOverlapping(start, end time.Time) ([]NarrativeRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
+		`SELECT id, window_start, window_end, title, summary, status,
 		        compaction_boundary, compaction_boundary_event_id
 		 FROM narratives
 		 WHERE window_end >= ? AND window_start <= ?

@@ -329,7 +329,7 @@ func TestMatch_LoneJiraEventCandidateLinksDeterministically(t *testing.T) {
 // narrative 19's symptom. correlator.Match used one `limit` for both roles:
 //
 //	limit := cfg.CandidateLimit()                          // candidates per narrative
-//	narratives, err := s.NarrativesWithoutIssueKey(limit)   // narratives per pass
+//	narratives, err := s.NarrativesWithoutPrimaryLink(limit)   // narratives per pass
 //
 // So a config with max_candidates_per_narrative=10 examined only 10 narratives
 // per pass. On a real 30-narrative backlog that left 20 unmatched, which then

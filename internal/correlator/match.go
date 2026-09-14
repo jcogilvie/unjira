@@ -93,7 +93,7 @@ type verifiedCandidate struct {
 // Getting this backwards in either direction is a real failure mode, not a
 // theoretical one: misclassifying a transient outage as "not found" drops
 // the candidate permanently if a sibling candidate still lets the narrative
-// acquire a primary and leave the NarrativesWithoutIssueKey backlog (it will
+// acquire a primary and leave the NarrativesWithoutPrimaryLink backlog (it will
 // never be reconsidered again, so the falsely-dropped candidate never gets
 // a second chance); misclassifying a genuinely deleted ticket as transport
 // fails the narrative every single pass forever, since the same 404 recurs
@@ -172,10 +172,11 @@ func SingleTracker(tracker tasktracker.TaskReader) TrackerResolver {
 	return func(string) (tasktracker.TaskReader, error) { return tracker, nil }
 }
 
-// Match resolves narratives lacking an issue_key (per
-// store.NarrativesWithoutIssueKey) against the tracker each candidate's
-// connection resolves to, promoting a primary
-// into narratives.issue_key when one is found with sufficient confidence.
+// Match resolves narratives that have no primary link (per
+// store.NarrativesWithoutPrimaryLink) against the tracker each candidate's
+// connection resolves to, recording a narrative_issues row per judged candidate.
+// A primary is recorded whatever its confidence; match.confidence_floor decides
+// only whether the primary is ASSERTED in the pass result (see persistLinks).
 // See docs/superpowers/specs/2026-08-24-narrative-issue-matching-design.md
 // for the design this implements.
 //
@@ -208,7 +209,7 @@ func Match(
 	candidateLimit := cfg.CandidateLimit()
 	narrativeLimit := cfg.NarrativeLimit()
 
-	narratives, err := s.NarrativesWithoutIssueKey(narrativeLimit + 1)
+	narratives, err := s.NarrativesWithoutPrimaryLink(narrativeLimit + 1)
 	if err != nil {
 		return nil, Stats{}, fmt.Errorf("listing narratives without an issue key: %w", err)
 	}
@@ -478,16 +479,29 @@ func resolveVerified(
 	return links, primaryKey, primaryConfidence, rationale, callStats, nil
 }
 
-// persistLinks writes links and, only when primaryKey is set and
-// primaryConfidence clears floor, promotes it into the denormalized
-// narratives.issue_key — both inside one transaction, matching Persist's
-// convention of never holding a transaction open across an LLM round-trip
-// (classifyCandidates has already returned by the time this runs).
+// persistLinks writes links in one transaction, matching Persist's convention of
+// never holding a transaction open across an LLM round-trip (classifyCandidates
+// has already returned by the time this runs).
 //
-// The floor gates promotion, never recording: every link is written
-// regardless, since a dropped row would make a low-confidence match
-// indistinguishable from finding nothing at all (config.MatchConfig's own
-// doc comment). Returns the promoted key, or "" when nothing was promoted.
+// It returns primaryKey when primaryConfidence clears floor, and "" otherwise.
+// That return value is REPORTING ONLY — it becomes MatchResult.Primary, which the
+// renderer prints (or, when empty, prints "no primary promoted — below confidence
+// floor"). The floor no longer gates any write.
+//
+// It used to. `narratives.issue_key` denormalized the primary, and the floor
+// decided whether to set it, so a sub-floor match wrote the primary LINK ROW and
+// left the COLUMN null — inside one transaction, so it committed atomically into a
+// state where the two disagreed forever. Matching's backlog selected on the
+// column, so that narrative was re-matched every pass until a differing primary
+// tripped one_primary_per_narrative and aborted the whole pass. That was finding
+// F11; the column is gone and the backlog asks the link table now
+// (store.NarrativesWithoutPrimaryLink).
+//
+// The floor still gates nothing about RECORDING, which was always the intent:
+// every link is written regardless of confidence, because a dropped row would make
+// a low-confidence match indistinguishable from finding nothing at all
+// (config.MatchConfig.ConfidenceFloor's own doc comment — "the floor governs what
+// unjira asserts, not what it records").
 func persistLinks(
 	s *store.Store,
 	narrativeID int64,
@@ -512,19 +526,18 @@ func persistLinks(
 		}
 
 		if primaryConfidence < confidenceFloor {
-			// A silently-unpromoted match is indistinguishable from
-			// finding nothing at all, so this is logged, naming exactly
-			// what was blocked and why.
+			// Logged, naming exactly what was withheld and why: an unreported
+			// sub-floor match is indistinguishable from finding nothing at all.
+			// The link row above is already written — this only withholds the
+			// assertion, which is the whole distinction the floor draws.
 			log.Printf(
-				"correlator: narrative %d match %s at confidence %.2f below floor %.2f, not promoting",
+				"correlator: narrative %d match %s at confidence %.2f below floor %.2f, not asserting",
 				narrativeID, primaryKey, primaryConfidence, confidenceFloor,
 			)
+
 			return nil
 		}
 
-		if err := tx.SetNarrativeIssueLink(narrativeID, primaryKey, primaryConfidence); err != nil {
-			return err
-		}
 		promoted = primaryKey
 
 		return nil
