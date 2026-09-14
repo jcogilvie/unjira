@@ -238,8 +238,6 @@ func hydrateContextNarratives(s *store.Store, window correlator.TimeRange) ([]co
 			WindowEnd:      row.WindowEnd,
 			Title:          row.Title,
 			Summary:        row.Summary,
-			IssueKey:       row.IssueKey,
-			Confidence:     row.Confidence,
 			Status:         row.Status,
 			Events:         frozen,
 			EligibleEvents: assignable,

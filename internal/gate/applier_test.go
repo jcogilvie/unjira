@@ -543,7 +543,7 @@ func TestApplier_Create_ASecondPassFindsTheNarrativeTracked(t *testing.T) {
 		Payload: `{"summary":"s","description":"d"}`,
 	})
 
-	before, err := s.NarrativesWithoutIssueKey(10)
+	before, err := s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)
 	require.Len(t, before, 1, "precondition: the narrative starts untracked")
 

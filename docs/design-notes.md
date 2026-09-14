@@ -762,6 +762,71 @@ an obvious step rather than a challenge to a settled question. Keep writing them
 the rejected alternative in the record with its numbers: `IssueActivity`'s doc comment explains why
 there is no window knob, which is the question the next reader will otherwise ask.
 
+## 28. A denormalization with no reader is a bug waiting for a writer to forget it
+
+`narratives.issue_key` duplicated a fact `narrative_issues` already held: which key is a narrative's
+`primary`. It had **zero readers** — it was hydrated into `correlator.Narrative.IssueKey`, which
+nothing ever consulted, and `buildClusterPrompt` never rendered it. Same for the `confidence` column
+beside it. Both were write-only.
+
+That did not make them harmless. Three of the four writers of the primary role forgot to update the
+column, and the omissions were invisible precisely *because* nothing read it — until one query did.
+
+**The mechanism.** `persistLinks` wrote the primary link row, then checked `match.confidence_floor`
+and returned early before setting the column. Both statements were in one transaction, so it
+committed **atomically into a state where the two disagreed**: primary link present, column NULL.
+Matching's backlog selected on the column, so the narrative never left the pool; every pass
+re-matched it; and when a re-match assigned a *different* primary, the partial unique index
+`one_primary_per_narrative` rejected the insert and **aborted the entire pass**. A drain crashed on
+narrative 15 — `primary=PAAS-4002` at 0.55 against a floor of 0.70.
+
+> A denormalized column that nothing reads still has to be maintained by every writer, and nothing
+> tells you when one stops. The read that eventually arrives is the one that fails.
+
+**The fix was already in this file.** When the *create* path hit the same trap, incident notes here
+recorded the answer verbatim: "The correct question is `NOT EXISTS (SELECT 1 FROM
+narrative_issues ...)`". Two of the three accessors were built or corrected to ask the link table.
+Matching was never revisited, so it kept asking the column for months.
+
+| accessor | asked | correct? |
+|---|---|---|
+| `NarrativesWithNoIssueLink` (create) | `NOT EXISTS` any link | yes |
+| `NarrativesWithActionableLinks` (reconciler) | `EXISTS` link + role | yes |
+| `NarrativesWithoutIssueKey` (**matching**) | the denormalized column | **no** |
+
+**Two lessons, and the second is the one that generalizes.**
+
+*A fix applied to the instance is not applied to the class.* The create path's fix was correct,
+documented, and complete — for the create path. Nothing swept the sibling accessors, so the same
+defect sat two functions away in the same file. When a bug is worth a design note, the note should
+end with "where else does this shape exist", and that sweep should happen in the same PR.
+
+*Deleting beats disciplining.* The tempting fix was to make each of the three writers also set the
+column. That is the same discipline that already failed three times out of four, so it would fail a
+fourth. The column, its sibling, their setter, and both struct fields were deleted instead — the
+duplicated fact cannot drift because it no longer exists. Cost: nothing. Every reader was already
+asking the wrong question or not asking at all.
+
+**No migration was needed, which is worth noticing.** `NOT EXISTS(primary link)` re-derives the truth
+from data that was always correct, so narrative 15 self-repaired: it *has* a primary link, so it is
+attributed, so it left the backlog. When a denormalization drifts, the normalized side is usually
+still right — repair by deriving, not by patching rows.
+
+**The class was then swept, per that lesson.** The only other column that looks like this is
+`actions.issue_key`, and it is *not* a denormalization: `reconciler.SelectionRoles` includes
+`same_work`, and `route.go` drafts against those links too, so an action legitimately targets an
+issue that is not its narrative's primary. It records a per-action decision rather than duplicating
+one. (It happens to equal the primary on every row in the current store — which is exactly the kind
+of coincidence that would make a `COUNT(*)` check say "duplicate"; the schema and the drafting code
+are what settle it, not the data.) No other instance of the shape exists.
+
+**Verified by draining.** The pass that crashed now completes; matching's backlog went 38 → 26 and
+recorded primaries 33 → 45 in one pass. The floor keeps its real job: it withholds the *assertion*
+(`MatchResult.Primary`, which the renderer prints), never the *record*, which was always the
+intent — `config.MatchConfig.ConfidenceFloor`'s own doc comment says "the floor governs what unjira
+asserts, not what it records", because a dropped row would make a low-confidence match
+indistinguishable from finding nothing at all.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

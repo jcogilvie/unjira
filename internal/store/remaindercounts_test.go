@@ -29,7 +29,7 @@ import (
 // selection returns its whole population and its length IS the remainder.
 const bigEnoughToHoldEverything = 1000
 
-func TestCountNarrativesWithoutIssueKey_MatchesItsSelection(t *testing.T) {
+func TestCountNarrativesWithoutPrimaryLink_MatchesItsSelection(t *testing.T) {
 	s := openStore(t)
 	base := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
 
@@ -41,14 +41,18 @@ func TestCountNarrativesWithoutIssueKey_MatchesItsSelection(t *testing.T) {
 		require.NoError(t, err)
 	}
 
+	// Attribution is a primary LINK ROW, not a column — see F11. Expressed this
+	// way so the test survives the column's removal rather than pinning it.
 	attributed, err := s.InsertNarrative(base, base.Add(time.Hour), "already attributed", "s")
 	require.NoError(t, err)
-	require.NoError(t, s.SetNarrativeIssueLink(attributed, "DEVSBX-1", 0.9))
+	require.NoError(t, s.AddNarrativeIssues(attributed, []store.NarrativeIssue{
+		{IssueKey: "DEVSBX-1", Role: store.RolePrimary, Provenance: "test", Confidence: 0.9},
+	}))
 
-	selected, err := s.NarrativesWithoutIssueKey(bigEnoughToHoldEverything)
+	selected, err := s.NarrativesWithoutPrimaryLink(bigEnoughToHoldEverything)
 	require.NoError(t, err)
 
-	counted, err := s.CountNarrativesWithoutIssueKey()
+	counted, err := s.CountNarrativesWithoutPrimaryLink()
 	require.NoError(t, err)
 
 	assert.Equal(t, len(selected), counted,

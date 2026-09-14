@@ -52,8 +52,6 @@ CREATE TABLE IF NOT EXISTS narratives (
     window_end   TEXT NOT NULL,
     title        TEXT NOT NULL,
     summary      TEXT NOT NULL,
-    issue_key    TEXT,
-    confidence   REAL,
     status       TEXT NOT NULL DEFAULT 'open',
     compaction_boundary TEXT,
     -- Paired with compaction_boundary to break ties: occurred_at alone
@@ -91,10 +89,12 @@ CREATE TABLE IF NOT EXISTS narrative_issues (
 );
 
 -- Exactly one primary per narrative, enforced by the database rather than by
--- convention: narratives.issue_key denormalizes the primary, so a second
--- primary row would make that column arbitrary. The composite PRIMARY KEY
--- above prevents duplicate keys per narrative but permits two rows both marked
--- primary, which is the case this closes.
+-- convention. "Which issue is this narrative's" must have one answer: this row
+-- IS that answer (a narratives.issue_key column used to denormalize it, and
+-- drifted -- see F11), and NarrativesWithoutPrimaryLink treats the presence of
+-- this row as "attributed". Two primaries would make both questions arbitrary.
+-- The composite PRIMARY KEY above prevents duplicate keys per narrative but
+-- permits two rows both marked primary, which is the case this closes.
 CREATE UNIQUE INDEX IF NOT EXISTS one_primary_per_narrative
     ON narrative_issues (narrative_id) WHERE role = 'primary';
 

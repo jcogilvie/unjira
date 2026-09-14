@@ -12,6 +12,22 @@ import (
 // unrecognized value is a parse error upstream, never persisted.
 type Role string
 
+// RolePrimary is the one role this package names itself.
+//
+// The vocabulary is otherwise correlator's: NarrativesWithActionableLinks takes
+// its roles as a PARAMETER precisely so "what is actionable" has one definition,
+// in the caller, and this package need not import internal/correlator. That
+// remains true.
+//
+// The exception is narrow and forced. "Has a primary" is a structural fact about
+// the schema, not a policy choice: store.go's own partial unique index
+// one_primary_per_narrative hardcodes `WHERE role = 'primary'`, so this package
+// already depends on the value. Declaring it once here, and referencing it from
+// the two backlog predicates, means the schema and the queries that rely on it
+// cannot drift to different spellings. correlator.RolePrimary is an alias of
+// store.Role, so the two are the same value by construction.
+const RolePrimary Role = "primary"
+
 // NarrativeIssue is one (narrative, issue) link — the narrative_issues row
 // shape, mirroring how NarrativeRow mirrors narratives.
 //
@@ -41,25 +57,43 @@ type NarrativeIssueRef struct {
 	Confidence  float64
 }
 
-// NarrativesWithoutIssueKey returns up to limit narratives that have not yet
-// been attributed to a primary issue, ordered by (window_start, id) — the
-// backlog a matching pass works through. InsertNarrative leaves issue_key
-// NULL (the column has no NOT NULL constraint and is omitted from the insert
-// column list), so "IS NULL" alone would suffice; the "= ”" half of the
-// predicate is defensive belt-and-suspenders in case a future writer ever
-// persists an empty string instead of leaving it NULL.
-func (s *Store) NarrativesWithoutIssueKey(limit int) ([]NarrativeRow, error) {
+// NarrativesWithoutPrimaryLink returns up to limit narratives that have no
+// primary link, ordered by (window_start, id) — the backlog a matching pass
+// works through.
+//
+// The predicate asks the LINK TABLE, not the old denormalized
+// narratives.issue_key column, and that distinction was finding F11. The column
+// was only ever written for a primary that cleared match.confidence_floor, while
+// persistLinks writes the link row regardless — deliberately, because
+// config.MatchConfig.ConfidenceFloor governs "what unjira asserts, not what it
+// records", and dropping the rows would make a low-confidence match
+// indistinguishable from finding nothing at all.
+//
+// So a narrative with a REAL but low-confidence primary had link rows and a NULL
+// column, and a column-based query returned it forever: every pass re-matched it,
+// and a re-match that picked a DIFFERENT primary tripped the partial unique index
+// one_primary_per_narrative and aborted the entire pass. That crashed a drain.
+//
+// A primary link at ANY confidence means attributed. Deliberately narrower than
+// NarrativesWithNoIssueLink's "any link at all": a `mentioned` link is a citation,
+// not an attribution, so a narrative carrying only those is still matching's work.
+// Two questions, two predicates — see that method for why the create path needs
+// the broader one.
+func (s *Store) NarrativesWithoutPrimaryLink(limit int) ([]NarrativeRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, window_start, window_end, title, summary, issue_key, confidence, status,
-		        compaction_boundary, compaction_boundary_event_id
-		 FROM narratives
-		 WHERE issue_key IS NULL OR issue_key = ''
-		 ORDER BY window_start, id
+		`SELECT n.id, n.window_start, n.window_end, n.title, n.summary, n.status,
+		        n.compaction_boundary, n.compaction_boundary_event_id
+		 FROM narratives n
+		 WHERE NOT EXISTS (
+		     SELECT 1 FROM narrative_issues ni
+		     WHERE ni.narrative_id = n.id AND ni.role = ?
+		 )
+		 ORDER BY n.window_start, n.id
 		 LIMIT ?`,
-		limit,
+		string(RolePrimary), limit,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("querying narratives without an issue key: %w", err)
+		return nil, fmt.Errorf("querying narratives without a primary link: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -75,7 +109,7 @@ func (s *Store) NarrativesWithoutIssueKey(limit int) ([]NarrativeRow, error) {
 	return out, rows.Err()
 }
 
-// CountNarrativesWithoutIssueKey is how many narratives matching would examine if
+// CountNarrativesWithoutPrimaryLink is how many narratives matching would examine if
 // it had no cap — the backlog depth behind correlator.Match's per-pass limit.
 //
 // EXISTS to make a truncated pass legible. Both per-pass caps already log when
@@ -85,15 +119,20 @@ func (s *Store) NarrativesWithoutIssueKey(limit int) ([]NarrativeRow, error) {
 // survived three passes because the session piped output through `tail` and
 // discarded the warning.
 //
-// The predicate MUST stay identical to NarrativesWithoutIssueKey's. A count that
+// The predicate MUST stay identical to NarrativesWithoutPrimaryLink's. A count that
 // describes a different population than the pass examined is worse than no count:
 // it would report progress against a backlog that was never the one being drained.
-func (s *Store) CountNarrativesWithoutIssueKey() (int, error) {
+func (s *Store) CountNarrativesWithoutPrimaryLink() (int, error) {
 	var n int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM narratives WHERE issue_key IS NULL OR issue_key = ''`,
+		`SELECT COUNT(*) FROM narratives n
+		  WHERE NOT EXISTS (
+		      SELECT 1 FROM narrative_issues ni
+		      WHERE ni.narrative_id = n.id AND ni.role = ?
+		  )`,
+		string(RolePrimary),
 	).Scan(&n); err != nil {
-		return 0, fmt.Errorf("counting narratives without an issue key: %w", err)
+		return 0, fmt.Errorf("counting narratives without a primary link: %w", err)
 	}
 
 	return n, nil
@@ -103,12 +142,14 @@ func (s *Store) CountNarrativesWithoutIssueKey() (int, error) {
 // least one narrative_issues link whose role is in roles, ordered by
 // (window_start, id) — the reconciler's input backlog.
 //
-// Deliberately NOT keyed on the denormalized narratives.issue_key, which
-// MatchConfig.ConfidenceFloor only promotes above the floor: a real but
-// low-confidence primary has narrative_issues rows and a NULL issue_key, and
-// selecting on issue_key would leave the reconciler permanently blind to it
-// — exactly the class of bug behind the 08-21 discovery that
-// narratives.issue_key was never written at all. Roles are passed in rather
+// Keyed on the link table, which every narrative accessor now is. This one always
+// was: a narratives.issue_key column used to denormalize the primary, and because
+// MatchConfig.ConfidenceFloor decided whether to write it, a real but
+// low-confidence primary had link rows and a NULL column. Selecting on the column
+// would have left the reconciler permanently blind to that narrative. The column
+// is gone (finding F11) after the same disagreement crashed a matching pass from
+// the other direction, so the hazard this comment warned about cannot recur.
+// Roles are passed in rather
 // than hardcoded so the caller (reconciler.actionableLinks) stays the single
 // definition of "actionable" — this package must not import
 // internal/correlator.
@@ -128,8 +169,8 @@ func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]Narrat
 	}
 	args = append(args, limit)
 
-	query := `SELECT n.id, n.window_start, n.window_end, n.title, n.summary, n.issue_key,
-	                 n.confidence, n.status, n.compaction_boundary, n.compaction_boundary_event_id
+	query := `SELECT n.id, n.window_start, n.window_end, n.title, n.summary,
+	                 n.status, n.compaction_boundary, n.compaction_boundary_event_id
 	          FROM narratives n
 	          WHERE EXISTS (
 	              SELECT 1 FROM narrative_issues ni
@@ -158,7 +199,7 @@ func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]Narrat
 
 // CountNarrativesWithActionableLinks is how many narratives reconciling would
 // examine without its cap. Mirrors NarrativesWithActionableLinks' predicate
-// exactly, including the roles filter — see CountNarrativesWithoutIssueKey for why
+// exactly, including the roles filter — see CountNarrativesWithoutPrimaryLink for why
 // the predicates must not drift.
 func (s *Store) CountNarrativesWithActionableLinks(roles []Role) (int, error) {
 	if len(roles) == 0 {
@@ -184,32 +225,6 @@ func (s *Store) CountNarrativesWithActionableLinks(roles []Role) (int, error) {
 	}
 
 	return n, nil
-}
-
-// SetNarrativeIssueLink denormalizes a narrative's primary issue onto
-// narratives.issue_key/confidence, so callers that only need "what issue is
-// this" (digest/status output, NarrativesWithoutIssueKey's backlog filter)
-// don't have to join narrative_issues. AddNarrativeIssues is what actually
-// records the primary relationship; call both when setting a primary.
-func (s *Store) SetNarrativeIssueLink(id int64, issueKey string, confidence float64) error {
-	return setNarrativeIssueLinkImpl(s.db, id, issueKey, confidence)
-}
-
-// SetNarrativeIssueLink is the *Tx-scoped variant of
-// (*Store).SetNarrativeIssueLink.
-func (t *Tx) SetNarrativeIssueLink(id int64, issueKey string, confidence float64) error {
-	return setNarrativeIssueLinkImpl(t.tx, id, issueKey, confidence)
-}
-
-func setNarrativeIssueLinkImpl(c dbConn, id int64, issueKey string, confidence float64) error {
-	if _, err := c.Exec(
-		`UPDATE narratives SET issue_key = ?, confidence = ? WHERE id = ?`,
-		issueKey, confidence, id,
-	); err != nil {
-		return fmt.Errorf("setting issue link for narrative %d: %w", id, err)
-	}
-
-	return nil
 }
 
 // AddNarrativeIssues records narrative_issues rows for a narrative, one per
@@ -372,7 +387,7 @@ func removeNarrativeIssueImpl(c dbConn, narrativeID int64, issueKey string) erro
 // NarrativesWithNoIssueLink returns up to limit narratives having NO
 // narrative_issues row of any role — genuinely untracked work.
 //
-// Distinct from NarrativesWithoutIssueKey, and the difference is the whole point.
+// Distinct from NarrativesWithoutPrimaryLink, and the difference is the whole point.
 // That accessor selects on the denormalized narratives.issue_key, which
 // MatchConfig.ConfidenceFloor only promotes above the floor — so a narrative with
 // a real but low-confidence primary has narrative_issues rows AND a NULL
@@ -387,13 +402,13 @@ func removeNarrativeIssueImpl(c dbConn, narrativeID int64, issueKey string) erro
 // was never invoked for an unlinked narrative — proven by probe:
 //
 //	NarrativesWithActionableLinks (reconciler's backlog) -> 0 rows
-//	NarrativesWithoutIssueKey (matching's backlog)       -> 1 rows
+//	NarrativesWithoutPrimaryLink (matching's backlog)    -> 1 rows
 //
 // which is why adding "create" to the drafting prompt would have changed nothing.
 func (s *Store) NarrativesWithNoIssueLink(limit int) ([]NarrativeRow, error) {
 	rows, err := s.db.Query(
-		`SELECT n.id, n.window_start, n.window_end, n.title, n.summary, n.issue_key,
-		        n.confidence, n.status, n.compaction_boundary, n.compaction_boundary_event_id
+		`SELECT n.id, n.window_start, n.window_end, n.title, n.summary,
+		        n.status, n.compaction_boundary, n.compaction_boundary_event_id
 		 FROM narratives n
 		 WHERE NOT EXISTS (
 		     SELECT 1 FROM narrative_issues ni WHERE ni.narrative_id = n.id
