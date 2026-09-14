@@ -1,6 +1,9 @@
 package correlator
 
-import "regexp"
+import (
+	"regexp"
+	"time"
+)
 
 // This file exposes internals to the correlator_test package. It compiles only
 // under `go test`, so nothing here widens the package's real API.
@@ -73,9 +76,9 @@ type MatchVerdictForTest struct {
 // Match calls them, but the provenance ranking and exclusion rules are worth
 // testing without a store or a tracker.
 func GatherCandidatesForTest(
-	evts []Event, linkExclusions []*regexp.Regexp, limit int,
+	evts []Event, linkExclusions []*regexp.Regexp, limit int, jiraActivity map[string]time.Time,
 ) []Candidate {
-	return gatherCandidates(evts, linkExclusions, limit)
+	return gatherCandidates(evts, linkExclusions, limit, jiraActivity)
 }
 
 func ExcludedCandidatesForTest(evts []Event, linkExclusions []*regexp.Regexp) []string {

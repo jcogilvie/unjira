@@ -123,30 +123,6 @@ the natural moment to decide.
 
 ---
 
-### F9 — a low-precision candidate list truncates on an alphabetical tiebreak
-
-`gatherCandidates` (`internal/correlator/match_candidates.go:55-122`) ranks issue-key candidates by
-provenance — Jira event, then branch name, then first-mention prose, then later-mention prose — and
-truncates to `match.max_candidates_per_narrative`. Within the `ProvenanceProseLater` tier, ties break
-**alphabetically**, which has no relationship to relevance.
-
-Measured on real data: narrative 60 is a Claude Code session whose `ticket_keys` holds **67
-text-scraped keys** (including `UTF-8`, `Z0-9`, `CP-01`..`CP-15`). Running the real ranking logic
-against it, `PAAS-4001` — a key with genuine recent Jira activity — lands at **rank 41 of 65** and is
-truncated away, while alphabetically-earlier noise survives.
-
-The collector is right to scrape broadly and defer judgment (that is the dumb-collector invariant).
-The defect is that the *discriminator* is alphabetical.
-
-**Candidate fix, not yet chosen:** a deterministic corroboration tier ranked between `JiraEvent` and
-`ProseFirst` — promote a prose key whose issue has Jira activity inside a bounded recent window. It
-stays deterministic and pre-model, and the window is a new config knob independent of the clustering
-window. Cost when wrong: a false join costs one `GetIssue` verification plus a classifier call that
-can assign `mentioned`; a missed join is exactly today's behaviour. It changes
-`gatherCandidates`' signature, so `match_candidates_test.go` needs new cases — a real behaviour
-change, honestly flagged rather than sold as a refactor.
-
-
 ## Task cross-references
 
 | Finding | Task |
@@ -156,5 +132,5 @@ change, honestly flagged rather than sold as a refactor.
 | F5, F6 — dead schema, unread artifacts | **#176** |
 | F7 — connection/identity model | **#178** |
 | F8 — resolver's home | **#177** |
-| F9 — alphabetical candidate tiebreak | new; the real residue of #179 |
+| F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |

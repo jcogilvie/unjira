@@ -3,6 +3,7 @@ package correlator
 import (
 	"regexp"
 	"sort"
+	"time"
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
@@ -25,7 +26,7 @@ type Candidate struct {
 // mentioned, ranked strongest-provenance-first and truncated to limit
 // (limit <= 0 means no truncation).
 //
-// Three provenance tiers come out of today's artifacts:
+// Three provenance tiers come directly out of today's artifacts:
 //
 //   - ProvenanceJiraEvent from events.ArtifactIssueKey on a jira-source event —
 //     the event is already about that issue, so this is direct, not inferred.
@@ -48,11 +49,36 @@ type Candidate struct {
 // strongest surviving provenance is kept, and a Connection recorded by a
 // stronger mention is never overwritten by a weaker mention that lacks one.
 //
+// A fourth tier, ProvenanceCorroborated, sits between JiraEvent and ProseFirst:
+// a prose-only key whose issue appears in jiraActivity, meaning this store has
+// already collected Jira events for it. Keys in that tier are ordered by
+// most-recent activity first; every other tier keeps its alphabetical order.
+//
+// jiraActivity is passed in rather than queried because this function is pure —
+// no store, no network, no tracker (see CLAUDE.md's correlator invariant). Match
+// loads it once per pass and hands it down. A nil or empty map is "we know
+// nothing", not "nothing is relevant": ranking then degrades to exactly the
+// pre-F9 behaviour rather than to a worse one, which matters because most keys in
+// a fresh store have no collected Jira activity at all — the jira collector only
+// ever saw what its JQL scoped.
+//
+// Both halves of that tier are load-bearing. The tier alone does not fix F9: on
+// the measured case 30 of 73 keys were corroborated, still 3x the cap, so an
+// alphabetical sort inside the new tier re-decides the same way. See
+// match_corroboration_test.go for the numbers, and for why the finding's
+// originally-proposed recency WINDOW was rejected (it is only correct in a narrow
+// 21-30 day band, so its config knob would be a latent bug).
+//
 // Truncation keeps the head (the strongest candidates) because the limit
 // exists only to bound downstream cost (GetIssue fan-out, prompt size) — a
 // tail-keeping truncation would routinely throw away the branch candidate in
 // favor of prose noise, discarding the answer to save a few bytes.
-func gatherCandidates(evts []Event, linkExclusions []*regexp.Regexp, limit int) []Candidate {
+func gatherCandidates(
+	evts []Event,
+	linkExclusions []*regexp.Regexp,
+	limit int,
+	jiraActivity map[string]time.Time,
+) []Candidate {
 	best := make(map[string]Candidate)
 
 	upsert := func(issueKey string, provenance Provenance, connection string) {
@@ -105,12 +131,8 @@ func gatherCandidates(evts []Event, linkExclusions []*regexp.Regexp, limit int) 
 		out = append(out, c)
 	}
 
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Provenance.Rank() != out[j].Provenance.Rank() {
-			return out[i].Provenance.Rank() < out[j].Provenance.Rank()
-		}
-		return out[i].IssueKey < out[j].IssueKey
-	})
+	promoteCorroborated(out, jiraActivity)
+	rankCandidates(out, jiraActivity)
 
 	out = dropExcluded(out, linkExclusions)
 
@@ -119,6 +141,59 @@ func gatherCandidates(evts []Event, linkExclusions []*regexp.Regexp, limit int) 
 	}
 
 	return out
+}
+
+// promoteCorroborated relabels prose-tier candidates whose issue has collected
+// Jira activity, in place.
+//
+// Runs AFTER the gather loop rather than inside upsert so it sees each key's FINAL
+// provenance. Promoting during the gather would race the tiers: a key mentioned in
+// prose and later named in a branch would be promoted on its prose mention and
+// then need un-promoting, and upsert only ever moves provenance stronger.
+//
+// Only the prose tiers are eligible. ProvenanceCorroborated is WEAKER than both
+// branch and jira_event, so "promoting" one of those would be a demotion dressed
+// as a promotion — the easy mistake here, because the corroborated key has more
+// evidence attached and reads like it ought to win.
+func promoteCorroborated(candidates []Candidate, jiraActivity map[string]time.Time) {
+	for i, c := range candidates {
+		if _, active := jiraActivity[c.IssueKey]; !active {
+			continue
+		}
+		if c.Provenance != ProvenanceProseFirst && c.Provenance != ProvenanceProseLater {
+			continue
+		}
+
+		candidates[i].Provenance = ProvenanceCorroborated
+	}
+}
+
+// rankCandidates sorts strongest-provenance-first, in place.
+//
+// Within the corroborated tier ONLY, most-recent Jira activity wins; every other
+// tier stays alphabetical. That narrow scope is the half of F9's fix that actually
+// rescues its cited example — the corroborated pool is routinely larger than the
+// candidate cap (30 of 73 on the measured narrative), so without recency an
+// alphabetical sort inside the new tier re-decides exactly as before.
+func rankCandidates(candidates []Candidate, jiraActivity map[string]time.Time) {
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Provenance.Rank() != candidates[j].Provenance.Rank() {
+			return candidates[i].Provenance.Rank() < candidates[j].Provenance.Rank()
+		}
+
+		if candidates[i].Provenance == ProvenanceCorroborated {
+			iAt, jAt := jiraActivity[candidates[i].IssueKey], jiraActivity[candidates[j].IssueKey]
+			if !iAt.Equal(jAt) {
+				return iAt.After(jAt)
+			}
+			// Identical timestamps fall through to the key comparison rather than
+			// leaving order to sort.Slice's instability. Determinism is not cosmetic:
+			// an unstable candidate list changes the matching prompt between two
+			// otherwise-identical passes.
+		}
+
+		return candidates[i].IssueKey < candidates[j].IssueKey
+	})
 }
 
 // dropExcluded filters candidates whose issue key matches a configured

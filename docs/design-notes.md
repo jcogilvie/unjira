@@ -712,6 +712,56 @@ because the fix belongs in exactly one place:
   state bug: fixtures accumulate transitions and comments from every prior run, so tests start
   depending on where the last run left off, and a freshly-created fixture still races anyway.
 
+## 27. A proposed fix is a hypothesis; check it against the example that motivated it
+
+Finding F9 recorded a real defect precisely: `gatherCandidates` ranked issue-key candidates and
+truncated to a cap, and within the prose tiers ties broke **alphabetically**. It named a measured
+case — a session mentioning 67 keys where `PAAS-4001`, a ticket with genuine recent Jira activity,
+ranked 41 of 65 and was cut. It then proposed a fix: a corroboration tier ranked above prose, gated
+on a bounded recency window.
+
+The finding was right. **Its proposed fix was wrong, and the finding contained the evidence.**
+
+Re-measured on current data (73 keys after a clean re-collect), **30 of those keys corroborate** —
+still three times the default cap of 10. So adding the tier moves `PAAS-4001` from rank 45/73 to
+26/30 and it is *still truncated*: an alphabetical sort inside a pool larger than the cap re-decides
+exactly as before. The tier relocates the defect instead of removing it.
+
+The proposed recency *window* fared worse, because its correct value is a narrow band:
+
+| window | corroborated pool | outcome |
+|---|---|---|
+| 7d | 0 | the answer is outside it |
+| 14d | 4 | the answer is outside it |
+| 21d | 8 | works |
+| 30d | 10 | works |
+| 60d | 22 | over cap — alphabetical decides again |
+
+> **A config knob whose correct value is a narrow band nobody can calibrate is not a knob, it is a
+> latent bug with a default.**
+
+What actually fixes it is ordering *within* the tier by most-recent activity. That needs no knob and
+holds at every cap ≥ 8 and every window ≥ 30d — the window stops being load-bearing, so it was not
+added. Measured after: `PAAS-4001` moves 45/73 → **6/73**.
+
+**Why this is worth a numbered incident.** The failure mode is not "F9 was wrong". It is that a
+finding's *diagnosis* and its *proposed fix* have completely different evidentiary standing, and
+prose puts them side by side in the same confident voice. The diagnosis here was measured; the fix
+was reasoned. Only the diagnosis had been checked against the data, and nothing in the document
+marked the difference.
+
+So: **before implementing a documented fix, run the finding's own cited example through it.** Not the
+abstraction the fix is described in terms of — the concrete case. Two of the three tests that now
+cover this exist only because that check was run first, and the drill that proves the point is
+deleting the recency ordering: the resulting code *is* the fix F9 proposed, and it fails the test
+suite for F9.
+
+**Corollary for how findings are written.** Recording "candidate fix, **not yet chosen**" was what
+made this recoverable — it framed the fix as a hypothesis rather than a decision, so measuring it was
+an obvious step rather than a challenge to a settled question. Keep writing them that way, and keep
+the rejected alternative in the record with its numbers: `IssueActivity`'s doc comment explains why
+there is no window knob, which is the question the next reader will otherwise ask.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
