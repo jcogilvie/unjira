@@ -162,11 +162,30 @@ func (c *Collector) collectQuery(
 		return err
 	}
 
-	if len(issues) >= limit {
-		// Logged, never silent: a silent cap presents as a clean pass while
-		// ignoring work. Because the watermark only advances on a complete
-		// query, the next pass re-runs this range rather than skipping ahead.
-		log.Printf("jira: query %s/%s hit its %d-issue limit; more issues may be unexamined this pass",
+	// A capped pass saw an ARBITRARY subset, so it must not record progress.
+	//
+	// The JQL carries no ORDER BY, so which `limit` issues come back is Jira's
+	// choice. Advancing the watermark to the newest issue this pass happened to see
+	// permanently excludes every OLDER issue it missed, because the next pass is
+	// bounded by `updated >= <watermark>`. Measured on real data: a 50-issue cap
+	// against ~114 matching issues stored a watermark newer than most of them, and
+	// resetting the cursor by hand recovered 56 orphaned issues — 43 issues
+	// collected before, 99 after.
+	//
+	// The asymmetry decides it. NOT advancing costs a re-fetch of events that
+	// dedupe on (source, external_id) and are therefore free. Advancing costs work
+	// that is never collected at all, and nothing surfaces the loss: the pass logs
+	// a warning and then reports success.
+	//
+	// This block previously claimed "the watermark only advances on a complete
+	// query", which was never true of the code below it, and which nothing tested —
+	// the pre-existing cap test asserts only that a log line appears. See
+	// truncation_test.go.
+	capped := len(issues) >= limit
+	if capped {
+		log.Printf("jira: query %s/%s hit its %d-issue limit; the remainder are unexamined, so "+
+			"this pass will NOT advance its watermark and the next pass re-runs the same range. "+
+			"Raise max_issues_per_query to make progress",
 			conn.Name, query.Name, limit)
 	}
 
@@ -186,6 +205,14 @@ func (c *Collector) collectQuery(
 	if highest.IsZero() {
 		// Nothing matched; leave the existing watermark alone rather than
 		// writing a zero one.
+		return nil
+	}
+
+	if capped {
+		// Every event this pass DID read is already persisted — the visit callback
+		// ran, and events dedupe on (source, external_id). Only the watermark is
+		// withheld, so the next pass re-examines the same range and can reach the
+		// issues this one never saw.
 		return nil
 	}
 

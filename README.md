@@ -105,6 +105,25 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 ./unjira triage --dry-run            # walk it, decide, write nothing
 ```
 
+**Scope your collector JQL to work that is plausibly yours.** unjira reconciles what
+*you* did against what the tracker believes — so a query like `project = PAAS AND
+updated >= -120d` collects every colleague's ticket too, and you end up reviewing
+proposals to comment on other people's work. Measured on a real backlog: an
+unscoped query made 96% of collected events someone else's, and 21 of 25 queued
+proposals targeted tickets the operator had never touched. The example config's
+shape is the one to copy:
+
+```
+updated >= -14d AND (assignee = currentUser() OR reporter = currentUser() OR assignee IS EMPTY)
+```
+
+Two traps in that one line. **Parenthesize the OR group** — JQL binds `AND` tighter
+than `OR`, so dropping the parens silently widens the query enormously (measured on
+a real instance: 114 issues parenthesized, **5319** without). And `assignee IS EMPTY`
+is deliberate rather than sloppy: it catches a ticket you have picked up without
+claiming yet. It also pulls in the team's unassigned backlog, which is a real cost —
+drop that clause if your team assigns rigorously.
+
 `triage` is the human-facing surface: it shows one action at a time with its full
 body, and **applies nothing until you confirm at the end**. Beyond approve/reject
 it can reword an action (`e`), retarget it to a different issue (`t`), merge two
