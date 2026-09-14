@@ -133,6 +133,32 @@ func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
 
 	fmt.Printf("\n[%d/%d] %s  %s  confidence %.2f\n",
 		item.Position, item.Total, a.Type, a.IssueKey, a.Confidence)
+
+	// Context BEFORE the proposal, because that is the order a reviewer needs it
+	// in: what is this ticket, what work is this about, and only then what does
+	// unjira want to write. Printing the body first asks someone to judge prose
+	// against a subject they have not been told.
+	//
+	// Each line is omitted when unknown rather than printed empty. A tracker
+	// outage yields no "issue:" line at all, which reads as absence; "issue: "
+	// with nothing after it reads as a ticket with no summary, and those are
+	// different facts.
+	if item.Issue.Summary != "" {
+		fmt.Printf("  issue:     %s", item.Issue.Summary)
+		if item.Issue.StatusName != "" {
+			fmt.Printf("  [%s]", item.Issue.StatusName)
+		}
+		fmt.Println()
+	}
+
+	if item.Narrative.Title != "" {
+		fmt.Printf("  work:      %s\n", item.Narrative.Title)
+	}
+	if item.Narrative.Summary != "" {
+		fmt.Printf("%s\n", indent(item.Narrative.Summary, "             "))
+	}
+
+	fmt.Println()
 	fmt.Printf("%s\n", indent(bodyOf(a), "  "))
 	if a.Rationale != "" {
 		fmt.Printf("\n  why: %s\n", a.Rationale)
