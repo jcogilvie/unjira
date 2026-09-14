@@ -89,6 +89,23 @@ const (
 	// ProvenanceJiraEvent is a key found in a Jira-sourced event (e.g. the
 	// issue the event is already about).
 	ProvenanceJiraEvent Provenance = "jira_event"
+	// ProvenanceCorroborated is a key found only in prose, but whose issue has
+	// Jira activity this store has already collected. The mention is still an
+	// inference — nobody named this ticket for this work — but it is an inference
+	// about a ticket that demonstrably moved, which is strictly more than a bare
+	// mention.
+	//
+	// It ranks below ProvenanceJiraEvent because that means the event IS about the
+	// issue, and below ProvenanceBranch because a branch name is an explicit human
+	// act of naming the ticket, which no amount of activity timing equals.
+	//
+	// Introduced for finding F9: prose ties broke alphabetically, and on a
+	// monotonic issue counter that favours OLDER tickets — so the tiebreak was
+	// anti-correlated with relevance, not merely unrelated to it. See
+	// match_corroboration_test.go for the measurement, including why this tier
+	// only works alongside the recency ordering in gatherCandidates and not on
+	// its own.
+	ProvenanceCorroborated Provenance = "corroborated"
 	// ProvenanceProseFirst is a key first mentioned in free-text prose
 	// (commit messages, session transcripts).
 	ProvenanceProseFirst Provenance = "prose_first"
@@ -111,9 +128,9 @@ const (
 // Rank returns p's tiebreaker strength: lower is stronger. Used only to
 // order otherwise-equal candidates and as a prior in the matching prompt,
 // never in place of verification. An unrecognized Provenance ranks weakest
-// (4) rather than erroring, because Rank is a soft ordering signal, not a
-// closed-set gate like parseRole — an unexpected value here should degrade
-// gracefully, not fail a matching pass.
+// (one past the weakest known tier) rather than erroring, because Rank is a soft
+// ordering signal, not a closed-set gate like parseRole — an unexpected value
+// here should degrade gracefully, not fail a matching pass.
 func (p Provenance) Rank() int {
 	switch p {
 	case ProvenanceReviewer:
@@ -127,12 +144,14 @@ func (p Provenance) Rank() int {
 		return 0
 	case ProvenanceJiraEvent:
 		return 1
-	case ProvenanceProseFirst:
+	case ProvenanceCorroborated:
 		return 2
-	case ProvenanceProseLater:
+	case ProvenanceProseFirst:
 		return 3
-	default:
+	case ProvenanceProseLater:
 		return 4
+	default:
+		return 5
 	}
 }
 

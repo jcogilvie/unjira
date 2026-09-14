@@ -226,6 +226,22 @@ func Match(
 		narratives = narratives[:narrativeLimit]
 	}
 
+	// Loaded ONCE per pass, not per narrative: it is a whole-store aggregate that
+	// does not vary between narratives, and matchOne runs in a loop.
+	//
+	// A failure here does not fail the pass. An empty map degrades ranking to
+	// exactly the pre-F9 alphabetical behaviour, which is worse but not wrong —
+	// whereas refusing to match anything because one COUNT-style query failed
+	// would turn a ranking regression into an outage.
+	jiraActivity, err := s.IssueActivity()
+	if err != nil {
+		log.Printf("correlator: could not load issue activity (%v); candidate ranking falls back "+
+			"to provenance and issue key alone, so a recently-active ticket mentioned in passing "+
+			"may be truncated away", err)
+
+		jiraActivity = nil
+	}
+
 	var (
 		results []MatchResult
 		stats   Stats
@@ -233,7 +249,8 @@ func Match(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := matchOne(ctx, s, resolve, client, n, o.linkExclusions, candidateLimit, cfg, o.rules)
+		result, oneStats, err := matchOne(
+			ctx, s, resolve, client, n, o.linkExclusions, candidateLimit, cfg, o.rules, jiraActivity)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -259,6 +276,7 @@ func matchOne(
 	limit int,
 	cfg config.MatchConfig,
 	learnedRules []rules.Rule,
+	jiraActivity map[string]time.Time,
 ) (MatchResult, Stats, error) {
 	result := MatchResult{NarrativeID: narrative.ID}
 
@@ -273,7 +291,7 @@ func matchOne(
 
 	result.Excluded = excludedCandidates(evts, linkExclusions)
 
-	candidates := gatherCandidates(evts, linkExclusions, limit)
+	candidates := gatherCandidates(evts, linkExclusions, limit, jiraActivity)
 	if len(candidates) == 0 {
 		// Untracked work is the default path, not a special case: no
 		// tracker call, no LLM call, nothing written.

@@ -52,7 +52,7 @@ func TestGatherCandidates_BranchOutranksProse(t *testing.T) {
 		claudeEvent(t, "s1", "feature/PROJ-42", "PROJ-100", "PROJ-205", "PROJ-42"),
 	}
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 10)
+	got := correlator.GatherCandidatesForTest(evts, nil, 10, nil)
 
 	require.NotEmpty(t, got)
 	assert.Equal(t, "PROJ-42", got[0].IssueKey)
@@ -62,7 +62,7 @@ func TestGatherCandidates_BranchOutranksProse(t *testing.T) {
 func TestGatherCandidates_ProseOrderIsPreserved(t *testing.T) {
 	evts := []events.Event{claudeEvent(t, "s1", "", "PROJ-100", "PROJ-205")}
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 10)
+	got := correlator.GatherCandidatesForTest(evts, nil, 10, nil)
 
 	require.Len(t, got, 2)
 	assert.Equal(t, "PROJ-100", got[0].IssueKey)
@@ -74,7 +74,7 @@ func TestGatherCandidates_ProseOrderIsPreserved(t *testing.T) {
 func TestGatherCandidates_JiraArtifactIsACandidate(t *testing.T) {
 	evts := []events.Event{jiraEvent(t, "PROJ-7")}
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 10)
+	got := correlator.GatherCandidatesForTest(evts, nil, 10, nil)
 
 	require.Len(t, got, 1)
 	assert.Equal(t, "PROJ-7", got[0].IssueKey)
@@ -91,7 +91,7 @@ func TestGatherCandidates_DedupesKeepingStrongestProvenance(t *testing.T) {
 		claudeEvent(t, "s2", "feature/PROJ-42"),
 	}
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 10)
+	got := correlator.GatherCandidatesForTest(evts, nil, 10, nil)
 
 	require.Len(t, got, 1, "one key, one candidate")
 	assert.Equal(t, correlator.ProvenanceBranch, got[0].Provenance)
@@ -105,7 +105,7 @@ func TestGatherCandidates_HonorsExcludeFromLinking(t *testing.T) {
 	require.NoError(t, err)
 	evts := []events.Event{claudeEvent(t, "s1", "", "NOJIRA-1", "PROJ-42")}
 
-	got := correlator.GatherCandidatesForTest(evts, compiled, 10)
+	got := correlator.GatherCandidatesForTest(evts, compiled, 10, nil)
 
 	require.Len(t, got, 1)
 	assert.Equal(t, "PROJ-42", got[0].IssueKey)
@@ -122,7 +122,7 @@ func TestGatherCandidates_RespectsLimitStrongestFirst(t *testing.T) {
 		claudeEvent(t, "s1", "feature/PROJ-9", "PROJ-1", "PROJ-2", "PROJ-3", "PROJ-4"),
 	}
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 2)
+	got := correlator.GatherCandidatesForTest(evts, nil, 2, nil)
 
 	require.Len(t, got, 2)
 	assert.Equal(t, "PROJ-9", got[0].IssueKey, "the branch candidate must survive truncation")
@@ -132,7 +132,7 @@ func TestGatherCandidates_RespectsLimitStrongestFirst(t *testing.T) {
 func TestGatherCandidates_NoKeysIsEmptyNotError(t *testing.T) {
 	evts := []events.Event{claudeEvent(t, "s1", "main")}
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 10)
+	got := correlator.GatherCandidatesForTest(evts, nil, 10, nil)
 
 	assert.Empty(t, got, "untracked work is the default path, not an error")
 }

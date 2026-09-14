@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS narrative_issues (
     narrative_id INTEGER NOT NULL REFERENCES narratives (id),
     issue_key    TEXT    NOT NULL,
     role         TEXT    NOT NULL,   -- primary | same_work | mentioned
-    provenance   TEXT    NOT NULL,   -- branch | jira_event | prose_first | prose_later
+    provenance   TEXT    NOT NULL,   -- reviewer | branch | jira_event | corroborated | prose_first | prose_later
     confidence   REAL,
     connection   TEXT,               -- which JiraConnection resolved it
     created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),

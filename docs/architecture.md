@@ -61,7 +61,7 @@ flowchart TB
     subgraph correlate["internal/correlator"]
         CLUSTER["Cluster<br/>LLM · groups events<br/>into narratives"]
         PERSIST["Persist<br/>deterministic · new /<br/>extend / compact"]
-        CAND["gatherCandidates<br/>deterministic · pre-filter"]
+        CAND["gatherCandidates<br/>deterministic · pre-filter<br/>ranks on IssueActivity"]
         MATCH["Match<br/>LLM · narrative to issue"]
     end
 
@@ -95,7 +95,7 @@ flowchart TB
 ```
 
 **Seven LLM call sites**, all in two packages — `correlator/correlator.go:229`, `:618`, `:1020`,
-`correlator/match.go:556`, `reconciler/draft.go:90`, `:337`, `reconciler/create.go:235`. Nothing
+`correlator/match.go:574`, `reconciler/draft.go:90`, `:337`, `reconciler/create.go:240`. Nothing
 else in the tree calls a model.
 
 Store-mediation is what makes a failed pass cost a retry and nothing else: a stage that dies has

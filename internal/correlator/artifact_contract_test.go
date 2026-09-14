@@ -48,7 +48,7 @@ func TestArtifactKeyContract_JiraCollectorToCorrelator_ConnectionAndIssueKey(t *
 	require.NoError(t, err)
 	require.Len(t, evts, 1)
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 10)
+	got := correlator.GatherCandidatesForTest(evts, nil, 10, nil)
 
 	require.Len(t, got, 1)
 	assert.Equal(t, "PROJ-42", got[0].IssueKey)
@@ -97,7 +97,7 @@ func TestArtifactKeyContract_ClaudeCodeCollectorToCorrelator_BranchAndTicketKeys
 	))
 	require.Len(t, evts, 1)
 
-	got := correlator.GatherCandidatesForTest(evts, nil, 10)
+	got := correlator.GatherCandidatesForTest(evts, nil, 10, nil)
 
 	require.NotEmpty(t, got)
 	assert.Equal(t, "PROJ-42", got[0].IssueKey,
