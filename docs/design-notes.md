@@ -827,6 +827,79 @@ intent — `config.MatchConfig.ConfidenceFloor`'s own doc comment says "the floo
 asserts, not what it records", because a dropped row would make a low-confidence match
 indistinguishable from finding nothing at all.
 
+## 29. An outcome that leaves no trace re-derives itself forever
+
+The reconciler examined the same 20 narratives on every pass, at full model cost, while 35 behind
+them were never reached. Nothing was broken in the sense of a wrong answer — every component did
+exactly its job:
+
+- `Reconcile` selects `ORDER BY (window_start, id) LIMIT 20`, a **stable** order
+- those 20 were pure tracker-echo, so `suppressTrackerEcho` correctly refused to comment
+- **suppression wrote no row**, so `DeltaEvents` still returned those links
+- so the next pass selected the identical 20
+
+> An outcome that does not advance the watermark plus a stable selection order is a livelock, even
+> when every individual decision is correct.
+
+The fix was to record the suppression — one `StatusSuppressed` row per narrative per pass — so the
+narrative yields to the next one. Draining then converged: **35 → 17 → 16**, where three prior passes
+had all reported 35.
+
+**This codebase had already solved it once.** `StatusDeclined` exists for precisely this reason, and
+its doc comment records the same three-pass measurement, taken from the *create* path:
+
+```
+pass 1: proposed=0  cumulative LLM calls=1
+pass 2: proposed=0  cumulative LLM calls=2
+pass 3: proposed=0  cumulative LLM calls=3
+```
+
+> "The row exists to be a memory. Without it a declined narrative is re-judged on every pass forever
+> … Remembering the answer is the whole fix."
+
+The comment/transition path never got that treatment. Before this change **every action row in the
+live store was a create; zero came from reconcile** — a one-query check that would have exposed the
+gap at any point.
+
+That is incident 28's lesson recurring within a week: *a fix applied to the instance is not applied to
+the class.* Twice now the pattern has been "path A hit this, path A was fixed correctly and
+documented, path B was never swept". The countermeasure is concrete rather than aspirational: when a
+fix earns a design note, the same PR should ask **which other paths reach this code**, and answer it
+with a query rather than a memory. Here that query is one line.
+
+**Why a distinct status rather than reusing `declined`.** `declined` is the MODEL's judgment;
+`rejected` is a HUMAN's ruling; a suppression is neither — a deterministic filter fired. The existing
+comments are emphatic that conflating the first two would let slice 7's `rules.Distill` learn from
+unjira's own refusals as though a reviewer had made them. The same argument extends: training on
+filter outcomes would teach the model to imitate a `switch` statement.
+
+**The class was then swept with the query, per that lesson.** The other candidate is
+`ProposeCreates`, which has four suppression paths of its own, only one of which
+(`recordDecline`) writes a row. The query — narratives with no issue link and no action row —
+returns **0**, so nothing is currently starved there: the three trace-less paths all fire on
+narratives that either already carry a link (so `NarrativesWithNoIssueLink` excludes them) or hold
+only unjira's own output (so they have no evidence to re-derive from). Worth re-running that query
+rather than trusting this paragraph, since it is a statement about data, not structure.
+
+**Fixing it revealed the next constraint, twice, which is the normal case.** Removing a livelock does
+not reveal "done" — it reveals whatever was second-slowest. Both follow-ons were found by measuring
+again rather than declaring victory on the first green number.
+
+*First:* the selector still took `LIMIT 20` with no delta test, so 19 of 20 slots went to free skips
+and the work — sitting at positions 20–53 of 55 — needed ~30 passes to reach. That also meant the cap
+had stopped being the SPEND bound its config doc describes and become a row limit. Fixed by applying
+the delta test in the selector; one pass then moved the remainder 16 → 7.
+
+*Second, still open:* seven narratives whose delta is **entirely** `authored_by_unjira` — status
+transitions unjira recorded itself. `dropSelfAuthored` runs after the selector, so they are selected,
+emptied, and write nothing. Third instance of this same shape in one investigation, now in its cheap
+form: no model call, just a wasted slot and a remainder overstating by 7.
+
+That the identical shape appeared three times in one sitting is the real finding. It is not three bugs
+so much as one missing invariant: **every path that examines a narrative should either change its
+state or be excluded from selection.** Stated that way it is checkable, and it is what a future
+reviewer should hold new suppression paths to.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

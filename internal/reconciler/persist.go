@@ -3,6 +3,7 @@ package reconciler
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -66,6 +67,10 @@ func Persist(s *store.Store, results []ReconcileResult) ([]store.ActionRow, erro
 				row.ID = id
 				persisted = append(persisted, row)
 			}
+
+			if err := recordSuppression(tx, result); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -121,4 +126,43 @@ func ActionPayload(action ProposedAction) (string, error) {
 	}
 
 	return string(encoded), nil
+}
+
+// recordSuppression writes one watermark row for a narrative a pass examined and
+// suppressed, so the same suppression is not re-derived on every future pass.
+//
+// This is the second half of finding F12, and the create path had already solved
+// the identical problem — see StatusDeclined's doc comment, which records the same
+// three-pass measurement. Suppression used to write nothing, so DeltaEvents kept
+// returning the same links and Reconcile's stable ORDER BY (window_start, id)
+// LIMIT 20 re-examined the identical 20 narratives forever, at full model cost,
+// while the 35 behind them in the order were never reached.
+//
+// ONE row per narrative per pass, not one per reason. The row's only job is to
+// advance the watermark; the reasons ride along in the rationale so the decision
+// stays auditable, which per-reason rows would not improve. IssueKey is left empty
+// deliberately: a pass can suppress drafts against several issues, and picking one
+// would imply this row is about that issue. Payload is a JSON object rather than
+// empty text because the column is NOT NULL and every reader (bodyOf, ActionPayload)
+// expects decodable JSON.
+//
+// Not appended to `persisted`: that slice is what the auto-commit path may apply,
+// and gate.Applier handed a row with no payload to post would fail on it.
+func recordSuppression(tx *store.Tx, result ReconcileResult) error {
+	if len(result.Suppressed) == 0 {
+		return nil
+	}
+
+	if _, err := tx.InsertAction(store.ActionRow{
+		NarrativeID: result.NarrativeID,
+		Type:        string(ActionComment),
+		Payload:     "{}",
+		Rationale:   strings.Join(result.Suppressed, "; "),
+		Status:      store.StatusSuppressed,
+	}); err != nil {
+		return fmt.Errorf(
+			"recording suppression for narrative %d: %w", result.NarrativeID, err)
+	}
+
+	return nil
 }

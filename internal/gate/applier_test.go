@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
@@ -543,6 +544,17 @@ func TestApplier_Create_ASecondPassFindsTheNarrativeTracked(t *testing.T) {
 		Payload: `{"summary":"s","description":"d"}`,
 	})
 
+	// A linked event, so the narrative carries a delta. Without one it is invisible
+	// to NarrativesWithActionableLinks, which applies the delta test in the selector
+	// (F12) — and an eventless narrative is a test-only shape anyway: reconcileOne
+	// would skip it at `len(delta) == 0`.
+	_, err := s.InsertEvent(events.NewEvent("claude_code", "create:1",
+		time.Date(2026, 8, 27, 9, 30, 0, 0, time.UTC), "did the work"))
+	require.NoError(t, err)
+	eventID, err := s.EventIDByExternalID("claude_code", "create:1")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(action.NarrativeID, []int64{eventID}))
+
 	before, err := s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)
 	require.Len(t, before, 1, "precondition: the narrative starts untracked")
@@ -554,6 +566,17 @@ func TestApplier_Create_ASecondPassFindsTheNarrativeTracked(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, tracked, 1,
 		"the narrative must now be the reconciler's business, not matching's backlog")
+
+	// The assertion this test was missing, per finding F11: it checked
+	// NarrativesWithoutPrimaryLink as a PRECONDITION and then asserted only on a
+	// different selector, so it never re-checked the backlog it started from. That
+	// gap is exactly what let linkCreatedIssue leave a narrative in matching's queue
+	// forever while looking correct here.
+	after, err := s.NarrativesWithoutPrimaryLink(10)
+	require.NoError(t, err)
+	assert.Empty(t, after,
+		"and it must LEAVE matching's backlog: an applied create is an attribution, so a narrative "+
+			"that stays selectable is re-matched every pass for a ticket unjira itself opened")
 }
 
 // TestApplier_Create_ReportsAnOrphanWhenTheTrackerReturnsNoKey: an issue that

@@ -138,6 +138,79 @@ func (s *Store) CountNarrativesWithoutPrimaryLink() (int, error) {
 	return n, nil
 }
 
+// hasUnexaminedDelta is the SQL predicate for "this narrative carries work the
+// reconciler has not examined", shared verbatim by NarrativesWithActionableLinks
+// (what a pass selects) and CountNarrativesWithDelta (what the remainder reports).
+//
+// A single constant rather than two hand-written copies, because those two
+// diverging is a specific, already-experienced failure: a count that describes a
+// different population than the pass examined reports progress against a backlog
+// nobody is draining (F10), and F12 was that same defect a second time. The
+// correlated `n.id` makes it a per-narrative test, so it drops into either query's
+// WHERE clause unchanged.
+//
+// The bound MUST stay identical to DeltaEvents': MAX(created_at) over actions of
+// ANY status, COALESCEd to ” so a narrative with no action has no watermark and
+// every link counts. Any status is deliberate — a declined or suppressed row still
+// means the narrative was examined and nothing new has happened since. Contrast
+// EligibleEvents, which bounds on status='applied' only because it asks a different
+// question ("what has no tracker mutation claimed yet").
+const hasUnexaminedDelta = `EXISTS (
+	              SELECT 1 FROM narrative_events ne
+	              WHERE ne.narrative_id = n.id
+	                AND ne.linked_at > COALESCE(
+	                    (SELECT MAX(created_at) FROM actions WHERE narrative_id = n.id), '')
+	          )`
+
+// CountNarrativesWithDelta is how many linked narratives a reconcile pass would
+// actually ACT on — the honest backlog depth behind reconciler's per-pass cap.
+//
+// Two predicates, both required, because the reconciler applies both. The role
+// filter is NarrativesWithActionableLinks' (what a pass SELECTS); the delta test is
+// DeltaEvents' (what a pass does not skip). reconcileOne returns early with
+// SkippedNoDelta when the delta is empty, so those narratives cost no model call
+// and cannot produce an action.
+//
+// Counting the selection alone was finding F12: the remainder said 55 where 20 had
+// nothing new, so it told an operator to re-run for work that did not exist, and
+// each re-run bills for the sweep.
+//
+// The delta bound MUST stay identical to DeltaEvents': MAX(created_at) over actions
+// of ANY status, COALESCEd to ” so a narrative with no action has no watermark and
+// every link counts. Any status is deliberate rather than sloppy — a DECLINED
+// proposal still means the narrative was examined and nothing new has happened
+// since, which is exactly the state this must not report as outstanding. (Contrast
+// EligibleEvents, which bounds on status='applied' only: that one asks "what has no
+// tracker mutation claimed yet", a different question, and the difference is
+// load-bearing.) Two queries answering "is there a delta" that drift apart produce
+// a count describing a different population than the pass examined.
+func (s *Store) CountNarrativesWithDelta(roles []Role) (int, error) {
+	if len(roles) == 0 {
+		return 0, nil
+	}
+
+	placeholders := make([]string, len(roles))
+	args := make([]any, 0, len(roles))
+	for i, r := range roles {
+		placeholders[i] = "?"
+		args = append(args, string(r))
+	}
+
+	query := `SELECT COUNT(*) FROM narratives n
+	          WHERE EXISTS (
+	              SELECT 1 FROM narrative_issues ni
+	              WHERE ni.narrative_id = n.id AND ni.role IN (` + strings.Join(placeholders, ",") + `)
+	          )
+	            AND ` + hasUnexaminedDelta
+
+	var n int
+	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting narratives with an unexamined delta: %w", err)
+	}
+
+	return n, nil
+}
+
 // NarrativesWithActionableLinks returns up to limit narratives having at
 // least one narrative_issues link whose role is in roles, ordered by
 // (window_start, id) — the reconciler's input backlog.
@@ -176,6 +249,7 @@ func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]Narrat
 	              SELECT 1 FROM narrative_issues ni
 	              WHERE ni.narrative_id = n.id AND ni.role IN (` + strings.Join(placeholders, ",") + `)
 	          )
+	            AND ` + hasUnexaminedDelta + `
 	          ORDER BY n.window_start, n.id
 	          LIMIT ?`
 
@@ -195,36 +269,6 @@ func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]Narrat
 	}
 
 	return out, rows.Err()
-}
-
-// CountNarrativesWithActionableLinks is how many narratives reconciling would
-// examine without its cap. Mirrors NarrativesWithActionableLinks' predicate
-// exactly, including the roles filter — see CountNarrativesWithoutPrimaryLink for why
-// the predicates must not drift.
-func (s *Store) CountNarrativesWithActionableLinks(roles []Role) (int, error) {
-	if len(roles) == 0 {
-		return 0, nil
-	}
-
-	placeholders := make([]string, len(roles))
-	args := make([]any, 0, len(roles))
-	for i, r := range roles {
-		placeholders[i] = "?"
-		args = append(args, string(r))
-	}
-
-	query := `SELECT COUNT(*) FROM narratives n
-	          WHERE EXISTS (
-	              SELECT 1 FROM narrative_issues ni
-	              WHERE ni.narrative_id = n.id AND ni.role IN (` + strings.Join(placeholders, ",") + `)
-	          )`
-
-	var n int
-	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
-		return 0, fmt.Errorf("counting narratives with actionable links: %w", err)
-	}
-
-	return n, nil
 }
 
 // AddNarrativeIssues records narrative_issues rows for a narrative, one per
