@@ -16,7 +16,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
-// selectionRoles is every role a narrative_issues row can carry. Reconcile
+// SelectionRoles is every role a narrative_issues row can carry. Reconcile
 // selects on this superset — NOT the narrower actionable set actionableLinks
 // filters to — so a `mentioned`-only narrative still gets a ReconcileResult
 // row documenting "considered, nothing to do", distinguishing it from a
@@ -28,7 +28,11 @@ import (
 // actionableLinks (below) is the actual, narrower "may receive an action"
 // definition — primary and same_work only, never mentioned — applied
 // per-narrative once a candidate has already been selected.
-var selectionRoles = []store.Role{
+// Exported so internal/pipeline can COUNT the same population Reconcile selects
+// (see ReconcileRunResult.Remaining). Duplicating the role list there would let the
+// two drift, and a backlog count that describes a different population than the
+// pass examined is worse than no count at all.
+var SelectionRoles = []store.Role{
 	correlator.RolePrimary,
 	correlator.RoleSameWork,
 	correlator.RoleMentioned,
@@ -110,7 +114,7 @@ func WithWorkflowGraph(graph *workflow.Graph) ReconcileOption {
 
 // Reconcile drafts proposed actions for narratives with at least one
 // narrative_issues link of any role. A mentioned-only narrative is still
-// selected (see selectionRoles) so it gets a ReconcileResult documenting
+// selected (see SelectionRoles) so it gets a ReconcileResult documenting
 // "considered, nothing to do" rather than silently vanishing; reconcileOne's
 // actionableLinks then narrows to primary/same_work before anything is
 // drafted. A narrative with no link at all is excluded — that is matching's
@@ -136,7 +140,7 @@ func Reconcile(
 
 	limit := cfg.NarrativeLimit()
 
-	narratives, err := s.NarrativesWithActionableLinks(limit+1, selectionRoles)
+	narratives, err := s.NarrativesWithActionableLinks(limit+1, SelectionRoles)
 	if err != nil {
 		return nil, correlator.Stats{}, fmt.Errorf("listing narratives with actionable links: %w", err)
 	}

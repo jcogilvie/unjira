@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
@@ -37,6 +38,15 @@ type ReconcileRunResult struct {
 	Results []reconciler.ReconcileResult
 	Stats   correlator.Stats
 	DryRun  bool
+	// Remaining is how many actionable-linked narratives are STILL eligible after
+	// this pass — 0 when the backlog drained. See MatchRunResult.Remaining for why
+	// this is data rather than only a log line.
+	//
+	// Covers the ACTIONABLE-LINK cap only, not ProposeCreates' separate untracked
+	// cap. Two numbers in one field would be a lie, and the create backlog drains
+	// on its own schedule; reporting the one an operator can act on beats reporting
+	// a sum of two unrelated populations.
+	Remaining int
 	// Persisted is exactly what reconciler.Persist wrote THIS call — empty
 	// under DryRun (Persist never ran) or after a Persist failure. This is
 	// watch's auto-commit seam: it identifies "freshly proposed this pass" by
@@ -118,6 +128,20 @@ func RunReconcile(
 	reconcileErr = errors.Join(reconcileErr, createErr)
 
 	result := ReconcileRunResult{Results: results, Stats: stats, DryRun: opts.DryRun}
+
+	// Before the DryRun early return, so a dry run reports its backlog too — that
+	// is the mode an operator uses to ask "how far behind am I", and answering only
+	// on the writing path would withhold it exactly when it is most wanted.
+	//
+	// A count failure does not fail the pass: reconciling happened. Remaining stays
+	// 0, which reads as caught-up — wrong, but quieter than discarding a completed
+	// pass over a COUNT(*).
+	if remaining, countErr := s.CountNarrativesWithActionableLinks(reconciler.SelectionRoles); countErr != nil {
+		log.Printf("pipeline: could not count the remaining eligible narratives (%v); "+
+			"this pass's summary will not report a backlog", countErr)
+	} else {
+		result.Remaining = remaining
+	}
 
 	if opts.DryRun {
 		return result, reconcileErr

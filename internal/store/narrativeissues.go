@@ -75,6 +75,30 @@ func (s *Store) NarrativesWithoutIssueKey(limit int) ([]NarrativeRow, error) {
 	return out, rows.Err()
 }
 
+// CountNarrativesWithoutIssueKey is how many narratives matching would examine if
+// it had no cap — the backlog depth behind correlator.Match's per-pass limit.
+//
+// EXISTS to make a truncated pass legible. Both per-pass caps already log when
+// they truncate, but log.Printf goes to stderr while the rendered summary goes to
+// stdout, so a bounded pass ends looking complete. A 42-narrative backlog was
+// misdiagnosed as a clustering defect on exactly that basis, and the misdiagnosis
+// survived three passes because the session piped output through `tail` and
+// discarded the warning.
+//
+// The predicate MUST stay identical to NarrativesWithoutIssueKey's. A count that
+// describes a different population than the pass examined is worse than no count:
+// it would report progress against a backlog that was never the one being drained.
+func (s *Store) CountNarrativesWithoutIssueKey() (int, error) {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM narratives WHERE issue_key IS NULL OR issue_key = ''`,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting narratives without an issue key: %w", err)
+	}
+
+	return n, nil
+}
+
 // NarrativesWithActionableLinks returns up to limit narratives having at
 // least one narrative_issues link whose role is in roles, ordered by
 // (window_start, id) — the reconciler's input backlog.
@@ -130,6 +154,36 @@ func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]Narrat
 	}
 
 	return out, rows.Err()
+}
+
+// CountNarrativesWithActionableLinks is how many narratives reconciling would
+// examine without its cap. Mirrors NarrativesWithActionableLinks' predicate
+// exactly, including the roles filter — see CountNarrativesWithoutIssueKey for why
+// the predicates must not drift.
+func (s *Store) CountNarrativesWithActionableLinks(roles []Role) (int, error) {
+	if len(roles) == 0 {
+		return 0, nil
+	}
+
+	placeholders := make([]string, len(roles))
+	args := make([]any, 0, len(roles))
+	for i, r := range roles {
+		placeholders[i] = "?"
+		args = append(args, string(r))
+	}
+
+	query := `SELECT COUNT(*) FROM narratives n
+	          WHERE EXISTS (
+	              SELECT 1 FROM narrative_issues ni
+	              WHERE ni.narrative_id = n.id AND ni.role IN (` + strings.Join(placeholders, ",") + `)
+	          )`
+
+	var n int
+	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting narratives with actionable links: %w", err)
+	}
+
+	return n, nil
 }
 
 // SetNarrativeIssueLink denormalizes a narrative's primary issue onto

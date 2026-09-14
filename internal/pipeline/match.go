@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
@@ -14,6 +15,15 @@ import (
 type MatchRunResult struct {
 	Matched []correlator.MatchResult
 	Stats   correlator.Stats
+	// Remaining is how many narratives are STILL unmatched after this pass — 0
+	// when the backlog drained.
+	//
+	// Data, not just a log line, for two reasons. The renderer prints it to stdout
+	// where an operator actually looks; correlator.Match's own cap warning goes to
+	// stderr, which is how a 42-narrative backlog got misread as a clustering
+	// defect. And `watch` can act on it: a loop that knows it is behind can drain
+	// rather than sleep its interval.
+	Remaining int
 }
 
 // RunMatch runs one narrative→issue matching pass: validate cfg.Match,
@@ -68,6 +78,27 @@ func RunMatch(
 	result := MatchRunResult{Matched: matched, Stats: stats}
 	if err != nil {
 		return result, fmt.Errorf("matching narratives: %w", err)
+	}
+
+	// Counted AFTER the pass, here rather than inside correlator.Match, for three
+	// reasons. It is EXACT: Match fetches limit+1 to tell "exactly full" from "more
+	// waiting", so it could only ever report "21 or more" where an operator wants
+	// 47. It respects the layering internal/pipeline already enforces — this layer
+	// does config and store I/O, correlator gets resolved values and is not
+	// responsible for reporting backlog depth. And post-pass state is the more
+	// useful number anyway, since the question is "am I caught up now", not "what
+	// did that pass see".
+	//
+	// A failure here is NOT the pass's failure: the matching happened and its
+	// results are worth returning. Remaining stays 0, which reads as "caught up" —
+	// the wrong answer, but a quieter one than discarding a completed pass over a
+	// COUNT(*).
+	remaining, countErr := s.CountNarrativesWithoutIssueKey()
+	if countErr != nil {
+		log.Printf("pipeline: could not count the remaining unmatched narratives (%v); "+
+			"this pass's summary will not report a backlog", countErr)
+	} else {
+		result.Remaining = remaining
 	}
 
 	return result, nil
