@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/triage"
 )
 
@@ -92,6 +93,18 @@ type stubHandler struct {
 	replacement      store.ActionRow
 	restructured     []store.ActionRow
 	err              error
+}
+
+// NarrativeContext and IssueContext return zero values: these tests predate the
+// review-context fields and assert on DECISIONS, so an undecorated Item is the
+// honest fixture. Session must present an item regardless — that property has its
+// own coverage in context_test.go.
+func (h *stubHandler) NarrativeContext(int64) (triage.NarrativeContext, error) {
+	return triage.NarrativeContext{}, nil
+}
+
+func (h *stubHandler) IssueContext(string) (tasktracker.Issue, error) {
+	return tasktracker.Issue{}, nil
 }
 
 func (h *stubHandler) Redraft(

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
 // Verb is one disposition a reviewer chooses for one action.
@@ -35,9 +36,47 @@ type Decision struct {
 	Positions []int
 }
 
-// Item is one action as presented for review.
+// NarrativeContext is the work an action was drafted from, as a reviewer needs to
+// see it. A subset of store.NarrativeRow rather than the row itself: a prompter
+// needs a human-readable "what work is this?" and nothing more, and passing the
+// whole row would invite rendering window boundaries and compaction internals at
+// someone who cannot act on them.
+type NarrativeContext struct {
+	Title   string
+	Summary string
+}
+
+// Item is one action as presented for review, with the context a reviewer needs
+// to judge it.
+//
+// Action alone is not enough, and that was learned the hard way: presented with a
+// comment proposal for PAAS-3969, a reviewer said "this doesn't actually tell me
+// about the ticket itself, so i really don't have what i need to decide". The body
+// and the model's own rationale were all Ask rendered — and the rationale is the
+// thing under review, so it must not also be the reviewer's only source of
+// context.
+//
+// Narrative and Issue are both BEST-EFFORT and may be zero. A tracker outage, a
+// deleted ticket, or a `create` with no issue key at all must still yield a
+// reviewable Item: context aids judgment rather than gating it, and losing a
+// half-reviewed batch to a failed decoration would be strictly worse than
+// reviewing without the decoration.
 type Item struct {
-	Action   store.ActionRow
+	Action store.ActionRow
+	// Narrative is the work this action was drafted from. It was already in the
+	// store and simply never reached the prompter.
+	Narrative NarrativeContext
+	// Issue is the LIVE target issue, read at review time.
+	//
+	// Live rather than stored because the store has no ticket snapshot to offer:
+	// the Jira collector records status transitions and field edits, never the
+	// issue itself, so `PAAS-3969 status: Discovery → In Progress` was the most a
+	// reviewer could learn locally. Reading now is also the freshest answer — a
+	// status changed since collection shows the reviewer the truth rather than
+	// unjira's stale belief.
+	//
+	// Zero for a `create`, which has no issue until it is applied.
+	Issue    tasktracker.Issue
 	Position int
 	Total    int
 }
@@ -62,6 +101,12 @@ type Session struct {
 	// than on the handler because a Session IS one pass — its lifetime and the
 	// context's are the same — whereas a handler is a long-lived dependency.
 	ctx context.Context //nolint:containedctx // a Session is one pass; see above
+	// issueCache memoizes IssueContext per key for this pass. A queue routinely
+	// holds many actions on one issue (one real batch had ten on PAAS-4019), and
+	// re-reading the same ticket per action would multiply the reviewer's wait by
+	// the batch size for no new information. Per-pass, not longer-lived: within one
+	// review the ticket is not expected to change, but across passes it may.
+	issueCache map[string]tasktracker.Issue
 }
 
 // NewSession builds a review session. handler may be nil: the verbs that need
@@ -74,6 +119,8 @@ func NewSession(ctx context.Context, batch []store.ActionRow, p Prompter, h Hand
 		prompter:  p,
 		handler:   h,
 		ctx:       ctx,
+
+		issueCache: make(map[string]tasktracker.Issue),
 	}
 }
 
@@ -82,7 +129,10 @@ func (s *Session) Run() error {
 	for i := 0; i < len(s.batch); i++ {
 		a := s.batch[i]
 
-		d, err := s.prompter.Ask(Item{Action: a, Position: i + 1, Total: len(s.batch)})
+		item := Item{Action: a, Position: i + 1, Total: len(s.batch)}
+		s.decorate(&item)
+
+		d, err := s.prompter.Ask(item)
 		if err != nil {
 			return fmt.Errorf("prompting for action %d: %w", a.ID, err)
 		}
@@ -128,6 +178,51 @@ func (s *Session) Run() error {
 	}
 
 	return nil
+}
+
+// decorate attaches the narrative and live issue a reviewer needs, best-effort.
+//
+// EVERY failure here is swallowed deliberately, and that is the load-bearing
+// property: context is an aid to judgment, not a precondition for it. A tracker
+// outage or a deleted ticket must not end a review the human is midway through,
+// because losing a half-reviewed batch is strictly worse than reviewing one item
+// without its decoration. The reviewer sees an empty summary and can still decide
+// — or skip, which is the honest move when context is missing.
+//
+// Not surfaced through Notify either: a per-item warning on every action of a
+// batch during a tracker outage would bury the actions themselves, and the empty
+// field already says "unknown" as clearly as a message would.
+func (s *Session) decorate(item *Item) {
+	if s.handler == nil {
+		return
+	}
+
+	if item.Action.NarrativeID != 0 {
+		if n, err := s.handler.NarrativeContext(item.Action.NarrativeID); err == nil {
+			item.Narrative = n
+		}
+	}
+
+	// A create has no issue key until it is applied, so there is nothing to read.
+	if item.Action.IssueKey == "" {
+		return
+	}
+
+	if cached, ok := s.issueCache[item.Action.IssueKey]; ok {
+		item.Issue = cached
+
+		return
+	}
+
+	issue, err := s.handler.IssueContext(item.Action.IssueKey)
+	if err != nil {
+		return
+	}
+
+	// Cached even when zero-valued, so a key that resolves to nothing is not
+	// re-read once per action for the rest of the pass.
+	s.issueCache[item.Action.IssueKey] = issue
+	item.Issue = issue
 }
 
 // Approved returns the actions the reviewer approved, in batch order.
@@ -210,6 +305,19 @@ var ErrAbandoned = fmt.Errorf("triage abandoned by reviewer")
 // we ask a human, Handler is what happens when the answer requires work. A test
 // can script one and stub the other.
 type Handler interface {
+	// NarrativeContext returns the work an action was drafted from, for display.
+	//
+	// Read-only and display-only, which is why it sits on Handler rather than
+	// Session taking a *store.Store: Session deliberately touches no storage, and
+	// giving it one to satisfy a display concern would widen it past "collect
+	// decisions" for no gain.
+	NarrativeContext(narrativeID int64) (NarrativeContext, error)
+	// IssueContext returns the LIVE issue an action targets, for display.
+	//
+	// A live read because the store holds no ticket snapshot — see Item.Issue.
+	// Errors are the caller's to swallow: Session degrades to no context rather
+	// than aborting a review the human is midway through.
+	IssueContext(issueKey string) (tasktracker.Issue, error)
 	// Redraft returns a replacement action for an edit.
 	//
 	// Takes a context because it makes an LLM call. Session holds one for exactly

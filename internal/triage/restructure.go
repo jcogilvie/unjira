@@ -2,6 +2,7 @@ package triage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jcogilvie/unjira/internal/config"
@@ -301,6 +302,46 @@ func (h *StoreHandler) persistReplacement(
 	row.ID = id
 
 	return row, nil
+}
+
+// NarrativeContext returns the work an action was drafted from, for display.
+//
+// A miss is not an error the reviewer needs to hear about — Session swallows it
+// and shows an empty title — so a deleted or not-yet-persisted narrative degrades
+// to no context rather than to a failed review.
+func (h *StoreHandler) NarrativeContext(narrativeID int64) (NarrativeContext, error) {
+	row, err := h.store.GetNarrative(narrativeID)
+	if err != nil {
+		return NarrativeContext{}, fmt.Errorf("reading narrative %d for review context: %w",
+			narrativeID, err)
+	}
+
+	return NarrativeContext{Title: row.Title, Summary: row.Summary}, nil
+}
+
+// IssueContext returns the LIVE issue an action targets, for display.
+//
+// Uses the same TaskReader the retarget verb already holds — a READER, never a
+// writer, so no display path can mutate a tracker. That is the same guarantee
+// restructure.go's own doc comment makes about this field, and it holds for the
+// identical reason: the narrowest interface that does the job.
+func (h *StoreHandler) IssueContext(issueKey string) (tasktracker.Issue, error) {
+	// A nil tracker is a legitimate configuration, not a bug to panic on: a handler
+	// built for restructure-only work (split needs the store and the LLM, never a
+	// tracker) has nothing to read with. Reported as unavailable so Session
+	// degrades to no context — the same path a tracker outage takes — rather than
+	// crashing a review over a display concern.
+	if h.tracker == nil {
+		return tasktracker.Issue{}, errors.New("no tracker configured; issue context unavailable")
+	}
+
+	issue, err := h.tracker.GetIssue(issueKey)
+	if err != nil {
+		return tasktracker.Issue{}, fmt.Errorf("reading issue %s for review context: %w",
+			issueKey, err)
+	}
+
+	return issue, nil
 }
 
 // Retarget moves a narrative's primary link to a different issue and redrafts
