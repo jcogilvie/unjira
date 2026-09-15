@@ -177,6 +177,7 @@ stateDiagram-v2
     direction LR
     [*] --> proposed: reconciler drafts
     [*] --> declined: model judged<br/>not worth tracking<br/>(create only)
+    [*] --> suppressed: deterministic filter<br/>refused the draft<br/>(watermark, not reviewed)
 
     proposed --> approved: triage [a]pprove<br/>or auto_commit
     proposed --> rejected: triage [r]eject<br/>or [t]arget
@@ -185,6 +186,7 @@ stateDiagram-v2
 
     approved --> applied: Applier wrote it
     approved --> failed: tracker refused<br/>actions.error records<br/>how far it got
+    approved --> failed: Applier refused —<br/>create whose narrative<br/>gained a primary link
 
     failed --> proposed: next reconcile pass
     edited --> proposed: replacement row
@@ -193,6 +195,7 @@ stateDiagram-v2
     applied --> [*]
     rejected --> [*]
     declined --> [*]
+    suppressed --> [*]
 
     note right of declined
         Distinct from rejected:

@@ -279,6 +279,31 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 		return fmt.Errorf("action %d: %w", action.ID, err)
 	}
 
+	// Re-check that the work is still untracked. A create is proposed from a
+	// SNAPSHOT — at propose time the narrative had no link — and matching can link it
+	// afterwards, in the observed case three hours later at confidence 1.0, to an
+	// issue that was already Done (finding F13). Nothing between proposal and write
+	// re-checked: openOrAppliedCreate inspects only other ACTIONS, never links.
+	//
+	// Here rather than as a queue-expiry rule because the applier is the only code
+	// that writes, so "is this still true?" belongs at the write. A duplicate ticket
+	// cannot be un-opened, which makes this the one check whose absence is
+	// irreversible.
+	//
+	// Only a PRIMARY link disqualifies. A `mentioned` link is a citation, not an
+	// attribution, so that narrative's work is still untracked and a create is still
+	// correct; refusing on any link would make unjira unable to open a ticket for
+	// work that merely references another issue.
+	if key, err := a.primaryLinkFor(action.NarrativeID); err != nil {
+		return fmt.Errorf("action %d: %w", action.ID, err)
+	} else if key != "" {
+		return fmt.Errorf(
+			"action %d: narrative %d is already tracked by %s, so creating an issue would "+
+				"duplicate it; the link was made after this action was proposed (reject it rather "+
+				"than retrying)", action.ID, action.NarrativeID, key,
+		)
+	}
+
 	var p createPayload
 	if err := json.Unmarshal([]byte(action.Payload), &p); err != nil {
 		return fmt.Errorf("action %d: decoding create payload %q: %w", action.ID, action.Payload, err)
@@ -409,3 +434,26 @@ func (a *Applier) checkProjectWritable(project string) error {
 // What survives is the malformed-payload check inline in applyTransition: an
 // empty target_status means the payload was never valid for its declared type,
 // and is this package's business rather than a tracker round trip to spend.
+
+// primaryLinkFor returns the issue key of narrativeID's primary link, or "" when it
+// has none. A read, on the write-authority package's one narrow exception: refusing
+// a duplicate needs to know what already tracks the work, and the alternative —
+// passing the answer in from the caller — would put the check somewhere that does not
+// write, where it could be bypassed by a second write path.
+func (a *Applier) primaryLinkFor(narrativeID int64) (string, error) {
+	links, err := a.store.NarrativeIssues(narrativeID)
+	if err != nil {
+		// Refuse rather than assume untracked: guessing wrong here opens a duplicate
+		// ticket, and the failure mode of guessing the other way is one unapplied
+		// action with a stated reason.
+		return "", fmt.Errorf("checking existing links for narrative %d: %w", narrativeID, err)
+	}
+
+	for _, l := range links {
+		if l.Role == store.RolePrimary {
+			return l.IssueKey, nil
+		}
+	}
+
+	return "", nil
+}

@@ -272,7 +272,7 @@ happened" and "the measurement window missed it", and the timestamps are what di
 
 ---
 
-### F13 — `ProposeCreates` reaches narratives matching has not examined yet, and proposes duplicate tickets
+### F13 — resolved: `ProposeCreates` reached narratives matching had not examined yet, and proposed duplicate tickets
 
 Both stages select oldest-first with the same cap, but over **different populations**:
 
@@ -336,25 +336,46 @@ longer than the cap, which is the normal state. Any narrative between matching's
 is a candidate on every pass. It reads as zero today (both pools have drained to 16, below the cap)
 and that is a property of a drained store, not of the code.
 
-**Candidate fixes, not yet chosen.**
+**Fixed by a precondition, plus a backstop at the write.**
 
-- **Refuse when unresolved tracker evidence exists.** A narrative whose events carry an `issue_key`
-  artifact with no corresponding link row has not been *examined*, only *unreached* — and those are
-  different facts that "no link" currently conflates. Deterministic, pre-model, and it uses exactly
-  the evidence `gatherCandidates` already reads. Would have refused action 16 outright. Does not help
-  a narrative whose only candidate keys are in prose.
-- **Record that matching examined a narrative**, and have create select only examined ones. The
-  general form: it closes the prose case too. But it needs somewhere to put the record, and note
-  `actions.created_at` is already a watermark for the reconcile path (see F11 for why not a column
-  beside an existing fact).
-- **Re-check at the write.** `applyCreate` refuses when the narrative has since acquired a primary
-  link. Last line before a real mutation, which is where this codebase puts every other safety check —
-  but it fires only at approval time, after a human was already asked to review a proposal that should
-  never have existed. Worth having regardless; not sufficient alone.
+The primary fix defers the create path entirely while matching is behind:
+`ReconcileOptions.UnmatchedNarratives` carries `MatchRunResult.Remaining` (already computed for F10
+and in scope immediately before `RunReconcile`), and a nonzero value skips `ProposeCreates`. That
+addresses the cause rather than the evidence: "no link" only means "untracked" once matching has
+examined everything, and while it is behind the same absence means "not looked at yet".
 
-Whichever is chosen, verify it against **this** case before believing it: matching's link row for
-narrative 24 postdates action 16 by three hours, so a fix that only consults link rows at propose time
-must be checked against the state as it was at 17:12, not as it is now.
+It also makes `buildCreatePrompt` honest again. That prompt asserts *"no tracker issue exists for any
+of it"*, which is true of every narrative the selector is supposed to return — so fixing the selector
+repairs the prompt rather than requiring it to hedge.
+
+**All-or-nothing rather than per-narrative**, deliberately. Deferring only the narratives matching has
+not reached needs a record of which those are, and matching writes nothing when it finds no candidates
+(`match.go:296` — "untracked work is the default path"). Since a later matching pass is the very thing
+that produces the link, deferring costs latency while proposing costs a duplicate ticket, and a create
+is the highest-blast-radius action unjira proposes. The deferral is reported, not silent: a
+permanently-behind matching stage would otherwise make unjira quietly stop proposing creates forever,
+which is F10's failure mode wearing a different hat.
+
+**The backstop:** `gate.Applier.applyCreate` now refuses when the narrative already has a primary link,
+naming the issue. A create is proposed from a snapshot and the applier is the only code that writes, so
+"is this still true?" belongs there rather than in a queue-expiry rule — a duplicate ticket cannot be
+un-opened. Only a PRIMARY link disqualifies: a `mentioned` link is a citation, not an attribution, and
+refusing on any link would make unjira unable to open a ticket for work that merely references another
+issue.
+
+**Verified against the state as it was, not as it is.** At 17:12 matching had linked narratives 1-20
+and stopped, leaving `Remaining = 52` — so the guard defers and action 16 is never proposed. This is
+the check the rejected candidates would have failed: they consult link rows, and narrative 24's link
+row did not exist until three hours later. The backstop was verified against today's queue instead,
+where action 16 is still pending and narrative 24 now links to `PAAS-3898`, so approving it is refused
+by name.
+
+Two candidates were rejected. **Refusing when unresolved tracker evidence exists** (an `issue_key`
+artifact with no link row) is deterministic and measured — it would have refused action 16, with zero
+false refusals across all 16 genuinely-untracked narratives — but it guards an evidence class rather
+than the precondition, and is blind to prose-only candidates. **Recording that matching examined a
+narrative** is the general form and closes the prose case, but needs new state for a case the
+precondition already covers.
 
 ---
 
@@ -371,4 +392,4 @@ must be checked against the state as it was at 17:12, not as it is now.
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
 | F11 — issue_key denormalization drifts | resolved: the column is **deleted**, along with `.confidence`, `SetNarrativeIssueLink` and `NarrativeRow.IssueKey`/`.Confidence` — all write-only. `NarrativesWithoutIssueKey` became `NarrativesWithoutPrimaryLink`, asking `NOT EXISTS(primary link)`. The fix was already named in `design-notes.md` when the create path hit the same trap; matching was the one accessor never revisited. No migration: narrative 15 self-repaired, since it *has* a primary link. Verified by draining — the pass that crashed now completes, backlog 38 → 26. |
 | F12 — reconcile remainder over-counted; suppressed narratives starved the queue | **fixed**: the count mirrors `DeltaEvents` (55 → 35), and `StatusSuppressed` records the examination so the watermark advances. Draining converges: 35 → 17 → 16. The selector now applies the delta test too, so the cap is a spend bound again: one pass moved the remainder 16 → 7 where the old design moved 1 per pass. A small **residual** remains — 7 narratives whose delta is entirely unjira's own output are selected, emptied by `dropSelfAuthored`, and write nothing |
-| F13 — create outruns matching, proposes duplicates | new; found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |
+| F13 — create outruns matching, proposes duplicates | **resolved**: creates are deferred while matching is behind (the precondition), and `applyCreate` refuses a create whose narrative has since acquired a primary link (the backstop). Found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |

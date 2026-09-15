@@ -818,3 +818,63 @@ func TestApplier_Transition_FirstHopFailureReadsAsAPlainRefusal(t *testing.T) {
 	assert.Equal(t, []string{"SetStatus:PROJ-1:In Progress"}, w.calls,
 		"and the walk stops: hop 2 must not be attempted after hop 1 failed")
 }
+
+// TestApplier_Create_RefusesWhenTheNarrativeIsAlreadyLinked is the last line before
+// a duplicate ticket, and finding F13 is why it exists.
+//
+// A create is proposed from a snapshot: at propose time the narrative had no link.
+// Matching can link it afterwards — in the observed case three hours afterwards, at
+// confidence 1.0, to an issue that was already Done — and nothing between the
+// proposal and the write re-checked. openOrAppliedCreate inspects only OTHER
+// ACTIONS, never whether links appeared.
+//
+// F13's primary fix defers the create path while matching is behind, which stops
+// these being proposed. This is the independent guard: a create that is already
+// queued, or one proposed before that fix existed, must still not open a duplicate.
+// The applier is the right layer for it because it is the only code that writes, so
+// "is this still true?" belongs here rather than in a queue-expiry rule.
+func TestApplier_Create_RefusesWhenTheNarrativeIsAlreadyLinked(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type:    "create",
+		Payload: `{"summary":"s","description":"d"}`,
+	})
+
+	// Matching linked the narrative after the create was proposed.
+	require.NoError(t, s.AddNarrativeIssues(action.NarrativeID, []store.NarrativeIssue{
+		{IssueKey: "PROJ-7", Role: store.RolePrimary, Provenance: "jira_event", Confidence: 1.0},
+	}))
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	err := applier.Apply(action)
+
+	require.Error(t, err, "a create for already-tracked work must be refused, not applied")
+	assert.Contains(t, err.Error(), "PROJ-7",
+		"the refusal must name the issue that already tracks the work, since that is what a "+
+			"reviewer needs in order to reject the action instead of retrying it")
+	assert.Empty(t, w.calls,
+		"and it must refuse BEFORE the write: a duplicate ticket cannot be un-opened")
+}
+
+// TestApplier_Create_StillAppliesWhenOnlyNonPrimaryLinksExist keeps the guard narrow.
+// A `mentioned` link is a citation, not an attribution — the narrative's work is
+// still untracked, so a create is still correct. Refusing on any link would make
+// unjira unable to open a ticket for work that merely cites another issue.
+func TestApplier_Create_StillAppliesWhenOnlyNonPrimaryLinksExist(t *testing.T) {
+	s := applierStore(t)
+	w := &fakeWriter{}
+	action := insertAction(t, s, store.ActionRow{
+		Type:    "create",
+		Payload: `{"summary":"s","description":"d"}`,
+	})
+
+	require.NoError(t, s.AddNarrativeIssues(action.NarrativeID, []store.NarrativeIssue{
+		{IssueKey: "PROJ-9", Role: store.Role("mentioned"), Provenance: "prose_later", Confidence: 0.3},
+	}))
+
+	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+
+	require.NoError(t, applier.Apply(action))
+	assert.Len(t, w.calls, 1, "citing an issue is not being tracked by it")
+}

@@ -900,6 +900,59 @@ so much as one missing invariant: **every path that examines a narrative should 
 state or be excluded from selection.** Stated that way it is checkable, and it is what a future
 reviewer should hold new suppression paths to.
 
+## 30. A subset is reached sooner, not later
+
+Two stages, both selecting oldest-first with a cap of 20, over different populations:
+
+- `correlator.Match` — narratives with **no primary link**
+- `reconciler.ProposeCreates` — narratives with **no link at all**
+
+Create's population is a strict subset of matching's, and I twice reasoned that this made create
+*safe* — if matching considers everything create considers, matching must get there first. That is
+backwards, and the error is worth naming because it is easy to make:
+
+> A subset's members sit at LOWER positions in the same ordering, so a capped selection reaches the
+> subset MORE easily. Subsetting inverts the protection it appears to give.
+
+The narratives create reaches first are exactly the ones matching just skipped. Reconstructed from
+timestamps: matching linked narratives 1–20, precisely its cap, and stopped. Seven minutes later
+`ProposeCreates` ran with a pool of `[6, 21, 22, 23, 24, 25, …]` — narrative 24 ranked **fifth** — and
+proposed opening a ticket for work `PAAS-3898` already tracked and had closed three weeks earlier.
+
+**The conflated fact.** "This narrative has no link" carried two meanings the code never separated:
+*the work is untracked* and *matching has not looked yet*. Only the first justifies a create. The fix
+is a precondition — defer creates while `MatchRunResult.Remaining` is nonzero — rather than a filter on
+evidence, because the problem was never which evidence leaked through.
+
+**The prompt made it confident.** `buildCreatePrompt` does not merely omit the link rows; it asserts
+their absence: *"Every event in this work (no tracker issue exists for any of it)"*. The model was
+handed a false premise and eleven events titled `PAAS-3898 status: ...`, trusted the premise, named the
+ticket it was duplicating, and recommended duplicating it. An accurate summary with an inverted
+conclusion is the hardest output for a reviewer to catch, because everything except the recommendation
+is right. Note the line is not wrong in itself — it is true of every narrative the selector is
+*supposed* to return. It became a lie when the selector started returning narratives that were merely
+unreached, which is incident 24 again: a prompt cannot enforce a structural precondition, and it does
+not survive one being violated.
+
+**Verify a fix against the state as it was.** Two of the three candidates consulted link rows at
+propose time. Both look correct against today's store — and both would have failed, because narrative
+24's link row postdates the action by three hours. The chosen fix was checked against the reconstructed
+17:12 state (`Remaining = 52`, so creates defer and the action never exists). When a bug involves
+timing, "does the fix work?" has to be asked of the moment the bug happened, not of the moment you are
+standing in.
+
+**The class was swept, per incident 29's rule.** unjira has three capped narrative selectors, and only
+one pair is subset-related: create's pool is a subset of matching's. Reconcile's
+(`NarrativesWithActionableLinks`) is *disjoint* from matching's — has-an-actionable-link versus
+no-primary-link — and a query confirms zero narratives in both. So this hazard exists at exactly one
+seam, and that seam is now guarded. Worth re-running that query if a fourth selector is ever added.
+
+**And a drill found a hole in my own tests.** Disabling the deferral guard entirely left every test in
+the new file passing, because they all covered the *rendering* of a deferral and none covered the
+*deciding*. A test that cannot fail when the feature is removed is not testing the feature. The
+break-it-first discipline is not only for finding whether the fix works — it is for finding whether the
+tests do.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
