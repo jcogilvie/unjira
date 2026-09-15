@@ -32,6 +32,26 @@ const DefaultBackfillDays = 14
 // Name is this collector's registration name.
 const Name = "claude_code"
 
+// DefaultMinSegmentMessages is the floor below which a branch run folds into its
+// neighbour rather than becoming its own event.
+//
+// Three, from measurement rather than taste. Raw branch-slicing over-splits: across 46
+// multi-branch sessions, 30 produced more contiguous runs than distinct branches, and
+// the worst produced 51 runs from 14 branches — at this floor it produces 6. The
+// motivating case (session e951ef78, whose vp-feedback-refactor run must stay separate
+// and dated 2026-07-09) is unaffected at 3 and wrongly merged at 5, so the value has
+// headroom below the point where it starts destroying real boundaries.
+//
+// Configurable via the `min_segment_messages` option, but with a default that works:
+// F9 is this repo's standing argument against a knob whose correct value the operator
+// has to discover.
+const DefaultMinSegmentMessages = 3
+
+// lineTypeUser is the transcript line type carrying a human-authored message.
+// Named because three call sites compare against it and a typo in any of them would
+// silently produce a session with zero user messages, which reads as "empty transcript".
+const lineTypeUser = "user"
+
 // Collector scans Claude Code session transcripts for new work.
 type Collector struct{}
 
@@ -65,6 +85,7 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 	}
 
 	backfillDays := intOption(cc.Options, "backfill_days", DefaultBackfillDays)
+	minSegment := intOption(cc.Options, "min_segment_messages", DefaultMinSegmentMessages)
 	horizon := time.Now().UTC().AddDate(0, 0, -backfillDays)
 
 	excludeCwds := stringSliceOption(cc.Options, "exclude_cwds")
@@ -102,7 +123,7 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 			continue
 		}
 
-		event, err := sessionEvent(path, mtime, normalizedExcludes)
+		evts, err := sessionEvents(path, mtime, normalizedExcludes, minSegment)
 		if err != nil {
 			return fmt.Errorf("reading session %s: %w", path, err)
 		}
@@ -111,90 +132,54 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 			return fmt.Errorf("setting cursor for %s: %w", path, err)
 		}
 
-		if event != nil {
-			visit(*event)
+		for _, evt := range evts {
+			visit(evt)
 		}
 	}
 
 	return nil
 }
 
-// sessionMeta is what scanLines accumulates from a transcript's JSONL lines.
-type sessionMeta struct {
-	cwd, gitBranch, firstTS, lastTS string
-	userTexts                       []string
-	orderedKeys                     []string
-}
-
-// scanLines walks a transcript's lines once, tracking cwd/branch/timestamps,
-// every candidate ticket key (from message text and, later, the branch
-// name), and every user-authored message.
-func scanLines(lines []map[string]any) sessionMeta {
-	var meta sessionMeta
-
-	keys := make(map[string]bool)
-	addKey := func(key string) {
-		if !keys[key] {
-			keys[key] = true
-			meta.orderedKeys = append(meta.orderedKeys, key)
-		}
-	}
-
-	for _, line := range lines {
-		if v, _ := line["cwd"].(string); v != "" {
-			meta.cwd = v
-		}
-		if v, _ := line["gitBranch"].(string); v != "" {
-			meta.gitBranch = v
-		}
-		if ts, _ := line["timestamp"].(string); ts != "" {
-			if meta.firstTS == "" {
-				meta.firstTS = ts
-			}
-			meta.lastTS = ts
-		}
-
-		text := messageText(line)
-		if text == "" {
-			continue
-		}
-
-		for _, key := range events.ExtractTicketKeys(text) {
-			addKey(key)
-		}
-		if line["type"] == "user" {
-			meta.userTexts = append(meta.userTexts, text)
-		}
-	}
-
-	if meta.gitBranch != "" {
-		for _, key := range events.ExtractTicketKeys(meta.gitBranch) {
-			addKey(key)
-		}
-	}
-
-	return meta
-}
-
-// sessionSummary renders the one-line human-readable summary for a session.
-func sessionSummary(project string, meta sessionMeta) string {
-	opening := strings.TrimSpace(strings.ReplaceAll(meta.userTexts[0], "\n", " "))
+// segmentSummary renders the one-line human-readable summary for one branch run.
+//
+// The opening line is the segment's OWN first message, not the session's. That
+// distinction is the point: a 71-day session's every event previously carried its May
+// opening ask, so three unrelated bodies of work were all described as "putting together
+// an architectural vision document" — the summary clustering and the review queue both
+// read.
+func segmentSummary(project string, seg segment) string {
+	opening := strings.TrimSpace(strings.ReplaceAll(seg.userTexts[0], "\n", " "))
 	if len(opening) > 160 {
 		opening = opening[:157] + "..."
 	}
 
 	branchNote := ""
-	if meta.gitBranch != "" {
-		branchNote = " on branch " + meta.gitBranch
+	if seg.gitBranch != "" {
+		branchNote = " on branch " + seg.gitBranch
 	}
 
 	return fmt.Sprintf(
 		`Claude Code session in %s%s: %d user messages. Opened with: "%s"`,
-		project, branchNote, len(meta.userTexts), opening,
+		project, branchNote, len(seg.userTexts), opening,
 	)
 }
 
-func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.Event, error) {
+// sessionEvents turns one transcript into one event per contiguous branch run.
+//
+// Finding F15: this used to return a single event dated to the session's LAST message.
+// Session e951ef78 ran 71 days across three branches; the run that produced the merge
+// PAAS-3905 retro-credits ended 2026-07-09, and the one event unjira emitted was dated
+// 2026-07-16 carrying the wrong branch. Every date comparison downstream — the
+// reconciler's delta, NarrativesOverlapping, any --since window — was against "when did
+// you last type".
+//
+// Each segment is dated to its OWN last message and carries its OWN branch, which is
+// what recovers ProvenanceBranch for the runs that were previously discarded. Every
+// segment also carries the full branch set (see segment.allBranches): slicing only helps
+// sessions that change branch, and 42 of 79 multi-day sessions never do.
+func sessionEvents(
+	path string, mtime time.Time, excludeCwds []string, minSegment int,
+) ([]events.Event, error) {
 	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 
 	lines, err := jsonlLines(path)
@@ -202,19 +187,9 @@ func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.E
 		return nil, err
 	}
 
-	meta := scanLines(lines)
-
-	if len(meta.userTexts) == 0 {
+	segs := segments(lines, minSegment)
+	if len(segs) == 0 {
 		return nil, nil
-	}
-
-	if meta.cwd != "" && isExcluded(meta.cwd, excludeCwds) {
-		return nil, nil // unjira's own repo etc. — skip to avoid self-reference loops
-	}
-
-	project := filepath.Base(filepath.Dir(path))
-	if meta.cwd != "" {
-		project = filepath.Base(meta.cwd)
 	}
 
 	stat, err := os.Stat(path)
@@ -222,26 +197,55 @@ func sessionEvent(path string, mtime time.Time, excludeCwds []string) (*events.E
 		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}
 
-	occurredAt := mtime
-	if parsed, err := time.Parse(time.RFC3339, strings.Replace(meta.lastTS, "Z", "+00:00", 1)); err == nil {
-		occurredAt = parsed
+	out := make([]events.Event, 0, len(segs))
+
+	for i, seg := range segs {
+		if len(seg.userTexts) == 0 {
+			continue
+		}
+		if seg.cwd != "" && isExcluded(seg.cwd, excludeCwds) {
+			continue // unjira's own repo etc. — skip to avoid self-reference loops
+		}
+
+		project := filepath.Base(filepath.Dir(path))
+		if seg.cwd != "" {
+			project = filepath.Base(seg.cwd)
+		}
+
+		occurredAt := mtime
+		if parsed, err := time.Parse(time.RFC3339, strings.Replace(seg.lastTS, "Z", "+00:00", 1)); err == nil {
+			occurredAt = parsed
+		}
+
+		// The segment index is part of the ExternalID, not just the file size. Size
+		// alone made a growing session re-emit whole-session snapshots (one live
+		// session produced 19); size plus index keeps each segment distinct within a
+		// snapshot while still deduping an unchanged re-read at insert. The index
+		// rather than the branch name because a branch can legitimately appear twice
+		// when runs are far enough apart not to coalesce.
+		evt := events.NewEvent(
+			Name,
+			fmt.Sprintf("%s:%d:%d", sessionID, stat.Size(), i),
+			occurredAt,
+			segmentSummary(project, seg),
+		)
+		evt.Artifacts["session_id"] = sessionID
+		evt.Artifacts["cwd"] = seg.cwd
+		evt.Artifacts[events.ArtifactGitBranch] = seg.gitBranch
+		events.SetTicketKeys(&evt, seg.orderedKeys)
+		evt.Artifacts["user_message_count"] = len(seg.userTexts)
+		evt.Artifacts["started_at"] = seg.firstTS
+		// The interval, not just its end. A segment spanning three weeks and one
+		// spanning an hour were previously indistinguishable, both reduced to a single
+		// timestamp — see F15's third consequence.
+		evt.Artifacts["ended_at"] = seg.lastTS
+		evt.Artifacts["session_branches"] = seg.allBranches
+		evt.RawRef = path
+
+		out = append(out, evt)
 	}
 
-	event := events.NewEvent(
-		Name,
-		fmt.Sprintf("%s:%d", sessionID, stat.Size()),
-		occurredAt,
-		sessionSummary(project, meta),
-	)
-	event.Artifacts["session_id"] = sessionID
-	event.Artifacts["cwd"] = meta.cwd
-	event.Artifacts[events.ArtifactGitBranch] = meta.gitBranch
-	events.SetTicketKeys(&event, meta.orderedKeys)
-	event.Artifacts["user_message_count"] = len(meta.userTexts)
-	event.Artifacts["started_at"] = meta.firstTS
-	event.RawRef = path
-
-	return &event, nil
+	return out, nil
 }
 
 func jsonlLines(path string) ([]map[string]any, error) {
