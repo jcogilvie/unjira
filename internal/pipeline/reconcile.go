@@ -31,6 +31,27 @@ type ReconcileOptions struct {
 	// this layer takes resolved inputs and does not reach for a tracker
 	// capability itself.
 	Graph *workflow.Graph
+	// UnmatchedNarratives is how many narratives matching left unexamined, from
+	// MatchRunResult.Remaining. Nonzero DEFERS the create path entirely.
+	//
+	// The precondition finding F13 was missing: "this narrative has no link" only
+	// means "untracked" once matching has examined everything. While matching is
+	// behind it means "not looked at yet", and those are different facts.
+	// ProposeCreates conflated them, and because its population (no link at all) is
+	// a SUBSET of matching's (no primary link), the narratives it reached first were
+	// exactly the ones matching had just skipped by cap. It proposed opening a
+	// ticket for work PAAS-3898 already tracked and had closed.
+	//
+	// Resolved by the caller rather than queried here, matching Graph and rules
+	// above: this layer takes resolved inputs. The caller already has the number —
+	// RunMatch returns it and it is in scope immediately before RunReconcile — so
+	// the check costs nothing new.
+	//
+	// Zero when the caller has no matching stage to report on (a reconcile-only
+	// invocation), which reads as "matching is caught up" and preserves the
+	// pre-F13 behaviour. That is the safe default only because a caller with no
+	// matching stage cannot be racing one.
+	UnmatchedNarratives int
 }
 
 // ReconcileRunResult is one reconcile pass, shaped for rendering.
@@ -38,6 +59,15 @@ type ReconcileRunResult struct {
 	Results []reconciler.ReconcileResult
 	Stats   correlator.Stats
 	DryRun  bool
+	// CreatesDeferred is how many narratives matching had left unexamined when this
+	// pass chose NOT to run the create path, or 0 when creates ran normally.
+	//
+	// Reported rather than silent, because a silent deferral is F10's failure mode
+	// wearing a different hat: a matching stage permanently behind its cap would make
+	// unjira quietly stop proposing creates forever, and the pass summary would look
+	// like a pass with nothing to create. The number is also the actionable part — it
+	// says how far matching has to get before creates resume.
+	CreatesDeferred int
 	// Remaining is how many actionable-linked narratives are STILL eligible after
 	// this pass — 0 when the backlog drained. See MatchRunResult.Remaining for why
 	// this is data rather than only a log line.
@@ -108,6 +138,8 @@ func RunReconcile(
 		return ReconcileRunResult{}, err
 	}
 
+	createsDeferred := 0
+
 	reconcileOpts := []reconciler.ReconcileOption{reconciler.WithRules(reconcilerRules)}
 	if opts.Graph != nil {
 		reconcileOpts = append(reconcileOpts, reconciler.WithWorkflowGraph(opts.Graph))
@@ -121,13 +153,26 @@ func RunReconcile(
 	// examined by it at all. That is why untracked work produced no action even
 	// though every layer below supports `create` — the gap was a missing selection
 	// path, not a missing prompt option.
-	createResults, createStats, createErr := reconciler.ProposeCreates(
-		ctx, s, client, cfg.Reconciler, reconcilerRules)
-	results = append(results, createResults...)
-	stats.Add(createStats)
-	reconcileErr = errors.Join(reconcileErr, createErr)
+	// DEFERRED while matching is behind — see ReconcileOptions.UnmatchedNarratives.
+	// All-or-nothing rather than per-narrative: deferring only the narratives
+	// matching has not reached would need a record of which those are, and matching
+	// writes nothing when it finds no candidates. Since a later matching pass is the
+	// very thing that produces the link, deferring costs latency while proposing
+	// costs a duplicate ticket.
+	if opts.UnmatchedNarratives > 0 {
+		createsDeferred = opts.UnmatchedNarratives
+	} else {
+		createResults, createStats, createErr := reconciler.ProposeCreates(
+			ctx, s, client, cfg.Reconciler, reconcilerRules)
+		results = append(results, createResults...)
+		stats.Add(createStats)
+		reconcileErr = errors.Join(reconcileErr, createErr)
+	}
 
-	result := ReconcileRunResult{Results: results, Stats: stats, DryRun: opts.DryRun}
+	result := ReconcileRunResult{
+		Results: results, Stats: stats, DryRun: opts.DryRun,
+		CreatesDeferred: createsDeferred,
+	}
 
 	// Before the DryRun early return, so a dry run reports its backlog too — that
 	// is the mode an operator uses to ask "how far behind am I", and answering only

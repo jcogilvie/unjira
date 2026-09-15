@@ -650,7 +650,13 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	// seam it needs (correlator.TrackerResolver) now exists.
 	reconcileResult, reconcileErr := pipeline.RunReconcile(
 		ctx, app.store, tracker, client, app.config,
-		pipeline.ReconcileOptions{Graph: app.workflowGraph(project)})
+		pipeline.ReconcileOptions{
+			Graph: app.workflowGraph(project),
+			// Defers the create path while matching is behind: an unmatched narrative
+			// has no link because it has not been LOOKED at, not because the work is
+			// untracked, and proposing a ticket for it duplicates a real one (F13).
+			UnmatchedNarratives: matchResult.Remaining,
+		})
 
 	// Render before returning the error, matching the matching stage above:
 	// Reconcile isolates failures per narrative, so healthy narratives produced
@@ -970,7 +976,10 @@ func (a *appContext) runWatchPass(
 
 	reconcileResult, reconcileErr := pipeline.RunReconcile(
 		ctx, a.store, tracker, client, a.config,
-		pipeline.ReconcileOptions{Graph: graph})
+		pipeline.ReconcileOptions{
+			Graph:               graph,
+			UnmatchedNarratives: matchResult.Remaining,
+		})
 	fmt.Print(pipeline.RenderReconcileResult(reconcileResult))
 
 	if reconcileErr != nil {

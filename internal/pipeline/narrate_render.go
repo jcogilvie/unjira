@@ -247,6 +247,7 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 	if len(r.Results) == 0 {
 		b.WriteString("\nno linked narratives to reconcile\n")
 		writeRemainder(&b, r.Remaining, "carrying unexamined work")
+		writeDeferredCreates(&b, r.CreatesDeferred)
 
 		return b.String()
 	}
@@ -256,8 +257,22 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 	}
 
 	writeRemainder(&b, r.Remaining, "carrying unexamined work")
+	writeDeferredCreates(&b, r.CreatesDeferred)
 
 	return b.String()
+}
+
+// writeDeferredCreates reports a skipped create path, and says nothing when creates
+// ran — silent at zero for the same reason writeRemainder is: a line on every
+// ordinary pass trains an operator to skip it.
+func writeDeferredCreates(b *strings.Builder, deferred int) {
+	if deferred <= 0 {
+		return
+	}
+
+	fmt.Fprintf(b, "\ncreate proposals deferred: %d narrative(s) are still unmatched, so "+
+		"\"no linked issue\" does not yet mean \"untracked\" — re-run to let matching catch up\n",
+		deferred)
 }
 
 // writeReconciledNarrative writes one narrative's header line and every
