@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
@@ -44,6 +45,7 @@ var SelectionRoles = []store.Role{
 type reconcileOptions struct {
 	rules []rules.Rule
 	graph *workflow.Graph
+	log   *slog.Logger
 }
 
 // ReconcileOption configures an optional Reconcile behaviour.
@@ -112,6 +114,16 @@ func WithWorkflowGraph(graph *workflow.Graph) ReconcileOption {
 	}
 }
 
+// WithReconcileLogger supplies the logger Reconcile reports on. Nil is silent, so
+// no existing caller or test changes. Named apart from correlator's WithLogger/
+// WithMatchLogger for the same reason those two are named apart from each other:
+// distinct option types, so a shared name would not compile at one of them.
+func WithReconcileLogger(log *slog.Logger) ReconcileOption {
+	return func(o *reconcileOptions) {
+		o.log = log
+	}
+}
+
 // Reconcile drafts proposed actions for narratives with at least one
 // narrative_issues link of any role. A mentioned-only narrative is still
 // selected (see SelectionRoles) so it gets a ReconcileResult documenting
@@ -148,11 +160,9 @@ func Reconcile(
 	// Reaching the cap is logged, never silent: a silent cap presents as a
 	// clean pass that quietly ignored work.
 	if len(narratives) > limit {
-		log.Printf(
-			"reconciler: %d or more narratives are eligible but this pass examines %d "+
-				"(reconciler.max_narratives_per_pass); the remainder wait for the next pass",
-			len(narratives), limit,
-		)
+		logging.For(o.log, "reconciler").Warn("narrative cap reached",
+			"unmatched_at_least", len(narratives), "examining", limit,
+			"config_key", "reconciler.max_narratives_per_pass")
 		narratives = narratives[:limit]
 	}
 
@@ -163,7 +173,7 @@ func Reconcile(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg, o.rules, o.graph)
+		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg, o.rules, o.graph, o.log)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -190,6 +200,7 @@ func reconcileOne(
 	cfg config.ReconcilerConfig,
 	learnedRules []rules.Rule,
 	graph *workflow.Graph,
+	log *slog.Logger,
 ) (ReconcileResult, correlator.Stats, error) {
 	result := ReconcileResult{NarrativeID: narrative.ID}
 
@@ -217,7 +228,7 @@ func reconcileOne(
 		return result, correlator.Stats{}, nil
 	}
 
-	verified, unverified, err := verifyLinks(s, tracker, narrative.ID, actionable)
+	verified, unverified, err := verifyLinks(s, tracker, narrative.ID, actionable, log)
 	result.Unverified = unverified
 	if err != nil {
 		return result, correlator.Stats{}, err
@@ -234,7 +245,7 @@ func reconcileOne(
 		return result, correlator.Stats{}, nil
 	}
 
-	drafted, stats, err := draft(ctx, client, narrative, delta, verified, learnedRules, graph)
+	drafted, stats, err := draft(ctx, client, narrative, delta, verified, learnedRules, graph, log)
 	if err != nil {
 		return result, stats, fmt.Errorf("drafting for narrative %d: %w", narrative.ID, err)
 	}
@@ -249,6 +260,7 @@ func reconcileOne(
 		Store:       s,
 		Delta:       delta,
 		Verified:    verified,
+		Log:         log,
 	}, drafted)
 
 	result.Proposed = kept
@@ -336,6 +348,7 @@ func verifyLinks(
 	tracker tasktracker.TaskReader,
 	narrativeID int64,
 	links []store.NarrativeIssue,
+	log *slog.Logger,
 ) (verified []verifiedLink, unverified []string, err error) {
 	for _, l := range links {
 		issue, getErr := tracker.GetIssue(l.IssueKey)
@@ -375,11 +388,9 @@ func verifyLinks(
 		// running" is precisely what must not be invisible.
 		lastStatus, haveLastStatus, statusErr := s.LatestStatusEvent(l.IssueKey)
 		if statusErr != nil {
-			log.Printf(
-				"reconciler: could not read collected status history for %s on narrative %d (%v); "+
-					"the staleness guard cannot run for this issue",
-				l.IssueKey, narrativeID, statusErr,
-			)
+			logging.For(log, "reconciler").Warn("could not read collected status history",
+				"issue_key", l.IssueKey, "narrative_id", narrativeID, "err", statusErr,
+				"consequence", "the staleness guard cannot run for this issue")
 
 			haveLastStatus = false
 		}
@@ -403,6 +414,7 @@ func suppressDuplicates(
 	s *store.Store,
 	narrativeID int64,
 	drafted []ProposedAction,
+	log *slog.Logger,
 ) (kept []ProposedAction, suppressed []string) {
 	for _, a := range drafted {
 		if a.Type == ActionCreate {
@@ -416,17 +428,15 @@ func suppressDuplicates(
 			// A failed reverse lookup must not silently drop a proposal:
 			// keep it and say so. A duplicate comment is recoverable; a
 			// silently-vanished proposal is not.
-			log.Printf(
-				"reconciler: narrative %d: checking other narratives on %s failed (%v); "+
-					"keeping the proposal rather than dropping it",
-				narrativeID, a.IssueKey, err,
-			)
+			logging.For(log, "reconciler").Warn("checking other narratives for this issue failed",
+				"narrative_id", narrativeID, "issue_key", a.IssueKey, "err", err,
+				"consequence", "keeping the proposal rather than dropping it")
 			kept = append(kept, a)
 
 			continue
 		}
 
-		if openProposalFromAnother(s, refs, narrativeID, a.IssueKey) {
+		if openProposalFromAnother(s, refs, narrativeID, a.IssueKey, log) {
 			suppressed = append(suppressed, fmt.Sprintf(
 				"%s: another narrative already has an open proposal on this issue", a.IssueKey))
 
@@ -446,6 +456,7 @@ func openProposalFromAnother(
 	refs []store.NarrativeIssueRef,
 	narrativeID int64,
 	issueKey string,
+	log *slog.Logger,
 ) bool {
 	for _, ref := range refs {
 		if ref.NarrativeID == narrativeID {
@@ -454,7 +465,8 @@ func openProposalFromAnother(
 
 		actions, err := s.ActionsForNarrative(ref.NarrativeID)
 		if err != nil {
-			log.Printf("reconciler: reading actions for narrative %d: %v", ref.NarrativeID, err)
+			logging.For(log, "reconciler").Warn("reading actions for narrative failed",
+				"narrative_id", ref.NarrativeID, "err", err)
 
 			continue
 		}

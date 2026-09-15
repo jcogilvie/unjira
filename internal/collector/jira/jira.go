@@ -3,12 +3,13 @@ package jira
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	jiraclient "github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 )
 
@@ -119,8 +120,9 @@ func (c *Collector) collectConnection(
 	var selfAccountID, accountZone string
 
 	if me, meErr := client.Myself(); meErr != nil {
-		log.Printf("jira: connection %s: could not read own account id (%v); "+
-			"self-authored changes will not be tagged this pass", conn.Name, meErr)
+		logging.For(cc.Log, "jira").Warn("could not read own account id",
+			"connection", conn.Name, "err", meErr,
+			"consequence", "self-authored changes will not be tagged this pass")
 	} else {
 		selfAccountID, _ = me["accountId"].(string)
 		accountZone, _ = me["timeZone"].(string)
@@ -165,7 +167,7 @@ func (c *Collector) collectQuery(
 
 	searchJQL := effectiveJQL
 	if watermark, ok := DecodePosition(position, effectiveJQL); ok {
-		searchJQL = effectiveJQL + " AND " + watermarkClause(watermark, accountZone, conn.Name)
+		searchJQL = effectiveJQL + " AND " + watermarkClause(watermark, accountZone, conn.Name, cc.Log)
 	}
 
 	// The issues are collected before fetching changelogs rather than emitted
@@ -203,10 +205,11 @@ func (c *Collector) collectQuery(
 	// truncation_test.go.
 	capped := len(issues) >= limit
 	if capped {
-		log.Printf("jira: query %s/%s hit its %d-issue limit; the remainder are unexamined, so "+
-			"this pass will NOT advance its watermark and the next pass re-runs the same range. "+
-			"Raise max_issues_per_query to make progress",
-			conn.Name, query.Name, limit)
+		logging.For(cc.Log, "jira").Warn("query hit its issue limit",
+			"connection", conn.Name, "query", query.Name, "limit", limit,
+			"consequence", "the remainder are unexamined, so this pass will NOT advance its "+
+				"watermark and the next pass re-runs the same range",
+			"action", "raise max_issues_per_query to make progress")
 	}
 
 	for _, issue := range issues {
@@ -271,11 +274,11 @@ const watermarkZoneFallbackMargin = 15 * time.Hour
 // An unknown or unloadable zone falls back to UTC minus
 // watermarkZoneFallbackMargin rather than to bare UTC, and says so, because an
 // over-wide window is recoverable and a too-narrow one is not.
-func watermarkClause(watermark time.Time, accountZone, connName string) string {
+func watermarkClause(watermark time.Time, accountZone, connName string, log *slog.Logger) string {
 	if accountZone == "" {
-		log.Printf("jira: connection %s: account timezone unknown; widening the watermark by %s. "+
-			"JQL dates are account-local, so a UTC bound could otherwise skip issues",
-			connName, watermarkZoneFallbackMargin)
+		logging.For(log, "jira").Warn("account timezone unknown; widening the watermark",
+			"connection", connName, "margin", watermarkZoneFallbackMargin,
+			"consequence", "JQL dates are account-local, so a UTC bound could otherwise skip issues")
 
 		return fmt.Sprintf("updated >= %q",
 			watermark.Add(-watermarkZoneFallbackMargin).UTC().Truncate(time.Minute).Format(jqlDateFormat))
@@ -283,8 +286,9 @@ func watermarkClause(watermark time.Time, accountZone, connName string) string {
 
 	loc, err := time.LoadLocation(accountZone)
 	if err != nil {
-		log.Printf("jira: connection %s: could not load account timezone %q (%v); "+
-			"widening the watermark by %s instead", connName, accountZone, err, watermarkZoneFallbackMargin)
+		logging.For(log, "jira").Warn("could not load account timezone; widening the watermark instead",
+			"connection", connName, "zone", accountZone, "err", err,
+			"margin", watermarkZoneFallbackMargin)
 
 		return fmt.Sprintf("updated >= %q",
 			watermark.Add(-watermarkZoneFallbackMargin).UTC().Truncate(time.Minute).Format(jqlDateFormat))

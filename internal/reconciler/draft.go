@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -12,6 +12,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/workflow"
@@ -77,6 +78,7 @@ func draft(
 	verified []verifiedLink,
 	learnedRules []rules.Rule,
 	graph *workflow.Graph,
+	log *slog.Logger,
 ) ([]ProposedAction, correlator.Stats, error) {
 	var stats correlator.Stats
 
@@ -100,7 +102,7 @@ func draft(
 		return nil, stats, err
 	}
 
-	return actionsFromVerdicts(narrative.ID, verdicts, verified, "draft", graph), stats, nil
+	return actionsFromVerdicts(narrative.ID, verdicts, verified, "draft", graph, log), stats, nil
 }
 
 // toProposedAction converts one verdict, flooring its confidence against
@@ -350,7 +352,13 @@ func Redraft(
 	// Extract draft()'s loop into a shared helper and call it from both rather
 	// than copying it here — a divergence would mean triage's redrafts floor
 	// confidence differently from watch's drafts, which nothing would catch.
-	return actionsFromVerdicts(narrative.ID, verdicts, verified, "redraft", nil), stats, nil
+	//
+	// nil logger: Redraft is triage's synchronous, human-attended path (ReworkOne's
+	// caller, internal/triage.StoreHandler, holds no logger today), unlike draft's
+	// unattended watch-pass caller. An unrecognized issue_key here surfaces to the
+	// reviewer directly via the returned actions, so silence costs nothing draft's
+	// silence would.
+	return actionsFromVerdicts(narrative.ID, verdicts, verified, "redraft", nil, nil), stats, nil
 }
 
 // actionsFromVerdicts maps the model's verdicts onto ProposedActions, dropping
@@ -368,7 +376,7 @@ func Redraft(
 // that were fine.
 func actionsFromVerdicts(
 	narrativeID int64, verdicts []draftVerdict, verified []verifiedLink, what string,
-	graph *workflow.Graph,
+	graph *workflow.Graph, log *slog.Logger,
 ) []ProposedAction {
 	byKey := make(map[string]verifiedLink, len(verified))
 	for _, v := range verified {
@@ -379,10 +387,8 @@ func actionsFromVerdicts(
 	for _, verdict := range verdicts {
 		v, ok := byKey[verdict.IssueKey]
 		if !ok {
-			log.Printf(
-				"reconciler: narrative %d %s named unrecognized issue_key %q, ignoring",
-				narrativeID, what, verdict.IssueKey,
-			)
+			logging.For(log, "reconciler").Warn("narrative named an unrecognized issue_key, ignoring",
+				"narrative_id", narrativeID, "what", what, "issue_key", verdict.IssueKey)
 
 			continue
 		}

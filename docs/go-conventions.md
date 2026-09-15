@@ -144,6 +144,81 @@ Formatters: `gofmt` (simplify), `gofumpt`, `goimports`, `gci` with custom import
 standard library, then third-party, then a blank-line-separated group for unjira's own
 `github.com/jcogilvie/unjira/...` packages.
 
+## Logging: log/slog, injected
+
+`log/slog` from the standard library. Not zap, zerolog, or logr — slog is stdlib as of Go
+1.21 (this module is on 1.26) so it costs no dependency, and this module has none for
+logging. The usual argument for zap or zerolog is allocation-per-line throughput, and
+unjira's dominant cost is a multi-minute LLM call: paying an API surface for nanoseconds
+nobody can observe is the wrong trade. logr is an interface for libraries that must not
+impose a backend, which is a library's concern and not a binary's. `slog.Handler` stays
+the extension point, so the decision is reversible at the handler rather than at 35 call
+sites.
+
+**Text is the default; JSON is first-class.** unjira is a CLI today, so the default has to
+be readable at a terminal. It is also expected to run as a service, and a structured mode
+retrofitted later means consumers spend the interim parsing a human format with regexes.
+`--log-level` and `--log-format` are Kong flags with `enum:` tags, so a typo fails at parse
+time with a usage message rather than silently defaulting.
+
+**The logger is injected, never ambient.** Built once in `run()`, stored on `appContext`,
+and passed down. No `slog.Default()`, no package-level logger — the same reasoning that
+keeps `gate.Applier` the only holder of write authority: a dependency reached for out of
+the air cannot be substituted in a test or scoped in a caller.
+
+How it is plumbed depends on what the package already has, in this order of preference:
+
+1. **An existing functional-options type** — `correlator.WithLogger`,
+   `correlator.WithMatchLogger`, `reconciler.WithReconcileLogger`. Optional by
+   construction, so no existing caller or test changes.
+2. **An existing options struct** — `pipeline.NarrateOptions.Log`, `MatchOptions.Log`,
+   `ReconcileOptions.Log`, `workflow.CacheOptions.Log`, `pipeline.CollectContext.Log`.
+3. **A field on the receiver**, set explicitly — `store.Store` via `SetLogger`. Used only
+   where a constructor is called from dozens of tests that have no interest in logs.
+4. **An explicit parameter** — `log *slog.Logger`, threaded to unexported helpers that
+   need it. Verbose at the call site but honest; used throughout `correlator/match.go`.
+
+Never widen a signature to reach option 4 when 1 or 2 exists.
+
+**Every record carries its component.** `logging.For(log, "correlator")` sets a
+`component=` attribute, which replaced the prefix every message used to carry
+(`"correlator: compacted narrative..."`). A prefix is an attribute wearing a costume:
+unqueryable once shipped as JSON, and repeated inside every format string where it can
+drift. Strip the prefix; keep only what varies in the message.
+
+`logging.For` tolerates a nil logger and `logging.Discard()` exists, so library code takes
+a `*slog.Logger` and never nil-checks it.
+
+**Attributes, not interpolation.** Every `%s`/`%d`/`%v` becomes a snake_case key/value
+pair. Errors go as `"err", err`. Where a message explained a consequence in prose, keep it
+as `"consequence", "..."` — it is the part an operator acts on. Render a `time.Duration`
+with `.String()`, or JSON shows raw nanoseconds.
+
+**Levels by meaning**, not by how interesting the line feels:
+
+| level | for |
+|---|---|
+| `Error` | the process is failing |
+| `Warn` | degradation an operator should know about — a fallback taken, a cap hit, a cache re-mined |
+| `Info` | lifecycle facts: something started, completed, or was deliberately withheld |
+| `Debug` | detail that exists in the binary and is off by default |
+
+Prefer the `...Context` variants (`WarnContext`, `InfoContext`) wherever a `ctx` is in
+scope.
+
+**Announce expensive work before doing it, not after.** The stage summary already reports
+what happened; a log line's value is being readable while the work is still running. That
+is finding F17: `RunNarrate` renders only after it returns, so an 18-minute clustering call
+that died on a gateway timeout printed nothing at all, and a running pass was
+indistinguishable from a hung one. `correlator.Cluster` now logs its candidate count,
+context-narrative count, and token estimate *before* calling the model — the three numbers
+that predict the wait.
+
+**Wire it, then prove it fires.** `store.SetLogger` existed for a whole commit before
+anything called it, so both of the store's warnings were built and silent — F17's failure
+reintroduced by the change that fixed it. A log site is not done until it has been observed
+in real output; `--log-format=json` piped through `jq` is the cheapest way to check.
+
 ## Package layout
 
 License header + one-line package doc comment (`// Package foo does X.`) at the top of every

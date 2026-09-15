@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/jcogilvie/unjira/internal/logging"
 )
 
 // DefaultCacheDir is where per-project graph caches live when CacheOptions
@@ -114,6 +116,8 @@ type CacheOptions struct {
 	// Now returns the current time. Nil means time.Now. Tests inject a fixed
 	// or stepped clock here rather than sleeping past a real TTL.
 	Now func() time.Time
+	// Log is where Cached/MarkDirty report a degraded cache. Nil is silent.
+	Log *slog.Logger
 }
 
 // CacheStatus reports how Cached obtained its graph — an operator-facing
@@ -160,7 +164,7 @@ func Cached(provider GraphProvider, projectKey string, opts CacheOptions) (*Grap
 
 	reason := "refresh requested"
 	if !opts.Refresh {
-		graph, age, freshReason := loadIfFresh(path, ttl, now())
+		graph, age, freshReason := loadIfFresh(path, ttl, now(), opts.Log)
 		if freshReason == "" {
 			return graph, CacheStatus{Cached: true, Age: age}, nil
 		}
@@ -175,8 +179,9 @@ func Cached(provider GraphProvider, projectKey string, opts CacheOptions) (*Grap
 
 	entry := cacheEntry{MinedAt: now(), Graph: graph.ToMap()}
 	if err := writeCacheEntry(path, entry); err != nil {
-		log.Printf("workflow: could not save cache for project %s at %s (%v); continuing without a cache",
-			projectKey, path, err)
+		logging.For(opts.Log, "workflow").Warn("could not save cache",
+			"project_key", projectKey, "path", path, "err", err,
+			"consequence", "continuing without a cache")
 	}
 
 	return graph, CacheStatus{Cached: false, Reason: reason}, nil
@@ -188,28 +193,29 @@ func Cached(provider GraphProvider, projectKey string, opts CacheOptions) (*Grap
 // nothing noteworthy about a cache that was never expected to exist yet);
 // an unreadable or corrupt cache IS logged, since those are real operational
 // surprises an operator would otherwise never see evidence of.
-func loadIfFresh(path string, ttl time.Duration, now time.Time) (*Graph, time.Duration, string) {
+func loadIfFresh(path string, ttl time.Duration, now time.Time, log *slog.Logger) (*Graph, time.Duration, string) {
 	body, err := os.ReadFile(path) //nolint:gosec // cache path is derived, not directly user-supplied
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, "no cache yet"
 		}
 
-		log.Printf("workflow: cache at %s is unreadable (%v); re-mining", path, err)
+		logging.For(log, "workflow").Warn("cache is unreadable, re-mining", "path", path, "err", err)
 
 		return nil, 0, fmt.Sprintf("cache unreadable: %v", err)
 	}
 
 	var entry cacheEntry
 	if err := json.Unmarshal(body, &entry); err != nil {
-		log.Printf("workflow: cache at %s is corrupt (%v); re-mining", path, err)
+		logging.For(log, "workflow").Warn("cache is corrupt, re-mining", "path", path, "err", err)
 
 		return nil, 0, fmt.Sprintf("cache corrupt: %v", err)
 	}
 
 	graph, err := GraphFromMap(entry.Graph)
 	if err != nil {
-		log.Printf("workflow: cache at %s has a corrupt graph payload (%v); re-mining", path, err)
+		logging.For(log, "workflow").Warn("cache has a corrupt graph payload, re-mining",
+			"path", path, "err", err)
 
 		return nil, 0, fmt.Sprintf("cache corrupt: %v", err)
 	}
@@ -245,7 +251,7 @@ func loadIfFresh(path string, ttl time.Duration, now time.Time) (*Graph, time.Du
 // stale if nothing has been mined) or when the existing cache is already
 // unreadable/corrupt (Cached's own tolerance re-mines on the very next read
 // regardless of the dirty flag, so there is nothing useful to persist).
-func MarkDirty(dir, projectKey string) error {
+func MarkDirty(dir, projectKey string, log *slog.Logger) error {
 	path := CachePath(dir, projectKey)
 
 	entry, err := readCacheEntry(path)
@@ -254,8 +260,8 @@ func MarkDirty(dir, projectKey string) error {
 			return nil
 		}
 
-		log.Printf("workflow: cache at %s cannot be marked dirty (%v); the next read re-mines anyway",
-			path, err)
+		logging.For(log, "workflow").Warn("cache cannot be marked dirty",
+			"path", path, "err", err, "consequence", "the next read re-mines anyway")
 
 		return nil
 	}

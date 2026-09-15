@@ -3,11 +3,12 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -24,6 +25,13 @@ type MatchRunResult struct {
 	// defect. And `watch` can act on it: a loop that knows it is behind can drain
 	// rather than sleep its interval.
 	Remaining int
+}
+
+// MatchOptions carries RunMatch's optional inputs, mirroring NarrateOptions and
+// ReconcileOptions so all three stages are configured the same way.
+type MatchOptions struct {
+	// Log is where the stage reports degradation. Nil is silent.
+	Log *slog.Logger
 }
 
 // RunMatch runs one narrative→issue matching pass: validate cfg.Match,
@@ -57,6 +65,7 @@ func RunMatch(
 	resolve correlator.TrackerResolver,
 	client llm.Client,
 	cfg config.Config,
+	opts MatchOptions,
 ) (MatchRunResult, error) {
 	if err := cfg.Match.Validate(); err != nil {
 		return MatchRunResult{}, fmt.Errorf("invalid match config: %w", err)
@@ -95,8 +104,9 @@ func RunMatch(
 	// COUNT(*).
 	remaining, countErr := s.CountNarrativesWithoutPrimaryLink()
 	if countErr != nil {
-		log.Printf("pipeline: could not count the remaining unmatched narratives (%v); "+
-			"this pass's summary will not report a backlog", countErr)
+		logging.For(opts.Log, "pipeline").Warn(
+			"could not count the remaining unmatched narratives",
+			"err", countErr, "consequence", "this pass's summary will not report a backlog")
 	} else {
 		result.Remaining = remaining
 	}

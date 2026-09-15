@@ -32,7 +32,7 @@ func TestOpenProposalFromAnother_RecognizesTheStoredProposedStatus(t *testing.T)
 	require.NoError(t, err)
 	require.NotEmpty(t, refs, "precondition: the other narrative's link is visible via the reverse lookup")
 
-	got := openProposalFromAnother(s, refs, other+1, "PROJ-1")
+	got := openProposalFromAnother(s, refs, other+1, "PROJ-1", nil)
 
 	assert.True(t, got,
 		"a status=StatusProposed action on another narrative sharing this issue must be found")
@@ -54,7 +54,7 @@ func TestOpenProposalFromAnother_IgnoresATerminalStatus(t *testing.T) {
 	refs, err := s.NarrativesForIssue("PROJ-1")
 	require.NoError(t, err)
 
-	got := openProposalFromAnother(s, refs, other+1, "PROJ-1")
+	got := openProposalFromAnother(s, refs, other+1, "PROJ-1", nil)
 
 	assert.False(t, got, "an applied action already reached the tracker; it is not an open proposal")
 }
@@ -74,7 +74,7 @@ func TestSuppressDuplicates_SuppressesACommentWhenAnotherNarrativeHasAnOpenPropo
 
 	drafted := []ProposedAction{{Type: ActionComment, IssueKey: "PROJ-1", Body: "a fresh comment"}}
 
-	kept, suppressed := suppressDuplicates(s, other+1, drafted)
+	kept, suppressed := suppressDuplicates(s, other+1, drafted, nil)
 
 	assert.Empty(t, kept)
 	require.Len(t, suppressed, 1)

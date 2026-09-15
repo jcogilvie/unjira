@@ -2,8 +2,6 @@ package correlator_test
 
 import (
 	"context"
-	"log"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +13,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -205,16 +204,19 @@ func TestMatch_EmptyClassifierResponseIsLoggedNotSilent(t *testing.T) {
 	s := persistStore(t)
 	nid := seedNarrative19(t, s)
 
-	// log.SetOutput directly, matching internal/collector/jira's own tests rather
-	// than adding an export_test seam for something the stdlib already exposes.
+	// Injected via WithMatchLogger rather than redirecting the global log package. The
+	// old comment here argued log.SetOutput avoided "adding an export_test seam for
+	// something the stdlib already exposes" — true at the time, but it made the assertion
+	// depend on process-wide state, which two concurrent tests would interleave.
 	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	log, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, lerr)
 
 	tracker := &narrative19Tracker{}
 	client := &promptCapturingLLM{response: "[]"}
 
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client, narrative19Config())
+	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client,
+		narrative19Config(), correlator.WithMatchLogger(log))
 
 	require.NoError(t, err, "an empty response must not fail the pass")
 	require.Len(t, results, 1)
@@ -227,7 +229,7 @@ func TestMatch_EmptyClassifierResponseIsLoggedNotSilent(t *testing.T) {
 	out := logged.String()
 	assert.Contains(t, out, "classifier returned no verdicts",
 		"the discard must be visible; silence is how this bug survived a real pass")
-	assert.Contains(t, out, "4 verified candidate(s)",
+	assert.Contains(t, out, "verified_candidates=4",
 		"the count is what shows the discard was total rather than a judgment about one key")
 }
 
@@ -407,19 +409,24 @@ func TestMatch_NarrativeCapIsHonouredAndLogged(t *testing.T) {
 		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
 	}
 
+	// The logger is INJECTED rather than captured by redirecting the global log package.
+	// That redirection was ambient coupling: it made the assertion depend on process-wide
+	// state, and two tests doing it concurrently would interleave. WithMatchLogger is the
+	// same seam production uses.
 	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	log, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, lerr)
 
 	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(&anyKeyTracker{}),
 		&promptCapturingLLM{response: "[]"},
-		config.MatchConfig{MaxNarrativesPerPass: 3, ConfidenceFloor: 0.7})
+		config.MatchConfig{MaxNarrativesPerPass: 3, ConfidenceFloor: 0.7},
+		correlator.WithMatchLogger(log))
 
 	require.NoError(t, err)
 	assert.Len(t, results, 3, "the cap bounds the pass")
 	assert.Contains(t, logged.String(), "match.max_narratives_per_pass",
 		"the config key that would change this must be named")
-	assert.Contains(t, logged.String(), "wait for the next pass",
+	assert.Contains(t, logged.String(), "narrative cap reached",
 		"silent truncation reads as a matching failure; say what happened")
 }
 
@@ -447,13 +454,17 @@ func TestMatch_ExactlyFullBatchDoesNotWarn(t *testing.T) {
 		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
 	}
 
+	// Injected, not captured from the global log package — which after the slog
+	// migration would make this assertion pass vacuously: Match no longer writes there,
+	// so an empty buffer would prove nothing about whether the warning fired.
 	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	log, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, lerr)
 
 	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(&anyKeyTracker{}),
 		&promptCapturingLLM{response: "[]"},
-		config.MatchConfig{MaxNarrativesPerPass: total, ConfidenceFloor: 0.7})
+		config.MatchConfig{MaxNarrativesPerPass: total, ConfidenceFloor: 0.7},
+		correlator.WithMatchLogger(log))
 
 	require.NoError(t, err)
 	assert.Len(t, results, total)

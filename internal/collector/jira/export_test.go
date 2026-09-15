@@ -1,6 +1,9 @@
 package jira
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // WatermarkClauseForTest exposes watermarkClause to the external test package.
 //
@@ -9,7 +12,13 @@ import "time"
 // invisible to the collector's HTTP-level tests (the fake does not interpret
 // JQL) and expensive to probe through the live tier.
 func WatermarkClauseForTest(watermark time.Time, accountZone, connName string) string {
-	return watermarkClause(watermark, accountZone, connName)
+	return watermarkClause(watermark, accountZone, connName, nil)
+}
+
+// WatermarkClauseForTestWithLogger is WatermarkClauseForTest with an injectable
+// logger, for the one test asserting on the fallback's log output.
+func WatermarkClauseForTestWithLogger(watermark time.Time, accountZone, connName string, log *slog.Logger) string {
+	return watermarkClause(watermark, accountZone, connName, log)
 }
 
 // WatermarkZoneFallbackMarginForTest exposes the fallback widening so tests

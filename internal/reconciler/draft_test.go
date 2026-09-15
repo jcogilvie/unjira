@@ -35,7 +35,7 @@ func TestDraftProducesOneActionPerActionableLinkWithDistinctBodies(t *testing.T)
 	}
 
 	got, stats, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "added retry logic")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "added retry logic")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 
 	require.Len(t, got, 2)
@@ -61,7 +61,7 @@ func TestDraftFloorsConfidenceForAnIllegalTransition(t *testing.T) {
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "finished it")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "finished it")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 
 	require.Len(t, got, 1)
@@ -84,7 +84,7 @@ func TestDraftIgnoresAnUnrecognizedIssueKey(t *testing.T) {
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 
 	assert.Empty(t, got,
@@ -109,7 +109,7 @@ func TestDraftPromptCarriesTheDeltaAndEachLinksLiveState(t *testing.T) {
 	}}
 
 	_, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "the delta event summary")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "the delta event summary")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 
 	require.Len(t, client.prompts, 1)
@@ -137,7 +137,7 @@ func TestDraftRejectsAnUnknownActionType(t *testing.T) {
 	}}
 
 	_, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.Error(t, err, "an action type outside the closed set must be a loud error, not a silent drop")
 }
 
@@ -155,7 +155,7 @@ func TestDraftToleratesAMarkdownFenceDespiteTheSystemPromptForbiddingIt(t *testi
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 }
@@ -172,7 +172,7 @@ func TestDraftClampsAnOutOfRangeConfidence(t *testing.T) {
 	}}
 
 	got, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.LessOrEqual(t, got[0].Confidence, 1.0, "a model confidence above 1 must be clamped, never trusted verbatim")
@@ -200,7 +200,7 @@ func TestDraftAppendsReconcilerRulesToTheSystemPrompt(t *testing.T) {
 	}
 
 	_, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified, learnedRules, nil)
+		[]events.Event{codeEvent("e1", "did work")}, verified, learnedRules, nil, nil)
 	require.NoError(t, err)
 
 	require.Len(t, client.systemPrompts, 1)
@@ -224,7 +224,7 @@ func TestDraftWithNoRulesLeavesSystemPromptUnchanged(t *testing.T) {
 	}}
 
 	_, _, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 
 	require.Len(t, client.systemPrompts, 1)
@@ -246,7 +246,7 @@ func TestDraftRecordsUsageInStats(t *testing.T) {
 	}}
 
 	_, stats, err := draft(t.Context(), client, narrative,
-		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil)
+		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Calls, "addUsage must not be double-counted alongside an explicit stats.Calls++")
 	assert.EqualValues(t, 11, stats.PromptTokens)

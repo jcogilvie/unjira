@@ -4,7 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"regexp"
@@ -27,6 +27,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/envfile"
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
@@ -68,6 +69,12 @@ type appContext struct {
 	store           *store.Store
 	jiraCredentials credentials.JSONSet
 	llmAPIKey       string
+	// log is the one logger, built in run() from the --log-level/--log-format flags and
+	// injected here rather than reached for as a package global. Passed DOWN to the
+	// packages that need it via their existing functional-option seams
+	// (correlator.WithLogger and friends), so a library function never depends on
+	// ambient state.
+	log *slog.Logger
 }
 
 // jiraClientForProject resolves the Jira connection covering projectKey and
@@ -145,14 +152,12 @@ func (a *appContext) warnIfNoStatusHistorySource() {
 		return
 	}
 
-	log.Printf(
-		"reconciler: no enabled collector supplies status-change history (see " +
-			"pipeline.StatusHistorySource); the staleness guard " +
-			"(suppressStaleTransitions, docs/design-notes.md incident 19) can never run for any " +
-			"issue on this tracker backend, and every work-derived transition will be proposed " +
-			"unguarded. Enable the jira collector — or a future equivalent for this backend — to " +
-			"restore it.",
-	)
+	logging.For(a.log, "reconciler").Warn("no enabled collector supplies status-change history",
+		"consequence", "the staleness guard (suppressStaleTransitions, docs/design-notes.md "+
+			"incident 19) can never run for any issue on this tracker backend, and every "+
+			"work-derived transition will be proposed unguarded",
+		"action", "enable the jira collector — or a future equivalent for this backend — to restore it",
+		"see", "pipeline.StatusHistorySource")
 }
 
 // workflowGraph returns the observed transition graph for projectKey, or nil
@@ -172,7 +177,8 @@ func (a *appContext) warnIfNoStatusHistorySource() {
 func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
 	tracker, err := a.taskTracker(projectKey)
 	if err != nil {
-		log.Printf("workflow: no tracker for project %s (%v); transitions will be single-hop", projectKey, err)
+		logging.For(a.log, "workflow").Warn("no tracker for project; transitions will be single-hop",
+			"project_key", projectKey, "err", err)
 
 		return nil
 	}
@@ -186,17 +192,17 @@ func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
 
 	graph, status, err := workflow.Cached(provider, projectKey, workflow.CacheOptions{
 		TTL: a.config.Workflow.CacheTTL.Duration(),
+		Log: a.log,
 	})
 	if err != nil {
-		log.Printf(
-			"workflow: could not obtain a graph for %s (%v); transitions will be single-hop",
-			projectKey, err)
+		logging.For(a.log, "workflow").Warn("could not obtain a graph; transitions will be single-hop",
+			"project_key", projectKey, "err", err)
 
 		return nil
 	}
 
 	if !status.Cached {
-		log.Printf("workflow: mined %s (%s)", projectKey, status.Reason)
+		logging.For(a.log, "workflow").Info("mined graph", "project_key", projectKey, "reason", status.Reason)
 	}
 
 	return graph
@@ -356,7 +362,7 @@ func (c *collectCmd) Run(app *appContext) error {
 		return err
 	}
 
-	results, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set())
+	results, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set(), app.log)
 	if err != nil {
 		return err
 	}
@@ -508,6 +514,7 @@ func (c *devWorkflowCmd) Run(app *appContext) error {
 	graph, status, err := workflow.Cached(jira.NewTracker(client), projectKey, workflow.CacheOptions{
 		TTL:     app.config.Workflow.CacheTTL.Duration(),
 		Refresh: c.Refresh,
+		Log:     app.log,
 	})
 	if err != nil {
 		return err
@@ -581,14 +588,14 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	}
 	defer app.releasePipelineLease(runID)
 
-	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set()); err != nil {
+	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set(), app.log); err != nil {
 		return err
 	}
 
 	window := c.window()
 
 	result, err := pipeline.RunNarrate(ctx, app.store, client, app.config, window,
-		pipeline.NarrateOptions{DryRun: c.DryRun})
+		pipeline.NarrateOptions{DryRun: c.DryRun, Log: app.log})
 	if err != nil {
 		return err
 	}
@@ -627,7 +634,8 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 		return err
 	}
 
-	matchResult, matchErr := pipeline.RunMatch(ctx, app.store, resolve, client, app.config)
+	matchResult, matchErr := pipeline.RunMatch(ctx, app.store, resolve, client, app.config,
+		pipeline.MatchOptions{Log: app.log})
 
 	// Render before returning the error: RunMatch isolates failures per
 	// narrative, so the healthy narratives matched and the operator should see
@@ -656,6 +664,7 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 			// has no link because it has not been LOOKED at, not because the work is
 			// untracked, and proposing a ticket for it duplicates a real one (F13).
 			UnmatchedNarratives: matchResult.Remaining,
+			Log:                 app.log,
 		})
 
 	// Render before returning the error, matching the matching stage above:
@@ -695,7 +704,7 @@ func (a *appContext) acquirePipelineLease(ctx context.Context, runID string) err
 // to).
 func (a *appContext) releasePipelineLease(runID string) {
 	if err := a.store.ReleaseLock(runID); err != nil {
-		log.Printf("releasing pipeline lock: %v", err)
+		logging.For(a.log, "cmd").Warn("releasing pipeline lock", "err", err)
 	}
 }
 
@@ -889,13 +898,13 @@ func (a *appContext) watchLoop(
 			// below, since a lease that cannot be acquired right now is
 			// exactly the kind of transient condition watch exists to
 			// survive rather than exit over.
-			log.Printf("watch: acquiring pipeline lease: %v", err)
+			logging.For(a.log, "cmd").Warn("acquiring pipeline lease", "err", err)
 		} else {
 			passErr := runOnePass(context.WithoutCancel(ctx), runID)
 			a.releasePipelineLease(runID)
 
 			if passErr != nil {
-				log.Printf("watch: pass failed: %v", passErr)
+				logging.For(a.log, "cmd").Warn("watch pass failed", "err", passErr)
 			}
 		}
 
@@ -945,7 +954,7 @@ func (a *appContext) runWatchPass(
 	since time.Duration,
 	dryRun bool,
 ) error {
-	if _, err := pipeline.RunCollect(a.config, a.store, registry, linkExclusions, a.jiraCredentials.Set()); err != nil {
+	if _, err := pipeline.RunCollect(a.config, a.store, registry, linkExclusions, a.jiraCredentials.Set(), a.log); err != nil {
 		return err
 	}
 
@@ -953,7 +962,7 @@ func (a *appContext) runWatchPass(
 	window := correlator.TimeRange{Start: now.Add(-since), End: now}
 
 	narrateResult, err := pipeline.RunNarrate(ctx, a.store, client, a.config, window,
-		pipeline.NarrateOptions{DryRun: dryRun})
+		pipeline.NarrateOptions{DryRun: dryRun, Log: a.log})
 	if err != nil {
 		return err
 	}
@@ -967,7 +976,8 @@ func (a *appContext) runWatchPass(
 		return nil
 	}
 
-	matchResult, matchErr := pipeline.RunMatch(ctx, a.store, resolve, client, a.config)
+	matchResult, matchErr := pipeline.RunMatch(ctx, a.store, resolve, client, a.config,
+		pipeline.MatchOptions{Log: a.log})
 	fmt.Print(pipeline.RenderMatchResult(matchResult))
 
 	if matchErr != nil {
@@ -979,6 +989,7 @@ func (a *appContext) runWatchPass(
 		pipeline.ReconcileOptions{
 			Graph:               graph,
 			UnmatchedNarratives: matchResult.Remaining,
+			Log:                 a.log,
 		})
 	fmt.Print(pipeline.RenderReconcileResult(reconcileResult))
 
@@ -1001,6 +1012,12 @@ var cli struct {
 	Config          string              `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
 	JiraCredentials credentials.JSONSet `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
 	LLMAPIKey       string              `name:"llm-api-key" env:"UNJIRA_LLM_API_KEY" help:"API key for the LLM backend."`
+
+	// Kong's enum: validates at parse time, so a typo fails with a usage message
+	// rather than silently defaulting — see logging.New for why a bad value is an
+	// error and not a fallback.
+	LogLevel  string `enum:"debug,info,warn,error" default:"info" env:"UNJIRA_LOG_LEVEL" help:"Log verbosity."`
+	LogFormat string `enum:"text,json" default:"text" env:"UNJIRA_LOG_FORMAT" help:"Log output shape. text for a terminal; json for a log shipper."`
 
 	Collect collectCmd `cmd:"" help:"Run every enabled collector and persist new events."`
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
@@ -1036,6 +1053,14 @@ func run() error {
 		kong.Description("A reconciliation agent that keeps Jira in sync with what you actually did."),
 	)
 
+	// Built before anything that might want to log, and injected rather than reached
+	// for: a package-level slog.Default() would be the same "grab a global instead of
+	// an declared dependency" shape that gate.Applier exists to prevent for writes.
+	log, err := logging.New(logging.Options{Level: cli.LogLevel, Format: cli.LogFormat})
+	if err != nil {
+		return err
+	}
+
 	cfg, err := config.Load(cli.Config)
 	if err != nil {
 		return err
@@ -1047,11 +1072,18 @@ func run() error {
 	}
 	defer func() { _ = s.Close() }()
 
+	// Without this the store's own warnings — a stolen pipeline lease, a release that
+	// was a no-op — are built but never emitted, which is F17's failure reintroduced by
+	// the change that fixed it. Open takes no logger on purpose (it is called from
+	// dozens of tests), so the one process that has a logger has to hand it over.
+	s.SetLogger(log)
+
 	return ctx.Run(&appContext{
 		config:          cfg,
 		store:           s,
 		jiraCredentials: cli.JiraCredentials,
 		llmAPIKey:       cli.LLMAPIKey,
+		log:             log,
 	})
 }
 

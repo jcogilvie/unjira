@@ -2,8 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +13,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/local"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/credentials"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
@@ -183,16 +182,17 @@ func TestWatchCmd_UnwritableDefaultProjectFailsFast(t *testing.T) {
 // this deployment is unguarded, short of noticing it in per-narrative
 // output one issue at a time.
 func TestWarnIfNoStatusHistorySource_LogsOnceWhenNothingSuppliesHistory(t *testing.T) {
+	var logged strings.Builder
+	testLog, err := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, err)
+
 	app := &appContext{
 		config: config.Config{
 			Tracker:    config.TrackerConfig{Backend: "jira"},
 			Collectors: map[string]map[string]any{"claude_code": {"enabled": true}},
 		},
+		log: testLog,
 	}
-
-	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	app.warnIfNoStatusHistorySource()
 
@@ -205,16 +205,17 @@ func TestWarnIfNoStatusHistorySource_LogsOnceWhenNothingSuppliesHistory(t *testi
 // the staleness guard can run once history is collected. A false positive
 // here would train operators to ignore the warning.
 func TestWarnIfNoStatusHistorySource_SilentWhenTheJiraCollectorIsEnabled(t *testing.T) {
+	var logged strings.Builder
+	testLog, err := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, err)
+
 	app := &appContext{
 		config: config.Config{
 			Tracker:    config.TrackerConfig{Backend: "jira"},
 			Collectors: map[string]map[string]any{"jira": {"enabled": true}},
 		},
+		log: testLog,
 	}
-
-	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	app.warnIfNoStatusHistorySource()
 
@@ -229,16 +230,17 @@ func TestWarnIfNoStatusHistorySource_SilentWhenTheJiraCollectorIsEnabled(t *test
 // test uses, and warning on every one of them would be exactly the noise
 // task #174's brief says this must not become.
 func TestWarnIfNoStatusHistorySource_SilentOnTheLocalBackend(t *testing.T) {
+	var logged strings.Builder
+	testLog, err := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, err)
+
 	app := &appContext{
 		config: config.Config{
 			Tracker:    config.TrackerConfig{Backend: "local"},
 			Collectors: map[string]map[string]any{"claude_code": {"enabled": true}},
 		},
+		log: testLog,
 	}
-
-	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	app.warnIfNoStatusHistorySource()
 

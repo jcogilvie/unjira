@@ -13,13 +13,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/gate"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/triage"
@@ -262,7 +262,7 @@ func (c *triageCmd) Run(app *appContext) error {
 		}
 		defer func() {
 			if err := app.store.ReleaseLock(runID); err != nil {
-				log.Printf("triage: releasing lease: %v", err)
+				logging.For(app.log, "triage").Warn("releasing lease", "err", err)
 			}
 		}()
 	}

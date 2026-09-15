@@ -2,6 +2,7 @@
 package pipeline
 
 import (
+	"log/slog"
 	"regexp"
 
 	"github.com/jcogilvie/unjira/internal/config"
@@ -30,6 +31,8 @@ type CollectContext struct {
 	// Options is this collector's own block from config.Collectors[<name>],
 	// including the "enabled" key that got it selected.
 	Options map[string]any
+	// Log is where a collector reports degradation. Nil is silent.
+	Log *slog.Logger
 }
 
 // Collector reads its source since the last cursor, emits normalized
@@ -59,6 +62,7 @@ func RunCollect(
 	registry map[string]func() Collector,
 	linkExclusions []*regexp.Regexp,
 	creds credentials.Set,
+	log *slog.Logger,
 ) (map[string]int, error) {
 	results := make(map[string]int)
 
@@ -78,6 +82,7 @@ func RunCollect(
 			Config:      cfg,
 			Credentials: creds,
 			Options:     options,
+			Log:         log,
 		}
 
 		err := collector.Collect(cc, func(event events.Event) {
