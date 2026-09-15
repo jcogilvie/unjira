@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
+
+	"github.com/jcogilvie/unjira/internal/logging"
 )
 
 // -- pipeline lock ---------------------------------------------------------
@@ -87,8 +88,8 @@ func (s *Store) TryAcquire(runID string, now time.Time, ttl time.Duration) (bool
 
 	if priorRunID != "" && priorRunID != runID {
 		if priorExpTime, perr := time.Parse(lockTimeFormat, priorExp); perr == nil {
-			log.Printf("pipeline lock: stealing expired lease from run_id=%s (expired %s ago)",
-				priorRunID, now.Sub(priorExpTime))
+			logging.For(s.log, "store").Warn("stealing expired pipeline lease",
+				"prior_run_id", priorRunID, "expired_ago", now.Sub(priorExpTime).String())
 		}
 	}
 
@@ -135,7 +136,8 @@ func (s *Store) ReleaseLock(runID string) error {
 		return fmt.Errorf("checking rows affected releasing pipeline lock for %s: %w", runID, err)
 	}
 	if released == 0 {
-		log.Printf("pipeline lock: release by run_id=%s was a no-op (not the current holder)", runID)
+		logging.For(s.log, "store").Warn("pipeline lease release was a no-op",
+			"run_id", runID, "reason", "not the current holder")
 	}
 
 	return nil

@@ -1,7 +1,6 @@
 package workflow_test
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/workflow"
 )
 
@@ -173,12 +173,12 @@ func TestCached_CorruptCacheFileFallsBackToMiningAndLogsIt(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("not json at all"), 0o600))
 
 	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	testLog, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, lerr)
 
 	provider := &queueProvider{graphs: []*workflow.Graph{graphNamed("A")}}
 
-	graph, status, err := workflow.Cached(provider, "PROJ", workflow.CacheOptions{Dir: dir})
+	graph, status, err := workflow.Cached(provider, "PROJ", workflow.CacheOptions{Dir: dir, Log: testLog})
 
 	require.NoError(t, err, "a corrupt cache must never fail the caller")
 	assert.False(t, status.Cached)
@@ -197,12 +197,12 @@ func TestCached_UnreadableCacheFileFallsBackToMiningAndLogsIt(t *testing.T) {
 	require.NoError(t, os.MkdirAll(path, 0o750)) // a directory, not a file, at the cache path
 
 	var logged strings.Builder
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	testLog, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, lerr)
 
 	provider := &queueProvider{graphs: []*workflow.Graph{graphNamed("A")}}
 
-	graph, status, err := workflow.Cached(provider, "PROJ", workflow.CacheOptions{Dir: dir})
+	graph, status, err := workflow.Cached(provider, "PROJ", workflow.CacheOptions{Dir: dir, Log: testLog})
 
 	require.NoError(t, err, "an unreadable cache must never fail the caller")
 	assert.False(t, status.Cached)
@@ -255,7 +255,7 @@ func TestCached_MiningFailurePropagatesWrapped(t *testing.T) {
 func TestMarkDirty_NoExistingCacheIsANoOp(t *testing.T) {
 	dir := t.TempDir()
 
-	err := workflow.MarkDirty(dir, "PROJ")
+	err := workflow.MarkDirty(dir, "PROJ", nil)
 
 	assert.NoError(t, err)
 }
@@ -277,7 +277,7 @@ func TestMarkDirty_ForcesAReMineOnTheNextCachedCallRegardlessOfTTL(t *testing.T)
 	require.NoError(t, err)
 	require.False(t, seeded.Cached)
 
-	require.NoError(t, workflow.MarkDirty(dir, "PROJ"))
+	require.NoError(t, workflow.MarkDirty(dir, "PROJ", nil))
 
 	graph, status, err := workflow.Cached(provider, "PROJ", opts)
 
@@ -298,7 +298,7 @@ func TestMarkDirty_UnrelatedProjectsCacheIsUntouched(t *testing.T) {
 	_, _, err := workflow.Cached(provider, "PAAS", opts)
 	require.NoError(t, err)
 
-	require.NoError(t, workflow.MarkDirty(dir, "PROJ")) // a different project, never cached
+	require.NoError(t, workflow.MarkDirty(dir, "PROJ", nil)) // a different project, never cached
 
 	graph, status, err := workflow.Cached(provider, "PAAS", opts)
 
@@ -319,7 +319,7 @@ func TestMarkDirty_CorruptCacheIsANoOpNotAnError(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
 	require.NoError(t, os.WriteFile(path, []byte("not json"), 0o600))
 
-	err := workflow.MarkDirty(dir, "PROJ")
+	err := workflow.MarkDirty(dir, "PROJ", nil)
 
 	assert.NoError(t, err)
 }

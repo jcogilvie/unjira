@@ -1,6 +1,8 @@
 package reconciler
 
 import (
+	"log/slog"
+
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -42,6 +44,9 @@ type filterContext struct {
 	// Verified are the narrative's links whose issues were confirmed against
 	// the live tracker, carrying current status and legal transitions.
 	Verified []verifiedLink
+
+	// Log is where the duplicate filter reports a degraded lookup. Nil is silent.
+	Log *slog.Logger
 }
 
 // suppressionFilter is one reason a drafted action might not reach a reviewer.
@@ -104,7 +109,7 @@ var suppressionChain = []suppressionFilter{
 	{
 		name: "duplicate",
 		apply: func(fctx filterContext, drafted []ProposedAction) ([]ProposedAction, []string) {
-			return suppressDuplicates(fctx.Store, fctx.NarrativeID, drafted)
+			return suppressDuplicates(fctx.Store, fctx.NarrativeID, drafted, fctx.Log)
 		},
 	},
 }

@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/reconciler"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
@@ -52,6 +53,8 @@ type ReconcileOptions struct {
 	// pre-F13 behaviour. That is the safe default only because a caller with no
 	// matching stage cannot be racing one.
 	UnmatchedNarratives int
+	// Log is where the stage reports degradation. Nil is silent.
+	Log *slog.Logger
 }
 
 // ReconcileRunResult is one reconcile pass, shaped for rendering.
@@ -140,7 +143,9 @@ func RunReconcile(
 
 	createsDeferred := 0
 
-	reconcileOpts := []reconciler.ReconcileOption{reconciler.WithRules(reconcilerRules)}
+	reconcileOpts := []reconciler.ReconcileOption{
+		reconciler.WithRules(reconcilerRules), reconciler.WithReconcileLogger(opts.Log),
+	}
 	if opts.Graph != nil {
 		reconcileOpts = append(reconcileOpts, reconciler.WithWorkflowGraph(opts.Graph))
 	}
@@ -163,7 +168,7 @@ func RunReconcile(
 		createsDeferred = opts.UnmatchedNarratives
 	} else {
 		createResults, createStats, createErr := reconciler.ProposeCreates(
-			ctx, s, client, cfg.Reconciler, reconcilerRules)
+			ctx, s, client, cfg.Reconciler, reconcilerRules, opts.Log)
 		results = append(results, createResults...)
 		stats.Add(createStats)
 		reconcileErr = errors.Join(reconcileErr, createErr)
@@ -187,8 +192,9 @@ func RunReconcile(
 	// F12), telling an operator to re-run for work that did not exist — and each
 	// re-run bills for the sweep. The count now mirrors the skip.
 	if remaining, countErr := s.CountNarrativesWithDelta(reconciler.SelectionRoles); countErr != nil {
-		log.Printf("pipeline: could not count the narratives with unexamined work (%v); "+
-			"this pass's summary will not report a backlog", countErr)
+		logging.For(opts.Log, "pipeline").Warn(
+			"could not count the narratives with unexamined work",
+			"err", countErr, "consequence", "this pass's summary will not report a backlog")
 	} else {
 		result.Remaining = remaining
 	}

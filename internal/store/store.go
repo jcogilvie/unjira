@@ -16,6 +16,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +175,21 @@ CREATE TABLE IF NOT EXISTS pipeline_lock (
 // Store wraps a SQLite connection with unjira's schema and access methods.
 type Store struct {
 	db *sql.DB
+	// log is optional. Nil means silent, so every existing caller of Open keeps working
+	// and no accessor needs a nil check — logging.For handles that. Set with SetLogger
+	// after Open rather than as an Open parameter, because Open's signature is used in
+	// dozens of tests that have no interest in logs.
+	log *slog.Logger
+}
+
+// SetLogger attaches a logger to an already-open store.
+//
+// Deliberately not an Open parameter: Open is called from many tests and from every
+// command, and threading a logger through all of them to serve two log lines would be
+// noise. The store is constructed once per process in cmd/unjira's run(), which is
+// exactly where the logger already exists.
+func (s *Store) SetLogger(log *slog.Logger) {
+	s.log = log
 }
 
 // dbConn is the subset of *sql.DB / *sql.Tx the narrative accessors need, so

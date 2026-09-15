@@ -145,7 +145,7 @@ func TestRunMatch_ReturnsRenderableResult(t *testing.T) {
 	llmFake := &pipelineFakeLLM{}
 	cfg := config.Config{Match: config.MatchConfig{MaxCandidatesPerNarrative: 10, ConfidenceFloor: 0.5}}
 
-	got, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg)
+	got, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg, pipeline.MatchOptions{})
 
 	require.NoError(t, err)
 	require.Len(t, got.Matched, 1)
@@ -188,7 +188,7 @@ Sentinel match-time rule body.
 		Rules: config.RulesConfig{Dir: rulesDir},
 	}
 
-	_, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg)
+	_, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg, pipeline.MatchOptions{})
 
 	require.NoError(t, err)
 	require.NotEmpty(t, llmFake.systemPrompts)
@@ -213,7 +213,7 @@ func TestRunMatch_MissingRulesDirIsANoOpNotAnError(t *testing.T) {
 		Rules: config.RulesConfig{Dir: filepath.Join(t.TempDir(), "does-not-exist")},
 	}
 
-	got, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg)
+	got, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg, pipeline.MatchOptions{})
 
 	require.NoError(t, err)
 	require.Len(t, got.Matched, 1)
@@ -239,7 +239,7 @@ func TestRunMatch_AppliesConfiguredLinkExclusions(t *testing.T) {
 		Match:              config.MatchConfig{MaxCandidatesPerNarrative: 10, ConfidenceFloor: 0.5},
 	}
 
-	got, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg)
+	got, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg, pipeline.MatchOptions{})
 
 	require.NoError(t, err)
 	require.Len(t, got.Matched, 1)
@@ -261,7 +261,7 @@ func TestRunMatch_RejectsInvalidMatchConfig(t *testing.T) {
 	llmFake := &pipelineFakeLLM{}
 	cfg := config.Config{Match: config.MatchConfig{ConfidenceFloor: 1.5}}
 
-	_, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg)
+	_, err := pipeline.RunMatch(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg, pipeline.MatchOptions{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "confidence_floor")

@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -119,6 +120,7 @@ func ProposeCreates(
 	client llm.Client,
 	cfg config.ReconcilerConfig,
 	learnedRules []rules.Rule,
+	log *slog.Logger,
 ) ([]ReconcileResult, correlator.Stats, error) {
 	var stats correlator.Stats
 
@@ -130,11 +132,9 @@ func ProposeCreates(
 	}
 
 	if len(narratives) > limit {
-		log.Printf(
-			"reconciler: %d or more untracked narratives are eligible but this pass examines %d "+
-				"(reconciler.max_narratives_per_pass); the remainder wait for the next pass",
-			len(narratives), limit,
-		)
+		logging.For(log, "reconciler").Warn("untracked narrative cap reached",
+			"unmatched_at_least", len(narratives), "examining", limit,
+			"config_key", "reconciler.max_narratives_per_pass")
 		narratives = narratives[:limit]
 	}
 
@@ -147,7 +147,8 @@ func ProposeCreates(
 			// Per narrative, matching Reconcile: one narrative's failure must not
 			// cost the rest their pass, since "no proposal" is a valid resting
 			// state.
-			log.Printf("reconciler: proposing a create for narrative %d: %v", n.ID, err)
+			logging.For(log, "reconciler").Warn("proposing a create failed",
+				"narrative_id", n.ID, "err", err)
 		}
 	}
 

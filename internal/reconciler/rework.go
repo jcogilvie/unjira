@@ -71,7 +71,10 @@ func ReworkOne(
 			narrativeID)
 	}
 
-	verified, _, err := verifyLinks(s, tracker, narrativeID, actionable)
+	// nil logger: ReworkOne is triage's synchronous path (see Redraft's own doc
+	// comment on this call chain having no logger to thread today), unlike
+	// Reconcile's unattended watch-pass caller.
+	verified, _, err := verifyLinks(s, tracker, narrativeID, actionable, nil)
 	if err != nil {
 		return nil, correlator.Stats{}, err
 	}

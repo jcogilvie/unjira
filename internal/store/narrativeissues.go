@@ -113,8 +113,8 @@ func (s *Store) NarrativesWithoutPrimaryLink(limit int) ([]NarrativeRow, error) 
 // it had no cap — the backlog depth behind correlator.Match's per-pass limit.
 //
 // EXISTS to make a truncated pass legible. Both per-pass caps already log when
-// they truncate, but log.Printf goes to stderr while the rendered summary goes to
-// stdout, so a bounded pass ends looking complete. A 42-narrative backlog was
+// they truncate, but the logger writes to stderr while the rendered summary goes
+// to stdout, so a bounded pass ends looking complete. A 42-narrative backlog was
 // misdiagnosed as a clustering defect on exactly that basis, and the misdiagnosis
 // survived three passes because the session piped output through `tail` and
 // discarded the warning.

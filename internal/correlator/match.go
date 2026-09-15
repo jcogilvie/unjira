@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -12,6 +12,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
@@ -46,10 +47,20 @@ type MatchResult struct {
 type matchOptions struct {
 	linkExclusions []*regexp.Regexp
 	rules          []rules.Rule
+	log            *slog.Logger
 }
 
 // MatchOption configures an optional Match behaviour.
 type MatchOption func(*matchOptions)
+
+// WithMatchLogger supplies the logger Match reports on. Nil is silent, so no existing
+// caller or test changes. Named apart from WithLogger (which configures Cluster) because
+// the two option types are distinct and a shared name would not compile at one of them.
+func WithMatchLogger(log *slog.Logger) MatchOption {
+	return func(o *matchOptions) {
+		o.log = log
+	}
+}
 
 // WithLinkExclusions supplies the compiled exclude_from_linking patterns
 // (see config.Config.CompiledLinkExclusions) so Match can drop placeholder
@@ -219,11 +230,9 @@ func Match(
 	// as a matching failure rather than a batch limit. Fetching limit+1 above is
 	// how this knows the difference between "exactly full" and "more waiting".
 	if len(narratives) > narrativeLimit {
-		log.Printf(
-			"correlator: %d or more narratives are unmatched but this pass examines %d "+
-				"(match.max_narratives_per_pass); the remainder wait for the next pass",
-			len(narratives), narrativeLimit,
-		)
+		logging.For(o.log, "correlator").WarnContext(ctx, "narrative cap reached",
+			"unmatched_at_least", len(narratives), "examining", narrativeLimit,
+			"config_key", "match.max_narratives_per_pass")
 		narratives = narratives[:narrativeLimit]
 	}
 
@@ -236,9 +245,10 @@ func Match(
 	// would turn a ranking regression into an outage.
 	jiraActivity, err := s.IssueActivity()
 	if err != nil {
-		log.Printf("correlator: could not load issue activity (%v); candidate ranking falls back "+
-			"to provenance and issue key alone, so a recently-active ticket mentioned in passing "+
-			"may be truncated away", err)
+		logging.For(o.log, "correlator").WarnContext(ctx, "could not load issue activity",
+			"err", err,
+			"consequence", "candidate ranking falls back to provenance and issue key alone, so a "+
+				"recently-active ticket mentioned in passing may be truncated away")
 
 		jiraActivity = nil
 	}
@@ -251,7 +261,8 @@ func Match(
 
 	for _, n := range narratives {
 		result, oneStats, err := matchOne(
-			ctx, s, resolve, client, n, o.linkExclusions, candidateLimit, cfg, o.rules, jiraActivity)
+			ctx, s, resolve, client, n, o.linkExclusions, candidateLimit, cfg, o.rules, jiraActivity,
+			o.log)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -278,6 +289,7 @@ func matchOne(
 	cfg config.MatchConfig,
 	learnedRules []rules.Rule,
 	jiraActivity map[string]time.Time,
+	log *slog.Logger,
 ) (MatchResult, Stats, error) {
 	result := MatchResult{NarrativeID: narrative.ID}
 
@@ -309,7 +321,7 @@ func matchOne(
 		return result, Stats{}, nil
 	}
 
-	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, evts, verified, learnedRules)
+	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, evts, verified, learnedRules, log)
 	if err != nil {
 		return result, stats, fmt.Errorf("classifying candidates for narrative %d: %w", narrative.ID, err)
 	}
@@ -317,7 +329,7 @@ func matchOne(
 	result.Links = links
 	result.Rationale = rationale
 
-	promoted, err := persistLinks(s, narrative.ID, links, primaryKey, primaryConfidence, cfg.ConfidenceFloor)
+	promoted, err := persistLinks(s, narrative.ID, links, primaryKey, primaryConfidence, cfg.ConfidenceFloor, log)
 	if err != nil {
 		return result, stats, fmt.Errorf("persisting issue links for narrative %d: %w", narrative.ID, err)
 	}
@@ -392,6 +404,7 @@ func resolveVerified(
 	evts []Event,
 	verified []verifiedCandidate,
 	learnedRules []rules.Rule,
+	log *slog.Logger,
 ) (links []store.NarrativeIssue, primaryKey string, primaryConfidence float64, rationale string, stats Stats, err error) {
 	if len(verified) == 1 {
 		v := verified[0]
@@ -434,11 +447,9 @@ func resolveVerified(
 		// narrative that the next pass may classify fine, and the prompt now
 		// carries the narrative's events, which may remove the case entirely.
 		// Visibility first; escalate only if it recurs with the evidence present.
-		log.Printf(
-			"correlator: narrative %d classifier returned no verdicts for %d verified candidate(s); "+
-				"nothing linked, so this narrative still reads as untracked",
-			narrative.ID, len(verified),
-		)
+		logging.For(log, "correlator").WarnContext(ctx, "classifier returned no verdicts",
+			"narrative_id", narrative.ID, "verified_candidates", len(verified),
+			"consequence", "nothing linked, so this narrative still reads as untracked")
 	}
 
 	byKey := make(map[string]verifiedCandidate, len(verified))
@@ -454,10 +465,8 @@ func resolveVerified(
 			// under this pass, so — per verify-correlations.md — it is not
 			// trusted regardless of stated confidence. Log loudly and skip
 			// rather than writing an attribution this pass never verified.
-			log.Printf(
-				"correlator: narrative %d classifier returned unrecognized issue_key %q, ignoring",
-				narrative.ID, verdict.IssueKey,
-			)
+			logging.For(log, "correlator").WarnContext(ctx, "classifier returned an unrecognized issue key",
+				"narrative_id", narrative.ID, "issue_key", verdict.IssueKey, "action", "ignoring")
 			continue
 		}
 
@@ -509,6 +518,7 @@ func persistLinks(
 	primaryKey string,
 	primaryConfidence float64,
 	confidenceFloor float64,
+	log *slog.Logger,
 ) (string, error) {
 	promoted := ""
 
@@ -530,10 +540,10 @@ func persistLinks(
 			// sub-floor match is indistinguishable from finding nothing at all.
 			// The link row above is already written — this only withholds the
 			// assertion, which is the whole distinction the floor draws.
-			log.Printf(
-				"correlator: narrative %d match %s at confidence %.2f below floor %.2f, not asserting",
-				narrativeID, primaryKey, primaryConfidence, confidenceFloor,
-			)
+			logging.For(log, "correlator").Info("primary below the confidence floor",
+				"narrative_id", narrativeID, "issue_key", primaryKey,
+				"confidence", primaryConfidence, "floor", confidenceFloor,
+				"action", "recorded but not asserted")
 
 			return nil
 		}

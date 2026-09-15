@@ -579,6 +579,99 @@ onboarding-backfill entry is for.
 
 ---
 
+### F17 — resolved: the slowest stage in the pipeline said nothing until it finished
+
+Every stage renders **after** it returns. In `cmd/unjira/main.go`:
+
+```go
+result, err := pipeline.RunNarrate(ctx, app.store, client, app.config, window, ...)
+// ...
+fmt.Print(pipeline.RenderNarrateResult(result))
+```
+
+`RunNarrate`'s cost is one LLM call, and it is the longest-running thing unjira does. So the stage that
+takes minutes is precisely the one that prints nothing while it takes them.
+
+There was also **no verbosity control of any kind** — no `--verbose`, no `--log-level`, nothing in
+config. Logging was 35 bare `log.Printf` calls across 13 files, and in the correlator and pipeline every
+one of them was an error or degradation path (`could not load issue activity`, `could not count the
+remaining unmatched narratives`). Nothing reported what a pass was *doing*.
+
+The render-after-return structure above is unchanged and correct: a stage summary belongs after the
+stage. What was missing was anything said *during* it.
+
+**What that cost, concretely.** Rebuilding the store produced three separate failures of
+understanding in one sitting:
+
+1. A 90-day window built a ~147k-token prompt, ran ~18 minutes, and died on a 504 having printed
+   nothing and persisted nothing (the timeout itself is F16, landing separately). The only way to know it was still alive was
+   `ps`.
+2. Asked "has something changed?", neither reviewer nor agent could answer without querying SQLite
+   directly. The pipeline's own output could not distinguish *running* from *hung*.
+3. Two durations were reported from feel and both were wrong: "22 minutes" was a 3-pass loop of ~3m24s
+   each, and "8 minutes" was a single 3m24s pass. Nothing printed a stage boundary to count, so there
+   was nothing to be right about.
+
+> A pass that emits its summary only on success is unobservable exactly when observation matters: while
+> it is slow, and after it has failed.
+
+**The numbers that would have answered it already exist, together, at the moment they are needed.**
+Before the call, `Cluster` holds the candidate count, the context-narrative count, and its own
+`estimateTokens` result. A mature store makes the third one the surprise: one pass spent **104,219
+prompt tokens to cluster 16 candidate events**, because **52 existing narratives** were hydrated as
+context. Without that breakdown the cost reads as a defect rather than as the price of context.
+
+**This is not a request for a progress bar.** A single line before the call, naming those three
+numbers, would have collapsed all three failures above into a first-second observation. The rest of the
+gap is the absence of a level: `log.Printf` cannot be turned up when diagnosing or down when running
+`watch` on an interval.
+
+**Fixed with `log/slog`, and with the whole sweep rather than a 36th `log.Printf`.** slog is stdlib as
+of Go 1.21 and this module is on 1.26, so it costs no dependency — and there was none for logging.
+`internal/logging` builds the one logger from a level and a format; `--log-level` and `--log-format` are
+Kong flags with `enum:` tags, so a typo fails at parse time instead of silently defaulting. Text is the
+default because unjira is a CLI; JSON is a first-class mode rather than a debug affordance, because a
+structured mode retrofitted later means consumers spend the interim parsing a human format with
+regexes. All 35 call sites migrated, so no mixed state remains. The library trade-offs and the
+injection rules are recorded in `docs/go-conventions.md`, which said nothing about logging before.
+
+**The announcement itself.** `correlator.Cluster` now logs before calling the model:
+
+```
+level=INFO msg=clustering component=correlator unlinked_events=1
+  assignable_events=30 context_narratives=1 est_tokens=5586
+```
+
+`est_tokens` is the number that predicts the wait and the one a caller cannot compute for itself —
+`buildClusterPrompt` is unexported. `clusterWithSplit` forwards its options so each half of a split
+announces too; a split pass must not go quieter than an unsplit one.
+
+`assignable_events` is deliberately separate from `unlinked_events`. The first draft logged only
+`candidates`, and against a pass summary reporting 2 unlinked it printed 30 — inviting exactly the "is
+that a bug?" question this line exists to prevent. The larger number is in-window events plus the
+reshufflable events context narratives already hold.
+
+**The logger is injected, never ambient**, through whatever seam each package already had — the
+variadic-option types, an options-struct field, a field on `store.Store`, or an explicit parameter
+threaded to unexported helpers. No `slog.Default()`, no package global: the same reasoning that makes
+`gate.Applier` the only holder of write authority.
+
+**A component attribute replaced the message prefix.** Every old message began with its component
+(`"correlator: compacted narrative..."`), which is an attribute wearing a costume — unqueryable once
+shipped as JSON and repeated in every format string where it could drift.
+
+**And the fix reintroduced the finding once, which is worth recording.** `store.SetLogger` existed for a
+whole commit with nothing calling it, so both of the store's warnings were built and permanently silent.
+It was found by forcing a stale pipeline lease and observing that nothing was emitted — not by reading
+the code, which looked correct. Hence the convention's closing rule: **a log site is not done until it
+has been seen in real output.**
+
+**The check this finding set** — can an operator tell, within seconds, roughly how long a pass will take
+and whether it is progressing — is met by the announcement, and was verified against the real binary in
+both output modes rather than only in tests.
+
+---
+
 ## Task cross-references
 
 | Finding | Task |
@@ -595,3 +688,4 @@ onboarding-backfill entry is for.
 | F13 — create outruns matching, proposes duplicates | **resolved**: creates are deferred while matching is behind (the precondition), and `applyCreate` refuses a create whose narrative has since acquired a primary link (the backstop). Found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
+| F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |

@@ -50,7 +50,7 @@ func TestProposeCreates_ProposesForAnUntrackedNarrative(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -73,7 +73,7 @@ func TestProposeCreates_RespectsARefusal(t *testing.T) {
 		`{"worth_tracking":false,"confidence":0.9,"rationale":"investigation with no outcome"}`,
 	}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -103,7 +103,7 @@ func TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	assert.Empty(t, got, "a linked narrative is tracked; creating for it would duplicate")
@@ -125,7 +125,7 @@ func TestProposeCreates_DoesNotProposeASecondCreateWhenOneIsApplied(t *testing.T
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -150,7 +150,7 @@ func TestProposeCreates_DoesNotProposeASecondCreateWhileOneAwaitsReview(t *testi
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -174,7 +174,7 @@ func TestProposeCreates_ARejectedCreateDoesNotBlockForever(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -193,7 +193,7 @@ func TestProposeCreates_RefusesToOpenABlankIssue(t *testing.T) {
 		`{"worth_tracking":true,"summary":"","description":"d","confidence":0.9,"rationale":"r"}`,
 	}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	// Per-narrative isolation means the pass survives; the narrative proposes
 	// nothing.
@@ -215,7 +215,7 @@ func TestProposeCreates_IgnoresNarrativesMadeOnlyOfUnjirasOwnOutput(t *testing.T
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -235,7 +235,7 @@ func TestProposeCreates_PromptCarriesEveryEventNotADelta(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, client.prompts, 1)
@@ -328,7 +328,7 @@ func TestProposeCreates_ADeclineIsRememberedSoTheNextPassIsFree(t *testing.T) {
 	client := &fakeLLM{responses: []string{declined, declined, declined}}
 
 	for pass := 1; pass <= 3; pass++ {
-		got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+		got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 		require.NoError(t, err, "pass %d", pass)
 		require.Len(t, got, 1)
 		assert.Empty(t, got[0].Proposed, "pass %d must propose nothing", pass)
@@ -348,7 +348,7 @@ func TestProposeCreates_ADeclineIsRecordedAsADistinctStatus(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{declined}}
 
-	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 	require.NoError(t, err)
 
 	actions, err := s.ActionsForNarrative(nid)
@@ -377,7 +377,7 @@ func TestProposeCreates_ADeclineIsReconsideredWhenNewWorkArrives(t *testing.T) {
 	client := &fakeLLM{responses: []string{declined, worthTracking}}
 
 	// Pass 1: declined.
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 	require.NoError(t, err)
 	require.Empty(t, got[0].Proposed)
 
@@ -394,7 +394,7 @@ func TestProposeCreates_ADeclineIsReconsideredWhenNewWorkArrives(t *testing.T) {
 	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
 
 	// Pass 2: the work changed, so ask again.
-	got, _, err = ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err = ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Len(t, got[0].Proposed, 1,
@@ -411,10 +411,10 @@ func TestProposeCreates_ADeclinedNarrativeSaysWhyItWasSkipped(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{declined, declined}}
 
-	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 	require.NoError(t, err)
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -431,7 +431,7 @@ func TestProposeCreates_ADeclineDoesNotBlockACommentOnTheSameNarrative(t *testin
 	nid := seedUntracked(t, s, codeEvent("dc:1", "not much"))
 
 	client := &fakeLLM{responses: []string{declined}}
-	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil)
+	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 	require.NoError(t, err)
 
 	// A comment action lands normally.

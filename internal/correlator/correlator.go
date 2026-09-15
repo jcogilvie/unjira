@@ -17,7 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -25,6 +25,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -151,6 +152,7 @@ func (s *Stats) AddUsage(u llm.Usage) {
 type clusterOptions struct {
 	rules       []rules.Rule
 	instruction string
+	log         *slog.Logger
 }
 
 // ClusterOption configures an optional Cluster behaviour.
@@ -165,6 +167,17 @@ type ClusterOption func(*clusterOptions)
 func WithClusterRules(learnedRules []rules.Rule) ClusterOption {
 	return func(o *clusterOptions) {
 		o.rules = learnedRules
+	}
+}
+
+// WithLogger supplies the logger Cluster announces its work on.
+//
+// An option rather than a parameter, matching WithClusterRules above: a logger is
+// optional by construction, so no existing caller or test changes, and nothing here
+// reaches for a package-level default. Absent, Cluster logs nowhere.
+func WithLogger(log *slog.Logger) ClusterOption {
+	return func(o *clusterOptions) {
+		o.log = log
 	}
 }
 
@@ -223,6 +236,26 @@ func Cluster(
 	if estimated > contextWindowTokens {
 		return clusterWithSplit(ctx, evts, existing, client, window, contextWindowTokens, filtered, stats, opts...)
 	}
+
+	// BEFORE the call, not after — finding F17. This is the pipeline's slowest step and
+	// it used to print nothing while running, so a pass in progress looked identical to
+	// a hung one. The three numbers together are what predict the wait: on a mature
+	// store one pass spent 104k prompt tokens to cluster 16 candidates, because 52
+	// existing narratives were hydrated as context, and without the breakdown that cost
+	// reads as a defect rather than the price of context.
+	// "assignable_events", not "candidates": the number is in-window events PLUS the
+	// reshufflable events already held by context narratives (assignableEvents above),
+	// so it is legitimately larger than the unlinked count the pass summary reports —
+	// 30 against 2 on a real run. Calling it candidates invited exactly the "is that a
+	// bug?" question this log line exists to prevent.
+	logging.For(o.log, "correlator").InfoContext(ctx, "clustering",
+		"unlinked_events", len(filtered),
+		"assignable_events", len(assignable),
+		"context_narratives", len(relevant),
+		"est_tokens", estimated,
+		"window_start", window.Start,
+		"window_end", window.End,
+	)
 
 	raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
 	if err != nil {
@@ -679,12 +712,18 @@ func Persist(
 	client llm.Client,
 	results []ClusterResult,
 	cfg config.CorrelatorConfig,
+	opts ...ClusterOption,
 ) ([]Narrative, Stats, error) {
 	if len(results) == 0 {
 		return nil, Stats{}, nil
 	}
 
-	preps, stats, err := prepareResults(ctx, s, client, results, cfg)
+	var o clusterOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	preps, stats, err := prepareResults(ctx, s, client, results, cfg, o.log)
 	if err != nil {
 		return nil, stats, err
 	}
@@ -721,12 +760,13 @@ func prepareResults(
 	client llm.Client,
 	results []ClusterResult,
 	cfg config.CorrelatorConfig,
+	log *slog.Logger,
 ) ([]preparedResult, Stats, error) {
 	var stats Stats
 	preps := make([]preparedResult, 0, len(results))
 
 	for _, r := range results {
-		p, oneStats, err := prepareOneResult(ctx, s, client, r, cfg)
+		p, oneStats, err := prepareOneResult(ctx, s, client, r, cfg, log)
 		stats.Add(oneStats)
 		if err != nil {
 			return nil, stats, err
@@ -748,6 +788,7 @@ func prepareOneResult(
 	client llm.Client,
 	r ClusterResult,
 	cfg config.CorrelatorConfig,
+	log *slog.Logger,
 ) (preparedResult, Stats, error) {
 	p := preparedResult{result: r}
 
@@ -771,7 +812,7 @@ func prepareOneResult(
 		// compaction possible for a narrative that doesn't exist yet.
 		return p, Stats{}, nil
 	case ClusterExtends:
-		return prepareExtend(ctx, s, client, r, cfg, p)
+		return prepareExtend(ctx, s, client, r, cfg, p, log)
 	default:
 		return preparedResult{}, Stats{}, fmt.Errorf("persisting narrative %q: unknown ClusterKind %v", r.Title, r.Kind)
 	}
@@ -791,6 +832,7 @@ func prepareExtend(
 	r ClusterResult,
 	cfg config.CorrelatorConfig,
 	p preparedResult,
+	log *slog.Logger,
 ) (preparedResult, Stats, error) {
 	if _, err := s.GetNarrative(r.NarrativeID); err != nil {
 		return preparedResult{}, Stats{}, fmt.Errorf("extending narrative %d: %w", r.NarrativeID, err)
@@ -818,7 +860,8 @@ func prepareExtend(
 
 	var stats Stats
 	if estimateTokens(r.Summary+renderEventsForEstimate(postBoundary)) > cfg.TailSummarizeThresholdTokens {
-		recap, boundary, boundaryEventID, compactStats, err := compactNarrativeTail(ctx, s, client, r.NarrativeID, r.Summary, postBoundary, cfg.RecentEventsKept)
+		recap, boundary, boundaryEventID, compactStats, err := compactNarrativeTail(
+			ctx, s, client, r.NarrativeID, r.Summary, postBoundary, cfg.RecentEventsKept, log)
 		stats.Add(compactStats)
 		if err != nil {
 			return preparedResult{}, stats, err
@@ -993,6 +1036,7 @@ func compactNarrativeTail(
 	existingSummary string,
 	postBoundary []Event,
 	recentEventsKept int,
+	log *slog.Logger,
 ) (recap string, boundary time.Time, boundaryEventID int64, stats Stats, err error) {
 	if len(postBoundary) <= recentEventsKept {
 		return "", time.Time{}, 0, Stats{}, nil
@@ -1022,8 +1066,9 @@ func compactNarrativeTail(
 	stats.Compactions = 1
 	stats.AddUsage(usage)
 
-	log.Printf("correlator: compacted narrative %d — folded %d event(s) up to %s (event id %d) into recap",
-		narrativeID, len(toCompact), boundary.Format(time.RFC3339), boundaryEventID)
+	logging.For(log, "correlator").InfoContext(ctx, "compacted narrative tail",
+		"narrative_id", narrativeID, "events_folded", len(toCompact),
+		"boundary", boundary.Format(time.RFC3339), "boundary_event_id", boundaryEventID)
 
 	return recap, boundary, boundaryEventID, stats, nil
 }

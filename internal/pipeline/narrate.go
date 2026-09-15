@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/config"
@@ -17,6 +18,11 @@ type NarrateOptions struct {
 	// Persist, so nothing is written. The reported narratives are exactly what
 	// would have been persisted, with zero IDs since no rows were inserted.
 	DryRun bool
+	// Log is where the stage announces long-running work, notably the clustering call
+	// that dominates a pass's wall time (finding F17). Nil is silent — the same
+	// contract every other optional dependency here has, so no caller is forced to
+	// supply one.
+	Log *slog.Logger
 }
 
 // NarrateResult is one pass's outcome, carrying enough detail for a human to
@@ -111,7 +117,8 @@ func RunNarrate(
 
 	clustered, clusterStats, err := correlator.Cluster(
 		ctx, candidates, existing, client, window, cfg.LLM.ContextWindowTokens,
-		correlator.WithClusterRules(correlatorRules))
+		correlator.WithClusterRules(correlatorRules),
+		correlator.WithLogger(opts.Log))
 	result.Stats.Add(clusterStats)
 	if err != nil {
 		return NarrateResult{}, fmt.Errorf("clustering: %w", err)

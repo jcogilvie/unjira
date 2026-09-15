@@ -1,13 +1,9 @@
 package jira_test
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +17,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -286,13 +283,9 @@ func TestCollect_HittingTheIssueLimitIsLogged(t *testing.T) {
 	// The spec requires this be "logged, never silent": a silent cap presents
 	// as a clean pass while ignoring work. An untested log line is one refactor
 	// away from being deleted, so capture the log output and assert on it.
-	var logged bytes.Buffer
-	log.SetOutput(&logged)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
-		log.SetFlags(log.LstdFlags)
-	})
+	var logged strings.Builder
+	testLog, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, lerr)
 
 	fake := &fakeJira{
 		accountID: "acct-unjira",
@@ -305,11 +298,14 @@ func TestCollect_HittingTheIssueLimitIsLogged(t *testing.T) {
 		Name: "corp", ProjectKeys: []string{"PROJ"}, MaxIssuesPerQuery: 2,
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
+	cc.Log = testLog
 
 	_, err := collectAll(t, cc)
 
 	require.NoError(t, err)
-	assert.Contains(t, logged.String(), "corp/mine",
+	assert.Contains(t, logged.String(), "connection=corp",
+		"the message must name the connection that was truncated")
+	assert.Contains(t, logged.String(), "query=mine",
 		"the message must name the query that was truncated")
 	assert.Contains(t, logged.String(), "limit")
 }
@@ -451,10 +447,8 @@ func TestWatermarkClause_UnknownZoneWidensRatherThanSkips(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Suppress the expected operator warning.
-			log.SetOutput(io.Discard)
-			t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
+			// WatermarkClauseForTest passes a nil logger, which logging.For
+			// discards — no suppression of a global logger is needed.
 			watermark := time.Date(2026, 8, 21, 19, 2, 0, 0, time.UTC)
 			want := watermark.
 				Add(-collectorjira.WatermarkZoneFallbackMarginForTest).
@@ -469,15 +463,11 @@ func TestWatermarkClause_UnknownZoneWidensRatherThanSkips(t *testing.T) {
 }
 
 func TestWatermarkClause_UnknownZoneIsLogged(t *testing.T) {
-	var logged bytes.Buffer
-	log.SetOutput(&logged)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
-		log.SetFlags(log.LstdFlags)
-	})
+	var logged strings.Builder
+	testLog, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, lerr)
 
-	collectorjira.WatermarkClauseForTest(time.Now(), "", "corp")
+	collectorjira.WatermarkClauseForTestWithLogger(time.Now(), "", "corp", testLog)
 
 	assert.Contains(t, logged.String(), "corp", "the operator must be able to see which connection")
 	assert.Contains(t, logged.String(), "timezone")
