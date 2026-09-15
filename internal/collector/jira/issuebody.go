@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	jiraclient "github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
@@ -36,7 +37,7 @@ func EventFromIssueBody(
 	ic IssueContext, summary string, description any, occurredAt time.Time,
 ) (events.Event, bool) {
 	summary = strings.TrimSpace(summary)
-	body := strings.TrimSpace(adfText(description))
+	body := strings.TrimSpace(jiraclient.ADFText(description))
 
 	if summary == "" && body == "" {
 		return events.Event{}, false
@@ -81,63 +82,6 @@ func EventFromIssueBody(
 	events.SetTrackerRecord(&evt)
 
 	return evt, true
-}
-
-// adfText flattens Jira's description field to plain text.
-//
-// Necessary rather than defensive: Jira Cloud v3 returns description as ADF (an
-// Atlassian Document Format object), verified live as a map with keys
-// {content, type, version}. clients/jira's existing `fields["description"].(string)`
-// yields "" against that — silently, which is how F14 went unnoticed while the code
-// looked like it handled descriptions.
-//
-// Both shapes are live in one deployment: the changelog's `toString` values arrive as
-// plain wiki markup ("h2. Summary\n\n..."), so a string input is passed through
-// rather than treated as an error.
-//
-// Recursive because the text that matters sits arbitrarily deep — the PR reference
-// that motivated this is two levels down, and list items nest three. A flattener that
-// read only top-level content would pass a hand-written flat fixture and lose every
-// real description, so issuebody_test.go's fixture is deliberately nested.
-//
-// An unrecognised type yields "" rather than a formatted rendering: "%v" of a
-// map would put Go syntax into an event summary, where it would be indexed as if it
-// were prose.
-func adfText(node any) string {
-	switch n := node.(type) {
-	case string:
-		return n
-	case []any:
-		return joinNonEmpty(n)
-	case map[string]any:
-		// A text node's own text, then whatever its children hold. Both are checked
-		// because a node can carry text AND content, and taking only the first would
-		// truncate at the first leaf.
-		var parts []string
-		if text, ok := n["text"].(string); ok && text != "" {
-			parts = append(parts, text)
-		}
-		if child := adfText(n["content"]); child != "" {
-			parts = append(parts, child)
-		}
-
-		return strings.Join(parts, "")
-	default:
-		return ""
-	}
-}
-
-// joinNonEmpty flattens a list of ADF nodes, separating block-level results with a
-// space so adjacent paragraphs do not run their words together.
-func joinNonEmpty(nodes []any) string {
-	parts := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		if text := adfText(node); text != "" {
-			parts = append(parts, text)
-		}
-	}
-
-	return strings.Join(parts, " ")
 }
 
 // stringOf reads a value that should be a string, yielding "" when it is absent or

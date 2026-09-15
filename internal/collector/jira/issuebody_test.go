@@ -63,39 +63,6 @@ func adfFixture(t *testing.T) map[string]any {
 	return out
 }
 
-// TestADFText_FlattensNestedTextNodes is the half that decides whether the fix works
-// at all. Jira Cloud v3 returns ADF, and clients/jira's existing
-// `fields["description"].(string)` yields "" against it — silently, which is how this
-// went unnoticed.
-func TestADFText_FlattensNestedTextNodes(t *testing.T) {
-	got := adfText(adfFixture(t))
-
-	assert.Contains(t, got, "PR: Sanyaku/platform-vision#1",
-		"the cross-reference is the whole point: this exact string is what links a narrative in the "+
-			"vision repo to the issue that tracks it, and it sits two levels down in the document")
-	assert.Contains(t, got, "three-year roadmap",
-		"text inside a bulletList/listItem/paragraph chain must survive; a flattener that reads only "+
-			"top-level content would pass a flat fixture and lose every real description")
-	assert.Contains(t, got, "Vision doc", "heading text counts as description text")
-}
-
-// TestADFText_AcceptsAPlainString keeps the fix working on a server that returns
-// wiki markup rather than ADF. The changelog already does exactly this — its
-// `toString` values are plain text — so both shapes are live in one deployment.
-func TestADFText_AcceptsAPlainString(t *testing.T) {
-	assert.Equal(t, "h2. Summary\n\nplain wiki markup",
-		adfText("h2. Summary\n\nplain wiki markup"))
-}
-
-// TestADFText_EmptyForNothingUsable pins the degradation. An absent description and
-// an unrecognised shape must both yield "", not a Go-syntax rendering of the value —
-// `map[content:...]` in an event summary would be indexed as if it were prose.
-func TestADFText_EmptyForNothingUsable(t *testing.T) {
-	assert.Empty(t, adfText(nil))
-	assert.Empty(t, adfText(map[string]any{"type": "doc"}), "a doc with no content is empty")
-	assert.Empty(t, adfText(42), "an unexpected type degrades to empty, never to %!v(int=42)")
-}
-
 // TestEventFromIssueBody_CarriesSummaryAndDescription is the finding itself: the
 // event must exist for an issue whose body was never edited.
 func TestEventFromIssueBody_CarriesSummaryAndDescription(t *testing.T) {

@@ -90,9 +90,12 @@ func normalizeIssue(raw map[string]any) tasktracker.Issue {
 
 	issue.Summary, _ = fields["summary"].(string)
 
-	// A failed assertion leaves this empty, which is the intended degradation
-	// for an ADF object (Jira Cloud v3) rather than a string.
-	issue.Description, _ = fields["description"].(string)
+	// Flattened rather than type-asserted: Jira Cloud v3 returns ADF here, and a bare
+	// `.(string)` yielded "" for every such issue — silently. Issue.Description feeds
+	// the matching prompt (correlator/match.go), and it exists because a one-line
+	// summary often cannot distinguish the ticket a narrative implements from one it
+	// merely mentions, so emptying it degraded the comparison it was added for.
+	issue.Description = adfText(fields["description"])
 
 	if status, ok := fields["status"].(map[string]any); ok {
 		issue.StatusName, _ = status["name"].(string)
