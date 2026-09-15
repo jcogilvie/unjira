@@ -9,8 +9,8 @@
       "max_issues_per_query": 200,
       "queries": [
         {
-          "name": "mine",
-          "jql": "assignee = currentUser() AND updated >= -14d"
+          "name": "mine-or-unassigned",
+          "jql": "updated >= -14d AND (assignee = currentUser() OR reporter = currentUser() OR assignee IS EMPTY)"
         }
       ]
     }
