@@ -85,8 +85,13 @@ stores, and a newcomer counting tables will over-count what unjira does by three
 
 ### F6 — Six artifacts are written and never read
 
-`cwd`, `session_id`, `started_at`, `user_message_count` (claudecode), `field`, `project_key` (jira)
-have zero production readers (verified). `field` has a doc comment claiming it *"distinguishes a
+`cwd`, `session_id`, `started_at`, `ended_at`, `session_branches`, `user_message_count` (claudecode),
+`field`, `project_key` (jira) have zero production readers (verified).
+
+`ended_at` and `session_branches` arrived with F15 and are listed here in the same breath as they were
+added, deliberately: they exist so a *future* reader — clustering weighing whether three branches are one
+story — can use them, and writing them without a reader is the honest first half of that. The distinction
+worth keeping is between an artifact nothing reads YET and one nothing will ever read. `field` has a doc comment claiming it *"distinguishes a
 description edit from a summary edit, which nothing else records"* — true, and nothing reads it.
 
 Cheap to keep and genuinely useful when re-enriching (**#176**). Listed for completeness, not as
@@ -459,6 +464,121 @@ from "build an index and hope" to "build an index over a corpus that contains th
 
 ---
 
+### F15 — resolved: a session was collapsed to one event dated to its last message, so a long session's work was undatable and unsplittable
+
+`collectSession` (`claudecode/claudecode.go:225-228`) sets `occurredAt` to `meta.lastTS` — the timestamp of
+the session's final message — and emits **one event per transcript snapshot**. Everything between the
+first and last message becomes a single point in time, summarised by its *opening* line.
+
+For a short session that is right. For a long one it destroys the only evidence that dates the work.
+
+**The measured case.** Session `e951ef78` in the `vision` repo ran **2026-05-06 → 2026-07-16**: 71 days,
+139 user messages, one event dated `2026-07-16T18:36`. Inside it:
+
+| branch | span |
+|---|---|
+| `main` | 2026-05-06 → 2026-06-09 |
+| `vp-feedback-refactor` | 2026-06-09 → **2026-07-09** |
+| `mesh-routing-learnings` | 2026-07-09 → 2026-07-16 |
+
+The transcript records `gitBranch` **per line** (1906 / 369 / 165 lines respectively). The collector
+keeps only the last one, so `git_branch` is `mesh-routing-learnings` and the other two are discarded.
+
+`PAAS-3905` — a retro-credit ticket — names `PR: Sanyaku/platform-vision#1 (vp-feedback-refactor) —
+MERGED 2026-07-09T21:38:18Z`. And the session's own message at `2026-07-09T21:38` reads **"merged to
+main. now i need us to incorporate learnings from these pages on a new branch"**. Same second. The
+session IS the work that ticket tracks, on a branch the collector threw away, at a timestamp seven days
+before the event it produced.
+
+**Three consequences, in increasing severity.**
+
+1. **Every date comparison is against "when did you last type", not "when was the work".** The
+   reconciler's delta, `NarrativesOverlapping`, and any `--since` window all compare against
+   `occurred_at`. A 71-day session is invisible to a 30-day window until its final message, then
+   appears entirely.
+2. **The strongest attribution signal is discarded.** `ProvenanceBranch` ranks second only to a Jira
+   event precisely because a branch name is an explicit human act of naming the ticket for this work
+   (`gatherCandidates`' doc comment). This session named three branches and unjira kept one.
+3. **Clustering cannot split what arrives as one event.** `Cluster` groups *events*; three distinct
+   bodies of work (vision authoring, VP-feedback refactor, mesh-routing learnings) are one indivisible
+   unit, so no clustering improvement can separate them. Triage's `[s]plit` cannot help either — it
+   redistributes events between narratives, and there is only one.
+
+**Not a lookback problem, which is what it first looked like.** Verified: the drains ran at
+`--since 720h`, so both this event and `PAAS-3905`'s transitions were always in the same window, and
+`NarrativesOverlapping` offered the neighbouring narrative as context. The window was never the
+constraint. The evidence was already collapsed before clustering saw it.
+
+**The mechanism is already half-built, which is what makes this tractable.** `external_id` is
+`<sessionID>:<fileSize>`, so a growing session already emits multiple events — today's own session has
+**19**. So "one event per session" is not an invariant anyone relies on; the events are simply sliced by
+*collection time* rather than by anything in the content. Each is a full-session snapshot re-summarised
+from message one, which is also why the 19 events all carry the same opening line.
+
+**Fixed by slicing on branch change AND carrying the branch set, which are two mechanisms because
+measurement showed either alone is wrong.**
+
+`segments()` (`claudecode/segments.go`) walks a transcript once and returns contiguous branch runs;
+`sessionEvents` emits one event per run, dated to **that run's** last message, carrying **that run's**
+branch and its own opening line. The motivating session now produces three events:
+
+| branch | occurred_at | messages |
+|---|---|---|
+| `main` | 2026-06-09 | 127 |
+| `vp-feedback-refactor` | **2026-07-09** | 8 |
+| `mesh-routing-learnings` | 2026-07-16 | 4 |
+
+That middle date is the check this finding demanded, and it matches `PAAS-3905`'s merge to the second.
+
+**Raw slicing over-splits, so runs below a floor fold into their neighbour.** Measured: the churniest
+session produced **51 runs from 14 branches**, and at the default floor of 3 messages it produces **6**.
+Our own session showed a 3-minute, 16-line `rebase-probe` detour sitting between two halves of one
+435-line body of work; emitting that as a peer would shred a session rather than disentangle it. A
+below-floor run **folds** rather than being dropped — its messages and ticket keys carry over, because
+silent data loss is the one thing this codebase errors over.
+
+The floor's default is 3 rather than tuned per operator. F9 is the standing argument against a knob
+whose correct value has to be discovered: at 3 the motivating case is unaffected, at 5 it wrongly merges
+the last two runs, so 3 has headroom below the point where the floor starts destroying real boundaries.
+Overridable via `min_segment_messages` for anyone who needs it.
+
+**Every event carries the full branch set** (`session_branches`), not just its own. Slicing helps only
+sessions that change branch, and **42 of 79** multi-day sessions never do — so the set is what gives the
+correlator something to weigh in the other half of the cases. Deciding whether three branches are one
+story is judgment, and judgment cannot weigh what it is not shown. Events also carry `ended_at`
+alongside the existing `started_at`, so a run spanning three weeks is distinguishable from one spanning
+an hour.
+
+**Ticket keys are scoped to the run that mentioned them.** A key named only while on one branch must not
+become a candidate for another segment's work — `gatherCandidates` treats a prose mention as a real
+candidate, so leaking them sideways would manufacture links from work that never referenced the ticket.
+
+**Worktrees are deliberately NOT a boundary, and the reason is measured.** `cwd` changes mid-session in
+**5 of 164** transcripts, and **4 of those** are a parent repo delegating to its own worktree —
+orchestration of one task. The single genuine focus change (two sibling worktrees) also changed branch,
+so branch-slicing already catches it. Stronger than a policy: because same-branch runs merge
+unconditionally, adding a cwd boundary produces byte-identical output when the branch is stable, so a
+worktree excursion *cannot* fragment a task. That property is structural, not asserted — noted in
+`segments_test.go` so a future reader does not mistake the test for the guarantee.
+
+**Idempotence.** The `ExternalID` becomes `<sessionID>:<fileSize>:<segmentIndex>`. Size alone made a
+growing session re-emit whole-session snapshots (one live session produced 19); size plus index keeps
+each segment distinct within a snapshot while an unchanged re-read still dedupes at insert. The index
+rather than the branch name, because a branch can legitimately appear twice when its runs are far enough
+apart not to coalesce.
+
+**`scanLines` and `sessionMeta` are deleted**, not left beside the new path — `segments` subsumes both,
+and two ways to read a transcript would drift.
+
+**Still open, and this is the honest limit:** slicing gives 37 of 79 multi-day sessions honest dates. The
+other 42 never change branch, so they remain one event — now carrying a real interval rather than a bare
+point, but still a single unit that clustering cannot subdivide. Recovering work bodies inside a
+single-branch session needs semantic judgment over the transcript, which is what the README's
+onboarding-backfill entry is for.
+
+
+---
+
 ## Task cross-references
 
 | Finding | Task |
@@ -474,3 +594,4 @@ from "build an index and hope" to "build an index over a corpus that contains th
 | F12 — reconcile remainder over-counted; suppressed narratives starved the queue | **fixed**: the count mirrors `DeltaEvents` (55 → 35), and `StatusSuppressed` records the examination so the watermark advances. Draining converges: 35 → 17 → 16. The selector now applies the delta test too, so the cap is a spend bound again: one pass moved the remainder 16 → 7 where the old design moved 1 per pass. A small **residual** remains — 7 narratives whose delta is entirely unjira's own output are selected, emptied by `dropSelfAuthored`, and write nothing |
 | F13 — create outruns matching, proposes duplicates | **resolved**: creates are deferred while matching is behind (the precondition), and `applyCreate` refuses a create whose narrative has since acquired a primary link (the backstop). Found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
+| F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |

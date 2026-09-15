@@ -82,6 +82,15 @@ non-obvious corrections each one produced.
   ensemble, the `emergent` tag, the ancillary-work ledger.
 - **Phase 3 — productize**: autonomy graduation, Slack review mode, shared team memory,
   config-driven setup.
+- **Onboarding backfill (planned, unscheduled)**: a one-shot pass that summarises historical
+  transcripts with a cheap model to recover work bodies from before unjira was watching. Deliberately
+  NOT part of collection: a transcript is re-read on every collect (the external ID includes the file
+  size, so a growing session emits a new snapshot — one live session produced 19), and paying per
+  snapshot for a job that only needs doing once is the wrong shape. It is also only needed for
+  history: once F15's segmentation lands, new sessions arrive already split and dated. Cost is not
+  the obstacle — roughly cents per transcript, single-digit dollars for a whole history — the obstacle
+  is that backfill and steady state are different problems, and a `dev backfill` command is where
+  this belongs.
 
 ## Quickstart
 
