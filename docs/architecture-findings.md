@@ -579,6 +579,63 @@ onboarding-backfill entry is for.
 
 ---
 
+### F17 — the slowest stage in the pipeline says nothing until it finishes
+
+Every stage renders **after** it returns. In `cmd/unjira/main.go`:
+
+```go
+result, err := pipeline.RunNarrate(ctx, app.store, client, app.config, window, ...)
+// ...
+fmt.Print(pipeline.RenderNarrateResult(result))
+```
+
+`RunNarrate`'s cost is one LLM call, and it is the longest-running thing unjira does. So the stage that
+takes minutes is precisely the one that prints nothing while it takes them.
+
+There is also **no verbosity control of any kind** — no `--verbose`, no `--log-level`, nothing in
+config. Logging is 35 bare `log.Printf` calls across 13 files, and in the correlator and pipeline every
+one of them is an error or degradation path (`could not load issue activity`, `could not count the
+remaining unmatched narratives`). Nothing reports what the pass is *doing*.
+
+**What that cost, concretely.** Rebuilding the store produced three separate failures of
+understanding in one sitting:
+
+1. A 90-day window built a ~147k-token prompt, ran ~18 minutes, and died on a 504 having printed
+   nothing and persisted nothing (the timeout itself is F16, landing separately). The only way to know it was still alive was
+   `ps`.
+2. Asked "has something changed?", neither reviewer nor agent could answer without querying SQLite
+   directly. The pipeline's own output could not distinguish *running* from *hung*.
+3. Two durations were reported from feel and both were wrong: "22 minutes" was a 3-pass loop of ~3m24s
+   each, and "8 minutes" was a single 3m24s pass. Nothing printed a stage boundary to count, so there
+   was nothing to be right about.
+
+> A pass that emits its summary only on success is unobservable exactly when observation matters: while
+> it is slow, and after it has failed.
+
+**The numbers that would have answered it already exist, together, at the moment they are needed.**
+Before the call, `Cluster` holds the candidate count, the context-narrative count, and its own
+`estimateTokens` result. A mature store makes the third one the surprise: one pass spent **104,219
+prompt tokens to cluster 16 candidate events**, because **52 existing narratives** were hydrated as
+context. Without that breakdown the cost reads as a defect rather than as the price of context.
+
+**This is not a request for a progress bar.** A single line before the call, naming those three
+numbers, would have collapsed all three failures above into a first-second observation. The rest of the
+gap is the absence of a level: `log.Printf` cannot be turned up when diagnosing or down when running
+`watch` on an interval.
+
+**Deliberately not fixed here, and not fixed piecemeal.** The remedy is a real logging framework rather
+than a 36th `log.Printf`, and the right one is `log/slog` — stdlib since Go 1.21, this module is on
+1.26, and there is currently no logging dependency at all (no zap, logr, zerolog). That is its own
+change: logger construction, a level flag, the convention written into `docs/go-conventions.md` (which
+says nothing about logging today), and the migration of all 35 existing sites. Doing it inside this
+finding would bury an observability fix in a mechanical sweep, and doing the announcement alone would
+add one more call site to the pile being migrated.
+
+**The check** for the eventual fix is whether an operator can tell, within seconds of starting a pass,
+roughly how long it will take and whether it is progressing — not whether a log line exists.
+
+---
+
 ## Task cross-references
 
 | Finding | Task |
@@ -595,3 +652,4 @@ onboarding-backfill entry is for.
 | F13 — create outruns matching, proposes duplicates | **resolved**: creates are deferred while matching is behind (the precondition), and `applyCreate` refuses a create whose narrative has since acquired a primary link (the backstop). Found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
+| F17 — the slowest stage is silent while it runs | new; found rebuilding the store. Every stage renders only after returning, and there is no verbosity control — 35 bare log.Printf sites, no framework. Fix is `log/slog` as its own change |
