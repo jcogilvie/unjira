@@ -14,11 +14,31 @@ import (
 
 // searchFields are the issue fields the search must return.
 //
-// summary and description are deliberately absent: they arrive as changelog
-// events when they change, and requesting them here would invite emitting a
-// snapshot on every pass — an event stream of "the description is still X",
-// which is not an observation that anything happened.
-var searchFields = []string{"key", "project", "updated"}
+// Two roles, and conflating them cost F14 its entire effect. A field in trackedFields
+// produces an event when it CHANGES, from the changelog. A field here is additionally
+// available as its CURRENT VALUE on the search result — which is what
+// EventFromIssueBody reads to record an issue's own summary and description.
+//
+// F14 shipped with only the first half: the constructor was wired, its tests were
+// green, and this list said {key, project, updated}, so it received "" for both values
+// on every issue and returned false every time. A full re-collect produced zero body
+// events out of 99 issues. The list is the seam, so the tests that guard it assert
+// this list rather than either side of it.
+//
+// The comment this replaced argued the fields should stay out because "requesting them
+// here would invite emitting a snapshot on every pass — an event stream of 'the
+// description is still X'". That risk is real and it is answered elsewhere: the body
+// event's ExternalID is `<KEY>:body:<updated-unix>`, which changes only when Jira's own
+// `updated` changes, so an unchanged body dedupes at insert. Withholding the fields did
+// not prevent the snapshot problem, it prevented the feature.
+//
+// fieldStatus is tracked but not requested here, and the asymmetry is informational
+// rather than a rule. Status transitions come from the changelog as from→to movements,
+// and current status comes live from GetIssue during verification, so nothing reads a
+// resting status value today — it would be collected and never consulted (compare F6).
+// If a reader for it appears, add it; the note is here so the omission reads as a
+// consequence rather than an oversight.
+var searchFields = []string{"key", "project", "updated", fieldSummary, fieldDescription}
 
 // Collector reads Jira changes for every configured connection's named queries.
 type Collector struct{}
@@ -315,7 +335,7 @@ func (c *Collector) collectIssue(
 	// Skipped rather than failed when the body is empty. A ticket with a one-line
 	// summary and no description is ordinary, unlike a changelog entry with no id.
 	if evt, ok := EventFromIssueBody(
-		ic, stringOf(fields["summary"]), fields["description"], updated,
+		ic, stringOf(fields[fieldSummary]), fields[fieldDescription], updated,
 	); ok {
 		visit(evt)
 	}
