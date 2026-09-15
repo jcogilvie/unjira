@@ -48,7 +48,7 @@ config:
 flowchart TB
     subgraph sources["Event sources"]
         CC["Claude Code transcripts<br/>(JSONL on disk)"]
-        JIRA["Jira Cloud<br/>(changelog + comments)"]
+        JIRA["Jira Cloud<br/>(issue bodies + changelog<br/>+ comments)"]
     end
 
     subgraph collectors["Collectors"]

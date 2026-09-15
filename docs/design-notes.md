@@ -953,6 +953,66 @@ the new file passing, because they all covered the *rendering* of a deferral and
 break-it-first discipline is not only for finding whether the fix works — it is for finding whether the
 tests do.
 
+## 31. Check whether a signal was collected before concluding it does not exist
+
+Reviewing a `create` proposal for narrative 32 ("Architectural vision & 3-year roadmap document"), I
+concluded there was no deterministic path from that narrative to `PAAS-3905`, the ticket that actually
+tracked the work. The evidence looked conclusive: `PAAS-3905` appears nowhere in the narrative's events,
+its title, or its summary, and its only candidate keys are doc-scraped noise (`CP-01`..`CP-15`, `SC-7`,
+`AC-4`) from the vision document's own section numbering.
+
+I called it an instance of the semantic-matching gap and cited it as the concrete justification for the
+vector index. **Both were wrong**, and the reviewer supplied the missing fact: `PAAS-3905`'s
+*description* contains `PR: Sanyaku/platform-vision#1`, and the narrative's session ran in the `vision`
+repo. There is a deterministic cross-reference. It had simply never been ingested.
+
+The jira collector derives events only from things that *happened to* an issue —
+`EventsFromChangelogEntry` and `EventFromComment`. Nothing derives an event from the issue itself, so a
+description written at creation and never edited does not exist as far as unjira is concerned. Measured:
+of 99 collected issues, **29 have description text and 70 do not**. The client already requests
+`fields=*all`; the body is fetched and discarded before the collector sees it.
+
+> "The data does not support this" and "we never ingested the data" produce identical query results and
+> lead to opposite decisions. Before concluding a signal is absent, check the collector, not just the
+> store.
+
+**Two concrete consequences.** The vector-index argument was overstated: an index built over a corpus
+missing the one discriminating string would have returned nothing, and that nothing would have been read
+as evidence that semantic matching does not work. So collection is now ordered *before* semantic
+matching, which reverses what I had proposed an hour earlier. And it explains why the model's own
+behaviour was fine — it hedged at confidence 0.60 and said explicitly that it could not confirm the
+document was finalised, which is an accurate account of the evidence it was given. The evidence was
+insufficient; the reasoning was not wrong.
+
+**A second instance of the millisecond trap, found in the same sitting.** Staging this finding surfaced
+a flake at 1-in-3 in `internal/gate`: `TestApplier_Create_ASecondPassFindsTheNarrativeTracked` links an
+event AFTER `insertAction` has already written an action row, and the delta test is
+`linked_at > MAX(actions.created_at)` compared lexically at millisecond precision. Same-millisecond
+inserts make the delta empty and the narrative invisible. This is the second time this exact race has bit
+in one session (the first was `reconcilebacklog_test.go`), and both were introduced by me while adding
+delta-aware assertions.
+
+The pattern worth naming: **when a selector gains a time-ordering predicate, every existing fixture that
+writes both sides of that comparison becomes a potential race** — and it will pass in isolation, because
+isolation is slower. Sweeping for it means running the whole package repeatedly, not reading the test.
+Fifteen consecutive full-suite runs now pass; nine files were checked as candidates and only this one
+raced.
+
+**The generalisation for a pipeline with a collection stage:** a query over the store answers "what do we
+know", never "what is knowable". Those diverge exactly where a collector's shape does not match the
+question being asked, and the divergence is invisible from inside the store. Fixed by emitting an issue-body event, with both design questions settled in the open: the
+`ExternalID` embeds the issue's `updated` time so an edited body is not frozen by `INSERT OR IGNORE`,
+and the event IS marked `tracker_record` — the tracker describing itself is not evidence work happened,
+though it stays readable as a candidate source. Usable for attribution, unusable for narration.
+
+**And the fix does less than it first appeared to, which is worth recording separately.** The body event
+is dated to the issue's `updated` time, so clustering places it with the issue's own lifecycle
+narrative rather than with the session that did the work — the two are three days apart in the
+motivating case. So the deterministic path still does not bridge them. What collection unlocks is the
+*precondition* for the semantic path: the discriminating string now exists to embed. The honest framing
+is that this changes the vector index from "build it and hope" to "build it over a corpus that contains
+the answer", and it would have been easy to write the commit message as though the case were closed.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
