@@ -136,8 +136,13 @@ func RunReconcile(
 	// A count failure does not fail the pass: reconciling happened. Remaining stays
 	// 0, which reads as caught-up — wrong, but quieter than discarding a completed
 	// pass over a COUNT(*).
-	if remaining, countErr := s.CountNarrativesWithActionableLinks(reconciler.SelectionRoles); countErr != nil {
-		log.Printf("pipeline: could not count the remaining eligible narratives (%v); "+
+	// CountNarrativesWithDelta, not CountNarrativesWithActionableLinks: the latter is
+	// what a pass SELECTS, and reconcileOne skips a selected narrative whose delta is
+	// empty. Counting the selection reported 55 where 20 had nothing new (finding
+	// F12), telling an operator to re-run for work that did not exist — and each
+	// re-run bills for the sweep. The count now mirrors the skip.
+	if remaining, countErr := s.CountNarrativesWithDelta(reconciler.SelectionRoles); countErr != nil {
+		log.Printf("pipeline: could not count the narratives with unexamined work (%v); "+
 			"this pass's summary will not report a backlog", countErr)
 	} else {
 		result.Remaining = remaining

@@ -67,6 +67,13 @@ func TestRenderMatchResult_SaysNothingWhenCaughtUp(t *testing.T) {
 // TestRenderReconcileResult_SurfacesTheRemainder: the reconciler has TWO caps
 // (eligible narratives, and untracked narratives for creates), and either can
 // truncate. A reviewer whose queue is short needs to know which pass was bounded.
+//
+// What the remainder COUNTS changed with finding F12 — it is now narratives whose
+// delta is non-empty rather than every narrative with an actionable link, because
+// reconcileOne skips the empty-delta ones. That distinction is pinned at the store
+// layer (internal/store/reconcilebacklog_test.go), where the two predicates that
+// must agree actually live; this test only cares that whatever number arrives is
+// rendered.
 func TestRenderReconcileResult_SurfacesTheRemainder(t *testing.T) {
 	out := pipeline.RenderReconcileResult(pipeline.ReconcileRunResult{
 		Remaining: 15,

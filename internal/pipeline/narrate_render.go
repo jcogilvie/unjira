@@ -246,7 +246,7 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 
 	if len(r.Results) == 0 {
 		b.WriteString("\nno linked narratives to reconcile\n")
-		writeRemainder(&b, r.Remaining, "eligible to reconcile")
+		writeRemainder(&b, r.Remaining, "carrying unexamined work")
 
 		return b.String()
 	}
@@ -255,7 +255,7 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 		writeReconciledNarrative(&b, result)
 	}
 
-	writeRemainder(&b, r.Remaining, "eligible to reconcile")
+	writeRemainder(&b, r.Remaining, "carrying unexamined work")
 
 	return b.String()
 }

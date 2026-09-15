@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS actions (
     rationale    TEXT,
     status       TEXT NOT NULL DEFAULT 'proposed',
                                       -- proposed | approved | edited | rejected | applied | failed
+                                      -- | suppressed  (a DETERMINISTIC filter refused
+                                      --   the draft; the row is a watermark so the
+                                      --   same suppression is not re-derived forever)
                                       -- | declined  (the MODEL judged the work not
                                       --   worth a ticket; no human ruled, nothing
                                       --   was written. Distinct from 'rejected',

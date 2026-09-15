@@ -737,6 +737,28 @@ func insertNarrativeForTest(t *testing.T, s *store.Store, title string) int64 {
 	return id
 }
 
+// withUnexaminedEvent links one event to a narrative, so it carries a delta.
+//
+// NarrativesWithActionableLinks selects only narratives with work the reconciler
+// has not examined (F12: the cap is a spend bound, and a row the pass skips for free
+// must not consume a slot). A narrative with links but NO events therefore is not
+// selected — correctly, since reconcileOne would skip it at `len(delta) == 0`
+// anyway. Tests about ROLE and LIMIT need their fixtures to clear that bar first, or
+// they silently end up asserting the delta rule instead of the rule they name.
+func withUnexaminedEvent(t *testing.T, s *store.Store, narrativeID int64, extID string) int64 {
+	t.Helper()
+
+	_, err := s.InsertEvent(events.NewEvent("claude_code", extID,
+		time.Date(2026, 8, 24, 9, 30, 0, 0, time.UTC), "work"))
+	require.NoError(t, err)
+
+	eventID, err := s.EventIDByExternalID("claude_code", extID)
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(narrativeID, []int64{eventID}))
+
+	return narrativeID
+}
+
 func TestNarrativesWithoutPrimaryLink_ExcludesLinkedOnes(t *testing.T) {
 	s := openStore(t)
 
@@ -906,9 +928,9 @@ func TestNarrativesWithActionableLinks_ExcludesMentionedOnlyAndUnlinked(t *testi
 	// row at all.
 	s := openStore(t)
 
-	actionable := insertNarrativeForTest(t, s, "actionable work")
-	mentionedOnly := insertNarrativeForTest(t, s, "mentioned only")
-	insertNarrativeForTest(t, s, "unlinked work")
+	actionable := withUnexaminedEvent(t, s, insertNarrativeForTest(t, s, "actionable work"), "am:1")
+	mentionedOnly := withUnexaminedEvent(t, s, insertNarrativeForTest(t, s, "mentioned only"), "am:2")
+	withUnexaminedEvent(t, s, insertNarrativeForTest(t, s, "unlinked work"), "am:3")
 
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 		if err := tx.AddNarrativeIssues(actionable, []store.NarrativeIssue{
@@ -936,7 +958,8 @@ func TestNarrativesWithActionableLinks_ExcludesMentionedOnlyAndUnlinked(t *testi
 func TestNarrativesWithActionableLinks_RespectsLimit(t *testing.T) {
 	s := openStore(t)
 	for i := range 5 {
-		id := insertNarrativeForTest(t, s, fmt.Sprintf("narrative %d", i))
+		id := withUnexaminedEvent(t, s,
+			insertNarrativeForTest(t, s, fmt.Sprintf("narrative %d", i)), fmt.Sprintf("lim:%d", i))
 		require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 			return tx.AddNarrativeIssues(id, []store.NarrativeIssue{
 				{IssueKey: fmt.Sprintf("PROJ-%d", i), Role: "primary", Provenance: "branch", Confidence: 0.9},

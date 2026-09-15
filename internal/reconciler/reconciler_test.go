@@ -233,14 +233,17 @@ func TestReconcileSkipsWhenTheDeltaIsEmpty(t *testing.T) {
 		},
 	}
 
-	nid := seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), codeEvent("e1", "wrote some code"))
-
-	// A prior action already covers every linked event.
-	_, err := s.InsertAction(store.ActionRow{
-		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
-		Payload: `{"body":"already said this"}`, Status: "proposed",
-	})
-	require.NoError(t, err)
+	// The delta is non-empty in SQL but empty after dropSelfAuthored: its only
+	// event is a comment unjira itself posted.
+	//
+	// This fixture used to be a code event plus a prior action, so the delta was
+	// empty at the STORE level. That no longer reaches reconcileOne at all —
+	// NarrativesWithActionableLinks now applies the delta test in the selector, so a
+	// store-empty delta is never selected (finding F12: the cap is a spend bound, and
+	// a row the pass skips for free must not consume a slot). The guard is still
+	// load-bearing, because dropSelfAuthored runs AFTER the selector: unjira's own
+	// output is invisible to SQL and can only be recognised here.
+	seedLinkedNarrative(t, s, "PROJ-1", store.Role("primary"), unjiraComment("e1"))
 
 	llmClient := &fakeLLM{}
 	results, _, err := Reconcile(t.Context(), s, tracker, llmClient, testConfig())

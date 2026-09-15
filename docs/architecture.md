@@ -214,9 +214,9 @@ Reading the transitions, since some distinctions matter more than an edge label 
   next reconcile pass** — there is no separate retry path.
 - **`skip`** leaves the action `proposed` for the next session.
 
-**The seven `actions.status` values are named constants in one place.** `internal/store/actionstatus.go`
+**The eight `actions.status` values are named constants in one place.** `internal/store/actionstatus.go`
 declares `StatusProposed`, `StatusApproved`, `StatusEdited`, `StatusRejected`, `StatusApplied`,
-`StatusFailed`, `StatusDeclined` — `store` rather than `reconciler`, `triage`, or `gate` (each of
+`StatusFailed`, `StatusDeclined`, `StatusSuppressed` — `store` rather than `reconciler`, `triage`, or `gate` (each of
 which writes or compares at least one) because `store` is the only package none of the other three
 import, so every writer reaches the constants through an import edge it already has. `gate` and
 `triage` reference them as `store.StatusX`; `reconciler.StatusProposed` and
@@ -317,6 +317,14 @@ trade-off was weighed.
 `suppressionChain`; `runSuppression` walks it, feeding each filter what survived the last. All four
 filters share one context type and one return contract, so the chain is a slice rather than four
 hand-wired calls.
+
+**A suppression is recorded, not merely reported.** `Persist` writes one `StatusSuppressed` row per
+narrative per pass that suppressed anything. That row is the watermark `DeltaEvents` reads, so the
+narrative yields its slot to the next one instead of being re-derived every pass — without it, a
+stable selection order plus a trace-less outcome is a livelock (finding F12, design note 29). The row
+never reaches the review queue (`triage` reads `StatusProposed`) and never reaches `gate.Applier`
+(`Persist` excludes it from its return value), and it is a watermark rather than a tombstone: new
+events land past it, so the narrative returns when there is finally something to say.
 
 **The order is asserted, not implied** — `TestSuppressionChain_OrderIsExplicitAndLoadBearing` reads it
 directly, and a dropped filter fails three tests including the tracker-echo end-to-end case. That is
