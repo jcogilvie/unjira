@@ -272,6 +272,92 @@ happened" and "the measurement window missed it", and the timestamps are what di
 
 ---
 
+### F13 — `ProposeCreates` reaches narratives matching has not examined yet, and proposes duplicate tickets
+
+Both stages select oldest-first with the same cap, but over **different populations**:
+
+| stage | selects | cap |
+|---|---|---|
+| `correlator.Match` | narratives with **no primary link** | `match.max_narratives_per_pass` (20) |
+| `reconciler.ProposeCreates` | narratives with **no link at all** | `reconciler.max_narratives_per_pass` (20) |
+
+Create's population is a **subset** of matching's, and that is the defect rather than a safeguard. A
+subset's members sit at *lower* positions, so a narrative beyond matching's cap can be comfortably
+inside create's — and the narratives create reaches first are precisely the ones matching just skipped.
+
+> Same ordering, same cap number, different populations. The subset is reached **more** easily, not
+> less, so subsetting inverts the protection it appears to give.
+
+**Observed, and reconstructed exactly from timestamps.** Action 16 proposes opening a ticket for work
+`PAAS-3898` already tracks and closed (Done, 2026-08-21). Its rationale says both things at once —
+naming `PAAS-3898` while asserting "no issue currently tracks it in the target system" — because both
+were true at different layers.
+
+| time | event |
+|---|---|
+| 16:43 | all 11 `PAAS-3898` events **ingested** |
+| 17:05 | all 11 **linked** to narrative 24, each carrying `issue_key=PAAS-3898` |
+| 17:05–17:07 | matching links narratives **1–20** — exactly its cap — then stops |
+| 17:12 | `ProposeCreates` runs. Its pool excludes those 19 linked narratives, so it is `[6, 21, 22, 23, 24, 25, …]` and **narrative 24 ranks 5th**. Create proposed. |
+| 20:27 | a later pass finally matches narrative 24 → `primary=PAAS-3898`, confidence **1.0** |
+
+So this is not "the issue arrived later" and not "we lacked context". Matching had a
+confidence-1.0 candidate at its strongest provenance (`ProvenanceJiraEvent`, from
+`events.ArtifactIssueKey`) sitting in the narrative's own linked events, seven minutes before the
+create. It simply had not looked yet.
+
+**The proposal is worse than wrong, it is confidently wrong — and the prompt is why.**
+`buildCreatePrompt` (`create.go:398`) does not merely omit the link rows; it states their absence as
+fact:
+
+```go
+b.WriteString("Every event in this work (no tracker issue exists for any of it):\n")
+```
+
+So the model was handed a false premise, then shown eleven events each titled `PAAS-3898 status: ...`.
+It resolved that contradiction the only way the prompt allows — trusting the premise — and produced an
+accurate summary with an inverted conclusion. It even named the ticket it was duplicating. That is the
+hardest kind of output for a reviewer to catch, because everything except the recommendation is right.
+
+The line is not wrong in itself: it is true of every narrative `NarrativesWithNoIssueLink` is
+*supposed* to return. It becomes a lie only because the selector now returns narratives that are
+merely unreached. A prompt that asserts a precondition the selector no longer guarantees is a second
+instance of design note 24's lesson — a prompt cannot enforce a structural precondition, and here it
+does not even survive one being violated.
+
+**Nothing downstream catches it either.** `openOrAppliedCreate` inspects only *other actions*, never
+whether links appeared. `gate.Applier.applyCreate` checks project-writability and decodes the payload,
+then calls `CreateIssue` — **there is no link re-check before the write.** So approving action 16
+opens a duplicate ticket, which the create path's own doc comments name as the worst outcome it exists
+to prevent.
+
+**Reproducible without any failure.** No crash, no timeout, no unverifiable candidate — just a backlog
+longer than the cap, which is the normal state. Any narrative between matching's cap and create's cap
+is a candidate on every pass. It reads as zero today (both pools have drained to 16, below the cap)
+and that is a property of a drained store, not of the code.
+
+**Candidate fixes, not yet chosen.**
+
+- **Refuse when unresolved tracker evidence exists.** A narrative whose events carry an `issue_key`
+  artifact with no corresponding link row has not been *examined*, only *unreached* — and those are
+  different facts that "no link" currently conflates. Deterministic, pre-model, and it uses exactly
+  the evidence `gatherCandidates` already reads. Would have refused action 16 outright. Does not help
+  a narrative whose only candidate keys are in prose.
+- **Record that matching examined a narrative**, and have create select only examined ones. The
+  general form: it closes the prose case too. But it needs somewhere to put the record, and note
+  `actions.created_at` is already a watermark for the reconcile path (see F11 for why not a column
+  beside an existing fact).
+- **Re-check at the write.** `applyCreate` refuses when the narrative has since acquired a primary
+  link. Last line before a real mutation, which is where this codebase puts every other safety check —
+  but it fires only at approval time, after a human was already asked to review a proposal that should
+  never have existed. Worth having regardless; not sufficient alone.
+
+Whichever is chosen, verify it against **this** case before believing it: matching's link row for
+narrative 24 postdates action 16 by three hours, so a fix that only consults link rows at propose time
+must be checked against the state as it was at 17:12, not as it is now.
+
+---
+
 ## Task cross-references
 
 | Finding | Task |
@@ -285,3 +371,4 @@ happened" and "the measurement window missed it", and the timestamps are what di
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
 | F11 — issue_key denormalization drifts | resolved: the column is **deleted**, along with `.confidence`, `SetNarrativeIssueLink` and `NarrativeRow.IssueKey`/`.Confidence` — all write-only. `NarrativesWithoutIssueKey` became `NarrativesWithoutPrimaryLink`, asking `NOT EXISTS(primary link)`. The fix was already named in `design-notes.md` when the create path hit the same trap; matching was the one accessor never revisited. No migration: narrative 15 self-repaired, since it *has* a primary link. Verified by draining — the pass that crashed now completes, backlog 38 → 26. |
 | F12 — reconcile remainder over-counted; suppressed narratives starved the queue | **fixed**: the count mirrors `DeltaEvents` (55 → 35), and `StatusSuppressed` records the examination so the watermark advances. Draining converges: 35 → 17 → 16. The selector now applies the delta test too, so the cap is a spend bound again: one pass moved the remainder 16 → 7 where the old design moved 1 per pass. A small **residual** remains — 7 narratives whose delta is entirely unjira's own output are selected, emptied by `dropSelfAuthored`, and write nothing |
+| F13 — create outruns matching, proposes duplicates | new; found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |
