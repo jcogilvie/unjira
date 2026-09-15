@@ -579,6 +579,65 @@ onboarding-backfill entry is for.
 
 ---
 
+### F16 — the cluster split threshold tests whether a prompt FITS, not whether it can be answered in time
+
+`Cluster` (`correlator/correlator.go:223`) splits its window only when the prompt exceeds
+`llm.context_window_tokens`:
+
+```go
+if estimated > contextWindowTokens {
+	return clusterWithSplit(...)
+}
+```
+
+That is a fit test. A prompt can sit comfortably inside the window and still be far too slow for the
+gateway in front of the model.
+
+**Measured.** Narrating 684 events in one 90-day window built a prompt of roughly **147k tokens**
+against a configured window of **200k**, so no split fired. The call ran for about **18 minutes** and
+then died:
+
+```
+Error: clustering: clustering events in window [2026-06-17, 2026-09-15):
+  completing chat prompt: POST ".../v1/chat/completions": 504 Gateway Timeout
+```
+
+The whole pass aborted having persisted nothing — 18 minutes of model time billed for zero narratives.
+The same store narrated in 30-day windows produced 52 narratives and 36 links without incident, so the
+event volume is not the problem; the single-call latency is.
+
+**A 504 is not retried.** `openai.Client.shouldRefreshAndRetry` (`clients/openai/openai.go:179`)
+returns true only for `401 Unauthorized`, where refreshing a credential can help. Every other status —
+including the gateway timeouts, 502s and 503s that a long-running proxied call invites — propagates
+straight out and fails the pass.
+
+**Why this is not simply "use a smaller `--since`".** It is, operationally, and that is the current
+workaround. But the failure mode is silent until it happens and then total: an operator picks a window
+by how much history they want, not by how many tokens that implies, and the feedback for choosing
+wrong is an 18-minute wait followed by a lost pass. `watch` runs unattended on an interval, so the
+same window that succeeded last month fails once the store grows past an invisible line.
+
+**Candidate fixes, not yet chosen.**
+
+- **Split on a token budget well below the window.** A `cluster_target_tokens` (or a fraction of
+  `context_window_tokens`) that triggers `clusterWithSplit` long before the hard limit. The machinery
+  already exists and is already recursive — only the threshold changes. Picking the number is the
+  question, and F9 is the standing argument against a knob whose correct value nobody can calibrate;
+  a fraction of the existing window at least derives from something.
+- **Retry the retryable statuses.** 502/503/504 and context deadlines are transient by definition, and
+  `cenkalti/backoff/v5` is already a dependency (added for the live-test index lag). This does not
+  prevent the 18-minute wait, and retrying a call that timed out because it was too big will time out
+  again — so it is complementary, not a substitute.
+- **Bound the call and split on timeout.** Give `Complete` a deadline shorter than the gateway's, and
+  treat exceeding it as a signal to split rather than an error. Adaptive rather than tuned, but it
+  discovers the boundary by crossing it, which costs a wasted call each time the store grows.
+
+Whichever is chosen, the check is whether a 90-day window over the current store completes — not
+whether the split fires on a synthetic prompt built to exceed the window, which is what the existing
+`clusterWithSplit` tests do.
+
+---
+
 ## Task cross-references
 
 | Finding | Task |
@@ -595,3 +654,4 @@ onboarding-backfill entry is for.
 | F13 — create outruns matching, proposes duplicates | **resolved**: creates are deferred while matching is behind (the precondition), and `applyCreate` refuses a create whose narrative has since acquired a primary link (the backstop). Found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
+| F16 — cluster splits on fit, not on latency | new; found rebuilding the store. A 147k-token prompt fit a 200k window, ran 18 minutes, and died on a 504 with nothing persisted. A 504 is not retried — only 401 is |
