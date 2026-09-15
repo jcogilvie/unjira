@@ -379,6 +379,86 @@ precondition already covers.
 
 ---
 
+### F14 — resolved: the jira collector recorded issue *changes*, so an issue's own body was never ingested
+
+The collector has exactly two event constructors: `EventsFromChangelogEntry` (`jira/events.go:73`) and
+`EventFromComment` (`:151`). Both derive from things that *happened to* an issue. **Nothing derives an
+event from the issue itself**, so a summary and description written at creation and never edited are
+invisible to unjira — while an issue whose description was later edited has that text, because the edit
+is a changelog entry.
+
+The data is fetched and thrown away. `clients/jira` requests `fields=*all` (`jira.go:122`), and
+`IssueContext` — the struct the collector threads through both constructors — carries only `Key` and
+`ProjectKey` (`events.go:48`). The body never reaches the code that builds events.
+
+**Scale, measured:** of **99** issues collected, only **29** have any description text. **70 do not.**
+
+**How it surfaced.** Reviewing a `create` proposal for narrative 32 ("Architectural vision & 3-year
+roadmap document"), I concluded there was no deterministic path from that narrative to `PAAS-3905`, the
+ticket the reviewer knew tracked the work — because `PAAS-3905` appears nowhere in the narrative's
+events, and its only candidate keys are doc-scraped noise (`CP-01`..`CP-15`, `SC-7`, `AC-4`).
+
+That was checking the wrong direction. The reviewer pointed out that `PAAS-3905`'s **description**
+contains `PR: Sanyaku/platform-vision#1` — and the narrative's session ran in the `vision` repo on
+branch `mesh-routing-learnings`. There *is* a cross-reference. It was simply never collected:
+`PAAS-3905` has two events, both status transitions, so no description text exists for it.
+
+**This corrects two earlier conclusions in this document's history, and that is the reason it is
+written down.** The narrative-32 case was called "the semantic-matching gap, with no path available",
+and cited as concrete justification for the vector index (**#29**). Both were overstated. A vector
+index over a corpus missing the one discriminating string would not have found this either — it would
+have returned nothing and been read as evidence that semantic matching does not work.
+
+> Before concluding that a signal does not exist, check whether it was collected. "The data does not
+> support this" and "we never ingested the data" produce identical query results and lead to opposite
+> decisions.
+
+**Ordering consequence:** fix collection before building semantic matching, or the first evaluation of
+semantic matching runs against a corpus with the key evidence missing.
+
+**Fixed by emitting an issue-body event.** `EventFromIssueBody` (`jira/issuebody.go`) turns an issue's
+current summary and description into one event, emitted before the changelog and comments in
+`collectIssue`. No extra request: `fields` already holds the body because the client asks for
+`fields=*all`.
+
+Two design questions this finding raised, both settled and both tested:
+
+- **Idempotence.** The `ExternalID` is `<KEY>:body:<updated-unix>`. A fixed id per issue would freeze
+  the first body ever collected under `INSERT OR IGNORE` and silently ignore every later revision —
+  the same class of bug as **#176**. Jira advances `updated` on any field change, so an edited
+  description mints a new row while an unchanged re-collect dedupes. It over-collects (an unrelated
+  field change also mints one), which is the safe direction: a duplicate body event is inert because
+  it is a tracker record, whereas a missed revision is invisible forever.
+- **`tracker_record`: yes.** It is the tracker describing itself, so it must not read as evidence
+  that work happened — otherwise the reconciler could draft a comment restating text the issue
+  already contains, which is what PR #39's tracker-echo filter exists to stop. The marker
+  deliberately does not hide it from `gatherCandidates`, which walks artifacts regardless. Usable for
+  **attribution**, unusable for **narration**.
+
+**ADF flattening was the load-bearing half, and it was nearly missed.** Verified against the live
+instance: `fields.description` is an ADF object (`map[string]any` with keys `{content, type, version}`),
+so `clients/jira`'s existing `fields["description"].(string)` yields `""` — silently, which is how this
+went unnoticed while the code looked like it handled descriptions. `adfText` recurses, because the text
+that matters sits arbitrarily deep: the PR reference is two levels down and list items nest three. A
+flattener reading only top-level content passes a hand-written flat fixture and loses every real
+description, so the test fixture is deliberately nested and a drill confirms the shallow version fails.
+
+**What this does and does not fix, stated precisely.** The F14 check was "would it give
+`gatherCandidates` a path from narrative 32 to `PAAS-3905`". Measured against the real ADF: the event
+carries `issue_key=PAAS-3905` at strongest provenance and `platform-vision` is in its searchable text.
+But the body event is dated to the issue's `updated` time (2026-07-13), while narrative 32's window
+starts 2026-07-16 — so clustering places it with narrative 25, the `PAAS-3905` lifecycle, not with the
+session that did the work.
+
+> So this does **not** close the narrative-32 case deterministically. What it does is make the
+> discriminating string exist at all, which is the precondition for the semantic path (**#29**) rather
+> than a substitute for it.
+
+That distinction is the finding's real content: collection was the blocker, and fixing it changes #29
+from "build an index and hope" to "build an index over a corpus that contains the answer".
+
+---
+
 ## Task cross-references
 
 | Finding | Task |
@@ -393,3 +473,4 @@ precondition already covers.
 | F11 — issue_key denormalization drifts | resolved: the column is **deleted**, along with `.confidence`, `SetNarrativeIssueLink` and `NarrativeRow.IssueKey`/`.Confidence` — all write-only. `NarrativesWithoutIssueKey` became `NarrativesWithoutPrimaryLink`, asking `NOT EXISTS(primary link)`. The fix was already named in `design-notes.md` when the create path hit the same trap; matching was the one accessor never revisited. No migration: narrative 15 self-repaired, since it *has* a primary link. Verified by draining — the pass that crashed now completes, backlog 38 → 26. |
 | F12 — reconcile remainder over-counted; suppressed narratives starved the queue | **fixed**: the count mirrors `DeltaEvents` (55 → 35), and `StatusSuppressed` records the examination so the watermark advances. Draining converges: 35 → 17 → 16. The selector now applies the delta test too, so the cap is a spend bound again: one pass moved the remainder 16 → 7 where the old design moved 1 per pass. A small **residual** remains — 7 narratives whose delta is entirely unjira's own output are selected, emptied by `dropSelfAuthored`, and write nothing |
 | F13 — create outruns matching, proposes duplicates | **resolved**: creates are deferred while matching is behind (the precondition), and `applyCreate` refuses a create whose narrative has since acquired a primary link (the backstop). Found in triage. `ProposeCreates` reaches narratives matching skipped by cap and proposes tickets for work already tracked. Nothing downstream re-checks, so approving one opens a duplicate ticket |
+| F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |

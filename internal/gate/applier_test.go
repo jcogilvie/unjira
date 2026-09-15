@@ -548,6 +548,16 @@ func TestApplier_Create_ASecondPassFindsTheNarrativeTracked(t *testing.T) {
 	// to NarrativesWithActionableLinks, which applies the delta test in the selector
 	// (F12) — and an eventless narrative is a test-only shape anyway: reconcileOne
 	// would skip it at `len(delta) == 0`.
+	//
+	// The sleep is load-bearing. insertAction above already wrote an action row, and
+	// the delta test is `linked_at > MAX(actions.created_at)` compared lexically as
+	// TEXT at millisecond precision (%f). Linking the event in the SAME millisecond
+	// as that row makes the delta empty and the narrative invisible — this test failed
+	// roughly one run in three before the wait. Same trap as
+	// internal/store/reconcilebacklog_test.go; the fixture has to actually satisfy the
+	// invariant rather than assume scheduling will.
+	time.Sleep(2 * time.Millisecond)
+
 	_, err := s.InsertEvent(events.NewEvent("claude_code", "create:1",
 		time.Date(2026, 8, 27, 9, 30, 0, 0, time.UTC), "did the work"))
 	require.NoError(t, err)

@@ -279,6 +279,20 @@ func (c *Collector) collectIssue(
 		SelfAccountID: selfAccountID,
 	}
 
+	// The issue's own body, emitted BEFORE the changelog and comments — finding F14.
+	// Every other constructor here derives from something that HAPPENED TO the issue,
+	// so a description written at creation and never edited was invisible: 70 of 99
+	// collected issues had no description text at all. No extra request is needed;
+	// `fields` already holds it because the client asks for `fields=*all`.
+	//
+	// Skipped rather than failed when the body is empty. A ticket with a one-line
+	// summary and no description is ordinary, unlike a changelog entry with no id.
+	if evt, ok := EventFromIssueBody(
+		ic, stringOf(fields["summary"]), fields["description"], updated,
+	); ok {
+		visit(evt)
+	}
+
 	changelog, err := client.GetChangelog(key)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("changelog for %s: %w", key, err)
