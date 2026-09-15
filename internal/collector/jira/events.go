@@ -25,10 +25,20 @@ const Name = "jira"
 // time.RFC3339 cannot parse it.
 const jiraTimeFormat = "2006-01-02T15:04:05.000-0700"
 
-// fieldStatus is Jira's changelog field name for a status transition. Named
-// separately (rather than the literal repeated below) because it also drives
-// the special-cased "from → to" summary format status transitions get.
-const fieldStatus = "status"
+// The Jira changelog field names unjira tracks. One block because they are one kind of
+// thing: a field whose edits become events. What differs between them is which LISTS
+// they appear in, and that is a property of the lists — see trackedFields below and
+// searchFields in jira.go.
+//
+// Named rather than repeated as literals because each appears in at least two places,
+// and two spellings of one field name in two lists is how F14 stayed invisible: the
+// body-event constructor was wired and tested while searchFields omitted the fields it
+// reads, so it received "" on every issue and returned false every time.
+const (
+	fieldStatus      = "status"
+	fieldSummary     = "summary"
+	fieldDescription = "description"
+)
 
 // trackedFields are the changelog fields that become events, mapped to the
 // ExternalID segment naming them. A map rather than a slice so lookup is the
@@ -37,10 +47,16 @@ const fieldStatus = "status"
 // Jira reports custom field names with their configured display name (Sprint,
 // Story Points), so an unlisted field simply falls through — which is the
 // intent: this list grows when an action type needs it.
+//
+// A SUPERSET of the body fields in searchFields, and the difference is deliberate.
+// Every field here produces an event when it CHANGES; searchFields additionally
+// requests the two whose CURRENT VALUE is meaningful, for EventFromIssueBody. Status is
+// tracked but not requested, because unjira reads live status via GetIssue during
+// verification — its resting value in a search result would be written and never read.
 var trackedFields = map[string]string{
-	fieldStatus:   fieldStatus,
-	"description": "description",
-	"summary":     "summary",
+	fieldStatus:      fieldStatus,
+	fieldDescription: fieldDescription,
+	fieldSummary:     fieldSummary,
 }
 
 // IssueContext is the per-issue data every event from that issue carries. It is
@@ -107,6 +123,10 @@ func EventsFromChangelogEntry(ic IssueContext, entry map[string]any) ([]events.E
 		to, _ := item["toString"].(string)
 
 		summary := fmt.Sprintf("%s %s: %s", ic.Key, field, to)
+		// Status gets a "from → to" summary rather than just the destination: a
+		// transition's meaning is the movement, and "PAAS-1 status: Done" loses which
+		// direction the work went. The other tracked fields carry prose, where the
+		// previous value is noise.
 		if field == fieldStatus {
 			summary = fmt.Sprintf("%s status: %s → %s", ic.Key, from, to)
 		}

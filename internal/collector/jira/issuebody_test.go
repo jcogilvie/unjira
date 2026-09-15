@@ -164,3 +164,38 @@ func TestEventFromIssueBody_SummaryAloneIsEnough(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, evt.Summary, "parameterGroup IaC translator")
 }
+
+// TestSearchFields_RequestTheBody is the test whose absence let F14 ship inert.
+//
+// EventFromIssueBody was correct, its unit tests were green, and collectIssue called
+// it — but searchFields asked Jira for only {key, project, updated}, so the
+// constructor received "" for both summary and description on every issue and
+// returned false every time. A full re-collect produced ZERO body events.
+//
+// Nothing connected the two facts: the constructor's tests supply their arguments
+// directly, and the collector's tests do not assert what the search requested. This
+// asserts the seam rather than either side of it.
+func TestSearchFields_RequestTheBody(t *testing.T) {
+	assert.Contains(t, searchFields, fieldDescription,
+		"EventFromIssueBody cannot see a field the search did not ask for; F14 was wired, "+
+			"tested, and starved by this list")
+	assert.Contains(t, searchFields, fieldSummary,
+		"a freshly-filed ticket often has a summary and no description, and the summary is "+
+			"then the only searchable text the issue has")
+	assert.Contains(t, searchFields, "updated",
+		"and `updated` must stay: it is both the watermark the query advances on and the "+
+			"body event's idempotence key")
+}
+
+// TestTrackedFieldsAndSearchFieldsAgree pins the duality that hid the bug: the same two
+// field names are needed as CHANGELOG field names (an edit produces an event) and as
+// SEARCH field names (the search must request them). Two lists, one fact.
+func TestTrackedFieldsAndSearchFieldsAgree(t *testing.T) {
+	for _, f := range []string{fieldSummary, fieldDescription} {
+		assert.Contains(t, trackedFields, f,
+			"%s must be tracked so an EDIT to it produces an event", f)
+		assert.Contains(t, searchFields, f,
+			"...and requested, so the issue's CURRENT value is available to EventFromIssueBody; "+
+				"F14 shipped with the first half only", f)
+	}
+}
