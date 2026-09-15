@@ -60,17 +60,24 @@ type Issue struct {
 	StatusName     string // native display value; "" if the backend has none
 	Labels         []string
 
-	// Description is the issue body. Populated on the live read path only —
-	// the Jira collector deliberately does not emit description snapshots as
-	// events, so this is the only place a never-edited ticket's body is
-	// available. Narrative→issue matching compares against it, since a
-	// one-line summary frequently cannot distinguish the ticket a narrative
-	// implements from one it merely mentions.
+	// Description is the issue body, as read live from the backend.
+	// Narrative→issue matching compares against it, since a one-line summary
+	// frequently cannot distinguish the ticket a narrative implements from one it
+	// merely mentions.
 	//
-	// Empty when the backend has none, or when Jira returns an Atlassian
-	// Document Format object rather than a string (v3 API): rendering ADF to
-	// text is deliberately out of scope, and an empty description degrades
-	// matching rather than breaking it.
+	// The Jira collector ALSO emits the body as an event (F14), so this is no longer
+	// the only place a never-edited ticket's text is available — the two serve
+	// different readers. This one is the live current value, fetched during
+	// verification; the event is a historical snapshot that clustering and candidate
+	// extraction can see. An earlier version of this comment claimed the collector
+	// deliberately did not emit them, and that the read path was therefore the only
+	// source; both stopped being true when F14 landed.
+	//
+	// Atlassian Document Format is flattened rather than dropped. Jira Cloud v3
+	// returns an ADF object here, and the previous `.(string)` assertion yielded ""
+	// for every such issue — silently, so the field the matcher relies on was empty
+	// on the whole live path while looking supported. Empty now means the backend
+	// genuinely has none, or the shape was neither text nor a document.
 	Description string
 }
 
