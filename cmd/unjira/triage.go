@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
@@ -164,8 +165,20 @@ func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
 		fmt.Printf("\n  why: %s\n", a.Rationale)
 	}
 
+	// Said BEFORE the prompt, and [a]pprove is dropped from the offered verbs. Write
+	// scope used to be checked only inside gate.Applier, so a reviewer judged an
+	// action, approved it, and learned only then that it could not be written — on a
+	// real queue that was 17 of 17 actions. Phrased as "would, but cannot, and here is
+	// the remedy" rather than a bare refusal, because the two refusals have different
+	// fixes: add a writable project key, or retarget the action.
+	if !item.Appliable {
+		fmt.Printf("\n  (!) unjira would write this, but cannot:\n%s\n",
+			indent(item.UnappliableReason, "      "))
+	}
+
 	for {
-		fmt.Print("\n  [a]pprove [r]eject [e]dit [m]erge [s]plit s[k]ip [t]arget [q]uit > ")
+		fmt.Printf("\n  %s[r]eject [e]dit [m]erge [s]plit s[k]ip [t]arget [q]uit > ",
+			approveVerb(item.Appliable))
 
 		if !p.in.Scan() {
 			if err := p.in.Err(); err != nil {
@@ -293,8 +306,14 @@ func (c *triageCmd) Run(app *appContext) error {
 	}
 
 	session := triage.NewSession(context.Background(), batch, prompter, handler)
+	// So a reviewer is told an action cannot be applied BEFORE judging it, rather than
+	// after approving it. Same config gate.Applier consults, via one shared predicate.
+	session.SetWritability(app.config)
 
 	fmt.Printf("%d proposed action(s) to review.\n", len(batch))
+	if n := unappliableCount(app.config, batch); n > 0 {
+		fmt.Printf("%d of them cannot be applied with the current write scope.\n", n)
+	}
 
 	if c.AutoApprove {
 		session.ApproveAll()
@@ -478,3 +497,41 @@ const (
 	leaseTTL  = 15 * time.Minute
 	leasePoll = 2 * time.Second
 )
+
+// approveVerb renders the [a]pprove offer, or nothing when the action cannot be
+// applied.
+//
+// Dropped from the prompt rather than shown greyed-out or annotated: a terminal has
+// no reliable way to render "present but disabled", and offering a key that then
+// refuses teaches a reviewer to distrust the prompt. triage.Session refuses the verb
+// regardless (a Prompter is an interface — a script, a future TUI — so the display is
+// a courtesy and the Session is the guard), which is why hiding it here is safe.
+func approveVerb(appliable bool) string {
+	if !appliable {
+		return ""
+	}
+
+	return "[a]pprove "
+}
+
+// unappliableCount is how many of batch the current write scope refuses, for the
+// header line.
+//
+// Stated up front as well as per action so a reviewer can decide whether to fix
+// config before starting rather than discovering it action by action. On the queue
+// that motivated this it was 17 of 17 — a fact worth knowing before reading the first
+// proposal, not after the last.
+func unappliableCount(cfg config.Config, batch []store.ActionRow) int {
+	n := 0
+	for _, a := range batch {
+		project, _, found := strings.Cut(a.IssueKey, "-")
+		if !found {
+			continue
+		}
+		if !cfg.ProjectWritability(project).Writable {
+			n++
+		}
+	}
+
+	return n
+}
