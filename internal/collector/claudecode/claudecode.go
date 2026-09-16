@@ -158,9 +158,21 @@ func segmentSummary(project string, seg segment) string {
 		branchNote = " on branch " + seg.gitBranch
 	}
 
+	// What the session DID, when anything is known (finding F25). Appended rather than
+	// replacing the opening line: the opening states intent, the facts state outcome,
+	// and a reconciler needs both to tell "started this" from "finished this".
+	//
+	// Omitted entirely when nothing matched, because an empty clause would read as
+	// "did nothing" — a stronger claim than "we have no record of doing anything", and
+	// the exact over-claim F25 is about.
+	factsNote := ""
+	if facts := sessionFacts(seg.factLines); len(facts) > 0 {
+		factsNote = " Did: " + strings.Join(facts, ", ") + "."
+	}
+
 	return fmt.Sprintf(
-		`Claude Code session in %s%s: %d user messages. Opened with: "%s"`,
-		project, branchNote, len(seg.userTexts), opening,
+		`Claude Code session in %s%s: %d user messages. Opened with: "%s"%s`,
+		project, branchNote, len(seg.userTexts), opening, factsNote,
 	)
 }
 
