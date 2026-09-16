@@ -68,6 +68,51 @@ Not fixed yet because it touches the client seam and wants its own tests for the
 
 ---
 
+### F25 — an event's summary names its own message count while withholding the messages, so "no evidence of X" is unfalsifiable
+
+`segmentSummary` (`internal/collector/claudecode/claudecode.go:150-165`) builds every claude_code
+event's summary from **the first user message only**, plus a count:
+
+```go
+opening := strings.TrimSpace(strings.ReplaceAll(seg.userTexts[0], "\n", " "))
+...
+`Claude Code session in %s%s: %d user messages. Opened with: "%s"`
+```
+
+Messages 2..n are absent, and so is every tool call. Measured across the store:
+
+```
+events whose summary is COMPLETE (1 message):   31 of 419   (7%)
+events omitting at least one message:          388 of 419  (93%)
+events omitting 10 or more messages:           119 of 419  (28%)
+worst case:                                    376 of 377 messages dropped
+```
+
+**Found by triaging a real proposal.** A transition on a fixture issue was rationalised as *"only 3
+messages logged with no PR or completion evidence yet — consistent with work having begun, not
+finished."* The session had in fact committed and edited a PR. The model was reasoning **correctly over
+an input that cannot express completion evidence** — it would have produced the same sentence for a
+session that shipped and closed the ticket.
+
+**Consequence, and it is worse than lost detail.** The summary states `3 user messages` and then shows
+one, so it advertises the existence of evidence it withholds. Any reconciler rationale of the form "no
+evidence of X" is therefore unfalsifiable rather than wrong, and `confidence` is scored against a
+truncation rather than against the work. That reaches the write gates: `confidence_floor` decides
+whether a proposal needs review.
+
+It also interacts with F20. The collector now *extracts ticket keys* from tool calls
+(`ArtifactSCMKeys`) but still cannot *say what those tool calls did* — so the pipeline knows a session
+committed against DEVSBX-514 while telling the reconciler there is no evidence of a commit.
+
+**Not simply "include every message."** `userTexts` for a 377-message session is exactly the volume F16
+attributes 93.7% of prompt cost to, and inlining it would undo F16's savings at the source. The shape
+this wants is a *summary that is honest about being one* — either a cheap distillation (the README's
+onboarding-backfill entry proposes Haiku for precisely this) or a set of structured, bounded facts
+(commits made, PRs touched, tests run) extracted deterministically the way `scmKeys` already extracts
+keys. The second is the smaller change and needs no model.
+
+---
+
 ### F19 — a link derived from co-clustering is recorded at 0.98–1.0 confidence
 
 Three narratives hold a primary link at `ProvenanceJiraEvent`:
@@ -893,6 +938,7 @@ both output modes rather than only in tests.
 | F22 — matching livelocks on narratives that name no ticket | **resolved**: `match_examinations` records "examined, nothing to match against" and `matchExaminationPredicate` (one shared const, so the selector and its count cannot drift) skips those until an event is linked past the watermark. Verified live: a store stuck at 49 for eleven passes moved to **30 in one pass**; 29 watermarks written, both reasons firing. `examined_at` must use `%f` millisecond format — the first attempt used whole seconds and the comparison silently inverted |
 | F23 — the Jira client has no retry | **open**: zero `retry`/`backoff` under `internal/clients/jira/` and no client timeout, so one `read: operation timed out` on one `GetIssue` aborted a whole drain pass. `verifyLinks` calls once per candidate, so failure probability grows with candidate count. Design settled in `docs/superpowers/specs/2026-09-16-http-retry-design.md`: promote the already-present `cenkalti/backoff/v5` behind a RoundTripper, idempotent methods only |
 | F24 — write scope was invisible until approval | **resolved**: `config.ProjectWritability` is one shared predicate; `gate.Applier` defers to it and triage consults it per action. `[a]pprove` is dropped from the prompt for an unappliable action and the Session refuses the verb regardless. Verified live: the header reports "17 of them cannot be applied" and each names its remedy |
+| F25 — a summary names its message count while withholding the messages | **open**: `segmentSummary` emits `userTexts[0]` plus a count, so 388 of 419 events (93%) omit content and the worst drops 376 of 377 messages. Found by triaging a real proposal whose rationale said "no PR or completion evidence yet" about a session that had committed and edited a PR — the model reasoned correctly over an input that cannot express the evidence, which makes "no evidence of X" unfalsifiable. Reaches `confidence_floor`, a write gate |
 | F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **open**: narratives 17/25 hold primary links at `jira_event` provenance resting on nothing but co-occurrence in a window — their branches contain no key. `confidence_floor` is a write gate, so inflation is a safety property. Fixed by the work-evidence/tracker-state separation, which removes the co-clustering |
 | F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is RE-RANKING not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrected the finding's own framing |
 | F21 — artifacts are frozen at first collection | **open**: `INSERT OR IGNORE` on `(source, external_id)` means a collector fix never reaches existing rows. 386 `claude_code` events predate `ArtifactSCMKeys` and never gain one, so F20's tier is invisible for all of them. Makes a fix's measured benefit differ silently from what a mature store receives |

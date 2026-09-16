@@ -18,7 +18,10 @@
   "collectors": {
     "claude_code": {
       "enabled": true,
-      "backfill_days": 14
+      "backfill_days": 14,
+      "exclude_cwds": [
+        "~/workspace/unjira"
+      ]
     },
     "github": {
       "enabled": false,
