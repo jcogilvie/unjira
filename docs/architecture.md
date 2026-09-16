@@ -58,6 +58,8 @@ flowchart TB
 
     STORE[("internal/store<br/>SQLite")]
 
+    SPLIT["PartitionByTrackerRecord<br/>deterministic · work evidence<br/>vs tracker state"]
+
     subgraph correlate["internal/correlator"]
         CLUSTER["Cluster<br/>LLM · groups events<br/>into narratives"]
         PERSIST["Persist<br/>deterministic · new /<br/>extend / compact"]
@@ -80,7 +82,8 @@ flowchart TB
 
     CC --> CCC --> STORE
     JIRA --> JC --> STORE
-    STORE --> CLUSTER --> PERSIST --> STORE
+    STORE --> SPLIT -->|"work evidence"| CLUSTER --> PERSIST --> STORE
+    SPLIT -->|"tracker state · never clustered"| STORE
     STORE --> CAND --> MATCH --> STORE
     STORE --> VERIFY --> DRAFT --> FILTERS --> STORE
     STORE --> TRIAGE --> STORE
@@ -90,7 +93,7 @@ flowchart TB
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,MATCH,DRAFT llm
-    class CCC,JC,PERSIST,CAND,FILTERS,DECIDE det
+    class CCC,JC,PERSIST,CAND,FILTERS,DECIDE,SPLIT det
     class APPLY danger
 ```
 
