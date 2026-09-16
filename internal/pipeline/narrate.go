@@ -141,6 +141,7 @@ func RunNarrate(
 	clustered, clusterStats, err := correlator.Cluster(
 		ctx, candidates, existing, client, window, cfg.LLM.ContextWindowTokens,
 		correlator.WithClusterRules(correlatorRules),
+		correlator.WithMaxEventSummaryChars(cfg.Correlator.MaxEventSummaryChars),
 		correlator.WithLogger(opts.Log))
 	result.Stats.Add(clusterStats)
 	if err != nil {
