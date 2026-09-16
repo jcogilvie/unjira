@@ -47,12 +47,20 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   `cmd/unjira/main.go`'s registry, enable it in config.
 - **All verification lives in the reconciler.** Never emit a state-bearing action from transcript
   intent; confirm current state against live Jira/GitHub first (see `rules/intent-not-outcome.md`).
-- **A deterministic pre-filter runs before every model call.** In the correlator that is
-  `match_candidates.go`'s `gatherCandidates`: it extracts and ranks issue-key candidates by
-  provenance (Jira event > branch name > first-mention prose > later-mention prose) before Match's
-  prompt is built. In the reconciler it is `runSuppression`'s four-filter chain, plus route
-  resolution. Keep judgment the model's job and extraction a pure function's — that separation is
-  what keeps the review queue signal-rich.
+- **A deterministic pre-filter runs before every model call.** Before *clustering* it is
+  `events.PartitionByTrackerRecord`: only work evidence becomes a candidate, because a tracker record
+  is the *other side* of the diff unjira computes, and narrating one produces a story that restates a
+  ticket. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
+  issue-key candidates by provenance (branch name > SCM authoring command > Jira event > corroborated
+  prose > first-mention prose > later-mention prose). In the reconciler it is `runSuppression`'s
+  four-filter chain, plus route resolution. Keep judgment the model's job and extraction a pure
+  function's — that separation is what keeps the review queue signal-rich.
+- **Work evidence and tracker state are different kinds, and only one is clusterable.** A collector
+  declares a tracker record with `events.SetTrackerRecord` (its doc comment says why the producer is
+  the only party that can know). The exclusion at clustering does *not* replace the reconciler's exit
+  filters — `AnyWorkEvidence`, `suppressTrackerEcho`, `dropSelfAuthored` all stay, because narratives
+  linked before the filter existed still hold tracker records and `narrative_events` rows are never
+  deleted. Entrance stops the pipeline *paying*; exit stops it *speaking*.
 - **`internal/correlator/refs` and `internal/correlator/fanout` have no callers yet, and that is
   deliberate.** They are pure, tested implementations of two GitHub-PR-shaped problems: env-mirror
   fan-out (one infra change becoming ~12 near-identical per-region PRs — see

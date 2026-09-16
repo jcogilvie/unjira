@@ -62,40 +62,31 @@ removes the co-clustering that produces it.
 
 ---
 
-### F20 — resolved: the Claude Code collector discarded the SCM commands, where the authoritative keys are
+### F21 — an event's artifacts are frozen at first collection, so a collector fix never reaches old rows
 
-**Fixed.** `scmKeys` extracts keys from authoring commands (`git commit`, `git checkout -b`, `gh pr
-create`, and the writing half of `mcp__github__*`), carried on `ArtifactSCMKeys`, consumed by
-`gatherCandidates` as `ProvenanceSCMCommand` — ranked just below `ProvenanceBranch` and above
-`ProvenanceJiraEvent`. Verified live: 13 real events now carry 34 SCM keys.
+Events are keyed `(source, external_id)` with `INSERT OR IGNORE`, so re-collecting never updates an
+existing row's artifacts. Every collector improvement therefore applies only to sessions collected
+after it landed.
 
-**The value is mostly RE-RANKING, not new keys, and that corrects the finding's original claim.** Of
-those 13 events, only **3** carry a key absent from the prose; **10** carry keys that are a subset of
-the prose keys. The pre-fix measurement (10 of 20 sessions gaining a key) counted keys the prose of
-*that session* lacked, but the collector flattens every mention into `ticket_keys`, so most were
-already present — just indistinguishable from noise.
+Measured after F20 shipped: **386 `claude_code` events** predate `ArtifactSCMKeys` and will never
+carry one, so the provenance tier that fix introduced is invisible for all of them. The same is true
+of F15's segment slicing (a session collected as one event stays one event) and of anything a future
+collector learns to extract.
 
-Which is where the actual win is. One event on branch `triage-shows-context`:
+**Consequence.** A fix's measured benefit is not the benefit an existing store receives, and the gap
+is silent — nothing reports "this event was collected under older extraction rules." It also makes
+before/after comparisons on a mature store misleading in the optimistic direction, since the new
+behaviour only ever appears on new rows.
 
-```
-prose keys: 18   ["PAAS-3969","SIA-201","PAAS-4019","PAAS-3984","PAAS-3886","PAAS-3805", …]
-scm keys:    2   ["PAAS-3969","PAAS-4019"]
-```
+The tension is real and `INSERT OR IGNORE` is not simply wrong: idempotent re-collection is what makes
+`collect` safe to run repeatedly, and finding #176 records why backfilling was rejected once already
+(a re-collect that mutates rows can rewrite history a narrative was already built from). What is
+missing is a *deliberate* path — a re-derive command that recomputes artifacts from `raw_ref` without
+touching identity, or a recorded extraction version per event so a reader can tell which rules
+produced it.
 
-**18 undifferentiated candidates collapse to 2 authoritative ones.** `match_candidates_limit` caps
-candidates and truncation keeps the head, so before this the two tickets actually committed against
-competed alphabetically with sixteen mentions-in-passing. That is the same defect F9 fixed for the
-corroborated tier, in a different place.
-
-Still open, deliberately:
-
-- **No backfill.** Events are keyed `(source, external_id)` with `INSERT OR IGNORE` (finding #176), so
-  the 386 existing `claude_code` events will never gain `scm_keys`. Only newly-collected sessions
-  benefit until something re-derives them.
-- **Reading commands are excluded at the collector**, so the distinction is not recoverable downstream.
-  That is deliberate — 8 of the keys measured appeared only in reading commands — but it means a key's
-  tier is decided by a regex over shell text, which is a heuristic in a codebase that prefers
-  declared markers.
+Not urgent while the store is disposable (`DEVSBX`, pre-release). It becomes load-bearing the moment a
+real store exists, which is why it is recorded now rather than rediscovered then.
 
 ---
 
@@ -150,7 +141,8 @@ response truncated after 32000 completion tokens (finish_reason=length)
 A smaller prompt still yields ~104 clusters, each emitting a title and summary, so
 `llm.max_output_tokens` (32,000 — `internal/config/config.go:209`) is exhausted before the prompt
 budget is. Any input-side fix alone leaves a wide window failing for the opposite reason. The
-completion side scales with **cluster count**, which F18 shows is currently ~1 per candidate.
+completion side scales with **cluster count**, which measured ~1 per candidate (110 and 104 clusters
+from 108 candidates over two runs).
 
 **Four candidates were falsified by measurement, and are recorded so they are not re-proposed:**
 
@@ -172,84 +164,27 @@ documented 2.41–2.51. Its 1.2× pessimism is the documented design.
 
 Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default).
 
-**Read F18 first.** Those 15 expensive Jira descriptions are `tracker_record` events, and so is every
-other Jira event in the store — 82% of the prompt's characters. F18's exclusion attacks the *volume*;
-capping only shapes what remains. Truncation is still worth having (it bounds any single event,
-whatever its source, and a future GitHub collector will have its own whales), but sizing the cap
-before F18 lands would calibrate it against a corpus that should not be there.
-
----
-
-### F18 — clustering narrates the tracker's own bookkeeping back into narratives about it
-
-Two live clustering runs over the same 60-day window (108 candidates) returned **110 and 104
-clusters** — near 1:1, so clustering is mostly relabelling each event as its own narrative. The cause
-is not the model's judgment. It is *what it is being asked to cluster*.
-
-**Every Jira event in the store is a tracker record, and they are 82% of the prompt's characters:**
-
-| source | `tracker_record` | events | chars |
-|---|---|---|---|
-| `claude_code` | absent | 229 | 45,550 |
-| `jira` | **true** | 96 | **210,350** |
-
-`events.ArtifactTrackerRecord` (`internal/events/tracker_record.go`) exists precisely to name these:
-"a record the tracker itself produced about a work item it already tracks." Its doc comment answers
-the question directly — *if unjira writes prose sourced only from events like this one, is it telling
-anybody anything they don't have?* No.
-
-**So clustering builds narratives out of them, and they are circular.** Of the 68 narratives:
+**Excluding tracker records from clustering did NOT reduce this**, and that is worth stating plainly
+because an earlier draft of this finding predicted it would. Re-measured on the same store after that
+exclusion landed:
 
 ```
-claude_code only   36
-jira ONLY          29   ← every event is tracker bookkeeping
-mixed               3
+since | uncapped |  cap5000  cap2000  cap1000   cap500
+  30d |  139,059 |  110,845   77,002   63,651   55,195
+  90d |  209,440!|  180,077  143,392  128,541  119,331
+ 365d |  235,512!|  206,150! 169,465  154,614  145,403
+                                  ! = over the 200k budget, bisects
 ```
 
-Of those 29 jira-only narratives, **26 contain exactly one distinct issue key**, and for all 26 the
-primary link points at **that same ticket**. A narrative whose entire content is PAAS-4034's own
-changelog, linked to PAAS-4034. `mixed` — a session's work joined to the ticket it concerns, which is
-the whole point of unjira — is **3 of 68**.
+Slightly *higher* than before, not lower. The two touch different things: the exclusion filters
+clustering **candidates**, while the 93.7% attributed above is events hydrated as **context** under
+narratives that already exist. Those narratives were built before the filter and their
+`narrative_events` rows are never deleted, so their tracker records still render. Excluding a category
+at the entrance does not retroactively empty the containers already holding it — the same reasoning
+that keeps the reconciler's exit filters load-bearing, and a consequence of F21.
 
-**Every one of the 26 is suppressed downstream**, all by the same filter:
-
-```
-comment on PAAS-4034: no evidence of work in the delta — every event is a record
-the tracker produced about itself (3 of them), so a comment could only …
-```
-
-`internal/reconciler/tracker_echo.go:60` calls `events.AnyWorkEvidence(delta)` and correctly refuses.
-So the safety net holds — nothing wrong is written — but the work to reach it is spent every pass:
-cluster the bookkeeping, name it, persist it, hydrate it as context next pass, propose a comment,
-suppress the comment.
-
-**Consequence, and why this outranks F16.** The exclusion is a one-line predicate on data the
-collector already declares, and excluding tracker records from clustering candidates takes the
-60-day window from **108 candidates to 36** — a 67% reduction before any truncation, attacking the
-82% term rather than F16's shaping of it. It also removes the near-singleton narratives inflating the
-review queue, and explains the drain plateau (narratives 59 → 68 across three passes while
-`unmatched` held at 16): passes manufacture jira-only narratives that can never produce an action.
-
-`CLAUDE.md`'s invariant says a deterministic pre-filter runs before every model call. `gatherCandidates`
-does this for *matching* (`internal/correlator/match_candidates.go`); clustering has no equivalent, so
-`buildClusterPrompt` (`internal/correlator/correlator.go:362`) receives every event indiscriminately.
-
-**The open question is not whether to exclude but where the line falls**, and it is genuinely open:
-
-- A tracker record is not worthless *as context*. `PAAS-3972 status: In Review → Done` is real
-  evidence about state, which is why the reconciler reads status history rather than ignoring it.
-- Excluding them from *candidates* (never becoming narratives) differs from excluding them from
-  *context* (invisible when judging `EXTENDS`), and the two have different risks.
-- `AnyWorkEvidence` and `IsTrackerRecord` have **one consumer each**, both in the reconciler. Lifting
-  the concept into the correlator is the change; the vocabulary is already there.
-
-Careful distinction: this is **not** `authored_by_unjira`. Of the jira-only narratives' 87 events only
-6 carry that tag — these are mostly *humans'* Jira activity, correctly collected. The problem is that
-tracker bookkeeping of any authorship is not work evidence, which is exactly the distinction
-`ArtifactTrackerRecord` was introduced to draw and `dropSelfAuthored` cannot.
-
-Not session fragmentation either: of the 18 single-event narratives, the 13 `claude_code` ones each
-share a `session_id` with **zero** other events — genuinely isolated work.
+So the cap is still needed, and sizing it is now unblocked: `cap2000` is the smallest tier that fits a
+365-day window in one call, and even `cap5000` stops fitting at 180 days.
 
 ---
 
@@ -916,5 +851,6 @@ both output modes rather than only in tests.
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
 | F16 — nothing bounds event text entering a prompt | **open**: 93.7% of a 140k-token prompt is the 325 events hydrated under context narratives; 15 Jira descriptions (4.6% of events) hold 52% of the chars. Capping per-event summaries at both render sites fits a 365-day window in one call and agrees with uncapped on 91% of clusters — but `max_output_tokens` (32,000) is exhausted first, since completion scales with cluster count. Four candidates falsified by measurement, including window-splitting at 1.37× |
 | F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **open**: narratives 17/25 hold primary links at `jira_event` provenance resting on nothing but co-occurrence in a window — their branches contain no key. `confidence_floor` is a write gate, so inflation is a safety property. Fixed by the work-evidence/tracker-state separation, which removes the co-clustering |
-| F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is mostly RE-RANKING, not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrects the finding's original framing. No backfill: existing events keep no scm_keys (#176) |
-| F18 — clustering narrates the tracker's own bookkeeping | **open**, and outranks F16: all 96 Jira events are `tracker_record` and are 82% of the prompt's chars. 29 of 68 narratives are jira-only; 26 of those hold one issue key and link to that same ticket. All 26 suppressed by `AnyWorkEvidence` downstream, so nothing wrong is written — but the cluster/persist/hydrate/propose/suppress cycle runs every pass. Excluding tracker records takes 60d candidates 108 → 36. Open question is candidates-vs-context, not whether |
+| F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is RE-RANKING not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrected the finding's own framing |
+| F21 — artifacts are frozen at first collection | **open**: `INSERT OR IGNORE` on `(source, external_id)` means a collector fix never reaches existing rows. 386 `claude_code` events predate `ArtifactSCMKeys` and never gain one, so F20's tier is invisible for all of them. Makes a fix's measured benefit differ silently from what a mature store receives |
+| F18 — clustering narrates the tracker's own bookkeeping | **resolved**: `events.PartitionByTrackerRecord` excludes tracker records from clustering candidates. Verified live — 73 of 143 unlinked events no longer reach the model, 1 call where the width used to bisect. Found while attributing F16's cost; the exit filters (`AnyWorkEvidence` et al.) STAY, because 96 records were already linked and `narrative_events` rows are never deleted |
