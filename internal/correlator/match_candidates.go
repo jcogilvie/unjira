@@ -26,7 +26,7 @@ type Candidate struct {
 // mentioned, ranked strongest-provenance-first and truncated to limit
 // (limit <= 0 means no truncation).
 //
-// Three provenance tiers come directly out of today's artifacts:
+// Four provenance tiers come directly out of today's artifacts:
 //
 //   - ProvenanceJiraEvent from events.ArtifactIssueKey on a jira-source event —
 //     the event is already about that issue, so this is direct, not inferred.
@@ -37,6 +37,13 @@ type Candidate struct {
 //     exactly the branch-vs-prose distinction that matters most for
 //     attribution — the branch is an explicit human act of naming the ticket
 //     for this work, prose is not.
+//   - ProvenanceSCMCommand from events.SCMKeysOf: keys the session named while
+//     AUTHORING in source control (finding F20). Read from the artifact rather
+//     than re-derived, unlike the branch tier, because the judgment this tier
+//     rests on was made at collection time — the collector kept authoring
+//     commands and dropped reading ones, and `git log --grep=PAAS-1` is
+//     indistinguishable from `git commit -m "PAAS-1: …"` once only the key
+//     survives.
 //   - ProvenanceProseFirst / ProvenanceProseLater from walking
 //     events.TicketKeysOf in order: index 0 is "first mentioned", everything
 //     after is "later mentioned". No finer split exists because the collector
@@ -49,7 +56,7 @@ type Candidate struct {
 // strongest surviving provenance is kept, and a Connection recorded by a
 // stronger mention is never overwritten by a weaker mention that lacks one.
 //
-// A fourth tier, ProvenanceCorroborated, sits between JiraEvent and ProseFirst:
+// A further tier, ProvenanceCorroborated, sits between JiraEvent and ProseFirst:
 // a prose-only key whose issue appears in jiraActivity, meaning this store has
 // already collected Jira events for it. Keys in that tier are ordered by
 // most-recent activity first; every other tier keeps its alphabetical order.
@@ -115,6 +122,15 @@ func gatherCandidates(
 			for _, key := range events.ExtractTicketKeys(branch) {
 				upsert(key, ProvenanceBranch, "")
 			}
+		}
+
+		// Keys named while AUTHORING in source control — a commit message, a branch
+		// creation, a PR title (finding F20). Read from their own artifact rather than
+		// re-derived from text: the collector already made the judgment this tier
+		// depends on, keeping authoring commands and dropping reading ones, and that
+		// distinction is not recoverable from the key alone.
+		for _, key := range events.SCMKeysOf(e) {
+			upsert(key, ProvenanceSCMCommand, "")
 		}
 
 		for i, key := range events.TicketKeysOf(e) {

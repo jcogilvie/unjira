@@ -233,6 +233,10 @@ func sessionEvents(
 		evt.Artifacts["cwd"] = seg.cwd
 		evt.Artifacts[events.ArtifactGitBranch] = seg.gitBranch
 		events.SetTicketKeys(&evt, seg.orderedKeys)
+		// Kept as its own artifact, not appended to the prose keys: a key committed
+		// under is stronger evidence than one mentioned, and the correlator ranks on
+		// exactly that difference (finding F20).
+		events.SetSCMKeys(&evt, seg.scmKeys)
 		evt.Artifacts["user_message_count"] = len(seg.userTexts)
 		evt.Artifacts["started_at"] = seg.firstTS
 		// The interval, not just its end. A segment spanning three weeks and one

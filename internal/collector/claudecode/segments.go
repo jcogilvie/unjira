@@ -29,6 +29,16 @@ type segment struct {
 	firstTS, lastTS string
 	userTexts       []string
 	orderedKeys     []string
+	// scmKeys are keys this run named while AUTHORING in the SCM — a commit message,
+	// a branch creation, a PR title (finding F20).
+	//
+	// Kept separate from orderedKeys rather than merged into it, because the two carry
+	// different evidential strength and the correlator ranks on exactly that: a prose
+	// mention is someone talking about a ticket, while a commit message is someone
+	// naming the ticket for this work. Merging would flatten that distinction the way
+	// ArtifactTicketKeys already flattens branch-vs-prose — the loss F15's comment
+	// calls out.
+	scmKeys []string
 	// allBranches is every branch the WHOLE session touched, in first-seen order,
 	// copied onto each segment.
 	//
@@ -108,6 +118,16 @@ func rawRuns(lines []map[string]any) (runs []segment, allBranches []string) {
 		}
 
 		accumulate(cur, cwd, ts, text, isUser)
+
+		// SCM keys come from the line's TOOL CALLS, which messageText discards — so
+		// they are gathered separately rather than via text (finding F20). Scoped to
+		// the open run for the same reason prose keys are: a key committed on one
+		// branch must not become a candidate for another segment's work.
+		for _, key := range scmKeys(line) {
+			if !slices.Contains(cur.scmKeys, key) {
+				cur.scmKeys = append(cur.scmKeys, key)
+			}
+		}
 	}
 
 	if cur != nil {
@@ -230,6 +250,14 @@ func absorb(dst *segment, src segment) {
 	for _, key := range src.orderedKeys {
 		if !slices.Contains(dst.orderedKeys, key) {
 			dst.orderedKeys = append(dst.orderedKeys, key)
+		}
+	}
+	// SCM keys merge too, and must: a below-floor run that did nothing but commit is
+	// exactly the run whose key matters most, and dropping it here would be silent
+	// data loss in the one direction F20 exists to fix.
+	for _, key := range src.scmKeys {
+		if !slices.Contains(dst.scmKeys, key) {
+			dst.scmKeys = append(dst.scmKeys, key)
 		}
 	}
 }

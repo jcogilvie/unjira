@@ -62,47 +62,40 @@ removes the co-clustering that produces it.
 
 ---
 
-### F20 — the Claude Code collector discards the SCM commands, which is where the ticket keys are
+### F20 — resolved: the Claude Code collector discarded the SCM commands, where the authoritative keys are
 
-`messageText` (`internal/collector/claudecode/claudecode.go:280-315`) reads only `type == "text"`
-content blocks:
+**Fixed.** `scmKeys` extracts keys from authoring commands (`git commit`, `git checkout -b`, `gh pr
+create`, and the writing half of `mcp__github__*`), carried on `ArtifactSCMKeys`, consumed by
+`gatherCandidates` as `ProvenanceSCMCommand` — ranked just below `ProvenanceBranch` and above
+`ProvenanceJiraEvent`. Verified live: 13 real events now carry 34 SCM keys.
 
-```go
-// Tool results and command wrappers (content starting
-// with '<') are skipped — they are plumbing, not narrative.
-```
+**The value is mostly RE-RANKING, not new keys, and that corrects the finding's original claim.** Of
+those 13 events, only **3** carry a key absent from the prose; **10** carry keys that are a subset of
+the prose keys. The pre-fix measurement (10 of 20 sessions gaining a key) counted keys the prose of
+*that session* lacked, but the collector flattens every mention into `ticket_keys`, so most were
+already present — just indistinguishable from noise.
 
-Correct about tool *results* — a 3,000-line `kubectl` dump is noise. But it also drops tool *inputs*,
-and `git commit -m "PAAS-3669: …"` is not plumbing: it is a developer naming the ticket for this work,
-which is the same explicit human act that makes `ProvenanceBranch` the strongest inferred tier.
-
-Measured over 28 `helm-charts` transcripts, across every SCM surface actually in use (`git`, `gh`,
-`rtk git`, and `mcp__github__*`):
+Which is where the actual win is. One event on branch `triage-shows-context`:
 
 ```
-sessions with any ticket key:                  20
-sessions where an SCM tool input adds a key
-  the collected prose does NOT contain:        10
-
-  ed6719a8  RE-7276          2110949a  PAAS-3691
-  e130534e  PAAS-3886, SUMO-288671    ef3075fb  PAAS-3846
-  b1cc4079  PSRE-2117, PSRE-2161      8961f3ac  PSRE-2164
-  cf81279d  DNS-1123                  d98a8615  PAAS-3846
+prose keys: 18   ["PAAS-3969","SIA-201","PAAS-4019","PAAS-3984","PAAS-3886","PAAS-3805", …]
+scm keys:    2   ["PAAS-3969","PAAS-4019"]
 ```
 
-**Half of all sessions carry a ticket key that unjira cannot see.** Volume is not the constraint:
-2,155 Bash calls mention git or gh, plus 13 `create_pull_request` and 33 `pull_request_read` MCP calls.
+**18 undifferentiated candidates collapse to 2 authoritative ones.** `match_candidates_limit` caps
+candidates and truncation keeps the head, so before this the two tickets actually committed against
+competed alphabetically with sixteen mentions-in-passing. That is the same defect F9 fixed for the
+corroborated tier, in a different place.
 
-**Consequence.** unjira's primary interface with git *is* Claude Code, so the transcript already holds
-commit messages, PR titles and branch creations — the deterministic attribution signal the correlator
-is otherwise reduced to inferring. This is a narrow extraction from a collector that already exists,
-not a new collector: no API, no auth, no endpoint.
+Still open, deliberately:
 
-Two cautions for whoever implements it. Extract with `events.ExtractTicketKeys`, not an ad-hoc regex —
-the measurement above initially matched `AC1-3`, `L310-326` and `PAAS-0` as keys. And a command's key
-is weaker evidence than a branch name (an agent may `git log --grep=PAAS-1234` while investigating
-something it is not working on), so it needs its own provenance tier rather than reusing
-`ProvenanceBranch`.
+- **No backfill.** Events are keyed `(source, external_id)` with `INSERT OR IGNORE` (finding #176), so
+  the 386 existing `claude_code` events will never gain `scm_keys`. Only newly-collected sessions
+  benefit until something re-derives them.
+- **Reading commands are excluded at the collector**, so the distinction is not recoverable downstream.
+  That is deliberate — 8 of the keys measured appeared only in reading commands — but it means a key's
+  tier is decided by a regex over shell text, which is a heuristic in a codebase that prefers
+  declared markers.
 
 ---
 
@@ -923,5 +916,5 @@ both output modes rather than only in tests.
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
 | F16 — nothing bounds event text entering a prompt | **open**: 93.7% of a 140k-token prompt is the 325 events hydrated under context narratives; 15 Jira descriptions (4.6% of events) hold 52% of the chars. Capping per-event summaries at both render sites fits a 365-day window in one call and agrees with uncapped on 91% of clusters — but `max_output_tokens` (32,000) is exhausted first, since completion scales with cluster count. Four candidates falsified by measurement, including window-splitting at 1.37× |
 | F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **open**: narratives 17/25 hold primary links at `jira_event` provenance resting on nothing but co-occurrence in a window — their branches contain no key. `confidence_floor` is a write gate, so inflation is a safety property. Fixed by the work-evidence/tracker-state separation, which removes the co-clustering |
-| F20 — the claudecode collector discards SCM commands | **open**: `messageText` reads only `type=="text"` blocks, dropping tool inputs. Measured over 28 transcripts: 10 of 20 sessions carry a ticket key in a `git`/`gh`/`rtk git`/`mcp__github__*` input that the collected prose does not contain. A narrow extraction from an existing collector — no API, no auth |
+| F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is mostly RE-RANKING, not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrects the finding's original framing. No backfill: existing events keep no scm_keys (#176) |
 | F18 — clustering narrates the tracker's own bookkeeping | **open**, and outranks F16: all 96 Jira events are `tracker_record` and are 82% of the prompt's chars. 29 of 68 narratives are jira-only; 26 of those hold one issue key and link to that same ticket. All 26 suppressed by `AnyWorkEvidence` downstream, so nothing wrong is written — but the cluster/persist/hydrate/propose/suppress cycle runs every pass. Excluding tracker records takes 60d candidates 108 → 36. Open question is candidates-vs-context, not whether |
