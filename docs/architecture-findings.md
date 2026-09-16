@@ -28,48 +28,6 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
-### F23 — the Jira client has no retry, so one transient timeout aborts a whole pass
-
-A drain pass died on this:
-
-```
-Error: matching narratives: verifying candidate PAAS-3042 for narrative 55:
-getting jira issue PAAS-3042: Get "https://…/rest/api/2/issue/PAAS-3042":
-read tcp …: read: operation timed out
-```
-
-One request out of hundreds. Nothing retried it, and the pass ended.
-
-**Measured:** zero matches for `retry`/`backoff` anywhere under `internal/clients/jira/`. The only
-retry in the tree is `openai.go`'s single 401-credential-refresh, which is auth-specific. No
-`http.Client` timeout is configured either — the facade uses whatever go-jira's default is
-(`internal/clients/jira/jira.go`).
-
-**Consequence.** `verifyLinks` performs one `GetIssue` per candidate, so the more candidates a pass
-has, the likelier it dies partway. Store-mediation bounds the damage — the pass committed what it
-finished and a re-run resumes — so this is a robustness gap rather than a correctness one. But the
-intended deployment is a cron running `collect` plus a human running `triage`, and a pipeline that
-fails on any single flaky request will fail often enough to erode trust in the cron.
-
-**What a fix must get right**, per the library review in
-`docs/superpowers/specs/2026-09-16-http-retry-design.md`:
-
-- **Only idempotent methods.** `AddComment`, `TransitionIssue` and `CreateIssue` are POST/PUT and Jira
-  offers no idempotency key, so a blind retry risks a duplicate comment or a double transition. This
-  rules out `hashicorp/go-retryablehttp`'s default `CheckRetry` (retries 5xx regardless of method), and
-  it is also why `failsafe-go` offers no advantage here: its `HandleIf` predicate receives only
-  `(*http.Response, error)`, so on a transport error — F23's actual case, where `resp` is nil — it
-  cannot see the method at all. An outer method-gate is structurally required either way.
-- **`Retry-After` on 429.** Jira Cloud rate-limits and sends the header; ignoring it turns a retry
-  into an amplifier.
-- **Draining and closing the response body between attempts**, or the connection is not returned to
-  the pool.
-- **Context cancellation**, so a retry loop honors the pass's deadline rather than outliving it.
-
-Not fixed yet because it touches the client seam and wants its own tests for the attempt bounds.
-
----
-
 ### F19 — a link derived from co-clustering is recorded at 0.98–1.0 confidence
 
 Three narratives hold a primary link at `ProvenanceJiraEvent`:
@@ -893,7 +851,7 @@ both output modes rather than only in tests.
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
 | F16 — nothing bounds event text entering a prompt | **open**: 93.7% of a 140k-token prompt is the 325 events hydrated under context narratives; 15 Jira descriptions (4.6% of events) hold 52% of the chars. Capping per-event summaries at both render sites fits a 365-day window in one call and agrees with uncapped on 91% of clusters — but `max_output_tokens` (32,000) is exhausted first, since completion scales with cluster count. Four candidates falsified by measurement, including window-splitting at 1.37× |
 | F22 — matching livelocks on narratives that name no ticket | **resolved**: `match_examinations` records "examined, nothing to match against" and `matchExaminationPredicate` (one shared const, so the selector and its count cannot drift) skips those until an event is linked past the watermark. Verified live: a store stuck at 49 for eleven passes moved to **30 in one pass**; 29 watermarks written, both reasons firing. `examined_at` must use `%f` millisecond format — the first attempt used whole seconds and the comparison silently inverted |
-| F23 — the Jira client has no retry | **open**: zero `retry`/`backoff` under `internal/clients/jira/` and no client timeout, so one `read: operation timed out` on one `GetIssue` aborted a whole drain pass. `verifyLinks` calls once per candidate, so failure probability grows with candidate count. Design settled in `docs/superpowers/specs/2026-09-16-http-retry-design.md`: promote the already-present `cenkalti/backoff/v5` behind a RoundTripper, idempotent methods only |
+| F23 — the Jira client has no retry | **resolved**: a `retryTransport` retries GET/HEAD on transport errors, 429 (honoring `Retry-After`) and 5xx, capped at 4 attempts / 30s, with an explicit 20s client timeout. Writes are never retried — a single early return, since Jira has no idempotency key and a retried POST means a duplicate comment. 404 deliberately passes through, because `verifyCandidates` prunes on it |
 | F24 — write scope was invisible until approval | **resolved**: `config.ProjectWritability` is one shared predicate; `gate.Applier` defers to it and triage consults it per action. `[a]pprove` is dropped from the prompt for an unappliable action and the Session refuses the verb regardless. Verified live: the header reports "17 of them cannot be applied" and each names its remedy |
 | F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **open**: narratives 17/25 hold primary links at `jira_event` provenance resting on nothing but co-occurrence in a window — their branches contain no key. `confidence_floor` is a write gate, so inflation is a safety property. Fixed by the work-evidence/tracker-state separation, which removes the co-clustering |
 | F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is RE-RANKING not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrected the finding's own framing |

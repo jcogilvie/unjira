@@ -51,7 +51,18 @@ func New(site, email, token string) (*Client, error) {
 	}
 
 	transport := jiracloud.BasicAuthTransport{Username: email, APIToken: token}
-	upstream, err := jiracloud.NewClient(site, transport.Client())
+
+	// Retry idempotent requests, and bound a single attempt's read (finding F23). One
+	// GetIssue timing out used to abort an entire pipeline pass, and that read was
+	// unbounded — both halves are required, since retrying a hang just retries hanging.
+	//
+	// Wrapped AROUND the auth transport rather than replacing it, so credentials are
+	// applied on every attempt.
+	httpClient := transport.Client()
+	httpClient.Timeout = clientTimeout
+	httpClient.Transport = newRetryTransport(httpClient.Transport, nil)
+
+	upstream, err := jiracloud.NewClient(site, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("constructing jira client for %s: %w", site, err)
 	}

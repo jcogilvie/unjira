@@ -1,6 +1,26 @@
 # HTTP retry for the Jira client
 
-**Status: design** — closes F23.
+## Status: landed 2026-09-16
+
+Implemented as `internal/clients/jira/retry.go`, installed in `jira.New`. Closes F23.
+
+**Verification.** `go test ./internal/clients/jira/` covers each retry condition, and the
+load-bearing one — POST/PUT/DELETE gets exactly 1 attempt even when a retry *would* have
+succeeded — is scripted to fail loudly rather than pass by luck. `TestNew_InstallsTheRetryTransport`
+asserts the wiring, drilled by removing it: it fails with "or F23's fix is inert — which is exactly
+how F14 shipped".
+
+**One deviation from the design below.** The spec said `WithMaxTries(4)` and `WithMaxElapsedTime(30s)`
+without noting that they interact: backoff/v5 stops when `elapsed + next > MaxElapsedTime`
+(`retry.go:122`), so a `Retry-After` longer than the remaining budget aborts rather than waiting. That
+is correct behaviour — a 60s rate-limit wait should not silently extend a 30s budget — but it means the
+two bounds are not independent, and the Retry-After test needs headroom to exercise the header at all.
+Worth knowing before tuning either number.
+
+**Not implemented:** the optional `*slog.Logger` is plumbed through `newRetryTransport` but `jira.New`
+passes nil, because it has no logger to hand it — `New(site, email, token)` predates the logging seam.
+Wiring it means widening that signature or adding an option, which belongs with whatever next needs it
+rather than here.
 
 ## The problem
 
