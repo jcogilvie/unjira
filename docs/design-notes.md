@@ -1098,6 +1098,46 @@ and a *later* event reads as *earlier*. The re-admission silently never fired, t
 into the tombstone the design explicitly rejected. **A schema comment warning about a trap is
 evidence the trap is easy to fall into — read it before writing the comparison, not after.**
 
+## 34. A summary that advertises what it omits invites unfalsifiable reasoning
+
+The first end-to-end triage session — collect through apply, against a real tracker — was run to
+produce slice 7's input. It produced something more useful: a defect visible only from the reviewer's
+seat.
+
+A transition proposal was rationalised as *"only 3 messages logged with no PR or completion evidence
+yet — consistent with work having begun, not finished."* The session had committed and edited a PR. The
+model was not hallucinating and was not careless; `segmentSummary` gives it
+
+```
+Claude Code session in helm-charts on branch vpc-output-application: 3 user messages.
+Opened with: "let's get the observed-infra Application into xvpc's outputs …"
+```
+
+and nothing else. Messages 2 and 3, and every tool call, are structurally absent. **The same sentence
+would have been produced for a session that shipped and closed the ticket.**
+
+Two things make this worth an incident rather than a line in the finding.
+
+**The summary states its own incompleteness and then reasons past it.** It says `3 user messages` and
+shows one. A consumer that trusted the count would know evidence was missing; a consumer that reads the
+prose concludes there is none. Measured: 388 of 419 events (93%) omit content, and the worst drops 376
+of 377 messages.
+
+> A field that reports how much it left out is not a safe input for "there is no evidence of X." Either
+> show the evidence or do not let the consumer conclude from its absence.
+
+**The defect was invisible from every other seat.** It is not a test failure — the collector does
+exactly what its doc comment says. It is not visible in the store, where the summary looks like a
+reasonable one-liner. It surfaced only when a human read the rationale *next to* the transcript it was
+derived from, which is the one comparison triage makes and no automated check does. That is an argument
+for running the human surface early on real data, not just for building it.
+
+A methodological note from the same run, because it nearly became a false finding. The applied comment
+rendered as ``branch \`elasticache-durability\`` when read back, and I was one step from filing an
+escaping bug in the write path. Checking the raw v2 response showed the comment in Jira is clean — the
+backslashes were the MCP client's JSON rendering. **Verify a suspected write-path defect against the
+system of record, not against a tool's display of it.**
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

@@ -29,6 +29,14 @@ type segment struct {
 	firstTS, lastTS string
 	userTexts       []string
 	orderedKeys     []string
+	// factLines are the raw transcript lines this run covered, kept only so
+	// sessionFacts can be computed ONCE over the whole run and ordered by factRules
+	// (finding F25). Accumulating phrases per line instead would fix them in
+	// observation order, which is exactly the churn the ordering exists to prevent.
+	//
+	// Scoped to the run for the same reason keys are: a commit made on one branch is
+	// not evidence about another segment's work.
+	factLines []map[string]any
 	// scmKeys are keys this run named while AUTHORING in the SCM — a commit message,
 	// a branch creation, a PR title (finding F20).
 	//
@@ -128,6 +136,11 @@ func rawRuns(lines []map[string]any) (runs []segment, allBranches []string) {
 				cur.scmKeys = append(cur.scmKeys, key)
 			}
 		}
+
+		// What the run DID, from the same tool calls (finding F25). Accumulated per line
+		// and ordered once at the end rather than here: sessionFacts sorts into
+		// factRules order, and appending per line would leave observation order instead.
+		cur.factLines = append(cur.factLines, line)
 	}
 
 	if cur != nil {
@@ -260,4 +273,7 @@ func absorb(dst *segment, src segment) {
 			dst.scmKeys = append(dst.scmKeys, key)
 		}
 	}
+	// And the lines the facts are derived from, for the same reason: a folded run that
+	// only ran `git commit` carries the one fact the merged segment most needs.
+	dst.factLines = append(dst.factLines, src.factLines...)
 }
