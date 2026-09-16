@@ -56,8 +56,10 @@ fails on any single flaky request will fail often enough to erode trust in the c
 
 - **Only idempotent methods.** `AddComment`, `TransitionIssue` and `CreateIssue` are POST/PUT and Jira
   offers no idempotency key, so a blind retry risks a duplicate comment or a double transition. This
-  is the constraint that rules out `hashicorp/go-retryablehttp`'s default `CheckRetry`, which retries
-  5xx regardless of method.
+  rules out `hashicorp/go-retryablehttp`'s default `CheckRetry` (retries 5xx regardless of method), and
+  it is also why `failsafe-go` offers no advantage here: its `HandleIf` predicate receives only
+  `(*http.Response, error)`, so on a transport error — F23's actual case, where `resp` is nil — it
+  cannot see the method at all. An outer method-gate is structurally required either way.
 - **`Retry-After` on 429.** Jira Cloud rate-limits and sends the header; ignoring it turns a retry
   into an amplifier.
 - **Draining and closing the response body between attempts**, or the connection is not returned to

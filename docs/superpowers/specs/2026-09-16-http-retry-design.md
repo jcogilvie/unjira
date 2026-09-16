@@ -19,29 +19,110 @@ Store-mediation bounds the damage (a re-run resumes), so this is robustness, not
 intended deployment is a cron running `collect` and a human running `triage` — a pipeline that dies on
 any single flaky request will erode trust in the cron.
 
-## Decision: no new dependency
+## Decision: `backoff/v5` behind a RoundTripper, on the merits
 
 **Promote `github.com/cenkalti/backoff/v5` from test-only to production, behind a small
 `http.RoundTripper` in `internal/clients/jira`.**
 
-It is already a direct dependency (`go.mod`), currently used only by `internal/live/jira_test.go`,
-which also already establishes the `WithMaxTries` + `WithMaxElapsedTime` pairing this will use.
+An earlier draft of this spec reached the same conclusion for the wrong reasons, and the reasoning is
+rewritten here rather than quietly corrected. What it argued — *"the deciding argument is the one
+`internal/logging` already made for choosing `log/slog`"* — is a **false analogy**. `log/slog` won
+because it is **stdlib**: zero dependency, permanently. `backoff/v5` is a third-party module that
+happens to already sit in `go.mod`. "Already present" and "costs nothing" are different properties,
+and the draft substituted one for the other. Inertia is not a merit, particularly on a greenfield
+project where swapping is cheap now and expensive later.
 
-### Why not a resilience library
+Re-evaluated against ranked criteria, with the numbers measured rather than asserted:
 
-The alternatives were reviewed against current maintenance status, not reputation:
+### 1. Does it make the load-bearing safety property easy to express?
 
-| Library | Status | Why not |
+The property is **never retry a Jira write** — no idempotency key exists, so a retried POST risks a
+duplicate comment on a real ticket.
+
+`failsafehttp`'s retry predicate is:
+
+```go
+HandleIf(func(resp *http.Response, err error) bool)
+```
+
+It never receives the `*http.Request`. On a *successful* response the method is recoverable via
+`resp.Request`, but **F23's actual failure is a transport error, where `resp == nil`** — so in exactly
+the case that matters for write safety (a POST whose connection died mid-flight; did the server see
+it?) the predicate cannot see the method at all. The outer method-gate below is therefore
+*structurally required* with either library.
+
+**Verdict: a wash.** The earlier draft called failsafe-go "the best-designed option", which overstated
+what its HTTP integration actually provides for this constraint.
+
+### 2. Does it fit where the project is going?
+
+`watch` is already a long-running interval loop, four rate-limited APIs are planned (Jira, GitHub,
+Slack, the LLM gateway), and structured JSON logging was made first-class explicitly because unjira
+"is also expected to run as a service across an org."
+
+**Verdict: failsafe-go's composition model wins on this axis** — see criterion 5 — but it argues for
+*when to revisit*, not for adopting a policy suite before a second policy is needed.
+
+### 3. Dependency cost, measured
+
+| build | binary | third-party packages compiled |
 |---|---|---|
-| `failsafe-go/failsafe-go` | Active, growing; `failsafehttp` subpackage | The closest resilience4j analogue and the best-designed option. Rejected only because it is a *second* dependency for capability `backoff/v5` already provides. Revisit if adaptive rate limiting or hedging is ever wanted. |
-| `hashicorp/go-retryablehttp` | Active (v0.7.8) | Its `DefaultRetryPolicy` retries 5xx **regardless of method** — actively dangerous here. Its own docs admit it "doesn't always act exactly as a RoundTripper should", since the transport shim is secondary to its `*Client` design. |
-| `sony/gobreaker/v2` | Active | Circuit breaking, not retry. See "deferred" below. |
-| `avast/retry-go` | Coasting | Its own README now points readers at a fork. |
-| `sethvargo/go-retry` | Low activity | Adds nothing over the dependency already present. |
+| `net/http` only | 5.04 MB | none |
+| `+ backoff/v5` | 5.10 MB | 1 |
+| `+ failsafehttp` (retry only) | 5.60 MB | failsafe-go core, `failsafehttp`, **`bits-and-blooms/bitset`**, **`influxdata/tdigest`**, and every policy package |
 
-The deciding argument is the one `internal/logging` already made for choosing `log/slog`: this module
-keeps its dependency surface small deliberately. Here it is stronger, because the dependency is
-*already there* — the only question is whether it is imported from production code.
+`failsafehttp` is one package whose server-side helpers import all policies, so **retry-only usage
+still compiles the whole suite**. That directly contradicts pay-for-what-you-use.
+
+**Verdict: `backoff/v5`.**
+
+### 4. Fit to the actual constraint
+
+Jira Cloud's limiter is a **token bucket** (documented: GET 100/s, POST 100/s, PUT/DELETE 50/s, plus an
+hourly points quota). failsafe-go offers smooth (leaky-bucket) and bursty (fixed-window) modes;
+`golang.org/x/time/rate` is a token bucket and therefore matches the thing being protected against
+more precisely.
+
+Its **adaptive** limiter infers a safe *concurrency* ceiling from latency trends — a congestion-control
+mechanism for a dependency whose safe concurrency is unknown. Jira publishes fixed numbers, and unjira
+issues requests serially, so adaptive limiting would slowly converge on a value Atlassian already
+states.
+
+**Verdict: neither — `x/time/rate` if proactive limiting is ever wanted, which needs no library swap.**
+
+### 5. Composability across 3+ policies
+
+`failsafe.With(fallback, retry, breaker, timeout)` composes outermost-to-innermost with documented
+semantics, so retry-outside-breaker means each attempt consults the breaker fresh. Sound and
+comprehensible, and it removes a nesting decision a hand-rolled stack has to get right.
+
+**Verdict: failsafe-go, uncontested — and this is the criterion that should trigger a revisit.**
+
+### 6. API stability
+
+The earlier draft leaned on this hardest and had it backwards. `cenkalti/backoff` shipped **v5 (Dec
+2024), v6 (Jun 2026), and v7 (Jun 2026)** — three import-path-breaking majors in under two years, with
+real signature changes. unjira is pinned to v5.0.3. failsafe-go churns via in-place 0.x renames
+(`Builder()` → `NewBuilder()`, an `int` → `float64` threshold change), which is quieter but invisible
+to SemVer.
+
+**Verdict: neither is stable. They fail differently, and this criterion decides nothing.**
+
+### Why the alternatives lose on merits
+
+| Library | Why not |
+|---|---|
+| `failsafe-go/failsafe-go` | No advantage on criterion 1 (the predicate cannot see the request on the error path), 10× the compiled dependency cost for retry-only, and its rate limiter is a worse mechanism match than `x/time/rate`. Genuinely wins criterion 5 — revisit *there*. |
+| `hashicorp/go-retryablehttp` | `DefaultRetryPolicy` retries 5xx **regardless of method** — actively dangerous here. Its own docs admit it "doesn't always act exactly as a RoundTripper should." |
+| `sony/gobreaker/v2` | Circuit breaking, not retry. The pick *if* a breaker is added. |
+| `avast/retry-go` | Its own README points readers at a fork. |
+| `sethvargo/go-retry` | Adds nothing `backoff/v5` does not already provide. |
+
+**The honest summary: `backoff/v5` wins on measured dependency cost and loses nothing that matters
+today, while failsafe-go's one real advantage (composition) applies to a policy stack unjira does not
+yet have.** Revisit when adding a second policy — most plausibly a circuit breaker once GitHub and
+Slack collectors land — not before, and not for adaptive limiting, hedging, cache or fallback, all of
+which remain speculative for unjira's serial request pattern.
 
 ### What `backoff/v5` supplies, so we do not write it
 
@@ -110,15 +191,29 @@ The transport takes an optional `*slog.Logger` and logs each retry at debug with
 and reason. Silent retries make latency inexplicable — the failure mode F17 was about — and this is
 the one place a wait can now be spent without any stage announcing it.
 
-## Circuit breaking: deferred, deliberately
+## Circuit breaking: deferred, for a different reason than first written
 
-`unjira` is a short-lived CLI. A breaker's value is remembering "do not bother" *across* calls, which
-a process that exits after one pass cannot use. The bounded retry budget above already fails fast.
+An earlier draft justified deferring this with *"unjira is a short-lived CLI; a breaker's value is
+remembering 'do not bother' across calls, which a process that exits after one pass cannot use."*
+**That premise is false, and checkably so.** `watchCmd.Run` (`cmd/unjira/main.go:754-857`) builds the
+`jira.Client`, tracker and applier **once, before `watchLoop`**, and reuses them across every tick of
+`--interval`. So breaker state *would* persist across passes within one `watch` process, and `watch` is
+the long-running mode the README already documents as shipped.
 
-If a long-running daemon mode ever lands, `sony/gobreaker/v2` is the pick, composed *inside* the retry
-transport (`retryTransport{inner: breakerTransport{inner: base}}`) so each attempt consults the
-breaker — not the reverse, which would let one breaker trip abort a retry sequence that was about to
-succeed.
+Worse, the draft used the opposite premise elsewhere in the same repo: `internal/logging`'s package
+comment justifies first-class JSON output because unjira "is also expected to run as a service across
+an org." One roadmap, evaluated two ways depending on which conclusion was convenient.
+
+**The correct reason to defer:** there is no incident evidence. F23 was a *single transient timeout*,
+which a bounded retry handles. A breaker earns its place against a *sustained* outage — where retrying
+every candidate in a pass wastes the whole budget rediscovering that Jira is down — and nothing has
+been observed like that yet. Revisit when it is, or when GitHub and Slack collectors make a
+multi-API blast radius real.
+
+When that happens, `sony/gobreaker/v2` composed *inside* the retry transport
+(`retryTransport{inner: breakerTransport{inner: base}}`) so each attempt consults the breaker — or
+`failsafe-go`, whose documented outermost-to-innermost composition expresses the same ordering without
+hand-nesting, and which wins on that criterion specifically.
 
 ## Testing
 
