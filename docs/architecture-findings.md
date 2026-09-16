@@ -101,47 +101,84 @@ documented 2.41–2.51. Its 1.2× pessimism is the documented design.
 
 Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default).
 
+**Read F18 first.** Those 15 expensive Jira descriptions are `tracker_record` events, and so is every
+other Jira event in the store — 82% of the prompt's characters. F18's exclusion attacks the *volume*;
+capping only shapes what remains. Truncation is still worth having (it bounds any single event,
+whatever its source, and a future GitHub collector will have its own whales), but sizing the cap
+before F18 lands would calibrate it against a corpus that should not be there.
+
 ---
 
-### F18 — clustering barely groups: 73 events sharing 28 tickets became ~106 clusters
+### F18 — clustering narrates the tracker's own bookkeeping back into narratives about it
 
-Two live clustering runs over the same 60-day window (108 candidates, 68 context narratives)
-returned **110 and 104 clusters**. Near 1:1 with the candidate count — clustering is mostly
-relabelling each event as its own narrative rather than grouping anything.
+Two live clustering runs over the same 60-day window (108 candidates) returned **110 and 104
+clusters** — near 1:1, so clustering is mostly relabelling each event as its own narrative. The cause
+is not the model's judgment. It is *what it is being asked to cluster*.
 
-The candidates make that indefensible. Of the 108, **73 are Jira events spanning only 28 distinct
-tickets**:
+**Every Jira event in the store is a tracker record, and they are 82% of the prompt's characters:**
+
+| source | `tracker_record` | events | chars |
+|---|---|---|---|
+| `claude_code` | absent | 229 | 45,550 |
+| `jira` | **true** | 96 | **210,350** |
+
+`events.ArtifactTrackerRecord` (`internal/events/tracker_record.go`) exists precisely to name these:
+"a record the tracker itself produced about a work item it already tracks." Its doc comment answers
+the question directly — *if unjira writes prose sourced only from events like this one, is it telling
+anybody anything they don't have?* No.
+
+**So clustering builds narratives out of them, and they are circular.** Of the 68 narratives:
 
 ```
-PAAS-3972 →  6 unclustered events      PAAS-3886 →  5
-PAAS-3898 →  6                         PAAS-3976 →  4
-PAAS-3974 →  5                         PAAS-3939 →  4
+claude_code only   36
+jira ONLY          29   ← every event is tracker bookkeeping
+mixed               3
 ```
 
-Six events carrying the same issue key in their `external_id`, each landing in a separate cluster.
-The issue key is a deterministic identifier sitting in the data; grouping by it needs no judgment.
+Of those 29 jira-only narratives, **26 contain exactly one distinct issue key**, and for all 26 the
+primary link points at **that same ticket**. A narrative whose entire content is PAAS-4034's own
+changelog, linked to PAAS-4034. `mixed` — a session's work joined to the ticket it concerns, which is
+the whole point of unjira — is **3 of 68**.
 
-This is not session fragmentation. Of the 18 single-event narratives in the store, the 13
-`claude_code` ones each have a `session_id` shared with **zero** other events (measured) — they are
-genuinely isolated work. The problem is specific to events that already announce what they belong to.
+**Every one of the 26 is suppressed downstream**, all by the same filter:
 
-It also explains the drain plateau: narratives grew 59 → 68 across three passes while `unmatched`
-held at 16. Passes manufacture near-singleton narratives rather than absorbing events into existing
-ones.
+```
+comment on PAAS-4034: no evidence of work in the delta — every event is a record
+the tracker produced about itself (3 of them), so a comment could only …
+```
 
-**Consequence.** Every near-singleton narrative is a review-queue candidate, so the queue inflates
-with work that is one ticket's activity split six ways. It also feeds F16: each narrative hydrates
-its own events as context, so poor grouping directly multiplies prompt cost.
+`internal/reconciler/tracker_echo.go:60` calls `events.AnyWorkEvidence(delta)` and correctly refuses.
+So the safety net holds — nothing wrong is written — but the work to reach it is spent every pass:
+cluster the bookkeeping, name it, persist it, hydrate it as context next pass, propose a comment,
+suppress the comment.
 
-`CLAUDE.md`'s invariant says a deterministic pre-filter runs before every model call and extraction
-is a pure function's job, not the model's. `gatherCandidates` does this for *matching*
-(`internal/correlator/match_candidates.go`). Clustering has no equivalent: `buildClusterPrompt`
-(`internal/correlator/correlator.go:362`) hands the model a flat numbered list and asks it to find
-structure that a `strings.Cut(externalID, ":")` already knows.
+**Consequence, and why this outranks F16.** The exclusion is a one-line predicate on data the
+collector already declares, and excluding tracker records from clustering candidates takes the
+60-day window from **108 candidates to 36** — a 67% reduction before any truncation, attacking the
+82% term rather than F16's shaping of it. It also removes the near-singleton narratives inflating the
+review queue, and explains the drain plateau (narratives 59 → 68 across three passes while
+`unmatched` held at 16): passes manufacture jira-only narratives that can never produce an action.
 
-Not fixed here because the shape decision is real — pre-grouping same-key events before the prompt,
-versus telling the model the key and trusting it, versus grouping deterministically and letting the
-model only split. Measured with `TestF16_DecisionDelta` in `internal/pipeline/f16_probe_test.go`.
+`CLAUDE.md`'s invariant says a deterministic pre-filter runs before every model call. `gatherCandidates`
+does this for *matching* (`internal/correlator/match_candidates.go`); clustering has no equivalent, so
+`buildClusterPrompt` (`internal/correlator/correlator.go:362`) receives every event indiscriminately.
+
+**The open question is not whether to exclude but where the line falls**, and it is genuinely open:
+
+- A tracker record is not worthless *as context*. `PAAS-3972 status: In Review → Done` is real
+  evidence about state, which is why the reconciler reads status history rather than ignoring it.
+- Excluding them from *candidates* (never becoming narratives) differs from excluding them from
+  *context* (invisible when judging `EXTENDS`), and the two have different risks.
+- `AnyWorkEvidence` and `IsTrackerRecord` have **one consumer each**, both in the reconciler. Lifting
+  the concept into the correlator is the change; the vocabulary is already there.
+
+Careful distinction: this is **not** `authored_by_unjira`. Of the jira-only narratives' 87 events only
+6 carry that tag — these are mostly *humans'* Jira activity, correctly collected. The problem is that
+tracker bookkeeping of any authorship is not work evidence, which is exactly the distinction
+`ArtifactTrackerRecord` was introduced to draw and `dropSelfAuthored` cannot.
+
+Not session fragmentation either: of the 18 single-event narratives, the 13 `claude_code` ones each
+share a `session_id` with **zero** other events — genuinely isolated work.
 
 ---
 
@@ -807,4 +844,4 @@ both output modes rather than only in tests.
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
 | F16 — nothing bounds event text entering a prompt | **open**: 93.7% of a 140k-token prompt is the 325 events hydrated under context narratives; 15 Jira descriptions (4.6% of events) hold 52% of the chars. Capping per-event summaries at both render sites fits a 365-day window in one call and agrees with uncapped on 91% of clusters — but `max_output_tokens` (32,000) is exhausted first, since completion scales with cluster count. Four candidates falsified by measurement, including window-splitting at 1.37× |
-| F18 — clustering barely groups | **open**: 73 Jira events spanning 28 tickets became ~106 clusters; six events sharing one issue key land in six narratives. No deterministic pre-filter before `buildClusterPrompt`, unlike `gatherCandidates` for matching. Explains the drain plateau (narratives 59 → 68 while unmatched held at 16) and multiplies F16's cost |
+| F18 — clustering narrates the tracker's own bookkeeping | **open**, and outranks F16: all 96 Jira events are `tracker_record` and are 82% of the prompt's chars. 29 of 68 narratives are jira-only; 26 of those hold one issue key and link to that same ticket. All 26 suppressed by `AnyWorkEvidence` downstream, so nothing wrong is written — but the cluster/persist/hydrate/propose/suppress cycle runs every pass. Excluding tracker records takes 60d candidates 108 → 36. Open question is candidates-vs-context, not whether |
