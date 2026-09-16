@@ -2,6 +2,7 @@ package gate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -392,27 +393,20 @@ func (a *Applier) checkWritable(issueKey string) error {
 // tracks", which is a signal about the correlator's attribution — the mention
 // that produced this candidate probably should not have become a link, and
 // triage's [t]arget is the remedy rather than a config edit.
+// The decision itself now lives in config.ProjectWritability, and this defers to it
+// rather than re-deriving it. Triage asks the same question at REVIEW time, so a
+// reviewer learns an action is unappliable before spending judgment on it (measured:
+// 17 of 17 queued actions were unappliable and nothing said so until approval). Two
+// copies of the predicate would be two things to keep in sync, and the failure modes
+// are the worst available here — triage offering an apply the gate then refuses, or
+// hiding one the gate would have allowed.
 func (a *Applier) checkProjectWritable(project string) error {
-	conn, ok := config.Config{Jira: a.jiraConnections}.JiraConnectionForProject(project)
-	if !ok {
-		return fmt.Errorf(
-			"project %q is not tracked by unjira: no jira connection lists it in project_keys, so "+
-				"this action targets work outside what unjira manages. If %q should be tracked, add "+
-				"it to a connection's project_keys (and writable_project_keys to allow writes); "+
-				"otherwise retarget the action to a tracked issue",
-			project, project,
-		)
+	writability := config.Config{Jira: a.jiraConnections}.ProjectWritability(project)
+	if writability.Writable {
+		return nil
 	}
 
-	if !conn.IsProjectWritable(project) {
-		return fmt.Errorf(
-			"project %q is readable but not writable (connection %q lists it in project_keys but "+
-				"not in writable_project_keys); add it there to allow writes",
-			project, conn.Name,
-		)
-	}
-
-	return nil
+	return errors.New(writability.Reason)
 }
 
 // There is deliberately no name-validating counterpart to the old

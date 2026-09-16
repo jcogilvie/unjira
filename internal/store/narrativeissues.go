@@ -88,6 +88,7 @@ func (s *Store) NarrativesWithoutPrimaryLink(limit int) ([]NarrativeRow, error) 
 		     SELECT 1 FROM narrative_issues ni
 		     WHERE ni.narrative_id = n.id AND ni.role = ?
 		 )
+		 `+matchExaminationPredicate+`
 		 ORDER BY n.window_start, n.id
 		 LIMIT ?`,
 		string(RolePrimary), limit,
@@ -129,7 +130,8 @@ func (s *Store) CountNarrativesWithoutPrimaryLink() (int, error) {
 		  WHERE NOT EXISTS (
 		      SELECT 1 FROM narrative_issues ni
 		      WHERE ni.narrative_id = n.id AND ni.role = ?
-		  )`,
+		  )
+		  `+matchExaminationPredicate,
 		string(RolePrimary),
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("counting narratives without a primary link: %w", err)

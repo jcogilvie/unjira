@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -76,9 +77,26 @@ type Item struct {
 	// unjira's stale belief.
 	//
 	// Zero for a `create`, which has no issue until it is applied.
-	Issue    tasktracker.Issue
-	Position int
-	Total    int
+	Issue tasktracker.Issue
+	// Appliable reports whether gate.Applier would accept this action's target
+	// project — asked HERE, at review time, rather than only after approval.
+	//
+	// Write scope used to be checked exclusively inside gate.Applier, so a reviewer
+	// read the issue, read the work, read the drafted prose, judged it, pressed [a],
+	// and only then learned it could not be written. Measured on a rebuilt queue: 17
+	// of 17 proposed actions were unappliable and nothing said so.
+	//
+	// True when the Session has no config to consult (see SetWritability): silence is
+	// not a refusal, and an unconfigured Session must not claim to know write scope.
+	Appliable bool
+	// UnappliableReason is operator-facing prose naming the REMEDY, empty when
+	// Appliable. The two refusals differ in what a reviewer should do — edit
+	// writable_project_keys, or retarget an action drafted for work unjira does not
+	// track — which is why this carries config.Writability's message rather than a
+	// bare flag.
+	UnappliableReason string
+	Position          int
+	Total             int
 }
 
 // Prompter is how a Session asks a human. cmd/unjira implements it against a
@@ -107,6 +125,45 @@ type Session struct {
 	// the batch size for no new information. Per-pass, not longer-lived: within one
 	// review the ticket is not expected to change, but across passes it may.
 	issueCache map[string]tasktracker.Issue
+	// writability answers "may unjira write to this action's project" per item, with
+	// no I/O. Nil means the Session was given no config, in which case every action
+	// reads as appliable — an unconfigured Session must not claim to know write scope,
+	// and every existing caller and test constructs one that way.
+	writability *config.Config
+}
+
+// SetWritability gives the Session the config it needs to tell a reviewer, before they
+// spend judgment, that an action cannot be applied.
+//
+// A setter rather than a NewSession parameter for the reason WithLogger is an option
+// elsewhere in this tree: every existing caller and test would otherwise need editing
+// to pass something they do not care about, and the zero behaviour (report everything
+// appliable) is the correct default for a Session that was told nothing.
+func (s *Session) SetWritability(cfg config.Config) {
+	s.writability = &cfg
+}
+
+// itemWritability is the per-action verdict, defaulting to appliable when the Session
+// holds no config.
+//
+// The project is derived from the issue key's prefix, matching how gate.Applier
+// resolves it for comment and transition actions. A `create` has no issue key yet, so
+// it reads as appliable here and gate.Applier checks it against defaultProject at
+// apply time — deliberately NOT duplicated, since this surface has no way to know
+// which project a create would land in.
+func (s *Session) itemWritability(a store.ActionRow) (bool, string) {
+	if s.writability == nil || a.IssueKey == "" {
+		return true, ""
+	}
+
+	project, _, found := strings.Cut(a.IssueKey, "-")
+	if !found {
+		return true, ""
+	}
+
+	w := s.writability.ProjectWritability(project)
+
+	return w.Writable, w.Reason
 }
 
 // NewSession builds a review session. handler may be nil: the verbs that need
@@ -130,12 +187,35 @@ func (s *Session) Run() error {
 		a := s.batch[i]
 
 		item := Item{Action: a, Position: i + 1, Total: len(s.batch)}
+		item.Appliable, item.UnappliableReason = s.itemWritability(a)
 		s.decorate(&item)
 
 		d, err := s.prompter.Ask(item)
 		if err != nil {
 			return fmt.Errorf("prompting for action %d: %w", a.ID, err)
 		}
+
+		// Refuse approve on an unappliable action rather than trusting the prompter to
+		// have hidden the verb. A Prompter is an interface — a script, a future TUI, a
+		// Slack surface — so the display is a courtesy and this is the guard. Approving
+		// here would only defer bad news gate.Applier is going to deliver anyway, and
+		// leave a `failed` row where a reviewer expected an `applied` one.
+		//
+		// Only APPROVE is gated. Reject stays available because rejecting an
+		// unappliable action is exactly the right disposition, and target stays
+		// available because it is the documented remedy for the untracked case —
+		// blocking either would leave rows nobody can dispose of.
+		if d.Verb == VerbApprove && !item.Appliable {
+			if err := s.prompter.Notify(
+				"cannot apply: " + item.UnappliableReason); err != nil {
+				return fmt.Errorf("notifying unappliable action %d: %w", a.ID, err)
+			}
+
+			i--
+
+			continue
+		}
+
 		switch d.Verb {
 		case VerbApprove, VerbReject, VerbSkip, VerbQuit:
 			// Recorded below; nothing to do but advance.

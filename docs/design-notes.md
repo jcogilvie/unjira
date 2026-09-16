@@ -1058,6 +1058,46 @@ a `T`. The watermark compares those as strings, `'T' (0x54) > ' ' (0x20)`, so ev
 newer and the freeze silently did nothing. A fixture that writes a timestamp in the wrong format does
 not fail; it quietly inverts the predicate it was meant to exercise.
 
+## 33. The same livelock recurs wherever a stage can decline silently
+
+Incident 29 named it: *"An outcome that does not advance the watermark plus a stable selection order
+is a livelock, even when every individual decision is correct."* That was the reconciler, fixed with
+`StatusSuppressed`.
+
+It recurred in **matching**, and nobody looked. `NarrativesWithoutPrimaryLink` orders by
+`(window_start, id)` and `matchOne` returns early when a narrative names no ticket — a correct
+decision with a comment defending it (*"untracked work is the default path, not a special case"*).
+Measured on a freshly rebuilt store: **eleven consecutive passes each reported 49 unmatched**, of
+which 33 could never be matched, and 18 of the 20 selected per pass were among those 33.
+
+Two things make this worth its own incident rather than a footnote on 29.
+
+**It was invisible until an unrelated fix removed the filler.** Before excluding tracker records from
+clustering, 29 of 68 narratives were jira-only — and a jira-sourced event always carries
+`ArtifactIssueKey`, so those always had a candidate and always matched. The bookkeeping was acting as
+ballast that kept the selector advancing. A fix in one stage exposed a latent livelock in another,
+and no test could have caught it because every unit was behaving correctly.
+
+**It blocked more than its own counter.** Creates are gated on matching being caught up, so a count
+that could not reach zero meant **no create was ever proposed** and the review queue could not
+rebuild. A fresh store produced 0 actions where it should have produced ~29. The stalled number was
+the symptom; the empty queue was the cost.
+
+> A stage that can decline without writing anything is a livelock waiting for a stable ORDER BY.
+> After fixing one, grep for the others: `return ..., nil` immediately after a "nothing to do" check.
+
+There were **two** such paths in `matchOne`, not one — no candidates, and every candidate failing
+verification. The second costs tracker calls per pass, not just selector churn, and it would have
+been easy to fix only the path the measurement pointed at.
+
+A corollary on format, since this cost a debugging cycle. The watermark compares `examined_at`
+against `narrative_events.linked_at` lexically, and the first implementation wrote `time.RFC3339`
+(whole seconds) against a column using `%f` (milliseconds). The `narrative_events` schema comment
+already warns about exactly this: `'.'` (0x2E) sorts before `'Z'` (0x5A), so `"…:05Z" > "…:05.123Z"`
+and a *later* event reads as *earlier*. The re-admission silently never fired, turning the watermark
+into the tombstone the design explicitly rejected. **A schema comment warning about a trap is
+evidence the trap is easy to fall into — read it before writing the comparison, not after.**
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

@@ -265,7 +265,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
 	}
 
-	if _, err := db.Exec(schema + localIssuesSchema); err != nil {
+	if _, err := db.Exec(schema + localIssuesSchema + matchExaminationsSchema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
