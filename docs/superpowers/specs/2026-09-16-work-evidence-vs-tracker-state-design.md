@@ -25,6 +25,16 @@ tracker_echo suppresses it, correctly
 Three separate filters exist at the exit — `suppressTrackerEcho`, `AnyWorkEvidence`,
 `dropSelfAuthored` — for one classification error at the entrance. That is the smell.
 
+**The exit filters stay, and this is a correction to an earlier draft of this spec.** The
+implementation measured 96 tracker records *already linked* into narratives from before the
+filter existed, and `narrative_events` rows are never deleted — so those deltas will carry
+tracker records for as long as those narratives live. The exclusion is also opt-in by the
+producing collector, so a collector that forgets to mark its records (the failure
+`IsTrackerRecord` deliberately tolerates) feeds them straight through. This is therefore
+defense in depth: the entrance filter stops the pipeline *paying* to narrate bookkeeping;
+the exit filters stop it *saying* anything derived from bookkeeping. "It lets you delete
+code" was the wrong test to apply here.
+
 ### Measured consequences
 
 Of 68 narratives in the dev store:

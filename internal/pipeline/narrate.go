@@ -8,6 +8,7 @@ import (
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
+	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -31,10 +32,17 @@ type NarrateResult struct {
 	Window            correlator.TimeRange
 	UnlinkedEvents    int // clustering candidates considered
 	ContextNarratives int // existing narratives passed to Cluster as context
-	DryRun            bool
-	Stats             correlator.Stats
-	Narratives        []NarratedNarrative
-	Compactions       []Compaction
+	// ExcludedTrackerRecords counts unlinked events in the window NOT offered to
+	// clustering because they are the tracker's own bookkeeping (finding F18).
+	//
+	// Reported rather than merely dropped: an unreported exclusion reads as "nothing
+	// was left out", and an operator looking at an empty pass needs to tell "no work
+	// happened" from "all of it was filtered".
+	ExcludedTrackerRecords int
+	DryRun                 bool
+	Stats                  correlator.Stats
+	Narratives             []NarratedNarrative
+	Compactions            []Compaction
 }
 
 // NarratedNarrative is one narrative this pass produced, with the member
@@ -92,11 +100,26 @@ func RunNarrate(
 ) (NarrateResult, error) {
 	result := NarrateResult{Window: window, DryRun: opts.DryRun}
 
-	candidates, err := s.UnlinkedEventsInRange(window.Start, window.End)
+	unlinked, err := s.UnlinkedEventsInRange(window.Start, window.End)
 	if err != nil {
 		return NarrateResult{}, fmt.Errorf("assembling clustering candidates: %w", err)
 	}
+
+	// Only work evidence is clusterable (finding F18). A tracker record is the OTHER
+	// side of the diff unjira computes — the tracker's own account of itself — so
+	// narrating one produces a story that restates a ticket, matches it to the ticket
+	// it came from, and proposes a comment that suppressTrackerEcho then refuses.
+	// Measured before this filter: 82% of the prompt's characters, and 29 of 68
+	// narratives containing nothing else.
+	//
+	// The excluded half is NOT linked to anything, so the next pass sees it again.
+	// That is deliberate and cheap: the filter is a pure function running before any
+	// model call, so a repeat costs a map lookup rather than tokens — which is what
+	// makes it unlike design-notes #29's livelock, where narratives were re-examined
+	// at full model cost. Do not "fix" this with a watermark.
+	candidates, trackerRecords := events.PartitionByTrackerRecord(unlinked)
 	result.UnlinkedEvents = len(candidates)
+	result.ExcludedTrackerRecords = len(trackerRecords)
 
 	if len(candidates) == 0 {
 		// Nothing to narrate is a normal outcome. Return before spending a
