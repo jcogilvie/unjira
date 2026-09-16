@@ -111,10 +111,15 @@ type ClusterResult struct {
 // compared against PromptTokens (the server's actual count) to check whether
 // that heuristic is any good.
 type Stats struct {
-	Calls            int
-	Splits           int // window bisections
-	MergeChecks      int // same-story checks at split seams
-	Compactions      int // Persist only
+	Calls       int
+	Splits      int // window bisections
+	MergeChecks int // same-story checks at split seams
+	Compactions int // Persist only
+	// Truncation is what the per-event summary cap left out, empty when no cap is
+	// configured (finding F16). Carried on Stats because that is what already flows
+	// from Cluster to internal/pipeline to the rendered pass summary — the same route
+	// EstimatedTokens takes, and reporting the cut is the point of having the cap.
+	Truncation       TruncationReport
 	PromptTokens     int64
 	CompletionTokens int64
 	EstimatedTokens  int
@@ -132,6 +137,15 @@ func (s *Stats) Add(other Stats) {
 	s.Splits += other.Splits
 	s.MergeChecks += other.MergeChecks
 	s.Compactions += other.Compactions
+	// Truncation sums across a bisected pass's levels the way every other counter
+	// does, so a split pass reports what the whole tree cut rather than one level's
+	// share. Lengths concatenate; the longest wins.
+	s.Truncation.Truncated += other.Truncation.Truncated
+	s.Truncation.OriginalLengths = append(
+		s.Truncation.OriginalLengths, other.Truncation.OriginalLengths...)
+	if other.Truncation.LongestOriginal > s.Truncation.LongestOriginal {
+		s.Truncation.LongestOriginal = other.Truncation.LongestOriginal
+	}
 	s.PromptTokens += other.PromptTokens
 	s.CompletionTokens += other.CompletionTokens
 	s.EstimatedTokens += other.EstimatedTokens
@@ -153,6 +167,9 @@ type clusterOptions struct {
 	rules       []rules.Rule
 	instruction string
 	log         *slog.Logger
+	// maxEventSummaryChars caps each context event's summary. Zero is unlimited,
+	// which keeps every existing caller and test unchanged (finding F16).
+	maxEventSummaryChars int
 }
 
 // ClusterOption configures an optional Cluster behaviour.
@@ -178,6 +195,18 @@ func WithClusterRules(learnedRules []rules.Rule) ClusterOption {
 func WithLogger(log *slog.Logger) ClusterOption {
 	return func(o *clusterOptions) {
 		o.log = log
+	}
+}
+
+// WithMaxEventSummaryChars caps each context event's summary in the prompt, reporting
+// what it truncated on Stats. Zero — the default — is unlimited.
+//
+// An option rather than a parameter for the reason WithClusterRules is one: Cluster's
+// positional signature should not grow per knob, and every existing caller means
+// "unlimited" without being edited to say so.
+func WithMaxEventSummaryChars(maxChars int) ClusterOption {
+	return func(o *clusterOptions) {
+		o.maxEventSummaryChars = maxChars
 	}
 }
 
@@ -222,6 +251,11 @@ func Cluster(
 	filtered := filterEventsInWindow(evts, window)
 	relevant := filterAdjacentOrOverlapping(existing, window)
 
+	// Bound the prompt's dominant term before building it (finding F16). Applied to
+	// the CONTEXT narratives only: the window's own events are the work being
+	// clustered, and truncating those would degrade the judgment rather than its cost.
+	relevant, truncation := capEventSummaries(relevant, o.maxEventSummaryChars)
+
 	// assignable shares ONE index space between the prompt and the parser:
 	// buildClusterPrompt numbers this exact slice, and parseClusterResponse
 	// resolves event_indices against it. Passing `filtered` to the parser while
@@ -231,6 +265,7 @@ func Cluster(
 	systemPrompt, userPrompt := buildClusterPrompt(assignable, relevant, o.rules, o.instruction)
 
 	var stats Stats
+	stats.Truncation = truncation
 	estimated := estimateTokens(systemPrompt + userPrompt)
 	stats.EstimatedTokens = estimated
 	if estimated > contextWindowTokens {

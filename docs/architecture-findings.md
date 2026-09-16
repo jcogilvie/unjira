@@ -84,101 +84,64 @@ real store exists, which is why it is recorded now rather than rediscovered then
 
 ---
 
-### F16 — nothing bounds how much event text enters a prompt, and the response ceiling is hit first
+### F16 — the prompt is unbounded in the window, and the response ceiling binds first
 
-A 90-day `dev narrate` ran ~18 minutes and died on a 504, having printed nothing and persisted
-nothing. The window is the only lever an operator has, and the cost is unbounded in it.
+A 90-day `dev narrate` ran ~18 minutes and died on a 504. The window is the only lever an operator has
+and the cost is unbounded in it.
 
-**Where the tokens are.** Measured by zeroing each payload site and diffing, against the real store
-(68 context narratives, 30-day window, 140,119 estimated tokens):
+**RE-MEASURED after F18 landed, and the finding's original diagnosis no longer holds.** Attribution by
+zeroing each payload site, on the current store:
 
-| zeroed | tokens | that field costs |
+| zeroed | tokens | costs |
 |---|---|---|
-| `Narrative.Events` | 140,119 | 0.0% |
-| `Narrative.EligibleEvents` | 8,794 | **93.7%** |
-| `Narrative.Summary` | 136,708 | 2.4% |
-| all narratives | 308 | 99.8% |
+| `Narrative.Events` | 100,600 | 0.0% |
+| `Narrative.EligibleEvents` | 90,144 | 10.4% |
+| `Narrative.Summary` | 99,404 | 1.2% |
+| **all context narratives** | 86,927 | **13.6%** |
 
-So the cost is neither the window's own events nor the narrative summaries — it is the **325 events
-hydrated underneath the context narratives**, at ~430 tokens each. They render at two sites:
-`EligibleEvents` as numbered candidates (`internal/correlator/correlator.go:380`) and `Events` as
-context detail (`:393`). `hydrateContextNarratives` partitions between them by the freeze watermark
-(`internal/pipeline/narrate.go:249-250`), so an event's *field* changes with the watermark but its
-presence in the prompt does not.
+Context narratives were **99.8%** of the cost when this finding was written. They are now **13.6%**,
+because F18 stopped tracker records from becoming narratives and every one of the 15 whale events —
+the 15,037-char Jira descriptions that held 52% of all characters — is a tracker record, now excluded
+before the prompt is built.
 
-The distribution is extreme: **15 events (4.6%) hold 52% of the characters**, all 15 Jira events
-whose `description` is a full incident write-up (PAAS-4002's is 12,397 chars). Their first ~150
-chars carry the issue key, title, and summary heading — the part clustering needs.
+**Measured consequence: a per-event summary cap is inert on this store.** The longest summary that can
+reach a prompt is **299 characters**, and **zero** work-evidence events exceed 2000. The cap was
+implemented, tested, and wired (`correlator.WithMaxEventSummaryChars`, reporting truncation counts and
+real lengths on `Stats`) — and it truncates nothing, because the payload it was designed to bound is
+no longer in the payload.
 
-**The fix that measures well.** Capping each context event's summary at both render sites:
+Kept rather than reverted, for two reasons. It bounds any *single* event whatever its source, which a
+future GitHub or Slack collector may well need — PR bodies and thread transcripts are whale-shaped. And
+the reporting half is the part that matters: a cap that fires silently would read as "nothing was left
+out", so it reports counts and pre-truncation lengths so an operator can tune it against evidence.
 
-```
-since | uncapped |  cap5000  cap2000  cap1000   cap500
-  30d |  140,119 |  110,757   74,072   59,221   50,010
-  90d |  203,625!|  174,262  137,577  122,726  113,516
- 365d |  229,263!|  199,901  163,216  148,365  139,154
-                                  ! = over the 200k budget, bisects
-```
+**What actually dominates now is VOLUME, not size:** 260 work-evidence events in a 30-day window at
+52,667 characters total — many small events rather than a few large ones. A per-event cap cannot help
+with that by construction; bounding it means bounding the *count*, which is a different and riskier
+change (which events do you drop, and what does clustering lose?).
 
-`cap2000` fits a **full-year** window in one call. Two live runs at `cap2000` versus uncapped agreed
-on **100 of 110 clusters (91%)**; the 10 differences were regroupings at the margin (8 `NEW`, 2
-`EXTENDS`), i.e. slightly coarser clusters, not a collapse. Prompt fell 143,229 → 89,193 actual
-tokens (38%).
-
-**But the response ceiling binds first.** The `cap2000` run initially *failed* where uncapped
-succeeded:
+**And the response ceiling still binds first.** A capped prompt still yields ~104 clusters, each
+emitting a title and summary, so `llm.max_output_tokens` is exhausted before the prompt budget is:
 
 ```
 response truncated after 32000 completion tokens (finish_reason=length)
 ```
 
-A smaller prompt still yields ~104 clusters, each emitting a title and summary, so
-`llm.max_output_tokens` (32,000 — `internal/config/config.go:209`) is exhausted before the prompt
-budget is. Any input-side fix alone leaves a wide window failing for the opposite reason. The
-completion side scales with **cluster count**, which measured ~1 per candidate (110 and 104 clusters
-from 108 candidates over two runs).
+That half is untouched by anything above, and is the next thing to fix. Completion scales with cluster
+count, which F18's near-1:1 grouping makes worse than it needs to be.
 
-**Four candidates were falsified by measurement, and are recorded so they are not re-proposed:**
+**Four candidates falsified by measurement, recorded so they are not re-proposed:**
 
 1. **Split the window.** Already implemented (`clusterWithSplit`). Costs **1.37×** at 90 days — both
-   halves re-hydrate the same 68 context narratives, dividing events while duplicating context.
-2. **Cap the narrative count.** Attacks 2.4% of the payload. It appeared to work only because
-   dropping a narrative incidentally drops its events.
-3. **Truncate `Events` / omit detail for primary-linked narratives.** Measured **0.0%** — `Events`
-   is empty whenever nothing has been applied. Also unsafe: dropping a narrative from `existing`
-   removes its events from `assignableEvents`' index space (`:348`), so reshuffling silently loses
-   reach.
-4. **Drain the action queue so the freeze watermark advances.** Simulated on a copy: 16 narratives
-   frozen, 102 events moved `EligibleEvents` → `Events`, and tokens went **up 131**. The watermark
-   governs assignability, not visibility.
+   halves re-hydrate the same context.
+2. **Cap the narrative count.** Attacks what is now a 1.2% term.
+3. **Truncate `Events` only.** Measured **0.0%** — that field is empty whenever nothing is applied.
+4. **Drain the action queue to advance the freeze watermark.** **+131 tokens**; the watermark governs
+   assignability, not visibility.
 
-`estimateTokens` is *not* implicated: at 500× the scale of its documented calibration it implied
-2.41 chars/token against the server's own count (172,351 est / 143,229 actual), squarely on the
-documented 2.41–2.51. Its 1.2× pessimism is the documented design.
-
-Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default).
-
-**Excluding tracker records from clustering did NOT reduce this**, and that is worth stating plainly
-because an earlier draft of this finding predicted it would. Re-measured on the same store after that
-exclusion landed:
-
-```
-since | uncapped |  cap5000  cap2000  cap1000   cap500
-  30d |  139,059 |  110,845   77,002   63,651   55,195
-  90d |  209,440!|  180,077  143,392  128,541  119,331
- 365d |  235,512!|  206,150! 169,465  154,614  145,403
-                                  ! = over the 200k budget, bisects
-```
-
-Slightly *higher* than before, not lower. The two touch different things: the exclusion filters
-clustering **candidates**, while the 93.7% attributed above is events hydrated as **context** under
-narratives that already exist. Those narratives were built before the filter and their
-`narrative_events` rows are never deleted, so their tracker records still render. Excluding a category
-at the entrance does not retroactively empty the containers already holding it — the same reasoning
-that keeps the reconciler's exit filters load-bearing, and a consequence of F21.
-
-So the cap is still needed, and sizing it is now unblocked: `cap2000` is the smallest tier that fits a
-365-day window in one call, and even `cap5000` stops fitting at 180 days.
+Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default). Note the
+probe truncates `Events` and so shows a per-event cap having no effect — which is the same
+wrong-field trap design-notes #32 records, and is now a true result rather than an instrument error.
 
 ---
 

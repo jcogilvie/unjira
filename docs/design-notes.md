@@ -1157,6 +1157,38 @@ a different costume — a fixture store rebuilt between measurements silently re
 measured — so the general form is: **establish what the "before" state actually was, and when, before
 attributing a delta to your own change.**
 
+## 36. A fix landing can invalidate the finding that motivated the next one
+
+F16 attributed 99.8% of a clustering prompt to context narratives, and 52% of all characters to 15
+whale events — Jira descriptions up to 15,037 chars. A per-event summary cap was the obvious fix, and
+the measurement supporting it was sound when taken.
+
+Then F18 shipped, excluding tracker records from clustering. **Every one of those 15 whales is a
+tracker record.** Re-measured on the same store afterward:
+
+```
+context narratives:  99.8%  ->  13.6%
+longest summary that can reach a prompt:  15,037  ->  299 chars
+work-evidence events over 2000 chars:              0
+```
+
+The cap was implemented, tested, wired, and is **provably inert** — not because it is wrong, but
+because the payload it bounds left the payload.
+
+> A finding's measurement has a shelf life bounded by the next fix that touches the same data. Re-run
+> it before implementing against it, not after.
+
+Two things kept this from being wasted work. The cap was verified against the real store rather than
+assumed to help, so the negative result surfaced before the PR claimed a benefit. And it was kept
+rather than reverted on a stated argument — it bounds any single event whatever its source, and a future
+GitHub or Slack collector has whale-shaped inputs (PR bodies, thread transcripts) — rather than on
+sunk cost.
+
+The corollary is about what replaced it. The cost is now **volume, not size**: 260 events at 52,667
+characters, many small rather than a few large. A per-event cap cannot address that by construction, and
+bounding the count is a different, riskier change — you have to decide which events to drop and what
+clustering loses. Recognising that the shape changed is the actual result of the re-measurement.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

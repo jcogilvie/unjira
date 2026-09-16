@@ -56,6 +56,18 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 	fmt.Fprintf(b, "tokens   %d prompt + %d completion (estimated %d)\n",
 		r.Stats.PromptTokens, r.Stats.CompletionTokens, r.Stats.EstimatedTokens)
 
+	// Only when the cap actually fired. A zero line on every pass is noise, but a
+	// SILENT truncation reads as "nothing was left out" — F25's defect one layer down.
+	// The longest original length is included because it is the number an operator
+	// needs to choose a better cap: a count says something was cut, not how much more
+	// room it would take to keep it.
+	if t := r.Stats.Truncation; t.Truncated > 0 {
+		fmt.Fprintf(b,
+			"capped   %d event summary/summaries truncated (longest was %d chars) — "+
+				"raise correlator.max_event_summary_chars to keep more\n",
+			t.Truncated, t.LongestOriginal)
+	}
+
 	for _, c := range r.Compactions {
 		fmt.Fprintf(b, "compact  narrative %d: folded %d event(s) up to %s\n",
 			c.NarrativeID, c.EventsFolded, c.Boundary.Format(time.RFC3339))
