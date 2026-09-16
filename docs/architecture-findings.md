@@ -28,6 +28,123 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
+### F16 — nothing bounds how much event text enters a prompt, and the response ceiling is hit first
+
+A 90-day `dev narrate` ran ~18 minutes and died on a 504, having printed nothing and persisted
+nothing. The window is the only lever an operator has, and the cost is unbounded in it.
+
+**Where the tokens are.** Measured by zeroing each payload site and diffing, against the real store
+(68 context narratives, 30-day window, 140,119 estimated tokens):
+
+| zeroed | tokens | that field costs |
+|---|---|---|
+| `Narrative.Events` | 140,119 | 0.0% |
+| `Narrative.EligibleEvents` | 8,794 | **93.7%** |
+| `Narrative.Summary` | 136,708 | 2.4% |
+| all narratives | 308 | 99.8% |
+
+So the cost is neither the window's own events nor the narrative summaries — it is the **325 events
+hydrated underneath the context narratives**, at ~430 tokens each. They render at two sites:
+`EligibleEvents` as numbered candidates (`internal/correlator/correlator.go:380`) and `Events` as
+context detail (`:393`). `hydrateContextNarratives` partitions between them by the freeze watermark
+(`internal/pipeline/narrate.go:249-250`), so an event's *field* changes with the watermark but its
+presence in the prompt does not.
+
+The distribution is extreme: **15 events (4.6%) hold 52% of the characters**, all 15 Jira events
+whose `description` is a full incident write-up (PAAS-4002's is 12,397 chars). Their first ~150
+chars carry the issue key, title, and summary heading — the part clustering needs.
+
+**The fix that measures well.** Capping each context event's summary at both render sites:
+
+```
+since | uncapped |  cap5000  cap2000  cap1000   cap500
+  30d |  140,119 |  110,757   74,072   59,221   50,010
+  90d |  203,625!|  174,262  137,577  122,726  113,516
+ 365d |  229,263!|  199,901  163,216  148,365  139,154
+                                  ! = over the 200k budget, bisects
+```
+
+`cap2000` fits a **full-year** window in one call. Two live runs at `cap2000` versus uncapped agreed
+on **100 of 110 clusters (91%)**; the 10 differences were regroupings at the margin (8 `NEW`, 2
+`EXTENDS`), i.e. slightly coarser clusters, not a collapse. Prompt fell 143,229 → 89,193 actual
+tokens (38%).
+
+**But the response ceiling binds first.** The `cap2000` run initially *failed* where uncapped
+succeeded:
+
+```
+response truncated after 32000 completion tokens (finish_reason=length)
+```
+
+A smaller prompt still yields ~104 clusters, each emitting a title and summary, so
+`llm.max_output_tokens` (32,000 — `internal/config/config.go:209`) is exhausted before the prompt
+budget is. Any input-side fix alone leaves a wide window failing for the opposite reason. The
+completion side scales with **cluster count**, which F18 shows is currently ~1 per candidate.
+
+**Four candidates were falsified by measurement, and are recorded so they are not re-proposed:**
+
+1. **Split the window.** Already implemented (`clusterWithSplit`). Costs **1.37×** at 90 days — both
+   halves re-hydrate the same 68 context narratives, dividing events while duplicating context.
+2. **Cap the narrative count.** Attacks 2.4% of the payload. It appeared to work only because
+   dropping a narrative incidentally drops its events.
+3. **Truncate `Events` / omit detail for primary-linked narratives.** Measured **0.0%** — `Events`
+   is empty whenever nothing has been applied. Also unsafe: dropping a narrative from `existing`
+   removes its events from `assignableEvents`' index space (`:348`), so reshuffling silently loses
+   reach.
+4. **Drain the action queue so the freeze watermark advances.** Simulated on a copy: 16 narratives
+   frozen, 102 events moved `EligibleEvents` → `Events`, and tokens went **up 131**. The watermark
+   governs assignability, not visibility.
+
+`estimateTokens` is *not* implicated: at 500× the scale of its documented calibration it implied
+2.41 chars/token against the server's own count (172,351 est / 143,229 actual), squarely on the
+documented 2.41–2.51. Its 1.2× pessimism is the documented design.
+
+Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default).
+
+---
+
+### F18 — clustering barely groups: 73 events sharing 28 tickets became ~106 clusters
+
+Two live clustering runs over the same 60-day window (108 candidates, 68 context narratives)
+returned **110 and 104 clusters**. Near 1:1 with the candidate count — clustering is mostly
+relabelling each event as its own narrative rather than grouping anything.
+
+The candidates make that indefensible. Of the 108, **73 are Jira events spanning only 28 distinct
+tickets**:
+
+```
+PAAS-3972 →  6 unclustered events      PAAS-3886 →  5
+PAAS-3898 →  6                         PAAS-3976 →  4
+PAAS-3974 →  5                         PAAS-3939 →  4
+```
+
+Six events carrying the same issue key in their `external_id`, each landing in a separate cluster.
+The issue key is a deterministic identifier sitting in the data; grouping by it needs no judgment.
+
+This is not session fragmentation. Of the 18 single-event narratives in the store, the 13
+`claude_code` ones each have a `session_id` shared with **zero** other events (measured) — they are
+genuinely isolated work. The problem is specific to events that already announce what they belong to.
+
+It also explains the drain plateau: narratives grew 59 → 68 across three passes while `unmatched`
+held at 16. Passes manufacture near-singleton narratives rather than absorbing events into existing
+ones.
+
+**Consequence.** Every near-singleton narrative is a review-queue candidate, so the queue inflates
+with work that is one ticket's activity split six ways. It also feeds F16: each narrative hydrates
+its own events as context, so poor grouping directly multiplies prompt cost.
+
+`CLAUDE.md`'s invariant says a deterministic pre-filter runs before every model call and extraction
+is a pure function's job, not the model's. `gatherCandidates` does this for *matching*
+(`internal/correlator/match_candidates.go`). Clustering has no equivalent: `buildClusterPrompt`
+(`internal/correlator/correlator.go:362`) hands the model a flat numbered list and asks it to find
+structure that a `strings.Cut(externalID, ":")` already knows.
+
+Not fixed here because the shape decision is real — pre-grouping same-key events before the prompt,
+versus telling the model the key and trusting it, versus grouping deterministically and letting the
+model only split. Measured with `TestF16_DecisionDelta` in `internal/pipeline/f16_probe_test.go`.
+
+---
+
 ### F1 — refs and fanout await a collector that does not exist yet
 
 `internal/correlator/refs` and `internal/correlator/fanout` are pure, thoroughly tested, and have
@@ -689,3 +806,5 @@ both output modes rather than only in tests.
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
+| F16 — nothing bounds event text entering a prompt | **open**: 93.7% of a 140k-token prompt is the 325 events hydrated under context narratives; 15 Jira descriptions (4.6% of events) hold 52% of the chars. Capping per-event summaries at both render sites fits a 365-day window in one call and agrees with uncapped on 91% of clusters — but `max_output_tokens` (32,000) is exhausted first, since completion scales with cluster count. Four candidates falsified by measurement, including window-splitting at 1.37× |
+| F18 — clustering barely groups | **open**: 73 Jira events spanning 28 tickets became ~106 clusters; six events sharing one issue key land in six narratives. No deterministic pre-filter before `buildClusterPrompt`, unlike `gatherCandidates` for matching. Explains the drain plateau (narratives 59 → 68 while unmatched held at 16) and multiplies F16's cost |

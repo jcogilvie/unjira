@@ -1013,6 +1013,51 @@ motivating case. So the deterministic path still does not bridge them. What coll
 is that this changes the vector index from "build it and hope" to "build it over a corpus that contains
 the answer", and it would have been easy to write the commit message as though the case were closed.
 
+## 32. Find which field holds the bytes before proposing what to trim
+
+Diagnosing F16 (an unbounded clustering prompt), I proposed four fixes in a row. Every one was
+falsified by measurement, and all four failed for the same reason: I reasoned about the *shape* of the
+code instead of measuring which field the data was actually in.
+
+| proposal | measured outcome |
+|---|---|
+| Split the window | **1.37× worse** — both halves re-hydrate the same context |
+| Cap the narrative count | attacks 2.4% of the payload |
+| Truncate `Narrative.Events` | **0.0%** — the field is empty |
+| Drain the queue to advance the freeze watermark | **+131 tokens** |
+
+Each was plausible from reading the code. The third is the sharpest: `hydrateContextNarratives`
+partitions events into `Events` (frozen) and `EligibleEvents` (assignable), and because nothing had
+ever been applied, *everything* was in `EligibleEvents` and `Events` was empty for all 68 narratives.
+I truncated the empty one and measured exactly 100.0% of baseline — an unmistakable signature I
+initially read as "small effect" rather than "wrong field."
+
+What finally settled it took one test: zero each payload site in turn and diff the totals.
+
+```
+Events=nil            140,119 tok | costs       0 (  0.0%)
+EligibleEvents=nil      8,794 tok | costs 131,325 ( 93.7%)
+Summary=""            136,708 tok | costs   3,411 (  2.4%)
+```
+
+That should have been the first thing built, not the fifth. It is cheaper than any of the four
+arguments it replaced — the prompt builder is pure, so the whole harness runs offline against a copy
+of the store with a fake client and costs nothing per run.
+
+> When output doesn't move, suspect the instrument before the hypothesis. An effect of *exactly*
+> 100.0% is not a weak result; it is evidence you are manipulating something nothing reads.
+
+The generalizable rule: **before optimizing a payload, attribute it.** Zeroing one contributor at a
+time is a two-line change that converts a debate about architecture into a table of numbers. Prefer
+it to any amount of reading, especially when the code has two similarly-named fields and a
+partitioning rule between them.
+
+A corollary about measurement hygiene, since two rounds were wasted on it. My simulated drain wrote
+`executed_at` with SQLite's `datetime('now')` — a space separator — while `linked_at` is RFC3339 with
+a `T`. The watermark compares those as strings, `'T' (0x54) > ' ' (0x20)`, so every event compared as
+newer and the freeze silently did nothing. A fixture that writes a timestamp in the wrong format does
+not fail; it quietly inverts the predicate it was meant to exercise.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
