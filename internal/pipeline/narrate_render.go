@@ -43,6 +43,14 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 		r.Window.Start.Format(time.RFC3339), r.Window.End.Format(time.RFC3339))
 	fmt.Fprintf(b, "events   %d unlinked candidate(s), %d narrative(s) as context\n",
 		r.UnlinkedEvents, r.ContextNarratives)
+
+	// Only when something was excluded: a zero line on every pass is noise, but a
+	// silent exclusion makes "no work happened" indistinguishable from "all of it was
+	// filtered" (finding F18).
+	if r.ExcludedTrackerRecords > 0 {
+		fmt.Fprintf(b, "excluded %d tracker record(s) — the tracker's own bookkeeping, not work evidence\n",
+			r.ExcludedTrackerRecords)
+	}
 	fmt.Fprintf(b, "llm      %d call(s), %d split(s), %d merge check(s)\n",
 		r.Stats.Calls, r.Stats.Splits, r.Stats.MergeChecks)
 	fmt.Fprintf(b, "tokens   %d prompt + %d completion (estimated %d)\n",

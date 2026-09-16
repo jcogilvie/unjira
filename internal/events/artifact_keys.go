@@ -41,6 +41,28 @@ const (
 	// caller writing or reading with the wrong shape silently loses every key
 	// on the first store round trip rather than failing loudly.
 	ArtifactTicketKeys = "ticket_keys"
+
+	// ArtifactSCMKeys is every ticket key a claude_code session named while
+	// AUTHORING in source control — a commit message, a branch creation, a PR
+	// title — in first-seen order.
+	//
+	// Separate from ArtifactTicketKeys rather than folded into it, for the same
+	// reason that constant's comment gives for the correlator re-deriving branch
+	// keys: flattening loses the distinction that matters most for attribution.
+	// A prose mention is someone talking about a ticket; a commit message is
+	// someone naming the ticket for this work, which is the same explicit human
+	// act that makes a branch name the strongest inferred signal.
+	//
+	// Written by the claudecode collector for finding F20: messageText reads only
+	// text blocks, so every key named in a tool call was discarded. Measured over
+	// 28 transcripts, 10 of 20 sessions carrying any key had one only here.
+	//
+	// Deliberately excludes keys from READING commands (`git log --grep=`, `gh pr
+	// view`): 8 of the keys measured appeared only in those, where an agent is
+	// investigating a ticket it may have nothing to do with.
+	//
+	// Same []any storage contract as ArtifactTicketKeys — use SetSCMKeys/SCMKeysOf.
+	ArtifactSCMKeys = "scm_keys"
 )
 
 // SetTicketKeys records keys on evt as the ArtifactTicketKeys artifact, for a
@@ -70,6 +92,40 @@ func SetTicketKeys(evt *Event, keys []string) {
 // a panic).
 func TicketKeysOf(evt Event) []string {
 	raw, ok := evt.Artifacts[ArtifactTicketKeys].([]any)
+	if !ok {
+		return nil
+	}
+
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+
+	return out
+}
+
+// SetSCMKeys records keys on evt as the ArtifactSCMKeys artifact, for a collector
+// emitting the tickets a session named while authoring in source control.
+//
+// Same []any storage contract as SetTicketKeys, and for the same reason: a JSON
+// round trip through the store produces []any on read, so writing []string would
+// work until the first round trip and then silently read as nothing.
+func SetSCMKeys(evt *Event, keys []string) {
+	out := make([]any, len(keys))
+	for i, k := range keys {
+		out[i] = k
+	}
+
+	evt.Artifacts[ArtifactSCMKeys] = out
+}
+
+// SCMKeysOf reads evt's ArtifactSCMKeys artifact as a []string, with the same
+// tolerance TicketKeysOf documents: absence, a wrong container type, or malformed
+// elements degrade to fewer keys rather than erroring.
+func SCMKeysOf(evt Event) []string {
+	raw, ok := evt.Artifacts[ArtifactSCMKeys].([]any)
 	if !ok {
 		return nil
 	}

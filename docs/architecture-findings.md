@@ -28,6 +28,231 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
+### F19 — a link derived from co-clustering is recorded at 0.98–1.0 confidence
+
+Three narratives hold a primary link at `ProvenanceJiraEvent`:
+
+```
+narrative  issue_key   role     provenance   confidence
+17         PAAS-3939   primary  jira_event   0.98
+18         PAAS-4017   primary  jira_event   1.0
+25         PAAS-3805   primary  jira_event   1.0
+```
+
+`ProvenanceJiraEvent` means "a key found in a Jira-sourced event" — and that event is in the cluster
+only because clustering put it there. So for narratives 17 and 25 the link rests on *nothing but
+co-occurrence in a window*: their session branches are `paas-xelasticache-autoscaling` and
+`vpc-output-application`, and neither contains its ticket key, in prose or anywhere else.
+
+The links are probably **correct** — `paas-xelasticache-autoscaling` really is PAAS-3939's *"Add
+Application Auto Scaling support to XElastiCache"*. But the relationship is **semantic**, and the
+pipeline is recording it as deterministic. `ProvenanceJiraEvent`'s doc comment justifies its rank
+because "the event IS about that issue" — true of the *event*, and silently inherited by the
+*narrative* the event was grouped into.
+
+**Consequence.** A 1.0-confidence link nothing downstream can falsify. `confidence_floor` is one of
+the three write gates, so an inflated confidence is a safety property, not a cosmetic one: it is the
+number that decides whether a proposal needs review. It also hides the semantic-matching gap that
+motivates the vector index — the case looks solved.
+
+Not a rank bug: `ProvenanceJiraEvent` is correctly ranked for what it describes. The defect is that a
+narrative inherits an event-level provenance without recording that the inheritance happened.
+Addressed by `docs/superpowers/specs/2026-09-16-work-evidence-vs-tracker-state-design.md`, which
+removes the co-clustering that produces it.
+
+---
+
+### F20 — resolved: the Claude Code collector discarded the SCM commands, where the authoritative keys are
+
+**Fixed.** `scmKeys` extracts keys from authoring commands (`git commit`, `git checkout -b`, `gh pr
+create`, and the writing half of `mcp__github__*`), carried on `ArtifactSCMKeys`, consumed by
+`gatherCandidates` as `ProvenanceSCMCommand` — ranked just below `ProvenanceBranch` and above
+`ProvenanceJiraEvent`. Verified live: 13 real events now carry 34 SCM keys.
+
+**The value is mostly RE-RANKING, not new keys, and that corrects the finding's original claim.** Of
+those 13 events, only **3** carry a key absent from the prose; **10** carry keys that are a subset of
+the prose keys. The pre-fix measurement (10 of 20 sessions gaining a key) counted keys the prose of
+*that session* lacked, but the collector flattens every mention into `ticket_keys`, so most were
+already present — just indistinguishable from noise.
+
+Which is where the actual win is. One event on branch `triage-shows-context`:
+
+```
+prose keys: 18   ["PAAS-3969","SIA-201","PAAS-4019","PAAS-3984","PAAS-3886","PAAS-3805", …]
+scm keys:    2   ["PAAS-3969","PAAS-4019"]
+```
+
+**18 undifferentiated candidates collapse to 2 authoritative ones.** `match_candidates_limit` caps
+candidates and truncation keeps the head, so before this the two tickets actually committed against
+competed alphabetically with sixteen mentions-in-passing. That is the same defect F9 fixed for the
+corroborated tier, in a different place.
+
+Still open, deliberately:
+
+- **No backfill.** Events are keyed `(source, external_id)` with `INSERT OR IGNORE` (finding #176), so
+  the 386 existing `claude_code` events will never gain `scm_keys`. Only newly-collected sessions
+  benefit until something re-derives them.
+- **Reading commands are excluded at the collector**, so the distinction is not recoverable downstream.
+  That is deliberate — 8 of the keys measured appeared only in reading commands — but it means a key's
+  tier is decided by a regex over shell text, which is a heuristic in a codebase that prefers
+  declared markers.
+
+---
+
+### F16 — nothing bounds how much event text enters a prompt, and the response ceiling is hit first
+
+A 90-day `dev narrate` ran ~18 minutes and died on a 504, having printed nothing and persisted
+nothing. The window is the only lever an operator has, and the cost is unbounded in it.
+
+**Where the tokens are.** Measured by zeroing each payload site and diffing, against the real store
+(68 context narratives, 30-day window, 140,119 estimated tokens):
+
+| zeroed | tokens | that field costs |
+|---|---|---|
+| `Narrative.Events` | 140,119 | 0.0% |
+| `Narrative.EligibleEvents` | 8,794 | **93.7%** |
+| `Narrative.Summary` | 136,708 | 2.4% |
+| all narratives | 308 | 99.8% |
+
+So the cost is neither the window's own events nor the narrative summaries — it is the **325 events
+hydrated underneath the context narratives**, at ~430 tokens each. They render at two sites:
+`EligibleEvents` as numbered candidates (`internal/correlator/correlator.go:380`) and `Events` as
+context detail (`:393`). `hydrateContextNarratives` partitions between them by the freeze watermark
+(`internal/pipeline/narrate.go:249-250`), so an event's *field* changes with the watermark but its
+presence in the prompt does not.
+
+The distribution is extreme: **15 events (4.6%) hold 52% of the characters**, all 15 Jira events
+whose `description` is a full incident write-up (PAAS-4002's is 12,397 chars). Their first ~150
+chars carry the issue key, title, and summary heading — the part clustering needs.
+
+**The fix that measures well.** Capping each context event's summary at both render sites:
+
+```
+since | uncapped |  cap5000  cap2000  cap1000   cap500
+  30d |  140,119 |  110,757   74,072   59,221   50,010
+  90d |  203,625!|  174,262  137,577  122,726  113,516
+ 365d |  229,263!|  199,901  163,216  148,365  139,154
+                                  ! = over the 200k budget, bisects
+```
+
+`cap2000` fits a **full-year** window in one call. Two live runs at `cap2000` versus uncapped agreed
+on **100 of 110 clusters (91%)**; the 10 differences were regroupings at the margin (8 `NEW`, 2
+`EXTENDS`), i.e. slightly coarser clusters, not a collapse. Prompt fell 143,229 → 89,193 actual
+tokens (38%).
+
+**But the response ceiling binds first.** The `cap2000` run initially *failed* where uncapped
+succeeded:
+
+```
+response truncated after 32000 completion tokens (finish_reason=length)
+```
+
+A smaller prompt still yields ~104 clusters, each emitting a title and summary, so
+`llm.max_output_tokens` (32,000 — `internal/config/config.go:209`) is exhausted before the prompt
+budget is. Any input-side fix alone leaves a wide window failing for the opposite reason. The
+completion side scales with **cluster count**, which F18 shows is currently ~1 per candidate.
+
+**Four candidates were falsified by measurement, and are recorded so they are not re-proposed:**
+
+1. **Split the window.** Already implemented (`clusterWithSplit`). Costs **1.37×** at 90 days — both
+   halves re-hydrate the same 68 context narratives, dividing events while duplicating context.
+2. **Cap the narrative count.** Attacks 2.4% of the payload. It appeared to work only because
+   dropping a narrative incidentally drops its events.
+3. **Truncate `Events` / omit detail for primary-linked narratives.** Measured **0.0%** — `Events`
+   is empty whenever nothing has been applied. Also unsafe: dropping a narrative from `existing`
+   removes its events from `assignableEvents`' index space (`:348`), so reshuffling silently loses
+   reach.
+4. **Drain the action queue so the freeze watermark advances.** Simulated on a copy: 16 narratives
+   frozen, 102 events moved `EligibleEvents` → `Events`, and tokens went **up 131**. The watermark
+   governs assignability, not visibility.
+
+`estimateTokens` is *not* implicated: at 500× the scale of its documented calibration it implied
+2.41 chars/token against the server's own count (172,351 est / 143,229 actual), squarely on the
+documented 2.41–2.51. Its 1.2× pessimism is the documented design.
+
+Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default).
+
+**Read F18 first.** Those 15 expensive Jira descriptions are `tracker_record` events, and so is every
+other Jira event in the store — 82% of the prompt's characters. F18's exclusion attacks the *volume*;
+capping only shapes what remains. Truncation is still worth having (it bounds any single event,
+whatever its source, and a future GitHub collector will have its own whales), but sizing the cap
+before F18 lands would calibrate it against a corpus that should not be there.
+
+---
+
+### F18 — clustering narrates the tracker's own bookkeeping back into narratives about it
+
+Two live clustering runs over the same 60-day window (108 candidates) returned **110 and 104
+clusters** — near 1:1, so clustering is mostly relabelling each event as its own narrative. The cause
+is not the model's judgment. It is *what it is being asked to cluster*.
+
+**Every Jira event in the store is a tracker record, and they are 82% of the prompt's characters:**
+
+| source | `tracker_record` | events | chars |
+|---|---|---|---|
+| `claude_code` | absent | 229 | 45,550 |
+| `jira` | **true** | 96 | **210,350** |
+
+`events.ArtifactTrackerRecord` (`internal/events/tracker_record.go`) exists precisely to name these:
+"a record the tracker itself produced about a work item it already tracks." Its doc comment answers
+the question directly — *if unjira writes prose sourced only from events like this one, is it telling
+anybody anything they don't have?* No.
+
+**So clustering builds narratives out of them, and they are circular.** Of the 68 narratives:
+
+```
+claude_code only   36
+jira ONLY          29   ← every event is tracker bookkeeping
+mixed               3
+```
+
+Of those 29 jira-only narratives, **26 contain exactly one distinct issue key**, and for all 26 the
+primary link points at **that same ticket**. A narrative whose entire content is PAAS-4034's own
+changelog, linked to PAAS-4034. `mixed` — a session's work joined to the ticket it concerns, which is
+the whole point of unjira — is **3 of 68**.
+
+**Every one of the 26 is suppressed downstream**, all by the same filter:
+
+```
+comment on PAAS-4034: no evidence of work in the delta — every event is a record
+the tracker produced about itself (3 of them), so a comment could only …
+```
+
+`internal/reconciler/tracker_echo.go:60` calls `events.AnyWorkEvidence(delta)` and correctly refuses.
+So the safety net holds — nothing wrong is written — but the work to reach it is spent every pass:
+cluster the bookkeeping, name it, persist it, hydrate it as context next pass, propose a comment,
+suppress the comment.
+
+**Consequence, and why this outranks F16.** The exclusion is a one-line predicate on data the
+collector already declares, and excluding tracker records from clustering candidates takes the
+60-day window from **108 candidates to 36** — a 67% reduction before any truncation, attacking the
+82% term rather than F16's shaping of it. It also removes the near-singleton narratives inflating the
+review queue, and explains the drain plateau (narratives 59 → 68 across three passes while
+`unmatched` held at 16): passes manufacture jira-only narratives that can never produce an action.
+
+`CLAUDE.md`'s invariant says a deterministic pre-filter runs before every model call. `gatherCandidates`
+does this for *matching* (`internal/correlator/match_candidates.go`); clustering has no equivalent, so
+`buildClusterPrompt` (`internal/correlator/correlator.go:362`) receives every event indiscriminately.
+
+**The open question is not whether to exclude but where the line falls**, and it is genuinely open:
+
+- A tracker record is not worthless *as context*. `PAAS-3972 status: In Review → Done` is real
+  evidence about state, which is why the reconciler reads status history rather than ignoring it.
+- Excluding them from *candidates* (never becoming narratives) differs from excluding them from
+  *context* (invisible when judging `EXTENDS`), and the two have different risks.
+- `AnyWorkEvidence` and `IsTrackerRecord` have **one consumer each**, both in the reconciler. Lifting
+  the concept into the correlator is the change; the vocabulary is already there.
+
+Careful distinction: this is **not** `authored_by_unjira`. Of the jira-only narratives' 87 events only
+6 carry that tag — these are mostly *humans'* Jira activity, correctly collected. The problem is that
+tracker bookkeeping of any authorship is not work evidence, which is exactly the distinction
+`ArtifactTrackerRecord` was introduced to draw and `dropSelfAuthored` cannot.
+
+Not session fragmentation either: of the 18 single-event narratives, the 13 `claude_code` ones each
+share a `session_id` with **zero** other events — genuinely isolated work.
+
+---
+
 ### F1 — refs and fanout await a collector that does not exist yet
 
 `internal/correlator/refs` and `internal/correlator/fanout` are pure, thoroughly tested, and have
@@ -689,3 +914,7 @@ both output modes rather than only in tests.
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
+| F16 — nothing bounds event text entering a prompt | **open**: 93.7% of a 140k-token prompt is the 325 events hydrated under context narratives; 15 Jira descriptions (4.6% of events) hold 52% of the chars. Capping per-event summaries at both render sites fits a 365-day window in one call and agrees with uncapped on 91% of clusters — but `max_output_tokens` (32,000) is exhausted first, since completion scales with cluster count. Four candidates falsified by measurement, including window-splitting at 1.37× |
+| F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **open**: narratives 17/25 hold primary links at `jira_event` provenance resting on nothing but co-occurrence in a window — their branches contain no key. `confidence_floor` is a write gate, so inflation is a safety property. Fixed by the work-evidence/tracker-state separation, which removes the co-clustering |
+| F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is mostly RE-RANKING, not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrects the finding's original framing. No backfill: existing events keep no scm_keys (#176) |
+| F18 — clustering narrates the tracker's own bookkeeping | **open**, and outranks F16: all 96 Jira events are `tracker_record` and are 82% of the prompt's chars. 29 of 68 narratives are jira-only; 26 of those hold one issue key and link to that same ticket. All 26 suppressed by `AnyWorkEvidence` downstream, so nothing wrong is written — but the cluster/persist/hydrate/propose/suppress cycle runs every pass. Excluding tracker records takes 60d candidates 108 → 36. Open question is candidates-vs-context, not whether |

@@ -106,6 +106,23 @@ const (
 	// only works alongside the recency ordering in gatherCandidates and not on
 	// its own.
 	ProvenanceCorroborated Provenance = "corroborated"
+	// ProvenanceSCMCommand is a key a claude_code session named while AUTHORING in
+	// source control — a commit message, a branch creation, a PR title. Recovered
+	// from tool inputs the collector previously discarded (finding F20).
+	//
+	// Ranks just below ProvenanceBranch and above ProvenanceJiraEvent, because it is
+	// the same KIND of signal as a branch name — a human naming the ticket for this
+	// work — but one step less committal: a branch names the work for its whole life,
+	// while a commit names one change within it, and a session may author against
+	// several tickets. Above ProvenanceJiraEvent because that means "a Jira event in
+	// this cluster mentions the issue", which is the tracker talking about itself,
+	// where this is the developer talking about their work.
+	//
+	// Only AUTHORING commands qualify, and the exclusion happens at the collector:
+	// keys from reading commands (`git log --grep=`, `gh pr view`) are dropped there,
+	// because 8 of the keys measured appeared only in those — an agent investigating a
+	// ticket it may have nothing to do with. See internal/collector/claudecode/scm.go.
+	ProvenanceSCMCommand Provenance = "scm_command"
 	// ProvenanceProseFirst is a key first mentioned in free-text prose
 	// (commit messages, session transcripts).
 	ProvenanceProseFirst Provenance = "prose_first"
@@ -142,16 +159,18 @@ func (p Provenance) Rank() int {
 		return -1
 	case ProvenanceBranch:
 		return 0
-	case ProvenanceJiraEvent:
+	case ProvenanceSCMCommand:
 		return 1
-	case ProvenanceCorroborated:
+	case ProvenanceJiraEvent:
 		return 2
-	case ProvenanceProseFirst:
+	case ProvenanceCorroborated:
 		return 3
-	case ProvenanceProseLater:
+	case ProvenanceProseFirst:
 		return 4
-	default:
+	case ProvenanceProseLater:
 		return 5
+	default:
+		return 6
 	}
 }
 
