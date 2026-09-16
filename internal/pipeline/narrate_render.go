@@ -53,8 +53,18 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 	}
 	fmt.Fprintf(b, "llm      %d call(s), %d split(s), %d merge check(s)\n",
 		r.Stats.Calls, r.Stats.Splits, r.Stats.MergeChecks)
-	fmt.Fprintf(b, "tokens   %d prompt + %d completion (estimated %d)\n",
-		r.Stats.PromptTokens, r.Stats.CompletionTokens, r.Stats.EstimatedTokens)
+	// Completion tokens are reported PER CLUSTER as well as in total, because that
+	// ratio is the only thing that predicts an output-ceiling overflow. F16's second
+	// half is that a capped prompt still failed at max_output_tokens: completion scales
+	// with cluster count, and a bare total gave an operator no way to see that coming.
+	// Guarded against a zero-cluster pass, which would otherwise divide by zero.
+	perCluster := ""
+	if n := len(r.Narratives); n > 0 && r.Stats.CompletionTokens > 0 {
+		perCluster = fmt.Sprintf(" — %d/cluster across %d",
+			r.Stats.CompletionTokens/int64(n), n)
+	}
+	fmt.Fprintf(b, "tokens   %d prompt + %d completion%s (estimated %d)\n",
+		r.Stats.PromptTokens, r.Stats.CompletionTokens, perCluster, r.Stats.EstimatedTokens)
 
 	// Only when the cap actually fired. A zero line on every pass is noise, but a
 	// SILENT truncation reads as "nothing was left out" — F25's defect one layer down.
