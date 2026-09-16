@@ -306,8 +306,24 @@ func matchOne(
 
 	candidates := gatherCandidates(evts, linkExclusions, limit, jiraActivity)
 	if len(candidates) == 0 {
-		// Untracked work is the default path, not a special case: no
-		// tracker call, no LLM call, nothing written.
+		// Untracked work is the default path, not a special case: no tracker call, no
+		// LLM call, nothing to link.
+		//
+		// But it must leave a WATERMARK, or this is a livelock (finding F22).
+		// NarrativesWithoutPrimaryLink orders by (window_start, id) — stable — so a
+		// narrative that writes nothing is re-selected every pass, and the ones behind
+		// it are never reached. Measured before this: eleven consecutive passes each
+		// reported 49 unmatched, 33 of which had no candidate keys at all, while
+		// creates stayed deferred forever because that count could not reach zero.
+		//
+		// Recorded here rather than by the caller because this is the branch that knows
+		// WHY nothing happened, and design-notes #29's lesson is that an outcome and
+		// its trace belong together.
+		if err := s.RecordMatchExamined(
+			narrative.ID, "no candidate issue keys in any event"); err != nil {
+			return result, Stats{}, err
+		}
+
 		return result, Stats{}, nil
 	}
 
@@ -318,6 +334,15 @@ func matchOne(
 	}
 
 	if len(verified) == 0 {
+		// Same livelock, one step later: candidates existed but none survived
+		// verification (the issues do not exist, or are on no configured connection).
+		// Without a watermark this narrative is re-selected and re-verified — at
+		// tracker-call cost, not just selector cost — every pass forever.
+		if err := s.RecordMatchExamined(
+			narrative.ID, "every candidate issue key failed verification"); err != nil {
+			return result, Stats{}, err
+		}
+
 		return result, Stats{}, nil
 	}
 
