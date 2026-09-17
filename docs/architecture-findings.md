@@ -120,15 +120,36 @@ out", so it reports counts and pre-truncation lengths so an operator can tune it
 with that by construction; bounding it means bounding the *count*, which is a different and riskier
 change (which events do you drop, and what does clustering lose?).
 
-**And the response ceiling still binds first.** A capped prompt still yields ~104 clusters, each
-emitting a title and summary, so `llm.max_output_tokens` is exhausted before the prompt budget is:
+**The response ceiling is now the binding constraint, and it REPRODUCES post-F18.** A 365-day window
+on the current store:
 
 ```
-response truncated after 32000 completion tokens (finish_reason=length)
+Error: clustering: ... completing chat prompt: response truncated after 32000
+completion tokens (finish_reason=length): raise llm.max_output_tokens, or reduce
+the prompt — a truncated reply is not safe to parse
 ```
 
-That half is untouched by anything above, and is the next thing to fix. Completion scales with cluster
-count, which F18's near-1:1 grouping makes worse than it needs to be.
+So this is not a stale concern that F18 incidentally fixed. F18 cut a 60-day window's candidates from
+108 to 36, but **121 work-evidence candidates remain across a year** and still yield enough clusters to
+exhaust the ceiling. Completion scales with **cluster count**, which nothing above touches — a capped
+prompt fails identically.
+
+`max_output_tokens` is already configurable, exposed and validated (`config.go:209`), so this is a
+tuning question rather than a feature. Two things make the tuning awkward, and both are worth knowing
+before someone attempts it:
+
+- **A 365-day pass takes 25+ minutes and prints nothing until it finishes.** Raising the ceiling and
+  re-running is a ~30-minute experiment per value, which is why no verified value is recorded here yet.
+  The pass now reports **completion tokens per cluster** (`274/cluster across 110`) so the ceiling can
+  be predicted arithmetically instead of discovered by overflowing.
+- **The environment's own `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is also 32000**, so the gateway may impose
+  its own ceiling regardless of what unjira asks for. The config comment already documents a case where
+  a litellm-fronted sonnet silently capped at 4096 while advertising 128000. Confirm the gateway
+  accepts a higher value before concluding unjira's config is the constraint.
+
+The cheaper fix may not be a bigger ceiling at all: **fewer clusters.** F18's near-1:1 grouping means
+~110 clusters from ~121 candidates, each emitting a title and summary. Grouping that actually grouped
+would cut completion proportionally, and that is the same defect the deleted F18 body described.
 
 **Four candidates falsified by measurement, recorded so they are not re-proposed:**
 
