@@ -5,10 +5,11 @@
 Pulls GitHub pull-request activity into the event log as a second **work-evidence** source,
 alongside `claude_code`. This is the moment `internal/correlator/refs` and
 `internal/correlator/fanout` — pure, tested, zero-caller since the Python→Go port — get the
-collector `CLAUDE.md` says they are waiting for. Closes finding **F1** (which is not a bug report;
-it is a considered "not yet" that names its own trigger condition, now met).
+collector `CLAUDE.md` says they are waiting for. It does **not** close finding **F1**: `fanout` gets a
+real integration point but is deferred past this slice, and §6 finds that `refs` has no consumer even
+*with* a collector in hand. F1 narrows rather than closes.
 
-## Why GitHub is not "the tracker"
+## Which side of the diff GitHub sits on (and why that depends on the deployment)
 
 Before any event shape can be decided, one architectural question has to be answered first, because
 every other decision in this spec depends on the answer: **which side of unjira's reconciliation does
@@ -23,40 +24,69 @@ GitHub, in the collector this spec designs, is a `pipeline.Collector` exactly li
 and `collector/claudecode` are — but unlike `collector/jira`, it does not read from the connection
 `gate.Applier` writes to. It reads from a system unjira **observes** and does not **govern**.
 
-That placement answers the spec's hardest open question by structure rather than by per-artifact
-judgment:
+That placement answers the spec's hardest open question — **for this deployment, not for all
+deployments.** The distinction is load-bearing, because unjira must operate whether or not a
+collector's system is also the tracker, across arbitrary combinations (Jira, GitHub, GitLab, Trello,
+YouTrack trackers; collectors for each of those plus Slack and other streams):
 
-> **No event this collector emits is ever a tracker record** (`events.ArtifactTrackerRecord`).
+> **No event this collector emits is a tracker record in a deployment where GitHub is not the
+> tracker** (`events.ArtifactTrackerRecord`). Slice 1's events — PR opened, PR merged/closed — are
+> work evidence in *every* deployment, for a reason independent of configuration: **a pull request is
+> not a work item in a tracker, it is a thing somebody did.** That is what makes the scope decision
+> below safe to settle now, ahead of any multi-tracker design.
 
-`events.ArtifactTrackerRecord`'s own doc comment defines the marker as "a record the tracker itself
-produced about a work item it already tracks" — and answers the question that matters with "if
-unjira writes prose sourced only from events like this one, is it telling anybody anything they don't
-have? The answer is no." That test is about which system unjira treats as *the* tracker
-(`tracker.backend`), not about how official an artifact looks. A GitHub PR body reads like a
-tracker's own bookkeeping — but it is not Jira's bookkeeping, and Jira is the tracker in every
-configuration this spec targets. It is evidence that something happened in the world, which is
-exactly what unjira exists to diff against the tracker. This is a structural fact derived from the
-architecture, not a per-artifact call this spec had to make artifact-by-artifact — which is a
-cleaner answer than the task's own framing anticipated ("a PR review comment, a CI status, and a
-merge commit are not obviously the same kind" — they are not the same kind of *artifact*, but they
-are the same kind of *evidence*, because none of them is Jira talking about itself).
+**Tracker-record-ness is a property of (artifact kind × which systems are trackers in this
+deployment), not a property of the collector.** `events.ArtifactTrackerRecord`'s own doc comment says
+so directly, while explaining why the marker is declared rather than inferred:
 
-**Scoping caveat, stated so it does not silently rot:** `docs/architecture.md`'s discussion of
-`tasktracker.StatusCategory` names a hypothetical future GitHub-Issues-as-tracker backend
-(`clients/github` implementing `TaskWriter`) — unbuilt today, and no `tracker.backend` value for it
-exists. If that is ever built, the *issues* API surface it collects from would need
-`events.SetTrackerRecord` exactly as `collector/jira` sets it today, for the identical reason. That
-is a different, larger feature (a second `tasktracker` implementation) than this spec, and this
-spec's PR/review/commit events stay work evidence regardless of whether it is ever built — they
-observe the SCM/collaboration surface, not a tracker.
+> *"**NOT the source name.** "Is this the jira collector?" is incident 21 exactly — the reconciler once
+> recognized only Jira's own changelog vocabulary and would have silently never fired for a GitHub
+> collector. **A GitHub-Issues collector's timeline events are tracker records too**, and must be
+> recognized without editing any consumer."*
 
-**Consequence for `AnyWorkEvidence`.** Because no event from this collector is ever a tracker record,
-the mere presence of a GitHub event in a narrative's delta always satisfies
-`events.AnyWorkEvidence` — which is correct: GitHub activity is, by construction, evidence real work
-happened, never bookkeeping to paraphrase. `reconciler.suppressTrackerEcho` therefore behaves toward
-a GitHub-only narrative exactly as it does toward a `claude_code`-only one today: it does not
-suppress on tracker-echo grounds. (It can still be suppressed on *other* grounds — staleness,
-duplication — same as any narrative.)
+So "GitHub is never the tracker side" would be a *false* structural claim — contradicted by the file
+that defines the concept. What is true structurally is narrower, and still sufficient for this slice:
+
+| event kind | tracker = Jira | tracker = GitHub Issues |
+|---|---|---|
+| PR opened / merged / closed | work evidence | work evidence |
+| Issue closed / labeled / commented | work evidence¹ | **tracker record** |
+| Jira changelog entry | tracker record | work evidence¹ |
+
+¹ Bookkeeping in a system that is *not* the tracker remains a real act the tracker does not know
+about, so it is evidence. Symmetrically: a Jira comment becomes work evidence in a deployment running
+GitHub Issues as the tracker with Jira as a merely-observed stream.
+
+`events.ArtifactTrackerRecord`'s test — "if unjira writes prose sourced only from events like this
+one, is it telling anybody anything they don't have?" — is therefore evaluated against *which systems
+are trackers here*, not against how official an artifact looks. A GitHub PR body reads like
+bookkeeping, but it is nobody's tracker bookkeeping: it is evidence something happened in the world,
+which is exactly what unjira diffs against the tracker.
+
+**Slice 1 avoids the ambiguous row entirely** by collecting no issue-shaped artifacts, so nothing here
+needs config-aware classification yet. **A slice that collects GitHub Issues does**, and it must ask
+"is GitHub a tracker in this deployment?" rather than answering from its own package name.
+`CollectContext` already carries `Config`, so the collector *can* ask; what does not exist yet is a
+typed way to get an answer — `config.JiraConnection` is Jira-shaped and `events.ArtifactConnection` is
+documented as "the configured **Jira** connection name." That gap is **F28**, cross-referencing **F7**.
+
+`docs/architecture.md` already names the hypothetical GitHub-Issues-as-tracker backend
+(`clients/github` implementing `TaskWriter`) under `tasktracker.StatusCategory` — unbuilt, with no
+`tracker.backend` value for it. If built, its *issues* surface needs `events.SetTrackerRecord` exactly
+as `collector/jira` sets it today, and it would additionally need a self-identity equivalent to
+`SelfAccountID` (see F28: the echo loop is the one thing that genuinely differs when collector and
+tracker coincide). This spec's PR events stay work evidence either way.
+
+**Consequence for `AnyWorkEvidence`.** Because no event from this slice is a tracker record, the mere
+presence of one of its GitHub events in a narrative's delta always satisfies
+`events.AnyWorkEvidence` — correct for PR lifecycle events, which are evidence real work happened
+rather than bookkeeping to paraphrase. A later issues-collecting slice must not assume this: in a
+GitHub-Issues-as-tracker deployment its events *are* bookkeeping, and a narrative holding only those
+must not satisfy `AnyWorkEvidence`, exactly as a Jira-only narrative does not today.
+
+`reconciler.suppressTrackerEcho` therefore behaves toward a GitHub-only narrative exactly as it does
+toward a `claude_code`-only one today: it does not suppress on tracker-echo grounds. (It can still be
+suppressed on *other* grounds — staleness, duplication — same as any narrative.)
 
 **Consequence for identity design (§3).** Because these events are clusterable work evidence, not
 inert tracker records, the identity scheme cannot follow the Jira issue-body precedent
@@ -250,7 +280,7 @@ loudly over silently dropping data.
 ## 3. `ExternalID` and idempotency — discrete lifecycle facts, not a revisioned snapshot
 
 This is the section the identity-mutability concern actually resolves in, and the resolution follows
-directly from §"Why GitHub is not the tracker": **because these events are work evidence
+directly from §"Which side of the diff GitHub sits on": **because these events are work evidence
 (clusterable), the Jira issue-body precedent — mint a fresh id keyed on a revision discriminator,
 because an inert duplicate tracker record costs nothing — is the wrong model here.** Adopting it
 verbatim (`owner/repo#N:body:<updated-unix>`, re-minting on every edit) would manufacture a fresh
@@ -474,7 +504,7 @@ independent collectors now observe **the same real-world PR**:
   `PAAS-123` from the PR's title/body onto its **own** `ArtifactSCMKeys` — plus the PR's head branch
   onto `ArtifactGitBranch`.
 
-Both are work evidence (§"Why GitHub is not the tracker" + F18's existing claude_code treatment); both
+Both are work evidence (§"Which side of the diff GitHub sits on" + F18's existing claude_code treatment); both
 are clusterable; both will very likely share a near-identical `OccurredAt` (the tool call and GitHub's
 `created_at` are seconds apart at most).
 
@@ -654,6 +684,6 @@ that looks prescient" — none resolved by picking arbitrarily:
 - No narrative→GitHub-object matching (only narrative→Jira-issue-key, feeding the existing pipeline
   better candidates).
 - No GitHub-Issues-as-tracker backend (a materially different, unbuilt feature — see the scoping
-  caveat in §"Why GitHub is not the tracker").
+  caveat in §"Which side of the diff GitHub sits on").
 - No `fanout`/`refs` implementation in slice 1 — designed (§6), deferred, with the deferral reasoned
   rather than assumed.
