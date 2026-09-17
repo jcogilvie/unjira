@@ -176,6 +176,14 @@ func parseRule(filename, contents string) (rule Rule, ok bool, err error) {
 		return Rule{}, false, err
 	}
 
+	// AFTER scope and confidence are validated, deliberately. Disabling a rule turns
+	// it off; it does not exempt it from being well-formed. Skipping first would defer
+	// a broken file's error to whenever somebody re-enables it, which is the worst
+	// moment to discover it.
+	if fields.Disabled {
+		return Rule{}, false, nil
+	}
+
 	body := strings.TrimSpace(strings.Join(lines[closing+1:], "\n"))
 
 	return Rule{
@@ -203,6 +211,15 @@ type frontmatterFields struct {
 	Confidence string `yaml:"confidence"`
 	Learned    string `yaml:"learned"`
 	Source     string `yaml:"source"`
+	// Disabled turns a rule off without deleting it. Absent means enabled, so every
+	// rule file written before this field existed behaves unchanged.
+	//
+	// Exists because deleting a rule loses WHY it was written. A norm that turned out
+	// to be wrong is worth keeping as a record of something tried and rejected — most
+	// of all for rules Distill produced, where a provisional guess vanishing looks
+	// like nobody ever proposed it. It also lets a reviewer accept a candidate they
+	// are unsure about in the off position, which says more than declining silently.
+	Disabled bool `yaml:"disabled"`
 }
 
 // parseFrontmatterFields parses the YAML block between a rule file's ---
