@@ -435,7 +435,11 @@ func buildClusterPrompt(
 }
 
 const clusterSystemPrompt = `Cluster the given events into narratives. "Events to cluster" are numbered; assign each to exactly one cluster via event_indices. "Existing narratives" are CONTEXT ONLY — never put their events in event_indices; use them only to decide whether a numbered event extends one of them. Tag each cluster "new" or "extends" (include narrative_id when extending). Return ONLY a JSON array matching this shape, no prose, no markdown fences:
-[{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"...","summary":"...","event_indices":[0,2,5]}]`
+[{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"...","summary":"...","event_indices":[0,2,5]}]
+
+Grouping criterion: a narrative is one logical unit of work — the same underlying piece of work, whatever raw events it took to produce it. Group events into the SAME cluster when they are steps toward the same outcome: the same ticket, branch, PR, or topic; a sequence of commits/comments/status-changes that tell one story end to end. Do NOT group events only because they are close in time, from the same source, or from the same author — those are weak signals, not a reason to merge unrelated work. Conversely, do not split one continuous piece of work into several clusters just because it produced several events.
+
+Default to the coarsest grouping that is still accurate. Do not create a separate cluster for every event: a numbered list of N events should very rarely produce N clusters. Before finalizing, check every event you tagged "new": if two "new" clusters are actually the same ticket/branch/PR/topic, merge them into one. Only leave two events in separate clusters when they are genuinely unrelated work.`
 
 // clusterResponseItem is the wire shape of one element in the model's JSON
 // array response.

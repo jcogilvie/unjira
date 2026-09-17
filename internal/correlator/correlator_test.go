@@ -132,6 +132,34 @@ func TestCluster_NoRulesOptionLeavesSystemPromptUnchanged(t *testing.T) {
 	assert.Equal(t, correlator.ClusterSystemPromptForTest(), llmFake.systemPrompts[0])
 }
 
+// TestClusterSystemPrompt_StatesGroupingCriterion pins the fix for F16's
+// near-1:1 grouping: a model told only "cluster these" with no criterion for
+// what makes events belong to the SAME narrative reasonably emits one
+// cluster per event. The prompt must say what unifies a narrative (one
+// underlying piece of work/story — e.g. same ticket/branch/PR/topic — not
+// mere adjacency in time or source) and must actively discourage a
+// one-event-per-cluster degenerate grouping.
+func TestClusterSystemPrompt_StatesGroupingCriterion(t *testing.T) {
+	prompt := correlator.ClusterSystemPromptForTest()
+
+	assert.Contains(t, prompt, "same underlying piece of work",
+		"prompt must state what makes events belong to the SAME narrative")
+	assert.Contains(t, prompt, "Do not create a separate cluster for every event",
+		"prompt must actively discourage one-cluster-per-event")
+}
+
+// TestClusterSystemPrompt_StillForbidsReassigningContextEvents guards the
+// invariant CLAUDE.md and buildClusterPrompt's doc comment both state:
+// existing narratives are CONTEXT ONLY and their events can never be placed
+// in event_indices. A grouping-criterion rewrite must not accidentally drop
+// or weaken this instruction.
+func TestClusterSystemPrompt_StillForbidsReassigningContextEvents(t *testing.T) {
+	prompt := correlator.ClusterSystemPromptForTest()
+
+	assert.Contains(t, prompt, "CONTEXT ONLY")
+	assert.Contains(t, prompt, "never put their events in event_indices")
+}
+
 func mustEvent(t *testing.T, source, externalID, summary string, occurredAt time.Time) correlator.Event {
 	t.Helper()
 	e := events.NewEvent(source, externalID, occurredAt, summary)
