@@ -34,10 +34,12 @@ Events are keyed `(source, external_id)` with `INSERT OR IGNORE`, so re-collecti
 existing row's artifacts. Every collector improvement therefore applies only to sessions collected
 after it landed.
 
-Measured after F20 shipped: **386 `claude_code` events** predate `ArtifactSCMKeys` and will never
-carry one, so the provenance tier that fix introduced is invisible for all of them. The same is true
-of F15's segment slicing (a session collected as one event stays one event) and of anything a future
-collector learns to extract.
+The **386** figure this finding originally cited was measured against a dev snapshot at the moment
+F20's PR landed and no longer exists in that form. Re-measured on the one real store currently on
+disk (`data/unjira.db`, 795 events): **419/419** `claude_code` events postdate F20 (0 missing
+`scm_keys`) but predate F25 by about two hours (419/419 missing its "Did: …" clause) — a current,
+concrete instance of the same mechanism, not a projection, and confirmation the gap recurs with every
+collector improvement rather than being specific to F20.
 
 **Consequence.** A fix's measured benefit is not the benefit an existing store receives, and the gap
 is silent — nothing reports "this event was collected under older extraction rules." It also makes
@@ -46,13 +48,21 @@ behaviour only ever appears on new rows.
 
 The tension is real and `INSERT OR IGNORE` is not simply wrong: idempotent re-collection is what makes
 `collect` safe to run repeatedly, and finding #176 records why backfilling was rejected once already
-(a re-collect that mutates rows can rewrite history a narrative was already built from). What is
-missing is a *deliberate* path — a re-derive command that recomputes artifacts from `raw_ref` without
-touching identity, or a recorded extraction version per event so a reader can tell which rules
-produced it.
+(a re-collect that mutates rows can rewrite history a narrative was already built from).
+
+**Designed, not implemented:**
+`docs/superpowers/specs/2026-09-17-artifact-rederivation-design.md` resolves the shape #176 left
+open — recompute one named artifact key in place, never touching identity — and the crux question of
+what happens to narratives/actions already built from the changed event (answer: nothing needs to,
+for an unmatched narrative or an applied action; a linked-but-not-yet-applied narrative is the one
+genuinely open case, left for a human in triage). It also surfaces a new, unresolved hazard for
+`claude_code` specifically: segment boundaries are not proven stable if a transcript grows after
+collection, so re-deriving that collector's artifacts is not yet safe to build. Recommends deferring
+implementation on the same grounds this entry already gave.
 
 Not urgent while the store is disposable (`DEVSBX`, pre-release). It becomes load-bearing the moment a
-real store exists, which is why it is recorded now rather than rediscovered then.
+real store exists, or a second collector improvement makes an operator ask for the backfill by name —
+which is why it is recorded now rather than rediscovered then.
 
 ---
 
@@ -306,5 +316,5 @@ the natural moment to decide.
 | F26 — a self-authored delta is selected, emptied, writes nothing | **resolved**: `reconcile_examinations` (`store.RecordReconcileExamined`) is a watermark table, F22's mechanism applied to the reconciler's Go-side `dropSelfAuthored` filter rather than a SQL predicate duplicating it. `NarrativesWithActionableLinks`/`CountNarrativesWithDelta` share one predicate (`hasUnexaminedDelta`) so the two cannot drift. Verified: a 2-narrative repro where the older, self-authored-only narrative previously starved a real one behind it under a cap of 1 now yields the real narrative on pass 2 |
 | F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **resolved by F18**, verified: zero `jira_event` primary links remain (branch 2, corroborated 4, prose_first 4, scm_command 5). The provenance can no longer be manufactured, because the Jira event is not in the cluster for a key to be read out of |
 | F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is RE-RANKING not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrected the finding's own framing |
-| F21 — artifacts are frozen at first collection | **open**: `INSERT OR IGNORE` on `(source, external_id)` means a collector fix never reaches existing rows. 386 `claude_code` events predate `ArtifactSCMKeys` and never gain one, so F20's tier is invisible for all of them. Makes a fix's measured benefit differ silently from what a mature store receives |
+| F21 — artifacts are frozen at first collection | **open, designed**: `docs/superpowers/specs/2026-09-17-artifact-rederivation-design.md` resolves the shape (artifact-key-scoped, recompute-and-diff, no new schema) and the invalidation question, but recommends deferring — no real store currently depends on it, and `claude_code` re-derivation has an unresolved segment-boundary hazard the spec surfaces but does not close |
 | F18 — clustering narrates the tracker's own bookkeeping | **resolved**: `events.PartitionByTrackerRecord` excludes tracker records from clustering candidates. Verified live — 73 of 143 unlinked events no longer reach the model, 1 call where the width used to bisect. Found while attributing F16's cost; the exit filters (`AnyWorkEvidence` et al.) STAY, because 96 records were already linked and `narrative_events` rows are never deleted |
