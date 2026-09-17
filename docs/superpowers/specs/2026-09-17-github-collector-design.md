@@ -1,0 +1,659 @@
+# GitHub collector — design
+
+**Status: design**
+
+Pulls GitHub pull-request activity into the event log as a second **work-evidence** source,
+alongside `claude_code`. This is the moment `internal/correlator/refs` and
+`internal/correlator/fanout` — pure, tested, zero-caller since the Python→Go port — get the
+collector `CLAUDE.md` says they are waiting for. Closes finding **F1** (which is not a bug report;
+it is a considered "not yet" that names its own trigger condition, now met).
+
+## Why GitHub is not "the tracker"
+
+Before any event shape can be decided, one architectural question has to be answered first, because
+every other decision in this spec depends on the answer: **which side of unjira's reconciliation does
+GitHub sit on?**
+
+`README.md`'s own framing: unjira diffs **reality** (event streams: Claude Code, GitHub, Slack)
+against **the tracker** (what the org believes — today, Jira; `tracker.backend` also accepts
+`local`, a mimicked tracker for when no real one is reachable). `internal/tasktracker.TaskTracker` is
+the interface that makes something "the tracker" in this codebase's vocabulary — `clients/jira` and
+`clients/local` implement it; nothing else does, and this spec does not add a third implementation.
+GitHub, in the collector this spec designs, is a `pipeline.Collector` exactly like `collector/jira`
+and `collector/claudecode` are — but unlike `collector/jira`, it does not read from the connection
+`gate.Applier` writes to. It reads from a system unjira **observes** and does not **govern**.
+
+That placement answers the spec's hardest open question by structure rather than by per-artifact
+judgment:
+
+> **No event this collector emits is ever a tracker record** (`events.ArtifactTrackerRecord`).
+
+`events.ArtifactTrackerRecord`'s own doc comment defines the marker as "a record the tracker itself
+produced about a work item it already tracks" — and answers the question that matters with "if
+unjira writes prose sourced only from events like this one, is it telling anybody anything they don't
+have? The answer is no." That test is about which system unjira treats as *the* tracker
+(`tracker.backend`), not about how official an artifact looks. A GitHub PR body reads like a
+tracker's own bookkeeping — but it is not Jira's bookkeeping, and Jira is the tracker in every
+configuration this spec targets. It is evidence that something happened in the world, which is
+exactly what unjira exists to diff against the tracker. This is a structural fact derived from the
+architecture, not a per-artifact call this spec had to make artifact-by-artifact — which is a
+cleaner answer than the task's own framing anticipated ("a PR review comment, a CI status, and a
+merge commit are not obviously the same kind" — they are not the same kind of *artifact*, but they
+are the same kind of *evidence*, because none of them is Jira talking about itself).
+
+**Scoping caveat, stated so it does not silently rot:** `docs/architecture.md`'s discussion of
+`tasktracker.StatusCategory` names a hypothetical future GitHub-Issues-as-tracker backend
+(`clients/github` implementing `TaskWriter`) — unbuilt today, and no `tracker.backend` value for it
+exists. If that is ever built, the *issues* API surface it collects from would need
+`events.SetTrackerRecord` exactly as `collector/jira` sets it today, for the identical reason. That
+is a different, larger feature (a second `tasktracker` implementation) than this spec, and this
+spec's PR/review/commit events stay work evidence regardless of whether it is ever built — they
+observe the SCM/collaboration surface, not a tracker.
+
+**Consequence for `AnyWorkEvidence`.** Because no event from this collector is ever a tracker record,
+the mere presence of a GitHub event in a narrative's delta always satisfies
+`events.AnyWorkEvidence` — which is correct: GitHub activity is, by construction, evidence real work
+happened, never bookkeeping to paraphrase. `reconciler.suppressTrackerEcho` therefore behaves toward
+a GitHub-only narrative exactly as it does toward a `claude_code`-only one today: it does not
+suppress on tracker-echo grounds. (It can still be suppressed on *other* grounds — staleness,
+duplication — same as any narrative.)
+
+**Consequence for identity design (§3).** Because these events are clusterable work evidence, not
+inert tracker records, the identity scheme cannot follow the Jira issue-body precedent
+(`<KEY>:body:<updated-unix>`, deliberately over-collecting on every field edit because an inert
+duplicate tracker record costs nothing). Doing that here would mint a fresh clusterable candidate on
+every trivial PR title/body edit — the expensive failure mode, not a safe one. §3 designs around this
+directly.
+
+## Scope
+
+In scope:
+
+- `internal/collector/github` — a `pipeline.Collector` implementation, PRs only.
+- A `clients/github` facade (see §1 for why) — read-only for this slice.
+- `config.Collectors["github"]` options (repos to watch; already stubbed inert in
+  `config/unjira.example.json`).
+- Registration in `cmd/unjira/main.go`'s `registry`.
+- Wiring `internal/correlator/fanout` and stating exactly how (and why not yet) `refs` connects — see
+  §6.
+
+Out of scope, named so the smallest slice stays honest about what it is not:
+
+- Reviews, review comments, CI/check runs, releases, direct-push commits (§2 says why, per artifact).
+- Any write path. `clients/github` gets no write methods in this slice; there is nothing for
+  `gate.Applier` to call, matching the Jira collector spec's own "this slice is read-only" precedent.
+- Narrative→GitHub-object matching. Matching today resolves a narrative to a **Jira** issue key
+  (`narrative_issues.issue_key`); this collector produces candidates for that same resolution (PR
+  bodies/titles/branch names carry Jira keys), not a new kind of link.
+
+**Success criterion**, matching the Jira collector spec's own bar: GitHub PR events appear in the
+event log, correctly shaped, idempotently, visible to the correlator as work evidence — and
+`fanout.ClusterFanout` demonstrably collapses a real fan-out family before an LLM call ever sees it.
+It does not prove anything about issue-key resolution quality; that is an existing consumer
+(`gatherCandidates`) this collector merely feeds better.
+
+## 1. Transport: the `gh` CLI, not a Go GitHub SDK, not the MCP server
+
+Three options, weighed against the same four axes the task named:
+
+| | credential handling | rate limits | offline testability | dependency |
+|---|---|---|---|---|
+| **`gh` CLI (`exec.Command`)** | reuses the operator's existing `gh auth login`; no new secret to manage | `gh` handles pagination/backoff itself; `search` (30/min) vs `core` (5000/hr) buckets are real and distinct (measured live, §1a) | subprocess is fake-able the same way `HelperCredential` already proves in this tree | zero new Go dependency |
+| **`google/go-github` (REST) or `shurcooL/githubv4` (GraphQL)** | needs its own token plumbing, parallel to but separate from `gh`'s | same underlying limits, self-managed | `httptest`, matching `clients/jira`'s existing pattern exactly | new dependency, `go.mod`/`go.sum` churn |
+| **GitHub MCP server** | session-scoped, not a `collect` pass's concern — `unjira collect` is a standalone CLI/cron invocation with no MCP session to borrow | opaque to unjira; the server manages it | cannot run offline in `go test ./...` at all — it is out-of-process and not fake-able the way an HTTP client is | none in Go, but wrong layer: MCP is for an *agent* driving GitHub interactively, not a deterministic collector CLI ever runs unattended |
+
+**Recommendation: `gh` CLI**, invoked via `exec.Command` exactly as `internal/llm.HelperCredential`
+already does for the LLM credential helper (`internal/llm/helper_credential.go:167`, `sh -c` +
+`CommandContext` + a bounded timeout + `WaitDelay` for the Linux pipe-drain trap that file's own
+comment documents at length). Three reasons this outranks a Go SDK, which was the closer call:
+
+- **Credentials come from the environment, never config files** (`CLAUDE.md`) — and `gh`'s own
+  `auth login` already IS that: a token living in the OS keychain (verified live in this
+  environment: `gh auth status` reports "Logged in to github.com account jcogilvie (keyring)"), not
+  a `UNJIRA_GITHUB_TOKEN`-shaped secret this spec would otherwise have to invent, document, and keep
+  out of git. A Go SDK client still needs a token from *somewhere*, and the honest options are
+  either duplicating what `gh auth login` already solved (a new env var, a new credential-set type
+  mirroring `internal/credentials`) or shelling out to `gh auth token` to borrow its credential —
+  at which point the SDK is buying nothing `gh` doesn't already give directly.
+- **This collector's own client surface is small.** `clients/jira` exists as a facade because
+  `go-jira` is a large SDK with a shape unjira needs to narrow (`internal/clients/jira/jira.go:1`'s
+  own doc comment: "this facade is the seam ... the community library underneath absorbs Jira Cloud
+  API churn"). The GitHub surface this slice needs is one query (list PRs updated since a watermark,
+  scoped to a repo) plus a details fetch — `gh pr list --json ... --search "updated:>=..."` and
+  `gh pr view <N> --json ...`. A thin wrapper over two `gh` invocations is a smaller, more honest
+  facade than pulling in a general-purpose REST/GraphQL client to reach the same two calls.
+- **Verified live in this environment**, not assumed: `gh pr list --repo jcogilvie/unjira --json
+  number,title,body,createdAt,mergedAt,closedAt,headRefName,author --limit N` returns every field
+  this slice's events need in one call, including the full PR body — no second per-PR fetch required
+  for the fields this slice reads (contrast the Jira collector, which needs two follow-up calls per
+  issue because `SearchIssues` cannot expand changelog/comments; `gh pr list --json` *can* expand PR
+  body inline). That materially undercuts the "GitHub needs per-item follow-ups too" assumption this
+  spec started with.
+
+**The `internal/clients/github` seam**, per `docs/go-conventions.md`'s "remote-system clients live
+under `internal/clients/<system>`" rule and the README's own locked list
+(`clients/litellm/clients/github/clients/slack` as later integrations — `README.md:301`) — a thin
+facade, no business logic, mirroring `clients/jira`'s shape:
+
+```go
+// internal/clients/github/github.go
+
+// Client is a facade over the gh CLI, exposing only the surface unjira needs.
+// Unlike clients/jira (a facade over a Go SDK), this facade's "upstream" is a
+// subprocess: gh already owns credential storage, rate-limit backoff, and
+// response shaping, so there is no SDK churn to absorb — the seam here is
+// "one command, one JSON shape," matching internal/llm.HelperCredential's
+// precedent for exec.Command as a legitimate client transport in this tree.
+type Client struct {
+    ghPath string        // resolved once via exec.LookPath("gh"); overridable for tests
+    timeout time.Duration
+}
+
+// ListPullRequests returns every PR in repo whose updated time is >= since,
+// via `gh pr list --repo <repo> --state all --search "updated:>=<since>"
+// --json ...`. Ascending by updated_at is not guaranteed by gh; the caller
+// sorts before advancing a watermark (mirroring the Jira collector's own
+// "the JQL carries no ORDER BY" note, jira.go:186).
+func (c *Client) ListPullRequests(repo string, since time.Time) ([]PullRequest, error)
+```
+
+Fake-ability for offline tests: `Client` takes an injected `runner func(args ...string)
+([]byte, error)` (or an equivalent seam), so `internal/collector/github`'s tests construct a
+`Client` backed by canned JSON fixtures with zero subprocess execution — the same shape
+`clients/jira`/`clients/openai` achieve with `httptest`, just substituting "a fake process runner"
+for "a fake HTTP server." A **live** tier (`internal/live`, `live` build tag, exactly as the Jira
+collector spec's own live tier works) runs the real `gh` binary against a real (public, low-stakes)
+repo — this codebase's own `jcogilvie/unjira` is the natural target, since it is already the
+project's own GitHub remote.
+
+**Rejected: a hybrid** (SDK for reads, `gh` for auth token extraction). Considered and dropped: it
+combines both surfaces' costs (a new dependency AND a `gh auth token` shell-out) for neither's
+benefit.
+
+## 2. What is collected: PR lifecycle only, in this slice
+
+Two event kinds, chosen the same way the Jira collector spec chose its four — "derived from what
+phase 1 can actually *do*," not from completeness:
+
+| `ExternalID` | `OccurredAt` | Source data |
+|---|---|---|
+| `<owner>/<repo>#<N>:opened` | PR's `created_at` | `gh pr list`/`pr view`, at collection time nearest to creation |
+| `<owner>/<repo>#<N>:merged` or `:closed` | PR's `merged_at` or `closed_at` | same, once the PR leaves the open state |
+
+Both carry the PR's title + body as `Summary` (format: `"<owner>/<repo>#<N>: <title>\n\n<body>"`,
+mirroring `EventFromIssueBody`'s `"<KEY>: <summary>\n\n<body>"` shape), `Actor` = the PR author's
+login, `RawRef` = the PR's HTML URL, and artifacts:
+
+- `events.ArtifactGitBranch` = the PR's head branch name — this is the **exact same artifact key**
+  `collector/claudecode` already writes, and `gatherCandidates` already re-derives ticket keys from
+  it via `ProvenanceBranch` (`match_candidates.go:121`, the strongest tier short of a human
+  reviewer). No new provenance tier is needed for this: a PR's head branch is the identical signal a
+  Claude Code session's branch is — "an explicit human act of naming the ticket for this work" — and
+  reusing the existing artifact key means `gatherCandidates` needs **zero changes** to consume it.
+- `events.ArtifactSCMKeys` = ticket keys extracted from the PR's **title and body** via
+  `events.ExtractTicketKeys`. This reuses `ProvenanceSCMCommand`'s existing tier
+  (`match_types.go:109`) rather than inventing a GitHub-specific one, on the same reasoning
+  `scm.go`'s doc comment gives for a commit message or `gh pr create` tool call: a PR title/body is
+  "a developer naming the ticket for this work," the same explicit-authoring act, just observed from
+  GitHub's side of the fence instead of Claude Code's. **This is a deliberate, load-bearing
+  decision**, not a shortcut: it means this collector needs no new `Provenance` constant, no
+  `Rank()` case, and no `gatherCandidates` change — every existing consumer already handles it
+  correctly the day this collector ships.
+- A private (collector-internal, per `docs/go-conventions.md`'s "only keys read outside their
+  producing collector belong [in the shared vocabulary]") `repo`/`number`/`author` triple, used
+  internally to build `fanout.Item` (§6) — not exposed as a shared `events.Artifact*` constant
+  because nothing outside this collector and its own pipeline wiring reads it yet.
+
+### Why these two, and not the rest
+
+Phase 1's write surface is "comments and forward transitions" (`README.md`'s own Status section);
+the two events above are exactly the moments that change what a comment or transition should say:
+opening a PR is the strongest available signal that work started, and merging/closing is the
+strongest available signal that it finished. Everything else considered and deferred:
+
+- **Reviews / review comments.** Real, valuable (`rules/review-staleness.md`,
+  `rules/bot-pr-noise.md` are both precedent-established norms this data would eventually feed), but
+  add a genuinely new identity question this slice does not need to answer to ship (§3's "editable
+  after submission" gap) and a second API shape (`gh pr view --json reviews,latestReviews`). Deferred
+  to slice 2, once PR-lifecycle events are live and reviewed.
+- **CI / check runs.** High-churn (reruns, flaky retries) in a way that mirrors
+  `rules/bot-pr-noise.md`'s own documented failure mode almost exactly — a check-run stream risks
+  becoming the new dependency-bump-approval noise. Deferred until there is real volume data to size
+  a filter against, matching this codebase's own "measure before capping" discipline
+  (`docs/architecture-findings.md` F16's four falsified proposals are the cautionary example).
+- **Commits (within a PR, or direct pushes).** Real value — F20 measured 32 of 47 commits carrying a
+  key in their message — but `collector/claudecode`'s own `scmKeys` (F20) already recovers commit
+  messages for every commit *authored through a Claude Code session*, which is unjira's primary
+  interface with git per `CLAUDE.md`. A GitHub-side commit collector's *marginal* value is commits
+  made outside a Claude Code session (another tool, another teammate) — real, but a second event
+  kind and a second API call (`gh pr view --json commits`) this slice does not need to ship to prove
+  the seam.
+- **Releases.** No consumer: phase 1 proposes comments and transitions, never anything a release
+  event would inform. Same "an action type needs it, it gets emitted" discipline the Jira collector
+  spec states for its own skipped changelog fields.
+- **Merge commit as its own event.** Redundant with the `:merged` event above — same underlying
+  fact, observed twice.
+
+### Full text, no truncation — and this is where F16's own foresight pays off
+
+PR bodies are exactly the "whale-shaped" input `docs/architecture-findings.md` F16 already
+anticipated when it kept `correlator.WithMaxEventSummaryChars` alive after measuring it inert on the
+current (all-Jira, all-`claude_code`) store: *"a future GitHub or Slack collector has whale-shaped
+inputs (PR bodies, thread transcripts)."* This collector does not add a new cap — the existing one
+already covers it, config-driven (`correlator.max_event_summary_chars`, currently `0` = unbounded in
+`config/unjira.example.json`), reporting truncation counts on `Stats` the way it already does for any
+source. Truncating here, by contrast, would repeat the Jira collector spec's own rejected argument
+almost verbatim: `Cluster` already bisects on overflow and errors loudly on a genuinely irreducible
+unit, so per-event self-censorship is unnecessary and violates the standing preference for erroring
+loudly over silently dropping data.
+
+## 3. `ExternalID` and idempotency — discrete lifecycle facts, not a revisioned snapshot
+
+This is the section the identity-mutability concern actually resolves in, and the resolution follows
+directly from §"Why GitHub is not the tracker": **because these events are work evidence
+(clusterable), the Jira issue-body precedent — mint a fresh id keyed on a revision discriminator,
+because an inert duplicate tracker record costs nothing — is the wrong model here.** Adopting it
+verbatim (`owner/repo#N:body:<updated-unix>`, re-minting on every edit) would manufacture a fresh
+clusterable candidate on every trivial title/body edit, which is expensive for the reason F18
+measured precisely: tracker-record exclusion cut a clustering prompt 8.3× by keeping non-work-evidence
+out of the pool; a duplicate work-evidence event does the opposite — it *adds* pool volume every time
+a PR is touched.
+
+The model that *does* transfer from Jira is a different one: `collector/jira`'s **changelog** events
+(`EventsFromChangelogEntry`), not its issue-body event. A changelog entry is a discrete, immutable
+historical fact — "at this instant, status moved from A to B" — recorded once and never re-derived
+from a later, possibly-edited value. This collector's two event kinds are exactly that shape:
+
+- `<owner>/<repo>#<N>:opened` is captured **once**, at (or shortly after) PR creation. GitHub's
+  `created_at` does not change once set. The title/body captured are a **frozen snapshot at that
+  instant** — if the author edits the title an hour later, this event does not update, and no new
+  event is minted for the edit either. That is an accepted limitation, not an oversight, on the same
+  grounds `collector/jira`'s Jira collector spec already accepts one for issues that leave a query's
+  scope: **the reconciler's own live verification is the backstop**, not perfect freshness at
+  collection time. (`rules/intent-not-outcome.md` already requires this regardless — a state-bearing
+  action must confirm current state before acting, so a stale PR title in the event log was never
+  going to be load-bearing for a *write* on its own.)
+- `<owner>/<repo>#<N>:merged` (or `:closed`) is captured **once**, when the PR's state transitions.
+  `merged_at`/`closed_at` are likewise set once. Whatever title/body is current *at that later
+  moment* is what this event captures — a genuine (if partial) freshness improvement over the
+  `:opened` snapshot, for free, simply because it is a second, later, independent observation of the
+  same PR, not a re-derivation of the first one.
+
+Neither id embeds a revision discriminator, and neither needs one: each names a specific, one-time,
+immutable-once-recorded historical instant, exactly as `<KEY>:status:<changelog-id>` does for Jira. A
+PR that is *reopened* after being closed (GitHub permits this) produces a **new** `:opened`-shaped
+question this design leaves genuinely unresolved (see Open Questions) rather than silently
+mis-keying it — reopening is rare enough, and consequential enough to get wrong, that guessing is
+worse than naming the gap.
+
+**One PR is (at most) two events, never one "current state" event.** This directly answers the
+task's framing ("say what identity a PR event has, whether one PR is one event or many"): it is
+many, but a small, *fixed* many — bounded by the lifecycle states this slice cares about (open,
+end), not by how many times the PR was edited. A PR that is opened and never merged or closed (still
+open at collection time, indefinitely) produces exactly one event, re-examined every pass (cheap: the
+watermark, §4, means it is only re-fetched, not re-emitted, once `:opened` is already stored) until
+it eventually closes.
+
+**What re-collection does to an existing row.** `INSERT OR IGNORE` on `(source, external_id)` means:
+once `<owner>/<repo>#N:opened` exists, re-collecting the same PR while it is still open is a no-op
+(the row is frozen — including its title/body snapshot — exactly as F21 describes for any collector).
+This collector does not attempt artifact re-derivation; per F21's own recommendation (deferred,
+`docs/superpowers/specs/2026-09-17-artifact-rederivation-design.md`), that is a separate, later
+mechanism this collector would use unmodified if it is ever built, not something this spec designs
+its own version of.
+
+## 4. Cursors and watermark
+
+One cursor per configured repo, in the existing `cursors` table (`PRIMARY KEY (collector,
+resource)`), following the Jira collector's own pattern exactly:
+
+```
+collector: "github"
+resource:  "owner/repo"
+position:  "<max PR updated_at seen>"
+```
+
+No hash-of-query component (contrast the Jira collector's `sha256(effective JQL)` watermark key):
+there is no operator-authored query to invalidate here, only a fixed list of configured repos. Adding
+or removing a repo from config changes which cursor *rows* exist, not what an existing row's
+watermark means — so there is nothing analogous to the Jira collector's "widening `project_keys`
+invalidates the old watermark" hazard.
+
+`gh pr list --search "updated:>=<watermark>"` bounds *which PRs are fetched*, mirroring the Jira
+collector's own watermark discipline: it must not be read as bounding which events are emitted for a
+PR that matches. In practice this matters less here than for Jira's changelog case (a PR usually has
+few lifecycle transitions, not months of history), but the principle transfers identically — a PR
+whose `updated_at` just crossed the watermark (say, it was just merged) still gets its `:opened`
+event emitted if this collector has never seen it before (e.g., a repo just added to config).
+Watermark advances only after a repo's list-and-fetch completes without error, to the max
+`updated_at` observed — same all-or-nothing-per-scope discipline as the Jira collector's
+per-query advance, scoped here to per-repo.
+
+**`gh pr list`'s two rate-limit buckets, verified live in this environment**: a plain `gh pr list
+--state all --json ...` call (no `--search`) consumes the **`core`** bucket (5000/hr, confirmed via
+`gh api rate_limit` before/after — unchanged at 5000 either way, meaning `gh`'s own GraphQL-backed
+list path is cheap enough not to register against a 5-item pull in this test), while `gh api
+"search/issues?q=...`" explicitly hits the **`search`** bucket (30/min, confirmed: it dropped from
+30 to unchanged-but-separately-tracked). **Recommendation: avoid `--search`/the search endpoint for
+the incremental watermark query** — 30 requests/minute is a real constraint for a `watch` loop
+running hourly-ish across several configured repos, where `core`'s 5000/hr has enormous headroom for
+this collector's actual call volume (one list call per repo per pass, plus, if needed, one detail
+call per new/changed PR). `gh pr list --json ... ` without `--search` still supports filtering by
+state and returns `updated_at`, so the watermark comparison can be done client-side (fetch a page,
+stop once `updated_at` falls below the watermark) rather than pushed into a search query string — an
+intentional trade of "one extra client-side comparison" for "stay in the generous rate-limit bucket
+entirely."
+
+## 5. Issue-key provenance — no new tier, reusing the existing ladder
+
+Restated from §2 because the task asks for it explicitly: **branch name → `ProvenanceBranch`, title/body
+→ `ProvenanceSCMCommand`.** Both are existing tiers (`match_types.go:88`, `:109`), already ranked
+correctly relative to each other and to Jira-sourced/prose-sourced candidates. Measured precedent for
+why `ProvenanceSCMCommand` is the right tier and not `ProvenanceProseFirst`: `scm.go`'s own doc
+comment argues a `gh pr create` tool call is "the same explicit human act that makes ProvenanceBranch
+the strongest inferred tier," and a PR's title/body — regardless of which side observed it — is that
+same act. No `Provenance` case needs adding; `gatherCandidates`, `promoteCorroborated`, and
+`rankCandidates` (`match_candidates.go`) need zero code changes to correctly rank a GitHub-sourced
+candidate against a Claude-Code- or Jira-sourced one, because the artifact keys they already read
+(`ArtifactGitBranch`, `ArtifactSCMKeys`) are exactly the ones this collector writes.
+
+A candidate this collector's PR body/title genuinely cannot supply: whether an author *read* about a
+ticket versus *authored against* it (`scm.go`'s own careful authoring-verb-only design). A PR body is
+inherently an authoring artifact — nobody opens a PR to investigate, only to propose a change — so
+there is no analogous "reading command" filter to build here; every PR title/body key extracted is,
+by construction, an authoring-tier signal.
+
+## 6. `refs` and `fanout` — how each wires in, and the one that genuinely does not yet have a home
+
+### `fanout` — wires in, at the pipeline layer, before the LLM `Cluster` call
+
+`fanout.Item{Repo, Author, Title, Number}` maps directly onto this collector's own PR data — the
+collector's job is only to emit events; the **pipeline** layer is where fan-out detection runs,
+analogous to how `events.PartitionByTrackerRecord` runs in `RunNarrate` today (see
+`docs/superpowers/specs/2026-09-16-work-evidence-vs-tracker-state-design.md`'s §1 for that precedent)
+rather than inside `collector/jira` itself. Concretely, in `internal/pipeline` alongside the existing
+tracker-record partition:
+
+```go
+// internal/pipeline/narrate.go (extended)
+work, trackerRecords := events.PartitionByTrackerRecord(candidates)
+prGroups := groupByFanoutFamily(work)   // new: filters to github :opened events, builds
+                                         // []fanout.Item, runs fanout.ClusterFanout
+```
+
+**What a detected family does, and why this stops short of merging events outright.** The package's
+own doc comment says fan-out clustering "decides nothing about meaning (that is the LLM correlator's
+job) — it just collapses the mechanical fan-out so the correlator sees one story instead of twelve
+fragments." Taken literally, "sees one story" argues for physically reducing N raw events to one
+before `Cluster` ever runs. This design does **not** do that, for a reason CLAUDE.md itself supplies:
+"never silently drop data" and the entrance/exit-filter distinction the tracker-record work already
+established — `PartitionByTrackerRecord` excludes events from the *candidate pool* while keeping them
+fully queryable at the store layer, never deleting or merging rows. Physically collapsing 12 PR
+events into 1 before clustering would mean 11 of them stop being independently visible to anything
+downstream (a later `NarrativeEventsForContext` hydration, a future artifact re-derivation pass, a
+human in `triage` wanting to see all 12 links) — the same category of loss `docs/design-notes.md`'s
+incident 13 names for a different operation ("the unsafe case stops being forbidden and becomes
+unreachable" is the right shape when the unsafe thing is a *write*; it is the wrong shape when the
+"unsafe thing" is a human wanting to audit the raw data later).
+
+So the design instead uses the **existing** `correlator.WithInstruction` mechanism
+(`correlator/correlator.go:228`) — already built for exactly "a deterministic signal that should
+strongly shape, but not dictate, one `Cluster` call's outcome" (its current caller is triage's
+`[s]plit`, telling the model a reviewer has already judged something). A detected fan-out family
+becomes an instruction appended to the cluster prompt: *"Events 3-8 are a detected environment-mirror
+fan-out family (jcogilvie/infra#678-689, same author, same normalized title 'switch shared module to
+managed mode'). Per this codebase's own operational history (a rule at
+confidence: high), these are almost certainly one logical change and should become one narrative with
+a range, unless you have specific evidence otherwise."* This keeps the LLM as the final arbiter of
+*meaning* (a family could, rarely, span two unrelated coincidentally-similar PRs — the model can
+still say so) while making the deterministic, high-confidence heuristic
+(`rules/env-mirror-fanout.md`, unmodified) load-bearing on every pass rather than hoped-for.
+
+**Why not a rule file instead of an instruction.** `rules/env-mirror-fanout.md` already exists and is
+already rendered into every `Cluster` call via `WithClusterRules` — so in one sense this is "already
+wired," and has been since the rule was written. What it lacks is the **per-window, per-PR
+specificity** a static rule file cannot carry: the rule states the *heuristic* ("normalize titles,
+group by repo+author+adjacent numbers"), but does not, and structurally cannot, name *which* events in
+*this* window matched it — that requires running `fanout.ClusterFanout` against this pass's actual
+data. The instruction is the deterministic pre-filter's output; the rule is the standing policy that
+justifies trusting it. Both are needed, and `WithInstruction`'s own doc comment already establishes
+the append order (rules, then instruction) that makes the two compose without conflict.
+
+**Deferred to slice 2, explicitly.** Per the "smallest first slice" discipline, this design is
+recorded now (`fanout.Item` construction, the `WithInstruction` integration point, the rejected
+event-merging alternative) but **not implemented in slice 1**. Slice 1 ships bare PR events with no
+fan-out detection; slice 2 adds `groupByFanoutFamily` once real fan-out data exists in a collected
+store to validate the heuristic against — matching this codebase's own repeated lesson (design-notes
+incidents 27, 32, 36: measure against real data before implementing a documented fix, because a
+finding's diagnosis and its proposed mechanism have different evidentiary standing). Shipping slice 1
+first is also what makes that later measurement possible at all.
+
+### `refs` — extractable, but genuinely has no consumer yet, and this spec says so plainly
+
+`refs.ParsePRRefs` matches GitHub's own `#N` / `owner/repo#N` cross-reference syntax — "Fixes #123",
+"see #456-460" — inside PR bodies. This collector **can** run it (on PR body text, via
+`refs.ParsePRRefs(body, refs.WithDefaultRepo(thisRepo))`) and **could** store the result as a new,
+collector-private artifact for future use. This design recommends doing exactly that much — extract
+and store, cheaply, deterministically — but stops there, because tracing the result forward exposes
+a real gap `CLAUDE.md`'s own F1 entry did not have the collector in hand to check yet:
+
+**There is no consumer for a GitHub-cross-reference in this pipeline, and building this collector
+does not create one.** Phase 1's matching resolves a narrative to a **Jira issue key**
+(`narratives.issue_key` → gone; today, `narrative_issues.issue_key`, per F11's resolution) — nothing
+in `internal/correlator` or `internal/reconciler` represents "this PR relates to that other PR" as a
+first-class relationship. `refs.Ref.Key()` produces `"owner/repo#123"`, which is not a Jira issue key
+and cannot become a `narrative_issues` row under today's schema (that table's `issue_key` column is
+explicitly a tracker key — `store.Role` values `primary`/`same_work`/`mentioned` are all defined
+relative to *a Jira issue*, per `correlator.Role`'s doc comment discussing "the motivating PAAS/SUMO
+case").
+
+So `CLAUDE.md`'s own framing turns out to be exactly right, and this investigation confirms rather
+than resolves it: **`refs` awaits not just *a* GitHub collector, but a GitHub-relationship-modeling
+feature this spec does not design** — representing "PR A references PR B" or "PR A closes issue B"
+as data a narrative or an action can use. That is a materially different, larger feature (a second
+relationship type alongside `narrative_issues`, or a same-repo PR-to-PR graph) than "collect GitHub
+PRs," and inventing a half-designed consumer here to give `refs` a caller would be worse than leaving
+it uncalled with the reason recorded — the same restraint F1 itself already modeled for the
+pre-collector state.
+
+**Recommendation:** extract via `refs.ParsePRRefs` and store as a private artifact in slice 1 (cheap,
+and it means the data exists the day a consumer is designed — the same "write now, read later"
+shape `docs/architecture-findings.md` F6 defends for `ArtifactGitBranch`'s siblings), but do **not**
+claim this collector "wires in" `refs` in the sense the Jira collector's own spec wired in
+`gatherCandidates`. It does not. This is recorded as an **open question** below rather than resolved,
+per the task's own instruction not to force a resolution where none is earned.
+
+## 7. `claude_code` double-observation — the highest-risk interaction, addressed directly
+
+The scenario: a Claude Code session runs `gh pr create` to open `owner/repo#456` for `PAAS-123`. Two
+independent collectors now observe **the same real-world PR**:
+
+- `collector/claudecode`'s `scmKeys` (F20) reads the tool call's input, extracting `PAAS-123` onto
+  the **transcript** event's `ArtifactSCMKeys`.
+- This collector's `:opened` event, reading the PR itself from GitHub's API, extracts the **same**
+  `PAAS-123` from the PR's title/body onto its **own** `ArtifactSCMKeys` — plus the PR's head branch
+  onto `ArtifactGitBranch`.
+
+Both are work evidence (§"Why GitHub is not the tracker" + F18's existing claude_code treatment); both
+are clusterable; both will very likely share a near-identical `OccurredAt` (the tool call and GitHub's
+`created_at` are seconds apart at most).
+
+**This is not automatically a bug — it is the corroboration case the architecture already has
+machinery for.** `docs/superpowers/specs/2026-09-16-work-evidence-vs-tracker-state-design.md`'s own
+measured table already shows "mixed" narratives — `claude_code` + `jira` events clustered
+together — as "unjira's actual job," not a defect: three of 68 narratives in that measurement were
+exactly this shape, and they are the ones matching resolves correctly. Adding `github` as a third
+work-evidence source into the same clustering pool is architecturally identical to that existing
+case, not a new category of problem. If `Cluster` correctly merges the transcript event and the PR
+event into one narrative (both timestamped within seconds, both mentioning `PAAS-123`), the result is
+*better* evidence, not duplicated evidence — `gatherCandidates`'s `upsert` (`match_candidates.go:91`)
+already collapses the same key seen from multiple events in one narrative into one `Candidate`,
+regardless of how many events named it.
+
+**The real, residual risk is a clustering *miss*, not a matching miss.** If `Cluster` does *not*
+recognize the transcript event and the PR event as one story — plausible, since their `Summary` text
+differs (a tool-call description vs. a rendered PR title/body) even though they describe the same
+act — the result is **two narratives for one piece of work**. Two backstops already exist for what
+that costs, and this design leans on both rather than building a third:
+
+- **At the write layer:** `reconciler.suppressDuplicates` (`reconciler.go:429`) already drops an
+  action whose issue already has an open proposal from a *different* narrative — so even an
+  unmerged pair cannot produce two comments/transitions on the same Jira issue. This is an existing,
+  tested backstop, not something this spec adds.
+- **At the review-queue layer:** an unmerged pair still costs two `Cluster`/`Match`/`Reconcile` passes
+  and, if the two narratives' actions differ in *type* (one narrative proposes a comment, the other a
+  transition), `suppressDuplicates` does not collapse them — a reviewer sees two queue entries about
+  one PR. This is a real cost `suppressDuplicates` does not fully absorb, and this design does not
+  claim it does.
+
+**What would close the residual gap, and why it is not this spec's job.** The clean fix is a
+deterministic cross-reference between the two event *sources*, not a smarter `Cluster` prompt: if
+`collector/claudecode`'s `scmKeys` were extended to also extract a PR number (via `refs.ParsePRRefs`
+on the same tool-call text it already reads) and stored it on a shared artifact both collectors
+write, `gatherCandidates` — or a new, narrower deterministic pre-filter — could recognize "these two
+events name the same `owner/repo#N`" before any model call, the same way `PartitionByTrackerRecord`
+recognizes tracker records today. That is a genuine, concrete design, and it is explicitly **not**
+built here: it requires a change to `collector/claudecode` (a second collector this spec does not
+own) in addition to this one, making it a cross-collector feature rather than something "add a
+GitHub collector" can ship alone. Recorded as an open question below.
+
+**Recommended validation, once both collectors run together on real data**: measure, the way this
+codebase's own design notes repeatedly insist on measuring before building (incidents 27, 32, 35, 36)
+— for real `gh pr create` sessions, does `Cluster` merge the transcript event and the PR event into
+one narrative or two? If the answer is "reliably one" (plausible: both carry the same ticket key in
+`ArtifactSCMKeys`, which is exactly the kind of textual overlap clustering already uses), the
+residual gap this section names may not be worth building a fix for at all — matching F16's own
+lesson that a plausible mechanism is not a finding until measured.
+
+## 8. Configuration
+
+`config/unjira.example.json` already stubs `collectors.github` inert
+(`{"enabled": false, "repos": ["yourorg/yourrepo"]}`) — this design fills that stub in rather than
+inventing a new shape:
+
+```json
+"collectors": {
+  "github": {
+    "enabled": true,
+    "repos": ["yourorg/yourrepo", "yourorg/other-repo"],
+    "backfill_days": 30
+  }
+}
+```
+
+- **`repos`**, a flat list of `owner/repo` strings — no per-repo query customization the way Jira's
+  `queries[]` has, because there is exactly one query this slice runs (list PRs since watermark) and
+  nothing analogous to Jira's "several views on one site" need.
+- **`backfill_days`**, mirroring `collector/claudecode`'s own option name and default shape
+  (`DefaultBackfillDays = 14`, `claudecode.go:28`) — how far back to look on a repo's first-ever
+  collection pass (no existing cursor row). A GitHub-specific default of 30 is proposed (PRs often
+  stay open longer than a Claude Code session backfill window needs to reach) but is genuinely a
+  guess, not a measurement — flagged as an open question below rather than asserted as tuned.
+- **No `project_keys`-shaped read-scope declaration**, unlike `config.JiraConnection`. There is no
+  analogous "which projects can this write to" question, because this slice never writes to GitHub —
+  `IsProjectWritable`'s whole reason for existing (gating `gate.Applier`) has no counterpart here
+  until a write path exists, which this spec does not add.
+- **No credential field in config**, per `CLAUDE.md`'s "credentials come from the environment, never
+  config files." Unlike Jira's `UNJIRA_JIRA_CREDENTIALS`, this collector needs **no new environment
+  variable at all** — §1's `gh auth login` reasoning is precisely why: the credential already lives
+  outside unjira's process, in `gh`'s own keychain-backed storage, and unjira's role is only to
+  invoke a binary that already knows how to authenticate itself. If `gh` is not authenticated,
+  `Collect` fails loudly naming the remedy (`run gh auth login`), matching the "credentials come from
+  the environment" spirit even though the mechanism differs from Jira's.
+
+**Registration** (`cmd/unjira/main.go:60`'s `registry` map):
+
+```go
+var registry = map[string]func() pipeline.Collector{
+    "claude_code": func() pipeline.Collector { return claudecode.New() },
+    backendJira:   func() pipeline.Collector { return collectorjira.New() },
+    "github":      func() pipeline.Collector { return collectorgithub.New() },
+}
+```
+
+One line, matching the Strategy+registry pattern `docs/architecture.md` §5 already credits this
+codebase with ("Adding a collector is one map entry. Verified: nothing downstream switches on
+collector name.") — this design changes nothing about that claim; it is exercised, not revisited.
+
+## 9. Testing strategy
+
+Offline (`go test ./...`, what CI runs), following the Jira collector spec's own established
+pattern, substituting a fake process runner for `httptest`:
+
+- **Collector unit tests** — a fake `github.Client` (canned `[]PullRequest` per call, no subprocess),
+  covering: `:opened`/`:merged`/`:closed` event shapes and `ExternalID`s; `ArtifactGitBranch` and
+  `ArtifactSCMKeys` populated correctly from head-branch and title/body respectively; **never**
+  `events.SetTrackerRecord` called (a regression test worth having given how load-bearing §"Why
+  GitHub is not the tracker" is — a future edit that starts marking these as tracker records would
+  silently reintroduce the exact category error F18's own spec fixed for Jira, and this is exactly
+  the shape `TestEveryEmittedEventIsMarkedATrackerRecord` polices for the Jira collector in reverse:
+  a `TestNoGitHubEventIsEverMarkedATrackerRecord` belongs in this collector's own package for the
+  identical reason that one lives in `collector/jira`'s).
+- **Identity/idempotency** — real temp-file SQLite (`store.Open`), covering: re-collecting an
+  already-`:opened` PR is a no-op (dedupe); a PR that transitions from open to merged between two
+  collection passes produces exactly one new event (`:merged`), not a duplicate `:opened`; a
+  reopened PR's handling matches whatever this spec's own open question below resolves to (currently
+  unresolved — the test that would pin the answer cannot be written until it is).
+- **Watermark** — real store, covering: cursor advances only after a repo's fetch completes without
+  error; a repo new to config (no existing cursor) backfills from `backfill_days`; a transient `gh`
+  failure on one repo does not block another configured repo's cursor from advancing (same
+  per-scope failure granularity the Jira collector's own spec establishes for per-query failures).
+- **Fanout integration point** (slice 2, when built) — `groupByFanoutFamily` over a synthetic
+  12-PR fan-out family produces the expected `WithInstruction` text; a non-fanout PR set produces no
+  instruction.
+- **`RunCollect` integration** — collector registered, run end-to-end against the fake client plus a
+  real store, asserting dedup on a second identical pass — matching the Jira collector spec's own
+  integration test shape exactly.
+
+Every regression test gets the break-it drill this codebase's own conventions require
+(`docs/superpowers/specs/2026-08-21-jira-collector-design.md`'s own testing section: "this project
+has caught four tests this month that looked like coverage and were not").
+
+**Live tier.** `internal/live` (the `live` build tag, `UNJIRA_LIVE=1`) gets a new test file running
+the real `gh` binary against a real, low-stakes repo — `jcogilvie/unjira` itself is the natural
+choice, since it is already this project's own remote and the operator (verified in this
+environment: `gh auth status` shows an authenticated `jcogilvie` session) already has push access for
+a throwaway branch+PR the live test can open and close as part of its own setup/teardown, mirroring
+`internal/live/jira_test.go`'s `dev seed`-then-assert shape.
+
+## Open questions
+
+Left genuinely open, per `CLAUDE.md`'s "the record of what was uncertain is worth more than a doc
+that looks prescient" — none resolved by picking arbitrarily:
+
+- **Reopened PRs.** GitHub permits reopening a closed PR. This design's two-event lifecycle
+  (`:opened`, `:merged`/`:closed`) has no slot for "reopened, and possibly re-closed again later" —
+  a second closure would collide with the first `:closed` `ExternalID` and dedupe away silently
+  (`INSERT OR IGNORE`), which is exactly the silent-data-loss shape this codebase's own conventions
+  warn hardest against. Genuinely rare in practice, but "rare" is not "impossible," and this spec
+  does not invent a numbering scheme (`:closed:2`? keyed on GitHub's own state-transition timestamp
+  instead of a fixed suffix?) without evidence for which shape is worth the complexity.
+- **The `claude_code` double-observation residual gap (§7).** Whether `Cluster` reliably merges a
+  transcript-observed PR-creation event with this collector's own `:opened` event for the same PR is
+  an empirical question this spec cannot answer without both collectors running against real data.
+  If it merges reliably, the gap may not need a fix. If it does not, the clean fix (a shared
+  cross-reference artifact via `refs.ParsePRRefs` on both collectors' text) requires a
+  `collector/claudecode` change this spec does not own. Left for measurement, not resolved here.
+- **`refs`' consumer (§6).** This design extracts and stores GitHub cross-references but names no
+  consumer for them — matching creates. Whether that consumer is a same-repo PR-relationship graph, a
+  richer `narrative_issues`-adjacent table, or something else entirely is undesigned. Recorded rather
+  than guessed at.
+- **`backfill_days` default of 30.** Proposed by analogy to `collector/claudecode`'s own backfill
+  option, not measured against any real repo's PR lifetime distribution. A repo with long-lived PRs
+  (weeks between open and merge) may want a materially larger value; this spec does not have the data
+  to tune it and says so rather than asserting a number that looks considered.
+- **Whether reviews/CI belong in slice 2 or a slice 3.** This spec defers both past slice 1 with a
+  stated reason each (§2), but does not commit to an order between them — that depends on which
+  gets requested first, or which measured gap (from running slice 1 against real data) turns out to
+  matter more.
+
+## Non-goals (restated, for the same reason the Jira collector spec restates its own)
+
+- No write path. `clients/github` has no `TaskWriter`-shaped methods; nothing in `gate.Applier`
+  changes.
+- No narrative→GitHub-object matching (only narrative→Jira-issue-key, feeding the existing pipeline
+  better candidates).
+- No GitHub-Issues-as-tracker backend (a materially different, unbuilt feature — see the scoping
+  caveat in §"Why GitHub is not the tracker").
+- No `fanout`/`refs` implementation in slice 1 — designed (§6), deferred, with the deferral reasoned
+  rather than assumed.
