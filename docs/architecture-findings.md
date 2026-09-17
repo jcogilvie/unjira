@@ -28,34 +28,6 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
-### F26 — a narrative whose delta is entirely unjira's own output is selected, emptied, and writes nothing
-
-The live residual of F12, kept when that finding was deleted because the finding is fixed and this is
-not.
-
-Draining converges to **7 narratives**, and those 7 are fully explained: every event they carry is
-`authored_by_unjira` — status transitions unjira recorded itself. `dropSelfAuthored` runs AFTER the
-selector, and must, because "unjira wrote this" is an artifact test SQL could do but the guard also
-protects a narrative whose delta is only *partly* self-authored. So those narratives are selected,
-emptied, and hit `SkippedNoDelta` writing nothing.
-
-**Third instance of the same shape** — an outcome that leaves no trace — after F12's suppression and
-F22's matching livelock. This is the cheap version: no `GetIssue`, no model call, just a wasted slot
-per pass and a remainder that overstates by 7.
-
-Open because the fix is a judgement call:
-
-- **Push an `authored_by_unjira` test into the selector.** Free, since the artifact is queryable — but
-  it duplicates `dropSelfAuthored`'s logic in SQL, and partial self-authorship still needs the Go check.
-- **Record the skip as a watermark row**, the way suppression and `match_examinations` now do. More
-  consistent with the two fixes that preceded it, and it makes the remainder honest rather than
-  merely smaller.
-
-The second is probably right, on the grounds that F22 established the pattern and a third ad-hoc
-variant is worse than a third instance of one mechanism.
-
----
-
 ### F21 — an event's artifacts are frozen at first collection, so a collector fix never reaches old rows
 
 Events are keyed `(source, external_id)` with `INSERT OR IGNORE`, so re-collecting never updates an
@@ -285,7 +257,7 @@ the natural moment to decide.
 | F23 — the Jira client has no retry | **resolved**: a `retryTransport` retries GET/HEAD on transport errors, 429 (honoring `Retry-After`) and 5xx, capped at 4 attempts / 30s, with an explicit 20s client timeout. Writes are never retried — a single early return, since Jira has no idempotency key and a retried POST means a duplicate comment. 404 deliberately passes through, because `verifyCandidates` prunes on it |
 | F24 — write scope was invisible until approval | **resolved**: `config.ProjectWritability` is one shared predicate; `gate.Applier` defers to it and triage consults it per action. `[a]pprove` is dropped from the prompt for an unappliable action and the Session refuses the verb regardless. Verified live: the header reports "17 of them cannot be applied" and each names its remedy |
 | F25 — a summary named its message count while withholding the messages | **resolved**: `sessionFacts` extracts bounded deterministic phrases from the same tool calls `scmKeys` reads, and `segmentSummary` appends a "Did: …" clause. Fixed-size by construction (40 commits -> one phrase), +3.7% prompt cost. Verified on the motivating case: the rationale went from "no PR or completion evidence yet" to "commit + PR opened + tests run", escalating a comment to an In Review transition |
-| F26 — a self-authored delta is selected, emptied, writes nothing | **open**, F12's residual, kept when that finding was deleted: 7 narratives whose every event is `authored_by_unjira` are selected, emptied by `dropSelfAuthored`, and hit `SkippedNoDelta`. Third instance of outcome-leaves-no-trace after F12 and F22 |
+| F26 — a self-authored delta is selected, emptied, writes nothing | **resolved**: `reconcile_examinations` (`store.RecordReconcileExamined`) is a watermark table, F22's mechanism applied to the reconciler's Go-side `dropSelfAuthored` filter rather than a SQL predicate duplicating it. `NarrativesWithActionableLinks`/`CountNarrativesWithDelta` share one predicate (`hasUnexaminedDelta`) so the two cannot drift. Verified: a 2-narrative repro where the older, self-authored-only narrative previously starved a real one behind it under a cap of 1 now yields the real narrative on pass 2 |
 | F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **resolved by F18**, verified: zero `jira_event` primary links remain (branch 2, corroborated 4, prose_first 4, scm_command 5). The provenance can no longer be manufactured, because the Jira event is not in the cluster for a key to be read out of |
 | F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is RE-RANKING not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrected the finding's own framing |
 | F21 — artifacts are frozen at first collection | **open**: `INSERT OR IGNORE` on `(source, external_id)` means a collector fix never reaches existing rows. 386 `claude_code` events predate `ArtifactSCMKeys` and never gain one, so F20's tier is invisible for all of them. Makes a fix's measured benefit differ silently from what a mature store receives |

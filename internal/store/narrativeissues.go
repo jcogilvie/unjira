@@ -157,12 +157,21 @@ func (s *Store) CountNarrativesWithoutPrimaryLink() (int, error) {
 // means the narrative was examined and nothing new has happened since. Contrast
 // EligibleEvents, which bounds on status='applied' only because it asks a different
 // question ("what has no tracker mutation claimed yet").
+//
+// Also carries reconcileExaminationPredicate (finding F26): hasUnexaminedDelta alone
+// cannot see that a narrative's surviving delta is entirely self-authored, because
+// that filter is Go-side (reconciler.dropSelfAuthored), not SQL-side. Without it, a
+// narrative in that shape passes this EXISTS check, gets selected, gets emptied, and
+// hits SkippedNoDelta forever — the same livelock hasUnexaminedDelta itself was built
+// to close, one layer up. Appending the predicate here rather than duplicating it at
+// each of this const's two call sites keeps the two queries this const already
+// unifies from also disagreeing about F26's exclusion.
 const hasUnexaminedDelta = `EXISTS (
 	              SELECT 1 FROM narrative_events ne
 	              WHERE ne.narrative_id = n.id
 	                AND ne.linked_at > COALESCE(
 	                    (SELECT MAX(created_at) FROM actions WHERE narrative_id = n.id), '')
-	          )`
+	          )` + reconcileExaminationPredicate
 
 // CountNarrativesWithDelta is how many linked narratives a reconcile pass would
 // actually ACT on — the honest backlog depth behind reconciler's per-pass cap.

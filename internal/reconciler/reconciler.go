@@ -225,6 +225,22 @@ func reconcileOne(
 	if len(delta) == 0 {
 		result.SkippedNoDelta = true
 
+		// A watermark, or this is finding F26: NarrativesWithActionableLinks'
+		// hasUnexaminedDelta check runs entirely in SQL and cannot see
+		// dropSelfAuthored's Go-side filter, so a narrative whose surviving delta
+		// is entirely self-authored keeps passing that check, gets selected again
+		// next pass under the stable (window_start, id) order, and hits this exact
+		// branch forever — the third instance of design-notes #29's shape, after
+		// F12 (StatusSuppressed) and F22 (match_examinations). Recorded here,
+		// where the emptiness is known, for the same reason match.go's
+		// RecordMatchExamined calls are: the outcome and its trace belong
+		// together.
+		if err := s.RecordReconcileExamined(
+			narrative.ID, "every delta event is authored_by_unjira"); err != nil {
+			return result, correlator.Stats{}, fmt.Errorf(
+				"recording reconcile examination for narrative %d: %w", narrative.ID, err)
+		}
+
 		return result, correlator.Stats{}, nil
 	}
 

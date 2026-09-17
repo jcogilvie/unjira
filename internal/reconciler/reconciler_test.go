@@ -433,3 +433,75 @@ func TestReconcileDropsSelfAuthoredEventsBeforeComputingTheDelta(t *testing.T) {
 	assert.Empty(t, tracker.getCalls, "verification never runs when the delta is empty")
 	assert.Empty(t, llmClient.prompts)
 }
+
+// TestReconcile_SelfAuthoredOnlyNarrativeYieldsToTheOneBehindIt is finding F26's
+// end-to-end repro: a stable selection order plus an outcome (SkippedNoDelta) that
+// leaves no trace is a livelock, the third instance of design-notes #29's shape.
+// Without RecordReconcileExamined, a narrative whose entire delta is self-authored
+// is re-selected under the cap every pass, and a real narrative behind it in the
+// (window_start, id) order is never reached — exactly the measured F26 shape (7
+// self-authored-only narratives permanently occupying slots the cap could otherwise
+// give to real work).
+func TestReconcile_SelfAuthoredOnlyNarrativeYieldsToTheOneBehindIt(t *testing.T) {
+	s := reconcileStore(t)
+	tracker := &fakeTracker{
+		issues: map[string]tasktracker.Issue{
+			"PROJ-1": {Key: "PROJ-1", Summary: "the ticket"},
+			"PROJ-2": {Key: "PROJ-2", Summary: "the other ticket"},
+		},
+	}
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+
+	// selfAuthoredOnly is older in the stable order, so a cap of 1 would pick it
+	// every pass if nothing recorded its emptiness.
+	selfAuthoredOnly, err := s.InsertNarrative(base, base.Add(time.Hour), "self-authored", "s")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeIssues(selfAuthoredOnly, []store.NarrativeIssue{
+		{IssueKey: "PROJ-1", Role: store.RolePrimary, Provenance: "branch", Confidence: 0.9},
+	}))
+	unjiraEvt := unjiraComment("live:1")
+	unjiraEvt.Artifacts["issue_key"] = "PROJ-1"
+	_, err = s.InsertEvent(unjiraEvt)
+	require.NoError(t, err)
+	unjiraEID, err := s.EventIDByExternalID(unjiraEvt.Source, unjiraEvt.ExternalID)
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(selfAuthoredOnly, []int64{unjiraEID}))
+
+	// real is younger, sits BEHIND selfAuthoredOnly in the order, and has real
+	// work in its delta.
+	realWork, err := s.InsertNarrative(base.Add(time.Minute), base.Add(time.Hour), "real work", "s")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeIssues(realWork, []store.NarrativeIssue{
+		{IssueKey: "PROJ-2", Role: store.RolePrimary, Provenance: "branch", Confidence: 0.9},
+	}))
+	codeEvt := codeEvent("live:2", "wrote real code")
+	_, err = s.InsertEvent(codeEvt)
+	require.NoError(t, err)
+	codeEID, err := s.EventIDByExternalID(codeEvt.Source, codeEvt.ExternalID)
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(realWork, []int64{codeEID}))
+
+	cfg := config.ReconcilerConfig{MaxNarrativesPerPass: 1, MinConfidenceToPropose: 0.5}
+	llmClient := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-2","type":"comment","body":"real work landed","confidence":0.8,"rationale":"delta shows it"}]`,
+	}}
+
+	// Pass 1: the cap of 1 selects only the older, self-authored-only narrative.
+	results, _, err := Reconcile(t.Context(), s, tracker, llmClient, cfg)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, selfAuthoredOnly, results[0].NarrativeID)
+	assert.True(t, results[0].SkippedNoDelta)
+
+	// Without the watermark this repeats forever: pass 2 selects the SAME
+	// narrative again, and `realWork` is never reached.
+	results, _, err = Reconcile(t.Context(), s, tracker, llmClient, cfg)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, realWork, results[0].NarrativeID,
+		"the self-authored-only narrative must yield once examined, or the real narrative behind "+
+			"it in the stable order is never reached — finding F26")
+	assert.False(t, results[0].SkippedNoDelta)
+	assert.NotEmpty(t, llmClient.prompts, "the real narrative's delta must actually reach drafting")
+}
