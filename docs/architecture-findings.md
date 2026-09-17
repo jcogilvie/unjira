@@ -224,6 +224,17 @@ pre-filters that actually run, and records these two as awaiting the GitHub coll
 stays only so a future reader who greps for uncalled packages finds the reasoning instead of
 re-deriving it.
 
+**The GitHub collector now has a design**
+(`docs/superpowers/specs/2026-09-17-github-collector-design.md`), which resolves how each package
+wires in rather than leaving it implied. `fanout` gets a real integration point — a deterministic
+pre-filter feeding `correlator.WithInstruction`, not a physical event merge — but is deferred past
+that design's own first slice pending real fan-out data to validate the heuristic against. `refs`
+turns out to have no consumer even once a GitHub collector exists: matching resolves a narrative to
+a *Jira issue key*, and nothing in the pipeline represents a GitHub PR-to-PR relationship, so
+`refs.Ref.Key()`'s output has nowhere to go yet. That is a **new, more specific instance of this same
+finding** — not a fix, and not a reason to reconsider deletion (the rule these packages implement is
+still live; see that spec's own §6 for why a half-designed consumer would be worse than none).
+
 ### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
 
 `internal/correlator` imports `internal/clients/jira` for one function: `IsTransportError`
