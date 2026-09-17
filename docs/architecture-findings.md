@@ -148,32 +148,43 @@ before someone attempts it:
   accepts a higher value before concluding unjira's config is the constraint.
 
 The cheaper fix may not be a bigger ceiling at all: **fewer clusters.** But the near-1:1 ratio is
-**not the model failing to group, and no prompt wording collapses it.** Measured on `f16-probe.db`
-over a 30-day window, one `dev narrate --dry-run` per arm:
+**not the model failing to group, and no prompt wording collapses it.** Three prompt variants × 3
+reps on `post-f18.db` over a 7-day window carrying 40+ genuinely-new (unlinked) events — the case a
+grouping instruction is supposed to help:
 
-| | clusters | NEW | EXTENDS | completion |
-|---|---|---|---|---|
-| baseline | 66 | 1 | 65 | 15,813 |
-| + an explicit grouping criterion in `clusterSystemPrompt` | 66 | 1 | 65 | 16,151 |
+| arm | clusters | NEW | EXTENDS | completion (mean) | range |
+|---|---|---|---|---|---|
+| baseline | 36, 36, 36 | 4 | 32 | 10,599 | 8,365–12,009 |
+| + explicit grouping criterion | 36, 36, 36 | 4 | 32 | 9,927 | 8,284–10,851 |
+| + criterion, reasoning-first key order | 38, 38, 36 | 4 | 32/34 | 12,656 | 9,825–14,931 |
 
-Identical cluster count; completion rose 2%. The pass logged `unlinked_events=4
-assignable_events=246 context_narratives=65`. Only 4 events are new — `assignableEvents` appends
-every context narrative's `EligibleEvents` into the numbered index space, so the model receives 246
-events of which 242 already belong to one of 65 narratives, and it returns them where they belong:
-**65 context narratives in, 65 `EXTENDS` out.** Completion scales with the number of *existing
-overlapping narratives*, not with how coarsely the model groups the new events. Collapsing two of
-those clusters would mean merging two already-persisted narratives, which is a different operation
-from clustering and one the pass should not perform implicitly.
+**`EXTENDS` equals the context-narrative count (32) in all nine runs.** `assignableEvents` appends
+every context narrative's `EligibleEvents` into the numbered index space, so the model receives ~190
+events of which ~150 already belong to one of 32 narratives, and it returns them where they belong.
+Completion scales with the number of *existing overlapping narratives*, not with how coarsely the
+model groups new events. Collapsing two of those clusters would mean merging two already-persisted
+narratives, which is a different operation from clustering and one the pass should not perform
+implicitly.
 
-The grouping criterion is kept on its own merits — it bounds the genuinely-new events, and should
-matter on a window with many unlinked candidates, which this one does not have — **not** because it
-reduces clusters. Attacking the ceiling means reducing the count of *hydrated context narratives*,
-which is untried.
+**The 40 new events collapse to 4 `NEW` clusters — the same 4 in every arm, differing only in title
+wording.** The model was already grouping new work ~10:1 unprompted. The premise that it was not
+grouping was wrong.
 
-`buildClusterPrompt`'s doc comment claims context narrative events "carry no index, so the model
-structurally cannot reassign them." `assignableEvents`, immediately below it, appends exactly those
-events into the index space; the comment describes the design from before eligible narrative events
-became assignable.
+**Note the noise floor: baseline completion alone spans 8,365–12,009 across identical runs, a 34%
+spread.** Any single-run completion comparison on this pass is uninterpretable. An earlier
+measurement here reported a "25% drop" from one run per arm; it was entirely inside this spread.
+Replicate before attributing a completion delta to a change.
+
+Attacking the ceiling means reducing the count of *hydrated context narratives*
+(`pipeline.hydrateContextNarratives` → `store.NarrativesOverlapping`, which today has no bound). That
+is the one untried lever, and the only one the evidence points at.
+
+Per-cluster output was the other candidate and is now smaller: the prompt asked for a `title` on every
+cluster while `ExtendNarrative`'s `UPDATE` has no title column, so ~32 titles per pass were generated
+and discarded. Fixed — `title` is now new-only. Worth ~446 completion tokens (4.2%), which is **well
+inside the 34% noise floor above** and therefore not verifiable by comparing pass totals; verified
+instead by cluster composition (36/36 clusters, the same 4 `NEW` groupings) and by the model emitting
+empty titles on 32/32 extends.
 
 **Candidates falsified by measurement, recorded so they are not re-proposed:**
 
@@ -183,9 +194,17 @@ became assignable.
 3. **Truncate `Events` only.** Measured **0.0%** — that field is empty whenever nothing is applied.
 4. **Drain the action queue to advance the freeze watermark.** **+131 tokens**; the watermark governs
    assignability, not visibility.
-5. **Tell the model to group more coarsely.** **0 clusters saved** (66 → 66, table above). The ratio
-   is one cluster per pre-existing narrative, which is a property of what the prompt is given rather
-   than of how the prompt asks for it.
+5. **Tell the model to group more coarsely.** **0 clusters saved** (36 → 36 across 3 reps, table
+   above). The ratio is one cluster per pre-existing narrative, which is a property of what the
+   prompt is given rather than of how the prompt asks for it.
+6. **Reasoning-first key order** — emitting a `rationale` field before `kind`/`narrative_id`, so the
+   judgment follows the reasoning rather than preceding it. Sound principle, and the schema's current
+   order genuinely does ask for the hardest decision first; `json.Unmarshal` binds by name so
+   reordering is free. But measured **worse**: 38/38/36 clusters and ~20% more completion, because
+   `rationale` is pure added output and justifying each cluster made the model *more* willing to open
+   new ones. It also fragmented one narrative's incoming events across three same-titled clusters
+   (harmless — `mergeSplitResults` unions `ClusterExtends` sharing a `NarrativeID`, and a persisted
+   run shows no duplicate titles — but not an improvement).
 
 Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default). Note the
 probe truncates `Events` and so shows a per-event cap having no effect — which is the same

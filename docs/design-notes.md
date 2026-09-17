@@ -1208,7 +1208,13 @@ plausible zero. Copying `.env` into the worktree and re-running gave 66 — iden
 true answer.
 
 > A measurement harness that greps a number out of a run must prove the run succeeded before it trusts
-> the number. Check the exit status, not just the output.
+> the number. Check the exit status, not just the output — and better, make the harness *refuse to
+> report* a number from a failed run, rather than trusting whoever reads it to check.
+
+The stronger form is not optional advice. **This recurred within the same session, to the same person
+who had just written it down**: a three-arm replication run, `.env` removed after the previous test, and
+one arm reported `clusters=0` three consecutive times before anyone noticed. Knowing the failure mode
+did not prevent it; the harness printing `completion=DIED` rather than `0` is what caught it.
 
 This is #32's wrong-field trap in a new costume, and shares its tell: **an implausibly perfect result
 — exactly 0.0%, exactly 100.0% — is evidence about the instrument, not about the code.** #32's version
@@ -1218,6 +1224,38 @@ It also explains a class of subagent report that looks like laziness and is not.
 into a worktree *cannot* measure anything requiring credentials, because the file holding them is
 gitignored by design. Being told so explicitly, and declining to fabricate a number, was the correct
 outcome — the measurement had to be run where the credentials live.
+
+## 38. A rendering placeholder is not a measurement
+
+Nine `dev narrate --dry-run` passes all printed `[EXTENDS #-]` for every cluster. Read as data, that
+says the model tags 32 of 36 clusters as extending an existing narrative and **never names which one**
+— the prompt's central instruction ignored ~100% of the time, a correctness bug sitting underneath a
+token-cost finding. It was filed as exactly that.
+
+It was not a bug. `narrativeIDLabel` renders `-` when the id is zero, and its own doc comment, ten
+lines from the code being read, says why:
+
+> *"a dry run persists nothing, and printing `#0` would look like a real row."*
+
+Every run had used `--dry-run`, so *every* cluster printed `#-` by construction. Re-running without it
+gave `[EXTENDS #15] [EXTENDS #18] [EXTENDS #19] [EXTENDS #25]…` — correctly resolved. And
+`prepareExtend` validates the target with `GetNarrative(r.NarrativeID)` before any LLM spend, so a zero
+or hallucinated id fails loudly; there is a named test for it. The mechanism claimed missing was
+already there, already tested.
+
+> An instrument's output conventions are part of the instrument. Before reading a value as data,
+> confirm the renderer is not substituting a placeholder for it.
+
+Three findings in one session traced to this shape, each retracted on inspection: a 25% completion
+"drop" that was inside a 34% noise band, a "regression" diagnosed from cluster counts without reading
+the clusters, and this one. The common tell is that **the anomaly was too dramatic to be real** — 100%
+of clusters broken, a quarter of tokens vanishing. #32 records the same tell for zeroing a field that
+was already empty.
+
+The generalisation is about verification order: a metric extracted from output is two claims, not one —
+that the number is what it appears to be, and that it means what it appears to mean. Dry-run modes,
+`0` defaults, and `-` placeholders all break the first claim silently, and no amount of replication
+catches it, because every replication reproduces the same artifact.
 
 ## What these validate about the architecture
 

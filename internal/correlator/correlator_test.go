@@ -1213,3 +1213,24 @@ func TestCluster_EligibleEventIndexResolvesToTheRightEvent(t *testing.T) {
 	assert.Equal(t, "THE ELIGIBLE ONE", got[0].Events[0].Summary,
 		"index 1 must resolve to the eligible narrative event, not an in-window one")
 }
+
+// TestClusterSystemPrompt_AsksForATitleOnlyWhenItCanBePersisted pins finding F27.
+//
+// applyPrepared's ClusterExtends branch calls store.ExtendNarrative, whose SQL is
+// `UPDATE narratives SET window_end = ?, summary = ?` — there is no title column in
+// that update, deliberately, since a narrative's identity should not churn every time
+// it gains an event. So a title on an "extends" cluster is generated and discarded:
+// measured at 32 of 36 clusters in a 7-day pass, ~446 completion tokens (4.2%).
+//
+// Asserted on the prompt rather than on token totals ON PURPOSE. The pass's
+// completion count varies 8,365-12,009 across identical runs (F16's 34% noise
+// floor), so a 4.2% saving is unmeasurable by comparing pass totals and any test
+// claiming to observe it would be unfalsifiable.
+func TestClusterSystemPrompt_AsksForATitleOnlyWhenItCanBePersisted(t *testing.T) {
+	prompt := correlator.ClusterSystemPromptForTest()
+
+	assert.Contains(t, prompt, `"title":"..., only if new"`,
+		"the schema must mark title as new-only, since ExtendNarrative cannot persist one")
+	assert.Contains(t, prompt, "Omit title when extending",
+		"the prompt must say why, so a reader does not restore it as an oversight")
+}
