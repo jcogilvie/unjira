@@ -147,11 +147,35 @@ before someone attempts it:
   a litellm-fronted sonnet silently capped at 4096 while advertising 128000. Confirm the gateway
   accepts a higher value before concluding unjira's config is the constraint.
 
-The cheaper fix may not be a bigger ceiling at all: **fewer clusters.** F18's near-1:1 grouping means
-~110 clusters from ~121 candidates, each emitting a title and summary. Grouping that actually grouped
-would cut completion proportionally, and that is the same defect the deleted F18 body described.
+The cheaper fix may not be a bigger ceiling at all: **fewer clusters.** But the near-1:1 ratio is
+**not the model failing to group, and no prompt wording collapses it.** Measured on `f16-probe.db`
+over a 30-day window, one `dev narrate --dry-run` per arm:
 
-**Four candidates falsified by measurement, recorded so they are not re-proposed:**
+| | clusters | NEW | EXTENDS | completion |
+|---|---|---|---|---|
+| baseline | 66 | 1 | 65 | 15,813 |
+| + an explicit grouping criterion in `clusterSystemPrompt` | 66 | 1 | 65 | 16,151 |
+
+Identical cluster count; completion rose 2%. The pass logged `unlinked_events=4
+assignable_events=246 context_narratives=65`. Only 4 events are new — `assignableEvents` appends
+every context narrative's `EligibleEvents` into the numbered index space, so the model receives 246
+events of which 242 already belong to one of 65 narratives, and it returns them where they belong:
+**65 context narratives in, 65 `EXTENDS` out.** Completion scales with the number of *existing
+overlapping narratives*, not with how coarsely the model groups the new events. Collapsing two of
+those clusters would mean merging two already-persisted narratives, which is a different operation
+from clustering and one the pass should not perform implicitly.
+
+The grouping criterion is kept on its own merits — it bounds the genuinely-new events, and should
+matter on a window with many unlinked candidates, which this one does not have — **not** because it
+reduces clusters. Attacking the ceiling means reducing the count of *hydrated context narratives*,
+which is untried.
+
+`buildClusterPrompt`'s doc comment claims context narrative events "carry no index, so the model
+structurally cannot reassign them." `assignableEvents`, immediately below it, appends exactly those
+events into the index space; the comment describes the design from before eligible narrative events
+became assignable.
+
+**Candidates falsified by measurement, recorded so they are not re-proposed:**
 
 1. **Split the window.** Already implemented (`clusterWithSplit`). Costs **1.37×** at 90 days — both
    halves re-hydrate the same context.
@@ -159,6 +183,9 @@ would cut completion proportionally, and that is the same defect the deleted F18
 3. **Truncate `Events` only.** Measured **0.0%** — that field is empty whenever nothing is applied.
 4. **Drain the action queue to advance the freeze watermark.** **+131 tokens**; the watermark governs
    assignability, not visibility.
+5. **Tell the model to group more coarsely.** **0 clusters saved** (66 → 66, table above). The ratio
+   is one cluster per pre-existing narrative, which is a property of what the prompt is given rather
+   than of how the prompt asks for it.
 
 Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default). Note the
 probe truncates `Events` and so shows a per-event cap having no effect — which is the same

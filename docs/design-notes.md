@@ -1189,6 +1189,36 @@ characters, many small rather than a few large. A per-event cap cannot address t
 bounding the count is a different, riskier change — you have to decide which events to drop and what
 clustering loses. Recognising that the shape changed is the actual result of the re-measurement.
 
+## 37. A missing credential makes a measurement return zero, not an error you notice
+
+Measuring whether a grouping criterion in `clusterSystemPrompt` reduces cluster count needed one
+`dev narrate --dry-run` per arm. The baseline ran in the repo and reported 66 clusters. The treatment
+ran in a git worktree and reported **0 clusters** — which, read as a result, is a 100% reduction and
+a spectacular success.
+
+It was not a result. `.env` is gitignored, so no worktree ever has `UNJIRA_JIRA_CREDENTIALS`, and the
+pass had died before clustering:
+
+```
+Error: jira connection "dev" has no credential: set it in UNJIRA_JIRA_CREDENTIALS
+```
+
+The exit code was 1 and the error was on stdout, but the *number extracted from the run* was a
+plausible zero. Copying `.env` into the worktree and re-running gave 66 — identical to baseline, the
+true answer.
+
+> A measurement harness that greps a number out of a run must prove the run succeeded before it trusts
+> the number. Check the exit status, not just the output.
+
+This is #32's wrong-field trap in a new costume, and shares its tell: **an implausibly perfect result
+— exactly 0.0%, exactly 100.0% — is evidence about the instrument, not about the code.** #32's version
+was zeroing a field that was already empty; this one was zeroing the whole pass.
+
+It also explains a class of subagent report that looks like laziness and is not. A subagent dispatched
+into a worktree *cannot* measure anything requiring credentials, because the file holding them is
+gitignored by design. Being told so explicitly, and declining to fabricate a number, was the correct
+outcome — the measurement had to be run where the credentials live.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
