@@ -34,11 +34,28 @@ Writes land in Jira, which is itself an observed stream — the loop closes and 
 its own changes as part of reality. There is no separate "executor" component: applying is
 `gate.Applier`, deliberately the single narrow choke point every write route converges on.
 
-## Status: phase 1, mostly landed — unjira can write, and does not by default
+## Status: phase 1 slices all built — unjira can write, and does not by default
 
 The whole loop runs: collectors → event log → correlator (cluster + match) → reconciler →
-review queue → apply. `unjira watch` executes it on an interval; `unjira actions` is the
-machine-facing surface over the queue.
+review queue → apply. `unjira watch` executes the pipeline on an interval;
+`unjira triage` is the human review surface and `unjira actions` the machine-facing one.
+
+The loop closes *as a unit*: a reviewer's correction is persisted as `actions.feedback`,
+`store.CorrectionsSince` reads it, and `rules.Distill` turns it into a candidate
+`rules/*.md` that the correlator's and reconciler's prompts already know how to read.
+Verified end to end against real corrections — 3 rulings produced 2 rules, correctly
+clustering two of them into one.
+
+**Not yet reachable from a command.** `Distill` and `CorrectionsSince` are built and
+tested, but no `unjira` subcommand calls them, so the learn step is invoked from code
+rather than from a terminal. Wiring it needs a decision this repo has not made: whether
+distillation runs on triage's learn-interval (the phase-1 spec's shape), as its own
+`unjira learn`, or per `watch` tick — and each implies a different watermark owner.
+
+Distillation drafts and returns candidates; **writing a rule file is a human decision**,
+for the same reason applying an action is — a rule shapes every future pass on every
+narrative. A rule can also be turned off with `disabled: true` in its frontmatter rather
+than deleted, so a norm that did not work out stays on the record instead of vanishing.
 
 **unjira has written to a real Jira instance** (`internal/live/autocommit_test.go`, 2026-08-27).
 That makes the next paragraph the important one.
@@ -73,7 +90,7 @@ not a mutation, so gate 1 is already the thing standing between untracked work a
 | ✅ 1–4 | LLM client, `correlator.Cluster`, persistence + compaction, `internal/reconciler` |
 | ✅ 5 | auto-commit gate + `watch` |
 | ✅ 6 | `unjira actions list\|decide` **and `triage`** — the machine-facing and human-facing halves of the review surface |
-| ⬜ 7 | `rules.Distill` — rule *reading* works in both prompts; distilling new rules from reviewer feedback does not |
+| ✅ 7 | `rules.Distill` — reviewer corrections become candidate rule files, returned for review. Verified end to end: 3 real corrections produced 2 rules, correctly clustering two into one. **Built and tested, not yet wired to a command** — see the Status section for the open question about where the learn step runs |
 
 See `docs/superpowers/specs/2026-08-11-phase1-correlator-design.md` for the slice list with the
 non-obvious corrections each one produced.
