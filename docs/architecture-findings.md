@@ -147,9 +147,41 @@ before someone attempts it:
   a litellm-fronted sonnet silently capped at 4096 while advertising 128000. Confirm the gateway
   accepts a higher value before concluding unjira's config is the constraint.
 
-The cheaper fix may not be a bigger ceiling at all: **fewer clusters.** F18's near-1:1 grouping means
-~110 clusters from ~121 candidates, each emitting a title and summary. Grouping that actually grouped
-would cut completion proportionally, and that is the same defect the deleted F18 body described.
+The cheaper fix is not a bigger ceiling: it is **fewer clusters.** F18's near-1:1 grouping means
+~110 clusters from ~121 candidates, each emitting a title and summary; completion scales with cluster
+count, so grouping that actually grouped cuts completion proportionally.
+
+**Root cause: the prompt gave no grouping criterion.** `clusterSystemPrompt`
+(`internal/correlator/correlator.go`) told the model only to "cluster the given events into
+narratives," with no statement of what makes two events belong to the SAME narrative and no
+guidance on granularity. A model given that instruction and nothing else reasonably treats every
+event as its own narrative — the near-1:1 result above is the predictable consequence of an
+underspecified prompt, not evidence that grouping is inherently hard for the model.
+
+**Fix landed: state the criterion in the prompt, not in Go.** The prompt now defines a narrative as
+"one logical unit of work... the same underlying piece of work" — grouped by ticket/branch/PR/topic
+continuity, not by time or source proximity — instructs the model to default to the coarsest
+accurate grouping, and to check every `"new"` cluster for a same-topic merge before returning. This
+keeps judgment the model's job per `CLAUDE.md`: no heuristic clustering was added to Go, and no
+event is dropped, sampled, or truncated. `TestClusterSystemPrompt_StatesGroupingCriterion` pins the
+criterion's presence; `TestClusterSystemPrompt_StillForbidsReassigningContextEvents` confirms the
+CONTEXT-ONLY invariant (existing narratives' events never enter `event_indices`) survived the
+rewrite — both in `internal/correlator/correlator_test.go`.
+
+**Grouping-quality delta not measured against a real store — stated, not hidden.** This change
+lands with `go build`, `go test ./...`, and `golangci-lint run ./...` green, but the worktree it was
+written in has no copy of a real unjira store (`F16_DB` unset, no `.db` file reachable) and no LLM
+credentials, so `TestF16_DecisionDelta` and `TestF16_WideWindowsWithCap` could not be run to get a
+real before/after cluster count on the 365-day window this finding names. The "~110 clusters from
+~121 candidates" figure and the 365-day response-ceiling reproduction above are the last numbers
+recorded here, not numbers re-measured against this change. Whoever has `F16_DB` access should run:
+
+```
+F16_PROBE=1 F16_DECISIONS=1 F16_DB=<copy of a real store> go test ./internal/pipeline/ -run TestF16 -v
+```
+
+and record the resulting cluster count, and whether the 365-day window now completes in one call,
+before treating the response-ceiling half of this finding as closed.
 
 **Four candidates falsified by measurement, recorded so they are not re-proposed:**
 
