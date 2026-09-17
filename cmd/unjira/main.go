@@ -1025,6 +1025,7 @@ var cli struct {
 	Watch   watchCmd   `cmd:"" help:"Interval loop: collect -> narrate -> match -> reconcile -> auto-commit gate."`
 	Actions actionsCmd `cmd:"" help:"Machine-facing primitives over the review queue: list and decide on proposed actions."`
 	Triage  triageCmd  `cmd:"" help:"Review the queue one action at a time: approve, reject, reword, re-cluster, retarget. Applies nothing until you confirm."`
+	Learn   learnCmd   `cmd:"" help:"Distil reviewer corrections into candidate rules/*.md. Drafts and prints; writes only what --keep names."`
 	Dev     devCmd     `cmd:"" help:"Tools for the dev Jira instance (seed/reset test data, inspect workflows)."`
 }
 

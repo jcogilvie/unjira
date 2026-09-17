@@ -34,11 +34,12 @@ Writes land in Jira, which is itself an observed stream — the loop closes and 
 its own changes as part of reality. There is no separate "executor" component: applying is
 `gate.Applier`, deliberately the single narrow choke point every write route converges on.
 
-## Status: phase 1 slices all built — unjira can write, and does not by default
+## Status: phase 1 landed — unjira can write, and does not by default
 
 The whole loop runs: collectors → event log → correlator (cluster + match) → reconciler →
-review queue → apply. `unjira watch` executes the pipeline on an interval;
-`unjira triage` is the human review surface and `unjira actions` the machine-facing one.
+review queue → apply → learn. `unjira watch` executes the pipeline on an interval;
+`unjira triage` is the human review surface, `unjira actions` the machine-facing one, and
+`unjira learn` distils reviewer corrections into rules.
 
 The loop closes *as a unit*: a reviewer's correction is persisted as `actions.feedback`,
 `store.CorrectionsSince` reads it, and `rules.Distill` turns it into a candidate
@@ -46,11 +47,11 @@ The loop closes *as a unit*: a reviewer's correction is persisted as `actions.fe
 Verified end to end against real corrections — 3 rulings produced 2 rules, correctly
 clustering two of them into one.
 
-**Not yet reachable from a command.** `Distill` and `CorrectionsSince` are built and
-tested, but no `unjira` subcommand calls them, so the learn step is invoked from code
-rather than from a terminal. Wiring it needs a decision this repo has not made: whether
-distillation runs on triage's learn-interval (the phase-1 spec's shape), as its own
-`unjira learn`, or per `watch` tick — and each implies a different watermark owner.
+`unjira learn` is the invocation, chosen over triage's learn-interval or a `watch` tick
+because it makes the watermark's owner obvious: one command, one watermark, advanced only
+when a rule is written. It drafts and prints by default; `--keep <name>` (repeatable) or
+`--all` writes. Verified end to end — 3 corrections produced 2 rules, `rules.Load` read
+them back, and `Render` put 869 characters of learned norms into the reconciler's prompt.
 
 Distillation drafts and returns candidates; **writing a rule file is a human decision**,
 for the same reason applying an action is — a rule shapes every future pass on every
@@ -90,7 +91,7 @@ not a mutation, so gate 1 is already the thing standing between untracked work a
 | ✅ 1–4 | LLM client, `correlator.Cluster`, persistence + compaction, `internal/reconciler` |
 | ✅ 5 | auto-commit gate + `watch` |
 | ✅ 6 | `unjira actions list\|decide` **and `triage`** — the machine-facing and human-facing halves of the review surface |
-| ✅ 7 | `rules.Distill` — reviewer corrections become candidate rule files, returned for review. Verified end to end: 3 real corrections produced 2 rules, correctly clustering two into one. **Built and tested, not yet wired to a command** — see the Status section for the open question about where the learn step runs |
+| ✅ 7 | `rules.Distill` + `unjira learn` — reviewer corrections become candidate rule files, printed for review and written only on `--keep`/`--all`. Verified end to end: 3 corrections produced 2 rules, correctly clustering two into one, and `Render` fed 869 chars of learned norms back into the reconciler's prompt |
 
 See `docs/superpowers/specs/2026-08-11-phase1-correlator-design.md` for the slice list with the
 non-obvious corrections each one produced.
@@ -129,6 +130,10 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 
 ./unjira triage                      # review the queue one action at a time
 ./unjira triage --dry-run            # walk it, decide, write nothing
+
+./unjira learn                       # draft rules from your corrections; writes nothing
+./unjira learn --keep say-what-changed   # write one drafted rule, by name
+./unjira learn --all                 # write all of them
 ```
 
 **Scope your collector JQL to work that is plausibly yours.** unjira reconciles what
