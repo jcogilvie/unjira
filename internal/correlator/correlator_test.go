@@ -132,6 +132,34 @@ func TestCluster_NoRulesOptionLeavesSystemPromptUnchanged(t *testing.T) {
 	assert.Equal(t, correlator.ClusterSystemPromptForTest(), llmFake.systemPrompts[0])
 }
 
+// TestClusterSystemPrompt_StatesGroupingCriterion pins the fix for F16's
+// near-1:1 grouping: a model told only "cluster these" with no criterion for
+// what makes events belong to the SAME narrative reasonably emits one
+// cluster per event. The prompt must say what unifies a narrative (one
+// underlying piece of work/story — e.g. same ticket/branch/PR/topic — not
+// mere adjacency in time or source) and must actively discourage a
+// one-event-per-cluster degenerate grouping.
+func TestClusterSystemPrompt_StatesGroupingCriterion(t *testing.T) {
+	prompt := correlator.ClusterSystemPromptForTest()
+
+	assert.Contains(t, prompt, "same underlying piece of work",
+		"prompt must state what makes events belong to the SAME narrative")
+	assert.Contains(t, prompt, "Do not create a separate cluster for every event",
+		"prompt must actively discourage one-cluster-per-event")
+}
+
+// TestClusterSystemPrompt_StillForbidsReassigningContextEvents guards the
+// invariant CLAUDE.md and buildClusterPrompt's doc comment both state:
+// existing narratives are CONTEXT ONLY and their events can never be placed
+// in event_indices. A grouping-criterion rewrite must not accidentally drop
+// or weaken this instruction.
+func TestClusterSystemPrompt_StillForbidsReassigningContextEvents(t *testing.T) {
+	prompt := correlator.ClusterSystemPromptForTest()
+
+	assert.Contains(t, prompt, "CONTEXT ONLY")
+	assert.Contains(t, prompt, "never put their events in event_indices")
+}
+
 func mustEvent(t *testing.T, source, externalID, summary string, occurredAt time.Time) correlator.Event {
 	t.Helper()
 	e := events.NewEvent(source, externalID, occurredAt, summary)
@@ -1184,4 +1212,25 @@ func TestCluster_EligibleEventIndexResolvesToTheRightEvent(t *testing.T) {
 	require.Len(t, got[0].Events, 1)
 	assert.Equal(t, "THE ELIGIBLE ONE", got[0].Events[0].Summary,
 		"index 1 must resolve to the eligible narrative event, not an in-window one")
+}
+
+// TestClusterSystemPrompt_AsksForATitleOnlyWhenItCanBePersisted pins finding F27.
+//
+// applyPrepared's ClusterExtends branch calls store.ExtendNarrative, whose SQL is
+// `UPDATE narratives SET window_end = ?, summary = ?` — there is no title column in
+// that update, deliberately, since a narrative's identity should not churn every time
+// it gains an event. So a title on an "extends" cluster is generated and discarded:
+// measured at 32 of 36 clusters in a 7-day pass, ~446 completion tokens (4.2%).
+//
+// Asserted on the prompt rather than on token totals ON PURPOSE. The pass's
+// completion count varies 8,365-12,009 across identical runs (F16's 34% noise
+// floor), so a 4.2% saving is unmeasurable by comparing pass totals and any test
+// claiming to observe it would be unfalsifiable.
+func TestClusterSystemPrompt_AsksForATitleOnlyWhenItCanBePersisted(t *testing.T) {
+	prompt := correlator.ClusterSystemPromptForTest()
+
+	assert.Contains(t, prompt, `"title":"..., only if new"`,
+		"the schema must mark title as new-only, since ExtendNarrative cannot persist one")
+	assert.Contains(t, prompt, "Omit title when extending",
+		"the prompt must say why, so a reader does not restore it as an oversight")
 }

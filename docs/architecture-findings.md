@@ -119,11 +119,46 @@ before someone attempts it:
   a litellm-fronted sonnet silently capped at 4096 while advertising 128000. Confirm the gateway
   accepts a higher value before concluding unjira's config is the constraint.
 
-The cheaper fix may not be a bigger ceiling at all: **fewer clusters.** F18's near-1:1 grouping means
-~110 clusters from ~121 candidates, each emitting a title and summary. Grouping that actually grouped
-would cut completion proportionally, and that is the same defect the deleted F18 body described.
+The cheaper fix may not be a bigger ceiling at all: **fewer clusters.** But the near-1:1 ratio is
+**not the model failing to group, and no prompt wording collapses it.** Three prompt variants × 3
+reps on `post-f18.db` over a 7-day window carrying 40+ genuinely-new (unlinked) events — the case a
+grouping instruction is supposed to help:
 
-**Four candidates falsified by measurement, recorded so they are not re-proposed:**
+| arm | clusters | NEW | EXTENDS | completion (mean) | range |
+|---|---|---|---|---|---|
+| baseline | 36, 36, 36 | 4 | 32 | 10,599 | 8,365–12,009 |
+| + explicit grouping criterion | 36, 36, 36 | 4 | 32 | 9,927 | 8,284–10,851 |
+| + criterion, reasoning-first key order | 38, 38, 36 | 4 | 32/34 | 12,656 | 9,825–14,931 |
+
+**`EXTENDS` equals the context-narrative count (32) in all nine runs.** `assignableEvents` appends
+every context narrative's `EligibleEvents` into the numbered index space, so the model receives ~190
+events of which ~150 already belong to one of 32 narratives, and it returns them where they belong.
+Completion scales with the number of *existing overlapping narratives*, not with how coarsely the
+model groups new events. Collapsing two of those clusters would mean merging two already-persisted
+narratives, which is a different operation from clustering and one the pass should not perform
+implicitly.
+
+**The 40 new events collapse to 4 `NEW` clusters — the same 4 in every arm, differing only in title
+wording.** The model was already grouping new work ~10:1 unprompted. The premise that it was not
+grouping was wrong.
+
+**Note the noise floor: baseline completion alone spans 8,365–12,009 across identical runs, a 34%
+spread.** Any single-run completion comparison on this pass is uninterpretable. An earlier
+measurement here reported a "25% drop" from one run per arm; it was entirely inside this spread.
+Replicate before attributing a completion delta to a change.
+
+Attacking the ceiling means reducing the count of *hydrated context narratives*
+(`pipeline.hydrateContextNarratives` → `store.NarrativesOverlapping`, which today has no bound). That
+is the one untried lever, and the only one the evidence points at.
+
+Per-cluster output was the other candidate and is now smaller: the prompt asked for a `title` on every
+cluster while `ExtendNarrative`'s `UPDATE` has no title column, so ~32 titles per pass were generated
+and discarded. Fixed — `title` is now new-only. Worth ~446 completion tokens (4.2%), which is **well
+inside the 34% noise floor above** and therefore not verifiable by comparing pass totals; verified
+instead by cluster composition (36/36 clusters, the same 4 `NEW` groupings) and by the model emitting
+empty titles on 32/32 extends.
+
+**Candidates falsified by measurement, recorded so they are not re-proposed:**
 
 1. **Split the window.** Already implemented (`clusterWithSplit`). Costs **1.37×** at 90 days — both
    halves re-hydrate the same context.
@@ -131,6 +166,17 @@ would cut completion proportionally, and that is the same defect the deleted F18
 3. **Truncate `Events` only.** Measured **0.0%** — that field is empty whenever nothing is applied.
 4. **Drain the action queue to advance the freeze watermark.** **+131 tokens**; the watermark governs
    assignability, not visibility.
+5. **Tell the model to group more coarsely.** **0 clusters saved** (36 → 36 across 3 reps, table
+   above). The ratio is one cluster per pre-existing narrative, which is a property of what the
+   prompt is given rather than of how the prompt asks for it.
+6. **Reasoning-first key order** — emitting a `rationale` field before `kind`/`narrative_id`, so the
+   judgment follows the reasoning rather than preceding it. Sound principle, and the schema's current
+   order genuinely does ask for the hardest decision first; `json.Unmarshal` binds by name so
+   reordering is free. But measured **worse**: 38/38/36 clusters and ~20% more completion, because
+   `rationale` is pure added output and justifying each cluster made the model *more* willing to open
+   new ones. It also fragmented one narrative's incoming events across three same-titled clusters
+   (harmless — `mergeSplitResults` unions `ClusterExtends` sharing a `NarrativeID`, and a persisted
+   run shows no duplicate titles — but not an improvement).
 
 Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default). Note the
 probe truncates `Events` and so shows a per-event cap having no effect — which is the same

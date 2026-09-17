@@ -435,7 +435,13 @@ func buildClusterPrompt(
 }
 
 const clusterSystemPrompt = `Cluster the given events into narratives. "Events to cluster" are numbered; assign each to exactly one cluster via event_indices. "Existing narratives" are CONTEXT ONLY — never put their events in event_indices; use them only to decide whether a numbered event extends one of them. Tag each cluster "new" or "extends" (include narrative_id when extending). Return ONLY a JSON array matching this shape, no prose, no markdown fences:
-[{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"...","summary":"...","event_indices":[0,2,5]}]`
+[{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"..., only if new","summary":"...","event_indices":[0,2,5]}]
+
+Omit title when extending: an extended narrative keeps the title it already has, so a title supplied there is discarded unread.
+
+Grouping criterion: a narrative is one logical unit of work — the same underlying piece of work, whatever raw events it took to produce it. Group events into the SAME cluster when they are steps toward the same outcome: the same ticket, branch, PR, or topic; a sequence of commits/comments/status-changes that tell one story end to end. Do NOT group events only because they are close in time, from the same source, or from the same author — those are weak signals, not a reason to merge unrelated work. Conversely, do not split one continuous piece of work into several clusters just because it produced several events.
+
+Default to the coarsest grouping that is still accurate. Do not create a separate cluster for every event: a numbered list of N events should very rarely produce N clusters. Before emitting a cluster tagged "new", check the clusters you have ALREADY emitted in this response: if one covers the same ticket/branch/PR/topic, put these events there instead of opening a new one. You cannot revise a cluster once emitted. Only leave two events in separate clusters when they are genuinely unrelated work.`
 
 // clusterResponseItem is the wire shape of one element in the model's JSON
 // array response.
@@ -987,9 +993,15 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 		if p.doCompact {
 			summary = p.recap
 		}
+
+		// row.Title, not r.Title: the prompt asks for a title only on "new" (F27),
+		// because ExtendNarrative's UPDATE has no title column and a supplied one
+		// would be discarded unread. So r.Title is empty here, and returning it
+		// would render `""` in the pass output — a narrative that visibly lost its
+		// name. The stored title is the one that is actually true of this row.
 		return Narrative{
 			ID: r.NarrativeID, WindowStart: row.WindowStart, WindowEnd: newEnd,
-			Title: r.Title, Summary: summary, Status: row.Status,
+			Title: row.Title, Summary: summary, Status: row.Status,
 		}, nil
 
 	default:
