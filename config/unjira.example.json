@@ -56,7 +56,8 @@
   "correlator": {
     "tail_summarize_threshold_tokens": 6000,
     "recent_events_kept": 20,
-    "max_event_summary_chars": 0
+    "max_event_summary_chars": 0,
+    "max_context_narratives": 0
   },
   "match": {
     "max_candidates_per_narrative": 10,

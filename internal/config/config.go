@@ -308,6 +308,41 @@ type CorrelatorConfig struct {
 	// which is F25's defect one layer down, and a bare count could not tell an
 	// operator whether raising the cap by 100 or by 10,000 recovers what was cut.
 	MaxEventSummaryChars int `json:"max_event_summary_chars"`
+	// MaxContextNarratives caps how many EXISTING narratives one narration pass
+	// hydrates as clustering context (pipeline.hydrateContextNarratives, fed by
+	// store.NarrativesOverlapping). Zero means unlimited, and zero is the default
+	// so the knob ships inert — nobody's behaviour shifts until they choose a value.
+	//
+	// Finding F16, re-measured after the per-event summary cap and the tracker-
+	// record exclusion both landed: completion tokens track EXTENDS-cluster count,
+	// and EXTENDS count equals the context-narrative count in every measured run —
+	// nine runs, 32/32 every time. Capping the per-event summary or the window
+	// width does not touch this: the cost is one cluster per pre-existing
+	// narrative shown to the model, not the size of what each one carries.
+	//
+	// A plain count rather than a token budget, matching MaxEventSummaryChars'
+	// own reasoning one level up: an operator chooses "how many stories can this
+	// pass consider" the same way they chose "how many characters can one event
+	// contribute", and a token estimate would hide the number that actually
+	// drives completion cost (cluster count) behind one further conversion the
+	// operator would have to invert to tune it.
+	//
+	// Bounding WHICH narratives survive, not just how many, is the load-bearing
+	// half — see correlator.SelectContextNarratives. A narrative is a story the
+	// model needs in order to judge "does this new event extend that", and
+	// dropping the wrong one does not save tokens for free: the model cannot see
+	// the story an event belongs to, so it opens a spurious "new" cluster and
+	// fragments a narrative that already exists — worse than the cost being
+	// bounded. NarrativesOverlapping orders (window_start, id), so a bare
+	// LIMIT would keep the OLDEST narratives — close to the worst choice, since
+	// the newest are the likeliest to be extended by new events.
+	//
+	// Excluded narratives are REPORTED (NarrateResult.ExcludedContextNarratives),
+	// mirroring ExcludedTrackerRecords: an unreported exclusion reads as "nothing
+	// was left out", and this cap is unmeasured — see docs/architecture-findings.md
+	// F16 — so an operator needs the count to tune it against evidence rather than
+	// guessing.
+	MaxContextNarratives int `json:"max_context_narratives"`
 }
 
 // Validate reports whether both correlator limits are set to usable values.
@@ -323,6 +358,13 @@ func (c CorrelatorConfig) Validate() error {
 	if c.MaxEventSummaryChars < 0 {
 		return fmt.Errorf(
 			"correlator.max_event_summary_chars must be zero (unlimited) or a positive character count")
+	}
+	// Same shape again: zero is the documented "unlimited" default, negative is
+	// always a mistake (most likely someone reaching for "unlimited", which this
+	// does not spell that way).
+	if c.MaxContextNarratives < 0 {
+		return fmt.Errorf(
+			"correlator.max_context_narratives must be zero (unlimited) or a positive count")
 	}
 
 	return nil

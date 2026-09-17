@@ -87,4 +87,22 @@ func TestRenderNarrateResult(t *testing.T) {
 
 		assert.Contains(t, out, "no narratives produced")
 	})
+
+	t.Run("excluded context narratives are reported so the bound is tunable", func(t *testing.T) {
+		bounded := full
+		bounded.ExcludedContextNarratives = 3
+
+		out := pipeline.RenderNarrateResult(bounded)
+
+		assert.Contains(t, out, "3", "the exclusion count reaches stdout")
+		assert.Contains(t, out, "max_context_narratives",
+			"names the knob an operator would raise, matching the truncation line's own convention")
+	})
+
+	t.Run("zero excluded context narratives prints nothing extra", func(t *testing.T) {
+		out := pipeline.RenderNarrateResult(full)
+
+		assert.NotContains(t, out, "max_context_narratives",
+			"silent at zero: a line on every ordinary pass trains an operator to skip it")
+	})
 }

@@ -296,6 +296,25 @@ func TestCorrelatorConfig_Validate(t *testing.T) {
 			name: "passes when both positive",
 			cfg:  config.CorrelatorConfig{TailSummarizeThresholdTokens: 6000, RecentEventsKept: 20},
 		},
+		{
+			name: "max_context_narratives zero (unlimited) is valid",
+			cfg: config.CorrelatorConfig{
+				TailSummarizeThresholdTokens: 6000, RecentEventsKept: 20, MaxContextNarratives: 0,
+			},
+		},
+		{
+			name: "max_context_narratives positive is valid",
+			cfg: config.CorrelatorConfig{
+				TailSummarizeThresholdTokens: 6000, RecentEventsKept: 20, MaxContextNarratives: 40,
+			},
+		},
+		{
+			name: "max_context_narratives negative is always a mistake",
+			cfg: config.CorrelatorConfig{
+				TailSummarizeThresholdTokens: 6000, RecentEventsKept: 20, MaxContextNarratives: -1,
+			},
+			wantErrText: "max_context_narratives",
+		},
 	}
 
 	for _, tt := range tests {
@@ -314,7 +333,8 @@ func TestCorrelatorConfig_Validate(t *testing.T) {
 func TestLoad_ParsesCorrelatorBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "unjira.config.json")
-	body := `{"correlator": {"tail_summarize_threshold_tokens": 6000, "recent_events_kept": 20}}`
+	body := `{"correlator": {"tail_summarize_threshold_tokens": 6000, "recent_events_kept": 20, ` +
+		`"max_context_narratives": 40}}`
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 
 	cfg, err := config.Load(path)
@@ -322,6 +342,20 @@ func TestLoad_ParsesCorrelatorBlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 6000, cfg.Correlator.TailSummarizeThresholdTokens)
 	assert.Equal(t, 20, cfg.Correlator.RecentEventsKept)
+	assert.Equal(t, 40, cfg.Correlator.MaxContextNarratives)
+}
+
+func TestLoad_MaxContextNarrativesDefaultsToZeroUnlimited(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"correlator": {"tail_summarize_threshold_tokens": 6000, "recent_events_kept": 20}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+
+	require.NoError(t, err)
+	assert.Zero(t, cfg.Correlator.MaxContextNarratives,
+		"the bound ships inert until an operator opts in, matching MaxEventSummaryChars/MaxOutputTokens")
 }
 
 func TestMatchConfig_Validate(t *testing.T) {
