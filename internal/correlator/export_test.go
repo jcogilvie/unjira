@@ -84,3 +84,16 @@ func GatherCandidatesForTest(
 func ExcludedCandidatesForTest(evts []Event, linkExclusions []*regexp.Regexp) []string {
 	return excludedCandidates(evts, linkExclusions)
 }
+
+// CapEventSummariesForTest exposes the per-event summary cap. Unexported in production
+// because only Cluster calls it, but the truncation arithmetic and its report are worth
+// testing without a prompt or a model — and the both-render-sites property in
+// particular, since an earlier version that touched only one measured 0.0%.
+func CapEventSummariesForTest(in []Narrative, maxChars int) ([]Narrative, TruncationReport) {
+	return capEventSummaries(in, maxChars)
+}
+
+// TruncationMarkerForTest is what capEventSummaries appends. Exposed so summarycap_test
+// (an external _test package) can assert cap+marker rather than a hand-computed byte
+// count — "…" is 3 bytes in UTF-8, and guessing 1 is how that assertion first failed.
+const TruncationMarkerForTest = truncationMarker

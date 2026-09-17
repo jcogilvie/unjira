@@ -288,6 +288,26 @@ type CorrelatorConfig struct {
 	// RecentEventsKept: how many of the newest events stay raw after a
 	// compaction — a count, so it's well-defined regardless of event density.
 	RecentEventsKept int `json:"recent_events_kept"`
+	// MaxEventSummaryChars caps each context event's summary in the clustering
+	// prompt. Zero means unlimited, and zero is the default so the knob ships
+	// inert — nobody's behaviour shifts until they choose a value.
+	//
+	// Finding F16: 93.7% of a 140k-token prompt was the events hydrated under
+	// context narratives, and 15 of 325 events held 52% of the characters, the
+	// largest a 15,037-char Jira description. Measured, 2000 fits a 365-day
+	// window in ONE call where 90 days previously bisected — and bisecting costs
+	// 1.37x, because both halves re-hydrate the same context.
+	//
+	// A plain character count rather than tiers or a token estimate: tokens are
+	// what the budget is denominated in, but characters are what a summary is
+	// measured in, and what an operator can compare against the lengths the
+	// truncation report gives back.
+	//
+	// Truncation is REPORTED with real pre-truncation lengths (see
+	// correlator.TruncationReport). A silent cap reads as "nothing was left out",
+	// which is F25's defect one layer down, and a bare count could not tell an
+	// operator whether raising the cap by 100 or by 10,000 recovers what was cut.
+	MaxEventSummaryChars int `json:"max_event_summary_chars"`
 }
 
 // Validate reports whether both correlator limits are set to usable values.
@@ -297,6 +317,12 @@ func (c CorrelatorConfig) Validate() error {
 	}
 	if c.RecentEventsKept <= 0 {
 		return fmt.Errorf("correlator.recent_events_kept must be a positive count")
+	}
+	// Negative is always a mistake; zero is the documented "unlimited" and must stay
+	// permitted, since it is the default. Same shape as LLMConfig.MaxOutputTokens.
+	if c.MaxEventSummaryChars < 0 {
+		return fmt.Errorf(
+			"correlator.max_event_summary_chars must be zero (unlimited) or a positive character count")
 	}
 
 	return nil
