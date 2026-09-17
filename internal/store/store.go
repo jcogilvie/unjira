@@ -2,9 +2,10 @@
 // the phase-1+ tables.
 //
 // The event log is append-only; (source, external_id) is the dedup key so
-// collectors can safely re-emit. Narratives/actions/estimates/ledger are
-// created now so the schema is stable, but only events and cursors are
-// written in phase 0.
+// collectors can safely re-emit. Every table here has at least one reader and
+// one writer: the phase-2 placeholders that did not (estimates, ledger) were
+// dropped, because schema is the most-read description of what a system stores
+// and a table nothing fills over-states what unjira does.
 //
 // This package also backs the local tasktracker backend's own mimicked issue
 // store (local_issues / local_issue_comments, in localissues.go) — a second,
@@ -146,23 +147,16 @@ CREATE TABLE IF NOT EXISTS actions (
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
-CREATE TABLE IF NOT EXISTS estimates (
-    id         INTEGER PRIMARY KEY,
-    issue_key  TEXT NOT NULL,
-    method     TEXT NOT NULL,         -- which framing produced it, or 'ensemble'
-    value      REAL NOT NULL,
-    spread     REAL,
-    actual     REAL,                  -- backfilled after completion, for calibration
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
-
-CREATE TABLE IF NOT EXISTS ledger (
-    id              INTEGER PRIMARY KEY,
-    occurred_at     TEXT NOT NULL,
-    description     TEXT NOT NULL,
-    source_event_id INTEGER REFERENCES events (id),
-    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
+-- The estimates and ledger tables were declared here as phase-2 placeholders, with no Go
+-- code reading or writing either (finding F5). Dropped rather than kept: schema is the
+-- most-read description of what a system stores, so a newcomer counting tables
+-- over-counted what unjira actually does. git history holds their shape for whenever
+-- phase 2 needs it, and re-adding a CREATE TABLE is cheaper than leaving a reader to
+-- trust a table nothing fills.
+--
+-- Existing databases keep their now-orphaned tables — this package has no migration
+-- mechanism (every statement is CREATE TABLE IF NOT EXISTS), so removal applies to new
+-- stores only. Harmless: nothing referenced them.
 
 CREATE TABLE IF NOT EXISTS pipeline_lock (
     id         INTEGER PRIMARY KEY CHECK (id = 1),

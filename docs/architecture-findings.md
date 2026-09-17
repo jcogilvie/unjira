@@ -28,37 +28,31 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
-### F19 — a link derived from co-clustering is recorded at 0.98–1.0 confidence
+### F26 — a narrative whose delta is entirely unjira's own output is selected, emptied, and writes nothing
 
-Three narratives hold a primary link at `ProvenanceJiraEvent`:
+The live residual of F12, kept when that finding was deleted because the finding is fixed and this is
+not.
 
-```
-narrative  issue_key   role     provenance   confidence
-17         PAAS-3939   primary  jira_event   0.98
-18         PAAS-4017   primary  jira_event   1.0
-25         PAAS-3805   primary  jira_event   1.0
-```
+Draining converges to **7 narratives**, and those 7 are fully explained: every event they carry is
+`authored_by_unjira` — status transitions unjira recorded itself. `dropSelfAuthored` runs AFTER the
+selector, and must, because "unjira wrote this" is an artifact test SQL could do but the guard also
+protects a narrative whose delta is only *partly* self-authored. So those narratives are selected,
+emptied, and hit `SkippedNoDelta` writing nothing.
 
-`ProvenanceJiraEvent` means "a key found in a Jira-sourced event" — and that event is in the cluster
-only because clustering put it there. So for narratives 17 and 25 the link rests on *nothing but
-co-occurrence in a window*: their session branches are `paas-xelasticache-autoscaling` and
-`vpc-output-application`, and neither contains its ticket key, in prose or anywhere else.
+**Third instance of the same shape** — an outcome that leaves no trace — after F12's suppression and
+F22's matching livelock. This is the cheap version: no `GetIssue`, no model call, just a wasted slot
+per pass and a remainder that overstates by 7.
 
-The links are probably **correct** — `paas-xelasticache-autoscaling` really is PAAS-3939's *"Add
-Application Auto Scaling support to XElastiCache"*. But the relationship is **semantic**, and the
-pipeline is recording it as deterministic. `ProvenanceJiraEvent`'s doc comment justifies its rank
-because "the event IS about that issue" — true of the *event*, and silently inherited by the
-*narrative* the event was grouped into.
+Open because the fix is a judgement call:
 
-**Consequence.** A 1.0-confidence link nothing downstream can falsify. `confidence_floor` is one of
-the three write gates, so an inflated confidence is a safety property, not a cosmetic one: it is the
-number that decides whether a proposal needs review. It also hides the semantic-matching gap that
-motivates the vector index — the case looks solved.
+- **Push an `authored_by_unjira` test into the selector.** Free, since the artifact is queryable — but
+  it duplicates `dropSelfAuthored`'s logic in SQL, and partial self-authorship still needs the Go check.
+- **Record the skip as a watermark row**, the way suppression and `match_examinations` now do. More
+  consistent with the two fixes that preceded it, and it makes the remainder honest rather than
+  merely smaller.
 
-Not a rank bug: `ProvenanceJiraEvent` is correctly ranked for what it describes. The defect is that a
-narrative inherits an event-level provenance without recording that the inheritance happened.
-Addressed by `docs/superpowers/specs/2026-09-16-work-evidence-vs-tracker-state-design.md`, which
-removes the co-clustering that produces it.
+The second is probably right, on the grounds that F22 established the pattern and a third ad-hoc
+variant is worse than a third instance of one mechanism.
 
 ---
 
@@ -233,20 +227,16 @@ would need cannot recognize its errors, and `correlator` — which otherwise tal
 `tasktracker` interfaces — has a concrete backend in its import list. This is incident 21's shape at
 the package level. The comment names the cycle as the blocker, which is the actionable part.
 
-### F5 — Three tables are created and never used
-
-`ledger` (`store.go:155`) and `estimates` (`store.go:145`) are in the schema. **No Go code reads or
-writes either** — the only references are the schema DDL and the package doc comment listing them.
-Both are phase-2 placeholders; `tasktracker.go:121` confirms the estimate path is deliberately
-unbuilt.
-
-Not a defect in itself. Worth naming because schema is the most-read description of what a system
-stores, and a newcomer counting tables will over-count what unjira does by three.
-
 ### F6 — Six artifacts are written and never read
 
 `cwd`, `session_id`, `started_at`, `ended_at`, `session_branches`, `user_message_count` (claudecode),
-`field`, `project_key` (jira) have zero production readers (verified).
+`field`, `project_key` (jira) have zero production readers.
+
+**Re-verified 2026-09-16**, because F15/F20/F25 all added artifacts and it was worth checking whether
+any of these had since gained a reader. None had. One near-miss worth naming: `segmentSummary` renders
+`len(seg.userTexts)`, not the `user_message_count` artifact — the number reaches a reader, the artifact
+does not. `scm_keys` (F20) is the counter-example that shows the difference: it was written *and*
+wired to `gatherCandidates` in the same change, so it never belonged on this list.
 
 `ended_at` and `session_branches` arrived with F15 and are listed here in the same breath as they were
 added, deliberately: they exist so a *future* reader — clustering weighing whether three branches are one
@@ -288,557 +278,14 @@ the natural moment to decide.
 
 ---
 
-### F12 — resolved, except a residual: the reconcile remainder over-counted, and suppressed narratives starved the queue
-
-Both halves are fixed; the residual at the end of this entry is the part still open, and it is a
-throughput bug rather than a correctness one. Kept as one entry because the second defect was only
-visible once the first was fixed, and separating them would lose that.
-
-`ReconcileRunResult.Remaining` was `CountNarrativesWithActionableLinks(SelectionRoles)`, rendered as
-*"N narrative(s) still eligible to reconcile — re-run to continue draining"*.
-
-That population is everything the reconciler *selects*, not everything it will *act on*.
-`reconcileOne` computes `store.DeltaEvents` and returns early with `SkippedNoDelta` when it is empty
-(`reconciler.go:214`) — the steady state for a narrative nothing new has happened to. Those
-narratives cost no model call and cannot produce an action, but they are counted in the remainder,
-so the number an operator reads is larger than the work that exists.
-
-Measured on the live store: of **55** selected, **20** have an empty delta and would be skipped, and
-**35** have a real one. The honest remainder is 35.
-
-The gap does close on its own. `DeltaEvents` bounds on `MAX(created_at)` over actions **regardless of
-status** (`narratives.go:421`), so once a narrative acquires any action row — including a declined one
-— its links fall behind that watermark and every later pass skips it. Those 20 are narratives the
-reconciler already worked through. So this is an over-count that shrinks, not a number that is stuck.
-
-**Why the fix is a query and not a schema change.** The tempting move is to record the examination —
-a `reconciled_at`, or a `narratives.status` value. That would duplicate a fact the schema already
-holds: `actions.created_at` IS the watermark, and `DeltaEvents` already reads it. Adding a column
-beside it recreates exactly the F11 defect, where a denormalization drifted from the table it
-duplicated because writers forgot to maintain it.
-
-So: count narratives whose delta is non-empty, using the same predicate `reconcileOne` skips on. One
-store method, no schema change, and it mirrors an existing definition rather than inventing a second
-one — which is the F10 lesson about a count and its selector drifting into describing different
-populations.
-
-Counting "narratives with no action yet" is close to right and still wrong: it reports 33 here, but a
-narrative carrying an old action and newer events *does* have work to do, and that predicate would
-exclude it.
-
-#### The count was only half of it: a suppressed narrative starved the queue
-
-Fixing the count exposed a second, worse defect that the wrong number had been hiding. With the
-honest remainder in place, three consecutive passes reported **35** and moved nothing.
-
-The reconciler selects `ORDER BY (window_start, id) LIMIT 20` — oldest first, a fixed order. The 20
-oldest linked narratives here are all pure tracker-echo, so PR #39's `suppressTrackerEcho` correctly
-declines to comment on them:
-
-```
-narrative 1
-  suppressed: comment on PAAS-3802: no evidence of work in the delta — every event is a
-  record the tracker produced about itself (8 of them)
-```
-
-**Suppression writes no action row.** No action row means no watermark, which means `DeltaEvents`
-still returns those links, which means the next pass selects the identical 20. Meanwhile the 35
-narratives at position 21+ — the ones carrying real work — are never reached.
-
-| position in the fixed order | count | fate |
-|---|---|---|
-| 1–20 | 20 | re-examined every pass, always suppressed |
-| 21+ | **35** | never reached |
-
-That is a livelock, not a cap. The cap is doing its job; the combination of a *stable* selection
-order with an outcome that *does not advance the watermark* is what starves the tail. Nothing
-converges, and every pass pays full model cost to re-derive the same 20 suppressions.
-
-So the remainder is now truthful and the instruction beside it is still false: re-running cannot
-reach those 35. **Both halves need fixing, and the second is the one that blocks draining.**
-
-**Fixed by recording the suppression.** `Persist` now writes one `StatusSuppressed` row per
-narrative per pass that suppressed something, exactly as the create path writes `StatusDeclined` for a
-refusal. That advances the watermark, so the narrative yields to the next one. Verified by draining:
-the remainder went **35 → 17 → 16**, where three previous passes had all reported 35. 83 suppression
-rows were written in the process.
-
-`StatusSuppressed` is distinct from `StatusDeclined` for the same reason `StatusDeclined` is distinct
-from `StatusRejected`: those record a MODEL's judgment and a HUMAN's ruling, and this records neither
-— a deterministic filter fired. Collapsing them would feed slice 7's `rules.Distill` filter outcomes
-as though a model had weighed them, and would make `actions list --status declined` stop meaning "the
-model said no".
-
-The row is a watermark, not a tombstone: new events land past it, so a narrative returns when there
-is finally something to say. That is asserted directly
-(`TestPersist_SuppressionDoesNotBlockALaterRealAction`), and it mirrors `openOrAppliedCreate`, which
-deliberately ignores `declined` for the same reason.
-
-The two rejected alternatives, for the record. **Ordering by least-recently-examined** is not
-independent — there is nothing to order by until an examination is recorded, so it needs this fix
-first, and it makes progress statistical rather than guaranteed. **Excluding tracker-echo in the
-selector** (pushing `events.AnyWorkEvidence` into SQL, which is expressible since the marker is a
-queryable artifact) fixes only one of the four filters; `unroutable`, `stale-transition` and
-`duplicate` starve identically. It remains a worthwhile *optimization* — free beats one cheap row —
-but it is not a substitute.
-
-#### Also fixed: the selector spent its cap on narratives it would skip
-
-The cap is documented as a SPEND bound — `config.DefaultMaxNarrativesPerPass` says *"each narrative
-costs at least one GetIssue per link plus one LLM drafting call, so an unbounded pass is unbounded
-spend"*. Recording suppressions broke that equivalence: a `LIMIT 20` selection returned 20 rows of
-which **19 were free skips and exactly 1 cost a model call.** The cap had silently become a row
-limit — the same confusion `MaxNarrativesPerPass` was split out of `MaxCandidatesPerNarrative` to
-prevent.
-
-Worse, the work was not merely behind the window. It sat at positions **20 through 53 of 55**, so at
-one useful slot per pass the tail needed ~30 passes, each paying to re-select and re-skip the same
-head.
-
-`NarrativesWithActionableLinks` now applies the delta test too, so every row it returns is a row that
-will cost something and the cap means what it says. Measured: one pass took the remainder **16 → 7**,
-where the previous design moved one narrative per pass.
-
-The predicate is a shared `const hasUnexaminedDelta` rather than two copies, because selector/count
-divergence is the specific failure this entry already recorded twice.
-
-`CountNarrativesWithActionableLinks` was deleted in the same change — with the selector filtered, it
-matched no selector and had no production caller.
-
-#### Residual: a narrative whose delta is entirely unjira's own output
-
-Draining now converges to **7**, and those 7 are fully explained: every event they carry is
-`authored_by_unjira` — status transitions unjira recorded itself. `dropSelfAuthored` runs AFTER the
-selector (it must: "unjira wrote this" is an artifact test SQL could do, but the guard also protects
-against a narrative whose delta is *partly* self-authored), so those narratives are selected, emptied,
-and hit `SkippedNoDelta` writing nothing.
-
-Same shape as the two defects above — an outcome that leaves no trace — and this is its third
-instance. It is now the cheap version: no GetIssue, no model call, just a wasted slot and a remainder
-that overstates by 7. Left open because the fix is a judgement call: either push an
-`authored_by_unjira` test into the selector (possible — the artifact is queryable — but it duplicates
-`dropSelfAuthored`'s logic in SQL, and partial self-authorship still needs the Go check), or record
-the skip as a watermark row the way suppression now does. The second is more consistent with the fix
-above; the first is free.
-
-**A correction, recorded because**A correction, recorded because the mistake is more instructive than the finding.** This finding
-first claimed the population could *never* drain, on the evidence that three consecutive passes left
-`proposed` at 3 and `declined` at 35. That reading was wrong: all 35 declines were timestamped inside
-the preceding 90 minutes, created by those very passes (10 at 17:11, 13 at 21:48–49, 6 at 22:03–04).
-The "before" figure had been captured *after* earlier passes already ran, so a post-work state was
-compared against a post-work state and a real change read as zero. The reconciler was working
-throughout — examining narratives, drafting, and suppressing correctly.
-
-The lesson generalizes past this finding: **a before/after measurement is only evidence if the
-"before" was captured before the work.** Two identical numbers are equally consistent with "nothing
-happened" and "the measurement window missed it", and the timestamps are what discriminate. Check
-`created_at` on the rows themselves rather than trusting a total.
-
-
----
-
-### F13 — resolved: `ProposeCreates` reached narratives matching had not examined yet, and proposed duplicate tickets
-
-Both stages select oldest-first with the same cap, but over **different populations**:
-
-| stage | selects | cap |
-|---|---|---|
-| `correlator.Match` | narratives with **no primary link** | `match.max_narratives_per_pass` (20) |
-| `reconciler.ProposeCreates` | narratives with **no link at all** | `reconciler.max_narratives_per_pass` (20) |
-
-Create's population is a **subset** of matching's, and that is the defect rather than a safeguard. A
-subset's members sit at *lower* positions, so a narrative beyond matching's cap can be comfortably
-inside create's — and the narratives create reaches first are precisely the ones matching just skipped.
-
-> Same ordering, same cap number, different populations. The subset is reached **more** easily, not
-> less, so subsetting inverts the protection it appears to give.
-
-**Observed, and reconstructed exactly from timestamps.** Action 16 proposes opening a ticket for work
-`PAAS-3898` already tracks and closed (Done, 2026-08-21). Its rationale says both things at once —
-naming `PAAS-3898` while asserting "no issue currently tracks it in the target system" — because both
-were true at different layers.
-
-| time | event |
-|---|---|
-| 16:43 | all 11 `PAAS-3898` events **ingested** |
-| 17:05 | all 11 **linked** to narrative 24, each carrying `issue_key=PAAS-3898` |
-| 17:05–17:07 | matching links narratives **1–20** — exactly its cap — then stops |
-| 17:12 | `ProposeCreates` runs. Its pool excludes those 19 linked narratives, so it is `[6, 21, 22, 23, 24, 25, …]` and **narrative 24 ranks 5th**. Create proposed. |
-| 20:27 | a later pass finally matches narrative 24 → `primary=PAAS-3898`, confidence **1.0** |
-
-So this is not "the issue arrived later" and not "we lacked context". Matching had a
-confidence-1.0 candidate at its strongest provenance (`ProvenanceJiraEvent`, from
-`events.ArtifactIssueKey`) sitting in the narrative's own linked events, seven minutes before the
-create. It simply had not looked yet.
-
-**The proposal is worse than wrong, it is confidently wrong — and the prompt is why.**
-`buildCreatePrompt` (`create.go:398`) does not merely omit the link rows; it states their absence as
-fact:
-
-```go
-b.WriteString("Every event in this work (no tracker issue exists for any of it):\n")
-```
-
-So the model was handed a false premise, then shown eleven events each titled `PAAS-3898 status: ...`.
-It resolved that contradiction the only way the prompt allows — trusting the premise — and produced an
-accurate summary with an inverted conclusion. It even named the ticket it was duplicating. That is the
-hardest kind of output for a reviewer to catch, because everything except the recommendation is right.
-
-The line is not wrong in itself: it is true of every narrative `NarrativesWithNoIssueLink` is
-*supposed* to return. It becomes a lie only because the selector now returns narratives that are
-merely unreached. A prompt that asserts a precondition the selector no longer guarantees is a second
-instance of design note 24's lesson — a prompt cannot enforce a structural precondition, and here it
-does not even survive one being violated.
-
-**Nothing downstream catches it either.** `openOrAppliedCreate` inspects only *other actions*, never
-whether links appeared. `gate.Applier.applyCreate` checks project-writability and decodes the payload,
-then calls `CreateIssue` — **there is no link re-check before the write.** So approving action 16
-opens a duplicate ticket, which the create path's own doc comments name as the worst outcome it exists
-to prevent.
-
-**Reproducible without any failure.** No crash, no timeout, no unverifiable candidate — just a backlog
-longer than the cap, which is the normal state. Any narrative between matching's cap and create's cap
-is a candidate on every pass. It reads as zero today (both pools have drained to 16, below the cap)
-and that is a property of a drained store, not of the code.
-
-**Fixed by a precondition, plus a backstop at the write.**
-
-The primary fix defers the create path entirely while matching is behind:
-`ReconcileOptions.UnmatchedNarratives` carries `MatchRunResult.Remaining` (already computed for F10
-and in scope immediately before `RunReconcile`), and a nonzero value skips `ProposeCreates`. That
-addresses the cause rather than the evidence: "no link" only means "untracked" once matching has
-examined everything, and while it is behind the same absence means "not looked at yet".
-
-It also makes `buildCreatePrompt` honest again. That prompt asserts *"no tracker issue exists for any
-of it"*, which is true of every narrative the selector is supposed to return — so fixing the selector
-repairs the prompt rather than requiring it to hedge.
-
-**All-or-nothing rather than per-narrative**, deliberately. Deferring only the narratives matching has
-not reached needs a record of which those are, and matching writes nothing when it finds no candidates
-(`match.go:296` — "untracked work is the default path"). Since a later matching pass is the very thing
-that produces the link, deferring costs latency while proposing costs a duplicate ticket, and a create
-is the highest-blast-radius action unjira proposes. The deferral is reported, not silent: a
-permanently-behind matching stage would otherwise make unjira quietly stop proposing creates forever,
-which is F10's failure mode wearing a different hat.
-
-**The backstop:** `gate.Applier.applyCreate` now refuses when the narrative already has a primary link,
-naming the issue. A create is proposed from a snapshot and the applier is the only code that writes, so
-"is this still true?" belongs there rather than in a queue-expiry rule — a duplicate ticket cannot be
-un-opened. Only a PRIMARY link disqualifies: a `mentioned` link is a citation, not an attribution, and
-refusing on any link would make unjira unable to open a ticket for work that merely references another
-issue.
-
-**Verified against the state as it was, not as it is.** At 17:12 matching had linked narratives 1-20
-and stopped, leaving `Remaining = 52` — so the guard defers and action 16 is never proposed. This is
-the check the rejected candidates would have failed: they consult link rows, and narrative 24's link
-row did not exist until three hours later. The backstop was verified against today's queue instead,
-where action 16 is still pending and narrative 24 now links to `PAAS-3898`, so approving it is refused
-by name.
-
-Two candidates were rejected. **Refusing when unresolved tracker evidence exists** (an `issue_key`
-artifact with no link row) is deterministic and measured — it would have refused action 16, with zero
-false refusals across all 16 genuinely-untracked narratives — but it guards an evidence class rather
-than the precondition, and is blind to prose-only candidates. **Recording that matching examined a
-narrative** is the general form and closes the prose case, but needs new state for a case the
-precondition already covers.
-
----
-
-### F14 — resolved: the jira collector recorded issue *changes*, so an issue's own body was never ingested
-
-The collector has exactly two event constructors: `EventsFromChangelogEntry` (`jira/events.go:73`) and
-`EventFromComment` (`:151`). Both derive from things that *happened to* an issue. **Nothing derives an
-event from the issue itself**, so a summary and description written at creation and never edited are
-invisible to unjira — while an issue whose description was later edited has that text, because the edit
-is a changelog entry.
-
-The data is fetched and thrown away. `clients/jira` requests `fields=*all` (`jira.go:122`), and
-`IssueContext` — the struct the collector threads through both constructors — carries only `Key` and
-`ProjectKey` (`events.go:48`). The body never reaches the code that builds events.
-
-**Scale, measured:** of **99** issues collected, only **29** have any description text. **70 do not.**
-
-**How it surfaced.** Reviewing a `create` proposal for narrative 32 ("Architectural vision & 3-year
-roadmap document"), I concluded there was no deterministic path from that narrative to `PAAS-3905`, the
-ticket the reviewer knew tracked the work — because `PAAS-3905` appears nowhere in the narrative's
-events, and its only candidate keys are doc-scraped noise (`CP-01`..`CP-15`, `SC-7`, `AC-4`).
-
-That was checking the wrong direction. The reviewer pointed out that `PAAS-3905`'s **description**
-contains `PR: Sanyaku/platform-vision#1` — and the narrative's session ran in the `vision` repo on
-branch `mesh-routing-learnings`. There *is* a cross-reference. It was simply never collected:
-`PAAS-3905` has two events, both status transitions, so no description text exists for it.
-
-**This corrects two earlier conclusions in this document's history, and that is the reason it is
-written down.** The narrative-32 case was called "the semantic-matching gap, with no path available",
-and cited as concrete justification for the vector index (**#29**). Both were overstated. A vector
-index over a corpus missing the one discriminating string would not have found this either — it would
-have returned nothing and been read as evidence that semantic matching does not work.
-
-> Before concluding that a signal does not exist, check whether it was collected. "The data does not
-> support this" and "we never ingested the data" produce identical query results and lead to opposite
-> decisions.
-
-**Ordering consequence:** fix collection before building semantic matching, or the first evaluation of
-semantic matching runs against a corpus with the key evidence missing.
-
-**Fixed by emitting an issue-body event.** `EventFromIssueBody` (`jira/issuebody.go`) turns an issue's
-current summary and description into one event, emitted before the changelog and comments in
-`collectIssue`. No extra request: `fields` already holds the body because the client asks for
-`fields=*all`.
-
-Two design questions this finding raised, both settled and both tested:
-
-- **Idempotence.** The `ExternalID` is `<KEY>:body:<updated-unix>`. A fixed id per issue would freeze
-  the first body ever collected under `INSERT OR IGNORE` and silently ignore every later revision —
-  the same class of bug as **#176**. Jira advances `updated` on any field change, so an edited
-  description mints a new row while an unchanged re-collect dedupes. It over-collects (an unrelated
-  field change also mints one), which is the safe direction: a duplicate body event is inert because
-  it is a tracker record, whereas a missed revision is invisible forever.
-- **`tracker_record`: yes.** It is the tracker describing itself, so it must not read as evidence
-  that work happened — otherwise the reconciler could draft a comment restating text the issue
-  already contains, which is what PR #39's tracker-echo filter exists to stop. The marker
-  deliberately does not hide it from `gatherCandidates`, which walks artifacts regardless. Usable for
-  **attribution**, unusable for **narration**.
-
-**ADF flattening was the load-bearing half, and it was nearly missed.** Verified against the live
-instance: `fields.description` is an ADF object (`map[string]any` with keys `{content, type, version}`),
-so `clients/jira`'s existing `fields["description"].(string)` yields `""` — silently, which is how this
-went unnoticed while the code looked like it handled descriptions. `adfText` recurses, because the text
-that matters sits arbitrarily deep: the PR reference is two levels down and list items nest three. A
-flattener reading only top-level content passes a hand-written flat fixture and loses every real
-description, so the test fixture is deliberately nested and a drill confirms the shallow version fails.
-
-**What this does and does not fix, stated precisely.** The F14 check was "would it give
-`gatherCandidates` a path from narrative 32 to `PAAS-3905`". Measured against the real ADF: the event
-carries `issue_key=PAAS-3905` at strongest provenance and `platform-vision` is in its searchable text.
-But the body event is dated to the issue's `updated` time (2026-07-13), while narrative 32's window
-starts 2026-07-16 — so clustering places it with narrative 25, the `PAAS-3905` lifecycle, not with the
-session that did the work.
-
-> So this does **not** close the narrative-32 case deterministically. What it does is make the
-> discriminating string exist at all, which is the precondition for the semantic path (**#29**) rather
-> than a substitute for it.
-
-That distinction is the finding's real content: collection was the blocker, and fixing it changes #29
-from "build an index and hope" to "build an index over a corpus that contains the answer".
-
----
-
-### F15 — resolved: a session was collapsed to one event dated to its last message, so a long session's work was undatable and unsplittable
-
-`collectSession` (`claudecode/claudecode.go:225-228`) sets `occurredAt` to `meta.lastTS` — the timestamp of
-the session's final message — and emits **one event per transcript snapshot**. Everything between the
-first and last message becomes a single point in time, summarised by its *opening* line.
-
-For a short session that is right. For a long one it destroys the only evidence that dates the work.
-
-**The measured case.** Session `e951ef78` in the `vision` repo ran **2026-05-06 → 2026-07-16**: 71 days,
-139 user messages, one event dated `2026-07-16T18:36`. Inside it:
-
-| branch | span |
-|---|---|
-| `main` | 2026-05-06 → 2026-06-09 |
-| `vp-feedback-refactor` | 2026-06-09 → **2026-07-09** |
-| `mesh-routing-learnings` | 2026-07-09 → 2026-07-16 |
-
-The transcript records `gitBranch` **per line** (1906 / 369 / 165 lines respectively). The collector
-keeps only the last one, so `git_branch` is `mesh-routing-learnings` and the other two are discarded.
-
-`PAAS-3905` — a retro-credit ticket — names `PR: Sanyaku/platform-vision#1 (vp-feedback-refactor) —
-MERGED 2026-07-09T21:38:18Z`. And the session's own message at `2026-07-09T21:38` reads **"merged to
-main. now i need us to incorporate learnings from these pages on a new branch"**. Same second. The
-session IS the work that ticket tracks, on a branch the collector threw away, at a timestamp seven days
-before the event it produced.
-
-**Three consequences, in increasing severity.**
-
-1. **Every date comparison is against "when did you last type", not "when was the work".** The
-   reconciler's delta, `NarrativesOverlapping`, and any `--since` window all compare against
-   `occurred_at`. A 71-day session is invisible to a 30-day window until its final message, then
-   appears entirely.
-2. **The strongest attribution signal is discarded.** `ProvenanceBranch` ranks second only to a Jira
-   event precisely because a branch name is an explicit human act of naming the ticket for this work
-   (`gatherCandidates`' doc comment). This session named three branches and unjira kept one.
-3. **Clustering cannot split what arrives as one event.** `Cluster` groups *events*; three distinct
-   bodies of work (vision authoring, VP-feedback refactor, mesh-routing learnings) are one indivisible
-   unit, so no clustering improvement can separate them. Triage's `[s]plit` cannot help either — it
-   redistributes events between narratives, and there is only one.
-
-**Not a lookback problem, which is what it first looked like.** Verified: the drains ran at
-`--since 720h`, so both this event and `PAAS-3905`'s transitions were always in the same window, and
-`NarrativesOverlapping` offered the neighbouring narrative as context. The window was never the
-constraint. The evidence was already collapsed before clustering saw it.
-
-**The mechanism is already half-built, which is what makes this tractable.** `external_id` is
-`<sessionID>:<fileSize>`, so a growing session already emits multiple events — today's own session has
-**19**. So "one event per session" is not an invariant anyone relies on; the events are simply sliced by
-*collection time* rather than by anything in the content. Each is a full-session snapshot re-summarised
-from message one, which is also why the 19 events all carry the same opening line.
-
-**Fixed by slicing on branch change AND carrying the branch set, which are two mechanisms because
-measurement showed either alone is wrong.**
-
-`segments()` (`claudecode/segments.go`) walks a transcript once and returns contiguous branch runs;
-`sessionEvents` emits one event per run, dated to **that run's** last message, carrying **that run's**
-branch and its own opening line. The motivating session now produces three events:
-
-| branch | occurred_at | messages |
-|---|---|---|
-| `main` | 2026-06-09 | 127 |
-| `vp-feedback-refactor` | **2026-07-09** | 8 |
-| `mesh-routing-learnings` | 2026-07-16 | 4 |
-
-That middle date is the check this finding demanded, and it matches `PAAS-3905`'s merge to the second.
-
-**Raw slicing over-splits, so runs below a floor fold into their neighbour.** Measured: the churniest
-session produced **51 runs from 14 branches**, and at the default floor of 3 messages it produces **6**.
-Our own session showed a 3-minute, 16-line `rebase-probe` detour sitting between two halves of one
-435-line body of work; emitting that as a peer would shred a session rather than disentangle it. A
-below-floor run **folds** rather than being dropped — its messages and ticket keys carry over, because
-silent data loss is the one thing this codebase errors over.
-
-The floor's default is 3 rather than tuned per operator. F9 is the standing argument against a knob
-whose correct value has to be discovered: at 3 the motivating case is unaffected, at 5 it wrongly merges
-the last two runs, so 3 has headroom below the point where the floor starts destroying real boundaries.
-Overridable via `min_segment_messages` for anyone who needs it.
-
-**Every event carries the full branch set** (`session_branches`), not just its own. Slicing helps only
-sessions that change branch, and **42 of 79** multi-day sessions never do — so the set is what gives the
-correlator something to weigh in the other half of the cases. Deciding whether three branches are one
-story is judgment, and judgment cannot weigh what it is not shown. Events also carry `ended_at`
-alongside the existing `started_at`, so a run spanning three weeks is distinguishable from one spanning
-an hour.
-
-**Ticket keys are scoped to the run that mentioned them.** A key named only while on one branch must not
-become a candidate for another segment's work — `gatherCandidates` treats a prose mention as a real
-candidate, so leaking them sideways would manufacture links from work that never referenced the ticket.
-
-**Worktrees are deliberately NOT a boundary, and the reason is measured.** `cwd` changes mid-session in
-**5 of 164** transcripts, and **4 of those** are a parent repo delegating to its own worktree —
-orchestration of one task. The single genuine focus change (two sibling worktrees) also changed branch,
-so branch-slicing already catches it. Stronger than a policy: because same-branch runs merge
-unconditionally, adding a cwd boundary produces byte-identical output when the branch is stable, so a
-worktree excursion *cannot* fragment a task. That property is structural, not asserted — noted in
-`segments_test.go` so a future reader does not mistake the test for the guarantee.
-
-**Idempotence.** The `ExternalID` becomes `<sessionID>:<fileSize>:<segmentIndex>`. Size alone made a
-growing session re-emit whole-session snapshots (one live session produced 19); size plus index keeps
-each segment distinct within a snapshot while an unchanged re-read still dedupes at insert. The index
-rather than the branch name, because a branch can legitimately appear twice when its runs are far enough
-apart not to coalesce.
-
-**`scanLines` and `sessionMeta` are deleted**, not left beside the new path — `segments` subsumes both,
-and two ways to read a transcript would drift.
-
-**Still open, and this is the honest limit:** slicing gives 37 of 79 multi-day sessions honest dates. The
-other 42 never change branch, so they remain one event — now carrying a real interval rather than a bare
-point, but still a single unit that clustering cannot subdivide. Recovering work bodies inside a
-single-branch session needs semantic judgment over the transcript, which is what the README's
-onboarding-backfill entry is for.
-
-
----
-
-### F17 — resolved: the slowest stage in the pipeline said nothing until it finished
-
-Every stage renders **after** it returns. In `cmd/unjira/main.go`:
-
-```go
-result, err := pipeline.RunNarrate(ctx, app.store, client, app.config, window, ...)
-// ...
-fmt.Print(pipeline.RenderNarrateResult(result))
-```
-
-`RunNarrate`'s cost is one LLM call, and it is the longest-running thing unjira does. So the stage that
-takes minutes is precisely the one that prints nothing while it takes them.
-
-There was also **no verbosity control of any kind** — no `--verbose`, no `--log-level`, nothing in
-config. Logging was 35 bare `log.Printf` calls across 13 files, and in the correlator and pipeline every
-one of them was an error or degradation path (`could not load issue activity`, `could not count the
-remaining unmatched narratives`). Nothing reported what a pass was *doing*.
-
-The render-after-return structure above is unchanged and correct: a stage summary belongs after the
-stage. What was missing was anything said *during* it.
-
-**What that cost, concretely.** Rebuilding the store produced three separate failures of
-understanding in one sitting:
-
-1. A 90-day window built a ~147k-token prompt, ran ~18 minutes, and died on a 504 having printed
-   nothing and persisted nothing (the timeout itself is F16, landing separately). The only way to know it was still alive was
-   `ps`.
-2. Asked "has something changed?", neither reviewer nor agent could answer without querying SQLite
-   directly. The pipeline's own output could not distinguish *running* from *hung*.
-3. Two durations were reported from feel and both were wrong: "22 minutes" was a 3-pass loop of ~3m24s
-   each, and "8 minutes" was a single 3m24s pass. Nothing printed a stage boundary to count, so there
-   was nothing to be right about.
-
-> A pass that emits its summary only on success is unobservable exactly when observation matters: while
-> it is slow, and after it has failed.
-
-**The numbers that would have answered it already exist, together, at the moment they are needed.**
-Before the call, `Cluster` holds the candidate count, the context-narrative count, and its own
-`estimateTokens` result. A mature store makes the third one the surprise: one pass spent **104,219
-prompt tokens to cluster 16 candidate events**, because **52 existing narratives** were hydrated as
-context. Without that breakdown the cost reads as a defect rather than as the price of context.
-
-**This is not a request for a progress bar.** A single line before the call, naming those three
-numbers, would have collapsed all three failures above into a first-second observation. The rest of the
-gap is the absence of a level: `log.Printf` cannot be turned up when diagnosing or down when running
-`watch` on an interval.
-
-**Fixed with `log/slog`, and with the whole sweep rather than a 36th `log.Printf`.** slog is stdlib as
-of Go 1.21 and this module is on 1.26, so it costs no dependency — and there was none for logging.
-`internal/logging` builds the one logger from a level and a format; `--log-level` and `--log-format` are
-Kong flags with `enum:` tags, so a typo fails at parse time instead of silently defaulting. Text is the
-default because unjira is a CLI; JSON is a first-class mode rather than a debug affordance, because a
-structured mode retrofitted later means consumers spend the interim parsing a human format with
-regexes. All 35 call sites migrated, so no mixed state remains. The library trade-offs and the
-injection rules are recorded in `docs/go-conventions.md`, which said nothing about logging before.
-
-**The announcement itself.** `correlator.Cluster` now logs before calling the model:
-
-```
-level=INFO msg=clustering component=correlator unlinked_events=1
-  assignable_events=30 context_narratives=1 est_tokens=5586
-```
-
-`est_tokens` is the number that predicts the wait and the one a caller cannot compute for itself —
-`buildClusterPrompt` is unexported. `clusterWithSplit` forwards its options so each half of a split
-announces too; a split pass must not go quieter than an unsplit one.
-
-`assignable_events` is deliberately separate from `unlinked_events`. The first draft logged only
-`candidates`, and against a pass summary reporting 2 unlinked it printed 30 — inviting exactly the "is
-that a bug?" question this line exists to prevent. The larger number is in-window events plus the
-reshufflable events context narratives already hold.
-
-**The logger is injected, never ambient**, through whatever seam each package already had — the
-variadic-option types, an options-struct field, a field on `store.Store`, or an explicit parameter
-threaded to unexported helpers. No `slog.Default()`, no package global: the same reasoning that makes
-`gate.Applier` the only holder of write authority.
-
-**A component attribute replaced the message prefix.** Every old message began with its component
-(`"correlator: compacted narrative..."`), which is an attribute wearing a costume — unqueryable once
-shipped as JSON and repeated in every format string where it could drift.
-
-**And the fix reintroduced the finding once, which is worth recording.** `store.SetLogger` existed for a
-whole commit with nothing calling it, so both of the store's warnings were built and permanently silent.
-It was found by forcing a stale pipeline lease and observing that nothing was emitted — not by reading
-the code, which looked correct. Hence the convention's closing rule: **a log site is not done until it
-has been seen in real output.**
-
-**The check this finding set** — can an operator tell, within seconds, roughly how long a pass will take
-and whether it is progressing — is met by the announcement, and was verified against the real binary in
-both output modes rather than only in tests.
-
----
-
 ## Task cross-references
 
 | Finding | Task |
 |---|---|
 | F1 — refs/fanout await the GitHub collector | resolved: keep, invariant corrected. Not a blocker. |
 | F3 — concrete backend in the correlator | **#183** |
-| F5, F6 — dead schema, unread artifacts | **#176** |
+| F5 — dead schema (estimates, ledger) | **resolved**: both dropped. Only TWO tables, not the three the finding claimed — a miscount nobody had checked. Existing databases keep their orphans, since this package has no migration mechanism, which is harmless because nothing referenced them |
+| F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here |
 | F7 — connection/identity model | **#178** |
 | F8 — resolver's home | **#177** |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
@@ -854,7 +301,8 @@ both output modes rather than only in tests.
 | F23 — the Jira client has no retry | **resolved**: a `retryTransport` retries GET/HEAD on transport errors, 429 (honoring `Retry-After`) and 5xx, capped at 4 attempts / 30s, with an explicit 20s client timeout. Writes are never retried — a single early return, since Jira has no idempotency key and a retried POST means a duplicate comment. 404 deliberately passes through, because `verifyCandidates` prunes on it |
 | F24 — write scope was invisible until approval | **resolved**: `config.ProjectWritability` is one shared predicate; `gate.Applier` defers to it and triage consults it per action. `[a]pprove` is dropped from the prompt for an unappliable action and the Session refuses the verb regardless. Verified live: the header reports "17 of them cannot be applied" and each names its remedy |
 | F25 — a summary named its message count while withholding the messages | **resolved**: `sessionFacts` extracts bounded deterministic phrases from the same tool calls `scmKeys` reads, and `segmentSummary` appends a "Did: …" clause. Fixed-size by construction (40 commits -> one phrase), +3.7% prompt cost. Verified on the motivating case: the rationale went from "no PR or completion evidence yet" to "commit + PR opened + tests run", escalating a comment to an In Review transition |
-| F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **open**: narratives 17/25 hold primary links at `jira_event` provenance resting on nothing but co-occurrence in a window — their branches contain no key. `confidence_floor` is a write gate, so inflation is a safety property. Fixed by the work-evidence/tracker-state separation, which removes the co-clustering |
+| F26 — a self-authored delta is selected, emptied, writes nothing | **open**, F12's residual, kept when that finding was deleted: 7 narratives whose every event is `authored_by_unjira` are selected, emptied by `dropSelfAuthored`, and hit `SkippedNoDelta`. Third instance of outcome-leaves-no-trace after F12 and F22 |
+| F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **resolved by F18**, verified: zero `jira_event` primary links remain (branch 2, corroborated 4, prose_first 4, scm_command 5). The provenance can no longer be manufactured, because the Jira event is not in the cluster for a key to be read out of |
 | F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is RE-RANKING not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrected the finding's own framing |
 | F21 — artifacts are frozen at first collection | **open**: `INSERT OR IGNORE` on `(source, external_id)` means a collector fix never reaches existing rows. 386 `claude_code` events predate `ArtifactSCMKeys` and never gain one, so F20's tier is invisible for all of them. Makes a fix's measured benefit differ silently from what a mature store receives |
 | F18 — clustering narrates the tracker's own bookkeeping | **resolved**: `events.PartitionByTrackerRecord` excludes tracker records from clustering candidates. Verified live — 73 of 143 unlinked events no longer reach the model, 1 call where the width used to bisect. Found while attributing F16's cost; the exit filters (`AnyWorkEvidence` et al.) STAY, because 96 records were already linked and `narrative_events` rows are never deleted |

@@ -1138,6 +1138,25 @@ escaping bug in the write path. Checking the raw v2 response showed the comment 
 backslashes were the MCP client's JSON rendering. **Verify a suspected write-path defect against the
 system of record, not against a tool's display of it.**
 
+## 35. A before/after measurement is only evidence if the "before" preceded the work
+
+Kept when F12 was deleted, because the mistake is more instructive than the finding was.
+
+F12 originally claimed a population could **never** drain, on the evidence that three consecutive
+passes left `proposed` at 3 and `declined` at 35. That reading was wrong. All 35 declines were
+timestamped inside the preceding 90 minutes — 10 at 17:11, 13 at 21:48–49, 6 at 22:03–04 — created by
+those very passes. The "before" figure had been captured *after* earlier passes already ran, so a
+post-work state was compared against a post-work state and a real change read as zero. The reconciler
+had been working correctly throughout.
+
+> Two identical numbers are equally consistent with "nothing happened" and "the measurement window
+> missed it". The timestamps discriminate; the totals do not.
+
+Check `created_at` on the rows themselves rather than trusting a count. The same trap recurred later in
+a different costume — a fixture store rebuilt between measurements silently reset the thing being
+measured — so the general form is: **establish what the "before" state actually was, and when, before
+attributing a delta to your own change.**
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
