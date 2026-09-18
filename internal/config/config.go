@@ -328,20 +328,42 @@ type CorrelatorConfig struct {
 	// operator would have to invert to tune it.
 	//
 	// Bounding WHICH narratives survive, not just how many, is the load-bearing
-	// half — see correlator.SelectContextNarratives. A narrative is a story the
-	// model needs in order to judge "does this new event extend that", and
-	// dropping the wrong one does not save tokens for free: the model cannot see
-	// the story an event belongs to, so it opens a spurious "new" cluster and
-	// fragments a narrative that already exists — worse than the cost being
-	// bounded. NarrativesOverlapping orders (window_start, id), so a bare
-	// LIMIT would keep the OLDEST narratives — close to the worst choice, since
-	// the newest are the likeliest to be extended by new events.
+	// half — see selectContextNarratives. A narrative is a story the model needs
+	// in order to judge "does this new event extend that". NarrativesOverlapping
+	// orders (window_start, id), so a bare LIMIT would keep the OLDEST narratives
+	// — close to the worst choice, since the newest are likeliest to be extended.
+	//
+	// AN ESCAPE HATCH, NOT A TUNING KNOB, and that is measured rather than
+	// cautionary. On post-f18.db over a 7-day window, 2 reps per arm:
+	//
+	//	bound  clusters   NEW    ctx  completion
+	//	off      37, 37     6     31  6,968 / 10,465
+	//	12       25, 26  13, 14   12  7,826 /  5,324
+	//
+	// Cluster count fell 37 -> 25, which is the win this knob was built for. It is
+	// not a win. NEW clusters MORE THAN DOUBLED, and every extra one duplicates a
+	// narrative that already exists but was dropped from context —
+	// 'triage-shows-context', 'corroborated-candidate-tier',
+	// 'finding-issue-key-drift' and 'finding-reconcile-remainder' each already had
+	// a row in narratives. The model could not see the story, so it opened a new
+	// one. That is data corruption, not overspend. Completion did not improve
+	// either: the two arms' ranges overlap, well inside the 34% run-to-run noise
+	// F16 records.
+	//
+	// So set this ONLY where the alternative is a pass that fails outright — the
+	// 365-day window that dies on the response ceiling, where a fragmented
+	// narrative beats no narrative. Do not set it to trim cost on a pass that
+	// already completes.
+	//
+	// The shared-issue-key tier cannot rescue an UNMATCHED narrative, which is why
+	// the damage lands where it does: the dropped narratives mostly had no issue
+	// key yet, so they fell to the recency tier and off the end. A branch- or
+	// repo-overlap tier is the untried idea; see F16.
 	//
 	// Excluded narratives are REPORTED (NarrateResult.ExcludedContextNarratives),
 	// mirroring ExcludedTrackerRecords: an unreported exclusion reads as "nothing
-	// was left out", and this cap is unmeasured — see docs/architecture-findings.md
-	// F16 — so an operator needs the count to tune it against evidence rather than
-	// guessing.
+	// was left out", and here the count is how an operator sees how much context
+	// they traded away.
 	MaxContextNarratives int `json:"max_context_narratives"`
 }
 

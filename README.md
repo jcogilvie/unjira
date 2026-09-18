@@ -273,11 +273,15 @@ data/                   SQLite database lives here (gitignored)
   the pass summary on stdout — not only in a stderr log line — and say to re-run: a stage that
   truncates silently makes unexamined work look like failed work, which is exactly how a matching
   batch limit once read as a matching bug. A drained pass says nothing, so the line means
-  something when it appears. `correlator.max_context_narratives` follows the same shape for
-  clustering's OTHER input — not the window's own events, but how many pre-existing narratives are
-  hydrated as context — zero (unlimited) by default, ranked (a narrative sharing an issue key with
-  the window, then most-recent-first) rather than truncated by insertion order, and its exclusions
-  reported the same way.
+  something when it appears. `correlator.max_context_narratives` bounds clustering's OTHER input —
+  not the window's own events, but how many pre-existing narratives are hydrated as context — zero
+  (unlimited) by default, ranked (a narrative sharing an issue key with the window, then
+  most-recent-first) rather than truncated by insertion order, and its exclusions reported the same
+  way. **Measured as an escape hatch, not a tuning knob:** at a bound of 12 on a real store, cluster
+  count fell 37 → 25 but `NEW` clusters more than doubled, every extra one duplicating a narrative
+  that already existed but was dropped from context — and completion tokens did not measurably
+  improve. Set it only where the alternative is a pass that fails outright on the response ceiling;
+  see `docs/architecture-findings.md` F16.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.

@@ -176,16 +176,49 @@ name (`pipeline.candidateIssueKeys`, reading the same artifact tiers `match_cand
 stdout only when non-zero, mirroring `ExcludedTrackerRecords`), so an operator can tune the bound
 against evidence rather than guessing blind.
 
-**Available but UNMEASURED.** `.env` is gitignored, so no worktree has `UNJIRA_JIRA_CREDENTIALS`, and
-`dev narrate` dies before clustering with no credential — a harness grepping a cluster count out of
-that failed run gets a plausible ZERO reading as a 100% improvement (design-notes #37). No end-to-end
-token or completion measurement is claimed here for that reason. What IS verified: the ordering and
-the bound as pure functions (`internal/pipeline/context_narratives_test.go`,
-`internal/store/narrativeissuekeys_test.go`) — zero bound includes everything, a bound below the
-population keeps the ranked set (not the first N by insertion), a shared issue key outranks recency,
-ties break deterministically on id, and the frozen/eligible partition
-(`hydrateContextNarratives`'s commit-watermark split) still holds for whatever narratives survive the
-cut. A real before/after token measurement against a live store remains open.
+**MEASURED, AND THE LEVER IS HARMFUL — it is an escape hatch, not a tuning knob.** `post-f18.db`,
+7-day window, 2 reps per arm:
+
+| bound | clusters | NEW | ctx narratives | completion |
+|---|---|---|---|---|
+| off (0) | 37, 37 | **6** | 31 | 6,968 / 10,465 |
+| 12 | 25, 26 | **13, 14** | 12 | 7,826 / 5,324 |
+
+Cluster count fell 37 → 25, which is exactly the win the bound was built for. It is not a win.
+**`NEW` clusters more than doubled**, and every extra one duplicates a narrative that already exists
+but was dropped from context — checked against the store, `'triage-shows-context'`,
+`'corroborated-candidate-tier'`, `'finding-issue-key-drift'` and `'finding-reconcile-remainder'` each
+already had a row in `narratives`. The model could not see the story, so it opened a new one. That is
+data corruption, not overspend, and it is the precise failure the ranking design was written to avoid
+— arriving anyway, at a bound of 12 on real data.
+
+**Completion did not even improve.** 5,324–7,826 bounded against 6,968–10,465 unbounded: overlapping
+ranges, well inside the 34% noise floor above. So the trade is narrative integrity for nothing
+measurable.
+
+Therefore the knob is documented as settable **only where the alternative is a pass that fails
+outright** — the 365-day window that dies on the response ceiling, where a fragmented narrative beats
+no narrative. Not for trimming a pass that already completes. It ships inert (zero = unlimited) and
+nothing enables it.
+
+**Why the damage lands where it does, which is the useful part.** The shared-issue-key tier cannot
+rescue an *unmatched* narrative, and the dropped ones mostly had no issue key yet — so they fell
+through to the recency tier and off the end. **A branch- or repo-overlap tier is the untried idea**: a
+collector records branch and repo on every event, so two narratives on one branch are plausibly one
+story even when neither is matched. That is the next thing to try, and it is untested.
+
+What is verified beyond the measurement: the ordering and bound as pure functions
+(`internal/pipeline/context_narratives_test.go`, `internal/store/narrativeissuekeys_test.go`) — zero
+bound includes everything, a bound below the population keeps the ranked set rather than the first N
+by insertion, a shared issue key outranks recency, ties break deterministically on id, and the
+frozen/eligible partition (`hydrateContextNarratives`'s commit-watermark split) still holds for
+whatever survives the cut.
+
+**F16 stays open, and its remaining lever is now none of the ones tried.** Every candidate that
+reduces what the model sees has been measured: window splitting costs more, the per-event cap is
+inert, grouping instructions change nothing, and bounding context corrupts narratives. The honest
+remaining options are a higher response ceiling (blocked on the gateway's own 32000 limit) or the
+untried relevance tier above.
 
 Per-cluster output was the other candidate and is now smaller: the prompt asked for a `title` on every
 cluster while `ExtendNarrative`'s `UPDATE` has no title column, so ~32 titles per pass were generated

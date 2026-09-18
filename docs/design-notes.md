@@ -1257,6 +1257,47 @@ that the number is what it appears to be, and that it means what it appears to m
 `0` defaults, and `-` placeholders all break the first claim silently, and no amount of replication
 catches it, because every replication reproduces the same artifact.
 
+## 39. The metric a bound improves is not the thing the bound was protecting
+
+F16's last untried lever was bounding how many pre-existing narratives clustering hydrates as context.
+The design anticipated the risk correctly and in writing: drop the wrong narrative and the model
+cannot see the story an event belongs to, so it opens a spurious `NEW` cluster and fragments a
+narrative that already exists. It mitigated that with a two-tier ranking — shared issue key first,
+then recency — rather than a bare `LIMIT`, which would have kept the *oldest* rows.
+
+The mitigation was sound and the harm arrived anyway. Measured, 2 reps per arm:
+
+```
+bound  clusters   NEW    ctx  completion
+off      37, 37     6     31  6,968 / 10,465
+12       25, 26  13, 14   12  7,826 /  5,324
+```
+
+Cluster count fell 37 → 25 — precisely the improvement the knob exists to produce. Reading only that
+column, it works. But `NEW` clusters more than doubled, and each extra one duplicated a narrative
+already in the store: `'triage-shows-context'`, `'corroborated-candidate-tier'`,
+`'finding-issue-key-drift'`, `'finding-reconcile-remainder'`. Completion tokens did not improve
+either — both ranges overlap inside the 34% run-to-run noise.
+
+> A bound's success metric and its damage metric are different columns. Measure the one the bound was
+> protecting, not the one it was reducing — a knob can hit its target and still be a regression.
+
+The ranking failed for a reason worth keeping: **the shared-issue-key tier cannot rescue an unmatched
+narrative.** Most dropped narratives had no issue key yet, so the tier meant to protect them never
+applied and they fell to recency, then off the end. A tier keyed on something every event carries —
+branch, repo — would not have that hole. Untried.
+
+Two process notes. The implementation was correct and its unit tests all passed; nothing at that layer
+could have caught this, because the defect is only visible against a real store with real narrative
+history. And the agent that built it was told not to measure (no credentials in a worktree, per #37)
+and correctly did not — which is why the knob was documented as "available but unmeasured" rather than
+"safe to enable." The honest gap left room for the measurement to overturn the conclusion instead of
+confirming a claim already written down.
+
+The knob ships anyway, inert, reframed as an escape hatch for the one case where the alternative is a
+pass that fails outright: a fragmented narrative beats no narrative. Keeping it is not sunk cost — it
+is the only lever that works at all when the response ceiling would otherwise abort the pass.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
