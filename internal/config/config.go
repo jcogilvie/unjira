@@ -308,6 +308,63 @@ type CorrelatorConfig struct {
 	// which is F25's defect one layer down, and a bare count could not tell an
 	// operator whether raising the cap by 100 or by 10,000 recovers what was cut.
 	MaxEventSummaryChars int `json:"max_event_summary_chars"`
+	// MaxContextNarratives caps how many EXISTING narratives one narration pass
+	// hydrates as clustering context (pipeline.hydrateContextNarratives, fed by
+	// store.NarrativesOverlapping). Zero means unlimited, and zero is the default
+	// so the knob ships inert — nobody's behaviour shifts until they choose a value.
+	//
+	// Finding F16, re-measured after the per-event summary cap and the tracker-
+	// record exclusion both landed: completion tokens track EXTENDS-cluster count,
+	// and EXTENDS count equals the context-narrative count in every measured run —
+	// nine runs, 32/32 every time. Capping the per-event summary or the window
+	// width does not touch this: the cost is one cluster per pre-existing
+	// narrative shown to the model, not the size of what each one carries.
+	//
+	// A plain count rather than a token budget, matching MaxEventSummaryChars'
+	// own reasoning one level up: an operator chooses "how many stories can this
+	// pass consider" the same way they chose "how many characters can one event
+	// contribute", and a token estimate would hide the number that actually
+	// drives completion cost (cluster count) behind one further conversion the
+	// operator would have to invert to tune it.
+	//
+	// Bounding WHICH narratives survive, not just how many, is the load-bearing
+	// half — see selectContextNarratives. A narrative is a story the model needs
+	// in order to judge "does this new event extend that". NarrativesOverlapping
+	// orders (window_start, id), so a bare LIMIT would keep the OLDEST narratives
+	// — close to the worst choice, since the newest are likeliest to be extended.
+	//
+	// AN ESCAPE HATCH, NOT A TUNING KNOB, and that is measured rather than
+	// cautionary. On post-f18.db over a 7-day window, 2 reps per arm:
+	//
+	//	bound  clusters   NEW    ctx  completion
+	//	off      37, 37     6     31  6,968 / 10,465
+	//	12       25, 26  13, 14   12  7,826 /  5,324
+	//
+	// Cluster count fell 37 -> 25, which is the win this knob was built for. It is
+	// not a win. NEW clusters MORE THAN DOUBLED, and every extra one duplicates a
+	// narrative that already exists but was dropped from context —
+	// 'triage-shows-context', 'corroborated-candidate-tier',
+	// 'finding-issue-key-drift' and 'finding-reconcile-remainder' each already had
+	// a row in narratives. The model could not see the story, so it opened a new
+	// one. That is data corruption, not overspend. Completion did not improve
+	// either: the two arms' ranges overlap, well inside the 34% run-to-run noise
+	// F16 records.
+	//
+	// So set this ONLY where the alternative is a pass that fails outright — the
+	// 365-day window that dies on the response ceiling, where a fragmented
+	// narrative beats no narrative. Do not set it to trim cost on a pass that
+	// already completes.
+	//
+	// The shared-issue-key tier cannot rescue an UNMATCHED narrative, which is why
+	// the damage lands where it does: the dropped narratives mostly had no issue
+	// key yet, so they fell to the recency tier and off the end. A branch- or
+	// repo-overlap tier is the untried idea; see F16.
+	//
+	// Excluded narratives are REPORTED (NarrateResult.ExcludedContextNarratives),
+	// mirroring ExcludedTrackerRecords: an unreported exclusion reads as "nothing
+	// was left out", and here the count is how an operator sees how much context
+	// they traded away.
+	MaxContextNarratives int `json:"max_context_narratives"`
 }
 
 // Validate reports whether both correlator limits are set to usable values.
@@ -323,6 +380,13 @@ func (c CorrelatorConfig) Validate() error {
 	if c.MaxEventSummaryChars < 0 {
 		return fmt.Errorf(
 			"correlator.max_event_summary_chars must be zero (unlimited) or a positive character count")
+	}
+	// Same shape again: zero is the documented "unlimited" default, negative is
+	// always a mistake (most likely someone reaching for "unlimited", which this
+	// does not spell that way).
+	if c.MaxContextNarratives < 0 {
+		return fmt.Errorf(
+			"correlator.max_context_narratives must be zero (unlimited) or a positive count")
 	}
 
 	return nil

@@ -362,6 +362,66 @@ func (s *Store) NarrativeIssues(narrativeID int64) ([]NarrativeIssue, error) {
 	return out, rows.Err()
 }
 
+// NarrativeIssueKeysByNarrative returns, for each id in narrativeIDs that has
+// at least one narrative_issues row, the set of issue keys it is linked to —
+// every role, not only primary. One query for many narratives, for a caller
+// ranking a batch (correlator.SelectContextNarratives, finding F16's
+// context-narrative bound) rather than answering one narrative at a time the
+// way NarrativeIssues does.
+//
+// Every role counts because the question this answers is "is this narrative
+// ABOUT the same issue as something else", which is a fact about the story,
+// not about which role Match promoted — that judgment is already made and
+// irrelevant here.
+//
+// A narrative with no links has NO entry in the returned map, not an entry
+// with an empty slice — the caller (SelectContextNarratives) only ever asks
+// "does this key exist in the map for this id", so the distinction is never
+// observed today, but an absent key is what "I don't know of any" should look
+// like, matching NarrativesWithoutPrimaryLink's own map-vs-empty-slice
+// convention elsewhere in this package.
+//
+// A nil or empty narrativeIDs returns an empty, non-nil map — not an error:
+// "rank nothing" is a valid caller state (an idle pass with no context
+// narratives at all), not a malformed query.
+func (s *Store) NarrativeIssueKeysByNarrative(narrativeIDs []int64) (map[int64][]string, error) {
+	out := make(map[int64][]string)
+	if len(narrativeIDs) == 0 {
+		return out, nil
+	}
+
+	placeholders := make([]string, len(narrativeIDs))
+	args := make([]any, len(narrativeIDs))
+	for i, id := range narrativeIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	rows, err := s.db.Query(
+		`SELECT narrative_id, issue_key FROM narrative_issues
+		 WHERE narrative_id IN (`+strings.Join(placeholders, ",")+`)
+		 ORDER BY narrative_id, issue_key`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying issue keys for %d narrative(s): %w", len(narrativeIDs), err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			narrativeID int64
+			issueKey    string
+		)
+		if err := rows.Scan(&narrativeID, &issueKey); err != nil {
+			return nil, fmt.Errorf("scanning issue key row: %w", err)
+		}
+		out[narrativeID] = append(out[narrativeID], issueKey)
+	}
+
+	return out, rows.Err()
+}
+
 // NarrativesForIssue returns every narrative linked to issueKey across all
 // roles — the reverse lookup the reconciler needs so it doesn't act twice on
 // one issue when two narratives share it (the SUMO co-representation case).

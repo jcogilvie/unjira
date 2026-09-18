@@ -238,6 +238,83 @@ func TestRunNarrate_HydratesOverlappingNarrativeEventsAsContext(t *testing.T) {
 	assert.Contains(t, client.prompts[0], "reworking the cache")
 }
 
+// TestRunNarrate_BoundsContextNarrativesAndReportsWhatWasExcluded pins the wiring
+// for finding F16's context-narrative bound (task #7): with
+// correlator.max_context_narratives set below the overlapping population, RunNarrate
+// must hydrate only that many, and must report how many it left out —
+// "never silently drop data" (CLAUDE.md) applies to this cap exactly as it does to
+// ExcludedTrackerRecords and the per-event summary cap.
+func TestRunNarrate_BoundsContextNarrativesAndReportsWhatWasExcluded(t *testing.T) {
+	s := narrateStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	// Three existing narratives, all overlapping or touching the [base, base+1h)
+	// pass window (window_end >= base in every case — NarrativesOverlapping's own
+	// predicate), at increasing recency (later window_end).
+	for i, label := range []string{"oldest", "middle", "newest"} {
+		windowEnd := base.Add(time.Duration(i) * 5 * time.Minute)
+		extID := fmt.Sprintf("old%d", i)
+		seedNarrateEvent(t, s, extID, label+" work", windowEnd.Add(-time.Minute))
+		eid, err := s.EventIDByExternalID("claude_code", extID)
+		require.NoError(t, err)
+		nid, err := s.InsertNarrative(windowEnd.Add(-time.Hour), windowEnd, label, label+" summary")
+		require.NoError(t, err)
+		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	}
+
+	seedNarrateEvent(t, s, "new", "new work", base.Add(30*time.Minute))
+
+	client := &narrateLLM{
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+	}
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	cfg := narrateConfig()
+	cfg.Correlator.MaxContextNarratives = 2
+
+	got, err := pipeline.RunNarrate(t.Context(), s, client, cfg, window, pipeline.NarrateOptions{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.ContextNarratives, "only 2 of the 3 overlapping narratives were hydrated")
+	assert.Equal(t, 1, got.ExcludedContextNarratives, "the bound must report what it left out")
+	require.Len(t, client.prompts, 1)
+	assert.Contains(t, client.prompts[0], "newest summary",
+		"the two most recently active narratives are kept")
+	assert.Contains(t, client.prompts[0], "middle summary")
+	assert.NotContains(t, client.prompts[0], "oldest summary",
+		"the oldest overlapping narrative is the one dropped, not the first by insertion order")
+}
+
+// TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited pins the default: the knob
+// ships inert until an operator opts in, matching MaxEventSummaryChars.
+func TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited(t *testing.T) {
+	s := narrateStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	for i, label := range []string{"a", "b", "c"} {
+		windowEnd := base.Add(time.Duration(i) * 5 * time.Minute)
+		extID := fmt.Sprintf("old%d", i)
+		seedNarrateEvent(t, s, extID, label+" work", windowEnd.Add(-time.Minute))
+		eid, err := s.EventIDByExternalID("claude_code", extID)
+		require.NoError(t, err)
+		nid, err := s.InsertNarrative(windowEnd.Add(-time.Hour), windowEnd, label, label+" summary")
+		require.NoError(t, err)
+		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	}
+	seedNarrateEvent(t, s, "new", "new work", base.Add(30*time.Minute))
+
+	client := &narrateLLM{
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+	}
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	got, err := pipeline.RunNarrate(t.Context(), s, client, narrateConfig(), window, pipeline.NarrateOptions{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.ContextNarratives, "config default is zero — unlimited")
+	assert.Zero(t, got.ExcludedContextNarratives)
+}
+
 // TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal proves
 // Compaction.EventsFolded reports what THIS pass's compaction folded, not
 // the narrative's cumulative fold count across every compaction it has ever

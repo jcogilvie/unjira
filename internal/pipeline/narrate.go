@@ -39,10 +39,22 @@ type NarrateResult struct {
 	// was left out", and an operator looking at an empty pass needs to tell "no work
 	// happened" from "all of it was filtered".
 	ExcludedTrackerRecords int
-	DryRun                 bool
-	Stats                  correlator.Stats
-	Narratives             []NarratedNarrative
-	Compactions            []Compaction
+	// ExcludedContextNarratives counts existing narratives that overlapped the
+	// window but were NOT hydrated as clustering context, because
+	// correlator.max_context_narratives bounded the population (finding F16).
+	// Zero whenever the bound is unset (the default) or the overlapping
+	// population never exceeded it.
+	//
+	// Reported for the same reason ExcludedTrackerRecords is: an unreported
+	// exclusion reads as "nothing was left out", and this bound is deliberately
+	// unmeasured (docs/architecture-findings.md F16) — an operator needs the
+	// count to tune correlator.max_context_narratives against evidence rather
+	// than guessing blind.
+	ExcludedContextNarratives int
+	DryRun                    bool
+	Stats                     correlator.Stats
+	Narratives                []NarratedNarrative
+	Compactions               []Compaction
 }
 
 // NarratedNarrative is one narrative this pass produced, with the member
@@ -127,11 +139,12 @@ func RunNarrate(
 		return result, nil
 	}
 
-	existing, err := hydrateContextNarratives(s, window)
+	existing, excludedContext, err := hydrateContextNarratives(s, window, candidates, cfg.Correlator.MaxContextNarratives)
 	if err != nil {
 		return NarrateResult{}, err
 	}
 	result.ContextNarratives = len(existing)
+	result.ExcludedContextNarratives = excludedContext
 
 	correlatorRules, err := loadCorrelatorRules(cfg)
 	if err != nil {
@@ -214,17 +227,35 @@ func requireNonEmptyClusters(clustered []correlator.ClusterResult) error {
 // hydrateContextNarratives loads the narratives overlapping or touching window
 // and fills each one's Events from the store, which is what makes Cluster's
 // context section carry raw events rather than just summaries (Path B).
-func hydrateContextNarratives(s *store.Store, window correlator.TimeRange) ([]correlator.Narrative, error) {
+//
+// maxContext bounds how many of the overlapping rows are hydrated at all
+// (finding F16, config.CorrelatorConfig.MaxContextNarratives) — applied BEFORE
+// the per-row event/eligibility queries below, not after, so a bound that
+// excludes a row also excludes its cost: hydrating first and discarding
+// narratives afterward would keep paying the queries this bound exists to
+// avoid. candidates is this pass's own work-evidence events (post-
+// PartitionByTrackerRecord), read for the issue keys they name — the shared-key
+// tier of selectContextNarratives' ranking. The second return is how many
+// overlapping rows were excluded, which the caller must report (never
+// silently drop data).
+func hydrateContextNarratives(
+	s *store.Store, window correlator.TimeRange, candidates []events.Event, maxContext int,
+) ([]correlator.Narrative, int, error) {
 	rows, err := s.NarrativesOverlapping(window.Start, window.End)
 	if err != nil {
-		return nil, fmt.Errorf("assembling context narratives: %w", err)
+		return nil, 0, fmt.Errorf("assembling context narratives: %w", err)
+	}
+
+	rows, excluded, err := boundContextNarratives(s, rows, candidates, maxContext)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	out := make([]correlator.Narrative, 0, len(rows))
 	for _, row := range rows {
 		contextEvents, err := s.NarrativeEventsForContext(row.ID)
 		if err != nil {
-			return nil, fmt.Errorf("hydrating context events for narrative %d: %w", row.ID, err)
+			return nil, 0, fmt.Errorf("hydrating context events for narrative %d: %w", row.ID, err)
 		}
 
 		// Partition by the commit watermark: uncommitted events stay eligible
@@ -241,7 +272,7 @@ func hydrateContextNarratives(s *store.Store, window correlator.TimeRange) ([]co
 		// in one prompt and invite assigning a frozen event by index.
 		eligibleIDs, err := s.EligibleEventIDs(row.ID)
 		if err != nil {
-			return nil, fmt.Errorf("resolving eligible events for narrative %d: %w", row.ID, err)
+			return nil, 0, fmt.Errorf("resolving eligible events for narrative %d: %w", row.ID, err)
 		}
 
 		eligible := make(map[int64]bool, len(eligibleIDs))
@@ -253,7 +284,7 @@ func hydrateContextNarratives(s *store.Store, window correlator.TimeRange) ([]co
 		for _, e := range contextEvents {
 			id, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 			if err != nil {
-				return nil, fmt.Errorf("resolving event id for %s/%s: %w", e.Source, e.ExternalID, err)
+				return nil, 0, fmt.Errorf("resolving event id for %s/%s: %w", e.Source, e.ExternalID, err)
 			}
 
 			if eligible[id] {
@@ -275,7 +306,34 @@ func hydrateContextNarratives(s *store.Store, window correlator.TimeRange) ([]co
 		})
 	}
 
-	return out, nil
+	return out, excluded, nil
+}
+
+// boundContextNarratives applies config.CorrelatorConfig.MaxContextNarratives to
+// rows before any per-row hydration query runs, so an excluded narrative's cost
+// is excluded too. Loads NarrativeIssueKeysByNarrative only when maxContext will
+// actually bind (selectContextNarratives is itself a no-op past that point) —
+// skipping a store round trip that a zero or oversized bound would throw away.
+func boundContextNarratives(
+	s *store.Store, rows []store.NarrativeRow, candidates []events.Event, maxContext int,
+) ([]store.NarrativeRow, int, error) {
+	if maxContext <= 0 || len(rows) <= maxContext {
+		return rows, 0, nil
+	}
+
+	ids := make([]int64, len(rows))
+	for i, row := range rows {
+		ids[i] = row.ID
+	}
+
+	linkedKeys, err := s.NarrativeIssueKeysByNarrative(ids)
+	if err != nil {
+		return nil, 0, fmt.Errorf("loading linked issue keys for context-narrative ranking: %w", err)
+	}
+
+	kept, excluded := selectContextNarratives(rows, linkedKeys, candidateIssueKeys(candidates), maxContext)
+
+	return kept, excluded, nil
 }
 
 // describeUnpersisted renders dry-run results, which have no ids because
