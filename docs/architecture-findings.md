@@ -315,6 +315,60 @@ Overlaps **F7** and should probably be decided with it: F7 asks whether `JiraCon
 kubeconfig-like shape, and a system-typed connection is most of what this needs. F7 currently reads as
 a tidiness question about one struct; this makes it a multi-tracker blocker.
 
+### F29 — nothing expresses which tracker a narrative's work belongs to
+
+F28 is about *classifying* an event. This is about *routing* one, and it has a worse failure mode.
+
+The relationship between collectors and trackers is **many-to-many**, and all three directions occur
+in one real deployment:
+
+- **One collector, several trackers.** A single `claude_code` collector observes OSS work on an
+  upstream project (tracked in that project's GitHub Issues) and employer work (tracked in Jira), in
+  the same transcript corpus, often on the same day.
+- **One tracker, several collectors.** Jira already receives evidence from `claude_code` and the Jira
+  collector; a GitHub collector makes three.
+- **One narrative, several trackers.** An upstream PR raised for an internal reason legitimately
+  concerns both: the OSS issue wants "PR opened upstream", the internal ticket wants "fix submitted,
+  awaiting maintainer review." Same work, two audiences, and **different prose** — which is not
+  routing but per-destination content, and is the hard part.
+
+**unjira has nowhere to express any of this.** `correlator.TrackerResolver` is already per-candidate
+(`func(connection string) (tasktracker.TaskReader, error)`), and its doc comment says the design
+intent plainly: *"this package only knows that different candidates can need different trackers."* So
+the *verification* layer is ready. What is missing is upstream of it — `Candidate.Connection` is
+populated only by jira-source events, everything else arrives empty and takes a resolver's default,
+and no config surface names a routing key at all (no repo, path, org, or source field exists).
+
+**The consequence is a disclosure risk, not a cost.** Narrative summaries are generated from
+transcript content, which routinely contains employer-internal ticket keys, incident detail and
+architecture. Routing one to a *public* tracker publishes that prose irreversibly — categorically
+unlike a wrong comment on an internal Jira issue, which is embarrassing and deletable. Today a
+GitHub-Issues tracker would arrive with no equivalent of `WritableProjectKeys`, so there is no way to
+say *"read this tracker, never write to it."*
+
+`config.JiraConnection.WritableProjectKeys` is the precedent and the right shape: write authority
+declared **independently** of read scope, absent meaning nothing is writable, and deliberately NOT
+defaulting to read scope because *"that would mean every project unjira reads is armed for writes the
+moment a connection is configured at all."* The multi-tracker version needs the same property per
+tracker, and a public tracker makes it load-bearing rather than merely prudent.
+
+**The policy is the operator's, and unjira must not encode one.** Whether OSS work is also tracked
+internally varies by org — some require it for time and compliance reasons, some explicitly forbid it.
+So the deliverable is **configurability, not a default**: a routing key (repo or path is the likely
+shape, since it is the one thing both collectors can name and it matches the ignore-list idea for
+keeping unjira's own sessions out of its corpus), per-tracker write authority, and a deny-by-default
+stance when no rule matches. Enumerating the plausible operator policies — route, mirror, or exclude —
+is useful for validating that the mechanism can express each, not for choosing one.
+
+Deferred deliberately, and recorded so the deferral is a decision rather than an oversight. It is not
+reachable today: one tracker backend is real, `local` is the only alternative, and no collector emits
+events for a second tracker. It becomes urgent with the **first public or second real tracker**, and
+the write-authority half should land *before* any tracker that could be public — a missing gate is
+discovered by publishing something.
+
+Decide with **F7** (**#178**) and **F28**: a system-typed connection carrying its own write scope is
+most of the mechanism all three need.
+
 ### F7 — config.JiraConnection carries four concerns
 
 One struct (`config/config.go:57-86`) holds: **endpoint** (`Site`), **identity** (implicitly, via
@@ -357,6 +411,7 @@ the natural moment to decide.
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
+| F29 — nothing expresses which tracker a narrative's work belongs to | open, **deferred deliberately**. Many-to-many collector↔tracker routing, plus per-tracker write authority. Not reachable with one real tracker; the write-authority half must land BEFORE any tracker that could be public, since a missing gate is discovered by publishing. Decide with F7/**#178** and F28 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
 | F11 — issue_key denormalization drifts | resolved: the column is **deleted**, along with `.confidence`, `SetNarrativeIssueLink` and `NarrativeRow.IssueKey`/`.Confidence` — all write-only. `NarrativesWithoutIssueKey` became `NarrativesWithoutPrimaryLink`, asking `NOT EXISTS(primary link)`. The fix was already named in `design-notes.md` when the create path hit the same trap; matching was the one accessor never revisited. No migration: narrative 15 self-repaired, since it *has* a primary link. Verified by draining — the pass that crashed now completes, backlog 38 → 26. |
