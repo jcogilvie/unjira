@@ -224,6 +224,17 @@ pre-filters that actually run, and records these two as awaiting the GitHub coll
 stays only so a future reader who greps for uncalled packages finds the reasoning instead of
 re-deriving it.
 
+**The GitHub collector now has a design**
+(`docs/superpowers/specs/2026-09-17-github-collector-design.md`), which resolves how each package
+wires in rather than leaving it implied. `fanout` gets a real integration point — a deterministic
+pre-filter feeding `correlator.WithInstruction`, not a physical event merge — but is deferred past
+that design's own first slice pending real fan-out data to validate the heuristic against. `refs`
+turns out to have no consumer even once a GitHub collector exists: matching resolves a narrative to
+a *Jira issue key*, and nothing in the pipeline represents a GitHub PR-to-PR relationship, so
+`refs.Ref.Key()`'s output has nowhere to go yet. That is a **new, more specific instance of this same
+finding** — not a fix, and not a reason to reconsider deletion (the rule these packages implement is
+still live; see that spec's own §6 for why a half-designed consumer would be worse than none).
+
 ### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
 
 `internal/correlator` imports `internal/clients/jira` for one function: `IsTransportError`
@@ -258,6 +269,105 @@ description edit from a summary edit, which nothing else records"* — true, and
 
 Cheap to keep and genuinely useful when re-enriching (**#176**). Listed for completeness, not as
 something to remove.
+
+### F28 — a collector cannot ask whether its own system is a tracker in this deployment
+
+unjira must work for arbitrary tracker/collector combinations — Jira, GitHub, GitLab, Trello,
+YouTrack as trackers; collectors for each of those plus Slack and other streams. **Whether an event is
+a tracker record is a property of (artifact kind × which systems are trackers *here*), not of the
+collector that produced it.** `events/tracker_record.go` says so explicitly, as its stated reason the
+marker is declared rather than inferred: *"A GitHub-Issues collector's timeline events are tracker
+records too, and must be recognized without editing any consumer."*
+
+A GitHub Issue closing is a tracker record when GitHub Issues is the tracker, and work evidence when
+Jira is. Symmetrically, a Jira comment is work evidence in a deployment tracking work in GitHub. Same
+artifact, classified oppositely by configuration.
+
+**A collector has no way to make that call.** `CollectContext` carries `Config`, so it can *look*, but
+there is nothing typed to look at: `config.JiraConnection` is Jira-shaped, `tracker.backend` is a bare
+string, and `events.ArtifactConnection` is documented as "the configured **Jira** connection name"
+(`events/artifact_keys.go:12`). So the only available basis for the decision is the collector's own
+package identity — exactly the inference `tracker_record.go` forbids, and the one incident 21 already
+burned this codebase for.
+
+**Consequence.** Any collector for a system that *could* be a tracker (GitHub, GitLab, Trello — most
+of the planned ones) must either hardcode an assumption about the deployment or mark nothing, and both
+are wrong in some valid configuration. Marking nothing is the direction `IsTrackerRecord`'s default
+chooses deliberately (too talkative, never silent), so the symptom is unjira paraphrasing a tracker
+back onto itself — design-notes #24's 18-of-21 measurement.
+
+**A second, sharper gap: self-authorship detection is Jira-only.** When a collector's system *is* the
+tracker, unjira's own writes return through that collector — post a comment, re-collect it next pass.
+`ArtifactAuthoredByUnjira` handles this, computed per-connection from `SelfAccountID` via one
+`Myself()` call (`collector/jira/events.go:211`). Nothing requires a collector to supply an
+equivalent, and absence reads as "not self-authored", so a tracker-collector without a self-identity
+narrates unjira's own output back at itself. **This is the one thing that genuinely differs when
+collector and tracker coincide** — and F26 (fixed, deleted) existed because those events accumulate
+even with Jira's detection working.
+
+Not urgent while Jira is the only real tracker and `local` the only alternative. It becomes a blocker
+for the second `tasktracker` implementation, and a **prerequisite for any GitHub slice collecting
+Issues** rather than only PRs (see
+`docs/superpowers/specs/2026-09-17-github-collector-design.md` §"Which side of the diff GitHub sits
+on", which sidesteps the ambiguity by collecting no issue-shaped artifacts).
+
+Overlaps **F7** and should probably be decided with it: F7 asks whether `JiraConnection` wants a
+kubeconfig-like shape, and a system-typed connection is most of what this needs. F7 currently reads as
+a tidiness question about one struct; this makes it a multi-tracker blocker.
+
+### F29 — nothing expresses which tracker a narrative's work belongs to
+
+F28 is about *classifying* an event. This is about *routing* one, and it has a worse failure mode.
+
+The relationship between collectors and trackers is **many-to-many**, and all three directions occur
+in one real deployment:
+
+- **One collector, several trackers.** A single `claude_code` collector observes OSS work on an
+  upstream project (tracked in that project's GitHub Issues) and employer work (tracked in Jira), in
+  the same transcript corpus, often on the same day.
+- **One tracker, several collectors.** Jira already receives evidence from `claude_code` and the Jira
+  collector; a GitHub collector makes three.
+- **One narrative, several trackers.** An upstream PR raised for an internal reason legitimately
+  concerns both: the OSS issue wants "PR opened upstream", the internal ticket wants "fix submitted,
+  awaiting maintainer review." Same work, two audiences, and **different prose** — which is not
+  routing but per-destination content, and is the hard part.
+
+**unjira has nowhere to express any of this.** `correlator.TrackerResolver` is already per-candidate
+(`func(connection string) (tasktracker.TaskReader, error)`), and its doc comment says the design
+intent plainly: *"this package only knows that different candidates can need different trackers."* So
+the *verification* layer is ready. What is missing is upstream of it — `Candidate.Connection` is
+populated only by jira-source events, everything else arrives empty and takes a resolver's default,
+and no config surface names a routing key at all (no repo, path, org, or source field exists).
+
+**The consequence is a disclosure risk, not a cost.** Narrative summaries are generated from
+transcript content, which routinely contains employer-internal ticket keys, incident detail and
+architecture. Routing one to a *public* tracker publishes that prose irreversibly — categorically
+unlike a wrong comment on an internal Jira issue, which is embarrassing and deletable. Today a
+GitHub-Issues tracker would arrive with no equivalent of `WritableProjectKeys`, so there is no way to
+say *"read this tracker, never write to it."*
+
+`config.JiraConnection.WritableProjectKeys` is the precedent and the right shape: write authority
+declared **independently** of read scope, absent meaning nothing is writable, and deliberately NOT
+defaulting to read scope because *"that would mean every project unjira reads is armed for writes the
+moment a connection is configured at all."* The multi-tracker version needs the same property per
+tracker, and a public tracker makes it load-bearing rather than merely prudent.
+
+**The policy is the operator's, and unjira must not encode one.** Whether OSS work is also tracked
+internally varies by org — some require it for time and compliance reasons, some explicitly forbid it.
+So the deliverable is **configurability, not a default**: a routing key (repo or path is the likely
+shape, since it is the one thing both collectors can name and it matches the ignore-list idea for
+keeping unjira's own sessions out of its corpus), per-tracker write authority, and a deny-by-default
+stance when no rule matches. Enumerating the plausible operator policies — route, mirror, or exclude —
+is useful for validating that the mechanism can express each, not for choosing one.
+
+Deferred deliberately, and recorded so the deferral is a decision rather than an oversight. It is not
+reachable today: one tracker backend is real, `local` is the only alternative, and no collector emits
+events for a second tracker. It becomes urgent with the **first public or second real tracker**, and
+the write-authority half should land *before* any tracker that could be public — a missing gate is
+discovered by publishing something.
+
+Decide with **F7** (**#178**) and **F28**: a system-typed connection carrying its own write scope is
+most of the mechanism all three need.
 
 ### F7 — config.JiraConnection carries four concerns
 
@@ -298,8 +408,10 @@ the natural moment to decide.
 | F3 — concrete backend in the correlator | **#183** |
 | F5 — dead schema (estimates, ledger) | **resolved**: both dropped. Only TWO tables, not the three the finding claimed — a miscount nobody had checked. Existing databases keep their orphans, since this package has no migration mechanism, which is harmless because nothing referenced them |
 | F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here |
-| F7 — connection/identity model | **#178** |
+| F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
+| F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
+| F29 — nothing expresses which tracker a narrative's work belongs to | open, **deferred deliberately**. Many-to-many collector↔tracker routing, plus per-tracker write authority. Not reachable with one real tracker; the write-authority half must land BEFORE any tracker that could be public, since a missing gate is discovered by publishing. Decide with F7/**#178** and F28 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
 | F11 — issue_key denormalization drifts | resolved: the column is **deleted**, along with `.confidence`, `SetNarrativeIssueLink` and `NarrativeRow.IssueKey`/`.Confidence` — all write-only. `NarrativesWithoutIssueKey` became `NarrativesWithoutPrimaryLink`, asking `NOT EXISTS(primary link)`. The fix was already named in `design-notes.md` when the create path hit the same trap; matching was the one accessor never revisited. No migration: narrative 15 self-repaired, since it *has* a primary link. Verified by draining — the pass that crashed now completes, backlog 38 → 26. |
