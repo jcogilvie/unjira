@@ -257,7 +257,19 @@ wrong-field trap design-notes #32 records, and is now a true result rather than 
 
 ---
 
-### F1 — refs and fanout await a collector that does not exist yet
+### F1 — refs and fanout await a wiring decision, not a missing collector
+
+**Narrowed 2026-09-21: the GitHub collector this entry was waiting for now exists**
+(`internal/collector/github`, PR lifecycle slice — opened, merged, closed). That does not close
+this finding, because the collector's own slice deliberately does not wire either package in — see
+`docs/superpowers/specs/2026-09-17-github-collector-design.md`'s §6, unchanged by that slice
+landing. `fanout` has a real integration point designed (`groupByFanoutFamily` feeding
+`correlator.WithInstruction`, at the pipeline layer) but deferred to a later slice pending real
+fan-out data; `refs` has no consumer even with a collector in hand, because matching resolves a
+narrative to a *Jira issue key* and nothing in the pipeline represents a GitHub PR-to-PR
+relationship. So the finding's shape has changed — "no collector" is no longer true — but its
+substance has not: both packages remain uncalled, and the reasoning below (unchanged) still
+explains why deleting them would be wrong.
 
 `internal/correlator/refs` and `internal/correlator/fanout` are pure, thoroughly tested, and have
 **zero production callers**. `refs.ParsePRRefs`, `fanout.ClusterFanout` and `fanout.NormalizeTitle`
@@ -273,8 +285,8 @@ Both facts are settled:
   neither can join a Jira event to a Claude Code session. Anything proposing them as the fix for
   disjoint clustering is mistaken about their shape.
 - The problems are real and still expected. `rules/env-mirror-fanout.md` is live at
-  `confidence: high`, drawn from predecessor operational experience, and the README's pipeline
-  diagram lists `(GitHub)` among the planned collectors. Deleting working implementations of a rule
+  `confidence: high`, drawn from predecessor operational experience, and `internal/collector/github`
+  is exactly the collector this finding named as missing. Deleting working implementations of a rule
   the repo still holds would leave the rule describing nothing.
 
 Two commits ever, both from the Python→Go port (`git log -- internal/correlator/refs
@@ -283,20 +295,10 @@ wired in any version, rather than lost in the port.
 
 **What remains open:** nothing in the code. CLAUDE.md's invariant used to claim these two were
 load-bearing today, which was false; it now names `gatherCandidates` and `runSuppression` as the
-pre-filters that actually run, and records these two as awaiting the GitHub collector. This entry
-stays only so a future reader who greps for uncalled packages finds the reasoning instead of
-re-deriving it.
-
-**The GitHub collector now has a design**
-(`docs/superpowers/specs/2026-09-17-github-collector-design.md`), which resolves how each package
-wires in rather than leaving it implied. `fanout` gets a real integration point — a deterministic
-pre-filter feeding `correlator.WithInstruction`, not a physical event merge — but is deferred past
-that design's own first slice pending real fan-out data to validate the heuristic against. `refs`
-turns out to have no consumer even once a GitHub collector exists: matching resolves a narrative to
-a *Jira issue key*, and nothing in the pipeline represents a GitHub PR-to-PR relationship, so
-`refs.Ref.Key()`'s output has nowhere to go yet. That is a **new, more specific instance of this same
-finding** — not a fix, and not a reason to reconsider deletion (the rule these packages implement is
-still live; see that spec's own §6 for why a half-designed consumer would be worse than none).
+pre-filters that actually run, and records these two as awaiting a wiring decision now that the
+GitHub collector exists (see the opening paragraph above for what that decision resolved to, per
+`docs/superpowers/specs/2026-09-17-github-collector-design.md`'s §6). This entry stays only so a
+future reader who greps for uncalled packages finds the reasoning instead of re-deriving it.
 
 ### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
 

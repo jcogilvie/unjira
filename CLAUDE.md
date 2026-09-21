@@ -64,8 +64,13 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
 - **`internal/correlator/refs` and `internal/correlator/fanout` have no callers yet, and that is
   deliberate.** They are pure, tested implementations of two GitHub-PR-shaped problems: env-mirror
   fan-out (one infra change becoming ~12 near-identical per-region PRs — see
-  `rules/env-mirror-fanout.md`, still live) and bare-`#N` reference ambiguity. Both await the
-  `(GitHub)` collector the README's pipeline diagram lists as planned. Keep them pure and keep the
+  `rules/env-mirror-fanout.md`, still live) and bare-`#N` reference ambiguity. `internal/collector/github`
+  now exists (PR lifecycle: opened, merged, closed) but deliberately does not wire either package in —
+  `fanout` has a real integration point *designed* (a deterministic pre-filter feeding
+  `correlator.WithInstruction`, at the pipeline layer) but deferred pending real fan-out data; `refs`
+  has no consumer even with a collector in hand, since matching resolves to a Jira issue key and
+  nothing represents a PR-to-PR relationship. See F1 and
+  `docs/superpowers/specs/2026-09-17-github-collector-design.md`'s §6. Keep them pure and keep the
   tests green; do not wire them into the Jira/Claude Code path, where they do not fit — `fanout.Item`
   is `{Repo, Author, Title, Number}` and `refs` matches only `#N` syntax, so neither can see a Jira
   issue key.
