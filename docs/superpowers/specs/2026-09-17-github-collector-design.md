@@ -128,7 +128,7 @@ Three options, weighed against the same four axes the task named:
 
 | | credential handling | rate limits | offline testability | dependency |
 |---|---|---|---|---|
-| **HTTP client + `UNJIRA_GITHUB_CREDENTIALS`** | the same path as Jira: `internal/credentials` decodes one env var, keyed by connection name | self-managed — and it inherits F23's `retryTransport`, since a `RoundTripper` is already the seam | `httptest`, exactly as `clients/jira` and `clients/openai` do today | `google/go-github`, or none at all for a surface this small |
+| **HTTP client + `UNJIRA_GITHUB_CREDENTIALS`** | the same path as Jira: `internal/credentials` decodes one env var (keyed by host — see §8) | self-managed — and it inherits F23's `retryTransport`, since a `RoundTripper` is already the seam | `httptest`, exactly as `clients/jira` and `clients/openai` do today | `google/go-github`, or none at all for a surface this small |
 | **`gh` CLI (`exec.Command`)** | borrows whatever `gh auth login` left in the OS keychain | `gh` manages its own backoff, opaquely | a fake process runner — workable, but a second testing idiom | no Go dependency, but a **runtime binary dependency** with no introspection into its version, auth state, or behaviour |
 | **GitHub MCP server** | session-scoped, and `unjira collect` is a cron/CLI invocation with no MCP session to borrow | opaque | cannot run in `go test ./...` at all — out-of-process, not fake-able | wrong layer: MCP is for an agent driving GitHub interactively, not an unattended collector |
 
@@ -164,7 +164,7 @@ unreasonable — it was wrong for reasons that only surface when you ask how it 
 it just is not unjira's transport:
 
 ```sh
-export UNJIRA_GITHUB_CREDENTIALS="{\"oss\":{\"token\":\"$(gh auth token)\"}}"
+export UNJIRA_GITHUB_CREDENTIALS="{\"github.com\":{\"token\":\"$(gh auth token)\"}}"
 ```
 
 A classic PAT or a fine-grained token works identically. The point is that unjira reads a token from
@@ -591,15 +591,18 @@ inventing a new shape:
 "collectors": {
   "github": {
     "enabled": true,
-    "repos": ["yourorg/yourrepo", "yourorg/other-repo"],
+    "repos": ["yourorg/yourrepo", "github.acme.corp/platform/infra"],
     "backfill_days": 30
   }
 }
 ```
 
-- **`repos`**, a flat list of `owner/repo` strings — no per-repo query customization the way Jira's
-  `queries[]` has, because there is exactly one query this slice runs (list PRs since watermark) and
-  nothing analogous to Jira's "several views on one site" need.
+- **`repos`**, a flat list of `owner/repo` strings, optionally host-qualified as
+  `host/owner/repo` — no per-repo query customization the way Jira's `queries[]` has, because there is
+  exactly one query this slice runs (list PRs since watermark) and nothing analogous to Jira's "several
+  views on one site" need. The host determines both which credential is used and which API base URL is
+  called; see "Credentials are keyed by HOST" below for the parsing rule and why locality lives here
+  rather than in a second parallel list.
 - **`backfill_days`**, mirroring `collector/claudecode`'s own option name and default shape
   (`DefaultBackfillDays = 14`, `claudecode.go:28`) — how far back to look on a repo's first-ever
   collection pass (no existing cursor row). A GitHub-specific default of 30 is proposed (PRs often
@@ -610,14 +613,83 @@ inventing a new shape:
   `IsProjectWritable`'s whole reason for existing (gating `gate.Applier`) has no counterpart here
   until a write path exists, which this spec does not add.
 - **No credential field in config**, per `CLAUDE.md`'s "credentials come from the environment, never
-  config files." The credential arrives exactly as Jira's does — `UNJIRA_GITHUB_CREDENTIALS`, a single
-  JSON object keyed by connection name, decoded by `internal/credentials` and handed to the collector
-  through `CollectContext.Credentials` (which `RunCollect` already passes "so a remote collector can
-  authenticate without reading the environment itself"). **One mechanism for every system**, which is
-  the whole point of §1's transport decision: an operator who knows how unjira gets its Jira token
-  already knows how it gets its GitHub token. A missing or empty credential fails loudly at `Collect`,
-  naming the env var and the connection it was looked up under — `credentials.Set.For` already
-  distinguishes "missing" from "empty" for precisely this reason.
+  config files." The credential arrives through the same mechanism as Jira's —
+  `UNJIRA_GITHUB_CREDENTIALS`, decoded by `internal/credentials`, handed to the collector through
+  `CollectContext.Credentials` (which `RunCollect` already passes "so a remote collector can
+  authenticate without reading the environment itself"). But it is **keyed by host, not by a config
+  connection name** — see below.
+
+### Credentials are keyed by HOST, because GitHub is an identity provider
+
+An earlier draft copied Jira's `map[connectionName]Credential` wholesale and proposed
+`{"oss":{"token":"..."}}`. **That key was undefined**: this collector's config has no connections, only
+a flat `repos` list, so nothing said what `"oss"` meant or which repos it covered. The symmetry with
+Jira was carried further than the systems actually match.
+
+**Where the two systems genuinely differ.** A Jira connection is a tenant: separate site, separate URL,
+separate token, genuinely separate auth surface — so keying by connection name models something real.
+GitHub is an **IDP**: one token carries org membership, and you do not authenticate per org. A user
+belonging to five orgs on github.com has one auth surface, not five. Keying those by connection name
+would ask an operator to invent names for distinctions that do not exist.
+
+**But more than one auth surface does exist — by host.** A self-hosted GitHub Enterprise Server
+instance and github.com are two credentials, two base URLs, and two account namespaces: structurally
+the same as two Jira sites. That is the axis worth keying on, and the only one.
+
+So the map stays (it is the same parser and the same package) and the key becomes the host:
+
+```
+UNJIRA_GITHUB_CREDENTIALS='{
+  "github.com":        {"token": "ghp_..."},
+  "github.acme.corp":  {"token": "ghp_..."}
+}'
+```
+
+**`github.com` is the well-known key**, spelled exactly as the host. Not a sentinel like `"default"` or
+`""`: an operator looking at a `repos` entry can read off which key applies without consulting a
+mapping, and a typo produces "no credential for host github.com" rather than silently selecting a
+default that happens to exist.
+
+**Repo locality resolves from the repo string itself**, so nothing needs declaring twice:
+
+```json
+"repos": [
+  "yourorg/yourrepo",                    // short form -> github.com
+  "github.acme.corp/platform/infra"      // explicit host -> that GHES instance
+]
+```
+
+A two-segment `owner/repo` **elides to `github.com`**, which keeps the common case exactly as short as
+it is today and makes the existing example config still correct. A leading segment containing a `.` is
+a host, and the remainder is `owner/repo`. Parsing rule, stated so an implementer does not improvise:
+**split on `/`; if the first segment contains a `.`, it is the host, otherwise the host is
+`github.com`.** Exactly two segments must remain after the host is removed, and anything else is a
+config error naming the offending entry — a three-segment string whose first segment has no dot is
+ambiguous, and guessing is how a repo gets silently collected from the wrong instance.
+
+The API base URL derives from the same host: `github.com` → `https://api.github.com`, and a GHES host
+→ `https://<host>/api/v3` (GHES's documented REST prefix). One field in config drives both the
+credential lookup and the endpoint, which is the property that makes this better than a second
+parallel list of hosts.
+
+**Why not a flat `{"token": "..."}`.** It is tempting, and for a github.com-only deployment it is all
+anyone needs. Rejected because GHES is not hypothetical and the migration is worse than the upfront
+cost: a flat form would have to grow into a keyed form later, breaking every configured env var, to buy
+the removal of one well-known key today. **Open question left open:** whether to also accept the flat
+form as sugar for `{"github.com": ...}`. It costs one branch in the decoder and removes a small papercut
+for the overwhelmingly common case, but two accepted shapes for one variable is exactly the kind of
+thing that makes an error message harder to write. Not resolved here.
+
+**Still deliberately absent: multiple identities on one host.** A bot account plus a human account on
+github.com is a real configuration, and this shape cannot express it — the host is the key, so there is
+one credential per host. That is the right trade for now: the common case needs one token per host, and
+adding an identity dimension before anything requires it would mean naming identities, which is the
+invented-key problem this section exists to remove. If a write path ever wants a distinct bot identity,
+that is the moment to revisit.
+
+A missing or empty credential fails loudly at `Collect`, naming the env var and the **host** it was
+looked up under — `credentials.Set.For` already distinguishes "missing" from "empty" for precisely this
+reason.
 
 **Registration** (`cmd/unjira/main.go:60`'s `registry` map):
 

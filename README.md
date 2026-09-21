@@ -345,11 +345,15 @@ data/                   SQLite database lives here (gitignored)
   connection count.
 - **Every remote system authenticates the same way: one JSON env var per credential kind, decoded by
   `internal/credentials`. No system reads another tool's stored state at runtime.** The planned GitHub
-  collector takes `UNJIRA_GITHUB_CREDENTIALS` in exactly that shape, which makes `gh` a convenient way
-  to *mint* a token and never a runtime dependency:
+  collector takes `UNJIRA_GITHUB_CREDENTIALS` in that shape, **keyed by host** rather than by a config
+  connection name: GitHub is an identity provider and one token carries org membership, so the auth
+  surfaces that genuinely differ are github.com and a GHES instance. A short `owner/repo` in `repos`
+  elides to `github.com`; a leading segment containing a dot names a GHES host, and that host drives
+  both the credential lookup and the API base URL. So `gh` is a convenient way to *mint* a token and
+  never a runtime dependency:
 
   ```sh
-  export UNJIRA_GITHUB_CREDENTIALS="{\"oss\":{\"token\":\"$(gh auth token)\"}}"
+  export UNJIRA_GITHUB_CREDENTIALS="{\"github.com\":{\"token\":\"$(gh auth token)\"}}"
   ```
 
   A PAT or fine-grained token works identically. An external binary's version, auth state and output
