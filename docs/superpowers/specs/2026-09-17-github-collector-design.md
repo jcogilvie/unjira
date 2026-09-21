@@ -680,12 +680,43 @@ form as sugar for `{"github.com": ...}`. It costs one branch in the decoder and 
 for the overwhelmingly common case, but two accepted shapes for one variable is exactly the kind of
 thing that makes an error message harder to write. Not resolved here.
 
-**Still deliberately absent: multiple identities on one host.** A bot account plus a human account on
-github.com is a real configuration, and this shape cannot express it — the host is the key, so there is
-one credential per host. That is the right trade for now: the common case needs one token per host, and
-adding an identity dimension before anything requires it would mean naming identities, which is the
-invented-key problem this section exists to remove. If a write path ever wants a distinct bot identity,
-that is the moment to revisit.
+**Multiple identities on one host: out of scope, and sufficient rather than a compromise.** A bot
+account alongside a human account on github.com is a real configuration this shape cannot express —
+the host is the key, so there is one credential per host. That is not a trade-off for slice 1, it is
+adequate: **a read needs *a* token that can reach the host, not a particular account.** `GET
+/repos/{owner}/{repo}/pulls` succeeds with any token holding access, so host keying is exactly the
+right granularity for a read-only collector.
+
+Identity becomes a real requirement for two things, and both are write-adjacent: **which account
+performs a write**, and **self-authorship detection** (`ArtifactAuthoredByUnjira` — F28's second gap,
+where a tracker-collector without a self-identity narrates unjira's own output back at itself). So the
+constraint is better stated as: reads and writes want different things from a credential, and this
+shape models reads.
+
+When that moment comes, the mechanism should be **discovery, not a naming convention.** `GET /user` is
+GitHub's `Myself()`, and `collector/jira` already establishes the pattern — `SelfAccountID`, "from one
+`Myself()` call per pass" (`collector/jira/events.go:71`), one call per connection per pass. The
+authenticated account is a *fact about the token*, so deriving it cannot drift; a config label can.
+Two shapes are therefore **rejected in advance**, because both are natural guesses:
+
+- **`"user@github.com"` as the credential key.** Reads well, and matches how git remotes and SSH
+  configs look — but it duplicates what the token already knows. A key reading `bot@github.com` over a
+  token that is actually the human's is a stale label nothing detects, the same defect class as the
+  `"oss"` key this section removed. It also still does not say which identity a given repo should use,
+  so it needs a second mechanism pointing at it.
+- **User-specified opaque keys** (`"bot"`, `"personal"`). Honest about being arbitrary, but they move
+  the question rather than answering it: something in config still has to reference them, which is the
+  invented-key problem one level up.
+
+The likely shape instead: a write destination names its identity (`"write_identity": "bot"`, omitted
+meaning "the read token"), `UNJIRA_GITHUB_CREDENTIALS` grows a nested `identities` map only for hosts
+that need one, and the composite `bot@github.com` form appears where it is genuinely load-bearing — as
+the **discovered** identity stamped on events for per-host self-authorship comparison, derived from
+`/user` rather than declared in config.
+
+Not designed here, because **selection is a write-path question and the write path is F29's
+territory** (per-tracker write authority, deny-by-default). Designing identity selection before
+knowing what a write destination looks like means guessing at the thing that does the selecting.
 
 A missing or empty credential fails loudly at `Collect`, naming the env var and the **host** it was
 looked up under — `credentials.Set.For` already distinguishes "missing" from "empty" for precisely this
@@ -751,6 +782,10 @@ a throwaway branch+PR the live test can open and close as part of its own setup/
 Left genuinely open, per `CLAUDE.md`'s "the record of what was uncertain is worth more than a doc
 that looks prescient" — none resolved by picking arbitrarily:
 
+- **Whether the flat credential form is also accepted.** `{"token": "..."}` as sugar for
+  `{"github.com": {"token": "..."}}` costs one decoder branch and removes a papercut for the
+  overwhelmingly common single-host case. Against: two accepted shapes for one env var makes the
+  error message harder to write, and "no credential for host X" is the message that has to stay clear.
 - **Reopened PRs.** GitHub permits reopening a closed PR. This design's two-event lifecycle
   (`:opened`, `:merged`/`:closed`) has no slot for "reopened, and possibly re-closed again later" —
   a second closure would collide with the first `:closed` `ExternalID` and dedupe away silently
