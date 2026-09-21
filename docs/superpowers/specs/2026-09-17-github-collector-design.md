@@ -122,83 +122,104 @@ event log, correctly shaped, idempotently, visible to the correlator as work evi
 It does not prove anything about issue-key resolution quality; that is an existing consumer
 (`gatherCandidates`) this collector merely feeds better.
 
-## 1. Transport: the `gh` CLI, not a Go GitHub SDK, not the MCP server
+## 1. Transport: an HTTP client with a token from the environment, not the `gh` CLI
 
 Three options, weighed against the same four axes the task named:
 
 | | credential handling | rate limits | offline testability | dependency |
 |---|---|---|---|---|
-| **`gh` CLI (`exec.Command`)** | reuses the operator's existing `gh auth login`; no new secret to manage | `gh` handles pagination/backoff itself; `search` (30/min) vs `core` (5000/hr) buckets are real and distinct (measured live, §1a) | subprocess is fake-able the same way `HelperCredential` already proves in this tree | zero new Go dependency |
-| **`google/go-github` (REST) or `shurcooL/githubv4` (GraphQL)** | needs its own token plumbing, parallel to but separate from `gh`'s | same underlying limits, self-managed | `httptest`, matching `clients/jira`'s existing pattern exactly | new dependency, `go.mod`/`go.sum` churn |
-| **GitHub MCP server** | session-scoped, not a `collect` pass's concern — `unjira collect` is a standalone CLI/cron invocation with no MCP session to borrow | opaque to unjira; the server manages it | cannot run offline in `go test ./...` at all — it is out-of-process and not fake-able the way an HTTP client is | none in Go, but wrong layer: MCP is for an *agent* driving GitHub interactively, not a deterministic collector CLI ever runs unattended |
+| **HTTP client + `UNJIRA_GITHUB_CREDENTIALS`** | the same path as Jira: `internal/credentials` decodes one env var (keyed by host — see §8) | self-managed — and it inherits F23's `retryTransport`, since a `RoundTripper` is already the seam | `httptest`, exactly as `clients/jira` and `clients/openai` do today | `google/go-github`, or none at all for a surface this small |
+| **`gh` CLI (`exec.Command`)** | borrows whatever `gh auth login` left in the OS keychain | `gh` manages its own backoff, opaquely | a fake process runner — workable, but a second testing idiom | no Go dependency, but a **runtime binary dependency** with no introspection into its version, auth state, or behaviour |
+| **GitHub MCP server** | session-scoped, and `unjira collect` is a cron/CLI invocation with no MCP session to borrow | opaque | cannot run in `go test ./...` at all — out-of-process, not fake-able | wrong layer: MCP is for an agent driving GitHub interactively, not an unattended collector |
 
-**Recommendation: `gh` CLI**, invoked via `exec.Command` exactly as `internal/llm.HelperCredential`
-already does for the LLM credential helper (`internal/llm/helper_credential.go:167`, `sh -c` +
-`CommandContext` + a bounded timeout + `WaitDelay` for the Linux pipe-drain trap that file's own
-comment documents at length). Three reasons this outranks a Go SDK, which was the closer call:
+**Recommendation: the HTTP client**, with its token read from the environment through
+`internal/credentials`, the same way every Jira credential is read. An earlier draft of this spec
+recommended `gh`; that is **withdrawn**, and the reasoning is recorded because the `gh` case was not
+unreasonable — it was wrong for reasons that only surface when you ask how it fails.
 
-- **Credentials come from the environment, never config files** (`CLAUDE.md`) — and `gh`'s own
-  `auth login` already IS that: a token living in the OS keychain (verified live in this
-  environment: `gh auth status` reports "Logged in to github.com account jcogilvie (keyring)"), not
-  a `UNJIRA_GITHUB_TOKEN`-shaped secret this spec would otherwise have to invent, document, and keep
-  out of git. A Go SDK client still needs a token from *somewhere*, and the honest options are
-  either duplicating what `gh auth login` already solved (a new env var, a new credential-set type
-  mirroring `internal/credentials`) or shelling out to `gh auth token` to borrow its credential —
-  at which point the SDK is buying nothing `gh` doesn't already give directly.
-- **This collector's own client surface is small.** `clients/jira` exists as a facade because
-  `go-jira` is a large SDK with a shape unjira needs to narrow (`internal/clients/jira/jira.go:1`'s
-  own doc comment: "this facade is the seam ... the community library underneath absorbs Jira Cloud
-  API churn"). The GitHub surface this slice needs is one query (list PRs updated since a watermark,
-  scoped to a repo) plus a details fetch — `gh pr list --json ... --search "updated:>=..."` and
-  `gh pr view <N> --json ...`. A thin wrapper over two `gh` invocations is a smaller, more honest
-  facade than pulling in a general-purpose REST/GraphQL client to reach the same two calls.
-- **Verified live in this environment**, not assumed: `gh pr list --repo jcogilvie/unjira --json
-  number,title,body,createdAt,mergedAt,closedAt,headRefName,author --limit N` returns every field
-  this slice's events need in one call, including the full PR body — no second per-PR fetch required
-  for the fields this slice reads (contrast the Jira collector, which needs two follow-up calls per
-  issue because `SearchIssues` cannot expand changelog/comments; `gh pr list --json` *can* expand PR
-  body inline). That materially undercuts the "GitHub needs per-item follow-ups too" assumption this
-  spec started with.
+**Why `gh` was rejected.**
+
+- **An undiagnosable runtime dependency.** `gh` is an external binary whose version, auth state, and
+  output shape unjira cannot introspect. `--json` field availability varies across versions; a token
+  can be absent, expired, scoped wrongly, or attached to the wrong account; a keychain can be locked.
+  Each is a different failure, and a subprocess surfaces them all as an exit code plus a line of text
+  that unjira would have to pattern-match to tell apart. An HTTP client gets a status code and a typed
+  body — 401 is not 403 is not 404 — and `X-RateLimit-Remaining` as a header rather than something
+  `gh` already decided on the operator's behalf.
+- **Two credential mechanisms is worse than one.** unjira has exactly one answer to "where do secrets
+  come from": a single JSON env var per credential kind, decoded by `internal/credentials`, keyed by
+  the config connection it belongs to. Reading Jira's credentials from the environment while reading
+  GitHub's out of another tool's keychain means two things to explain, two ways to fail, and two places
+  to look when a cron cannot authenticate. `CLAUDE.md`'s "credentials come from the environment, never
+  config files" is satisfied more directly by *being* an env var than by delegating to a tool that
+  happens to store one elsewhere.
+- **It would not have inherited F23's retry work.** `retryTransport` is a `RoundTripper`, chosen
+  because "one decorator covers the whole surface, including methods added later"
+  (`clients/jira/retry.go`). A GitHub HTTP client composes the same transport and gets
+  transient-failure retry, the `GET`/`HEAD` method gate, and `Retry-After` handling for free. A
+  subprocess inherits none of it and needs its own retry story — real work the `gh` option was
+  implicitly charging to "zero dependencies."
+
+**What the operator does instead**, one line in the README. `gh` remains a fine way to *mint* a token;
+it just is not unjira's transport:
+
+```sh
+export UNJIRA_GITHUB_CREDENTIALS="{\"github.com\":{\"token\":\"$(gh auth token)\"}}"
+```
+
+A classic PAT or a fine-grained token works identically. The point is that unjira reads a token from
+its own environment and never consults another tool's state at runtime.
+
+**Credential shape.** `credentials.Credential` is `{Email, Token}`, and GitHub needs no email. **Reuse
+the type with `Email` empty** rather than adding a parallel kind: a second near-identical type invites
+the two decoders to drift, and the package is explicitly built around "exactly one parser." `EnvVar`
+becomes per-kind (`UNJIRA_JIRA_CREDENTIALS`, `UNJIRA_GITHUB_CREDENTIALS`), which is the shape the
+package already anticipates — its own comment frames it as "one var per credential kind, not one pair
+per connection." **Open question:** whether `FromEnv` grows a kind parameter or the package grows a
+second constructor. Both preserve the single-parser property, which is the part that matters.
+
+**Dependency: start with no SDK.** This slice needs one listing call. `google/go-github` is
+well-maintained and a reasonable later choice, but a REST response through `encoding/json` needs no
+library, and the facade exists precisely so swapping the innards later does not ripple. This differs
+from `clients/jira`, which wraps `go-jira` because Jira Cloud's API is large and churning — the GitHub
+surface here is not. **Open question**, cheap to revisit once real pagination and secondary-rate-limit
+behaviour show up in the live tier.
 
 **The `internal/clients/github` seam**, per `docs/go-conventions.md`'s "remote-system clients live
 under `internal/clients/<system>`" rule and the README's own locked list
-(`clients/litellm/clients/github/clients/slack` as later integrations — `README.md:301`) — a thin
-facade, no business logic, mirroring `clients/jira`'s shape:
+(`clients/litellm/clients/github/clients/slack` — `README.md:301`) — a thin facade, no business logic,
+mirroring `clients/jira`'s shape including a constructor that takes an `*http.Client` so the caller
+composes transports:
 
 ```go
 // internal/clients/github/github.go
 
-// Client is a facade over the gh CLI, exposing only the surface unjira needs.
-// Unlike clients/jira (a facade over a Go SDK), this facade's "upstream" is a
-// subprocess: gh already owns credential storage, rate-limit backoff, and
-// response shaping, so there is no SDK churn to absorb — the seam here is
-// "one command, one JSON shape," matching internal/llm.HelperCredential's
-// precedent for exec.Command as a legitimate client transport in this tree.
+// Client is a facade over GitHub's REST API, exposing only the surface unjira
+// needs. Takes an *http.Client so the caller composes transports — in
+// particular the retry decorator clients/jira already uses, since "one
+// decorator covers the whole surface, including methods added later" applies
+// identically here.
 type Client struct {
-    ghPath string        // resolved once via exec.LookPath("gh"); overridable for tests
-    timeout time.Duration
+    http  *http.Client
+    base  string // api.github.com, overridable for httptest and GHES
+    token string
 }
 
-// ListPullRequests returns every PR in repo whose updated time is >= since,
-// via `gh pr list --repo <repo> --state all --search "updated:>=<since>"
-// --json ...`. Ascending by updated_at is not guaranteed by gh; the caller
-// sorts before advancing a watermark (mirroring the Jira collector's own
-// "the JQL carries no ORDER BY" note, jira.go:186).
+// ListPullRequests returns every PR in repo updated at or after since.
+// Ordering is requested explicitly (sort=updated&direction=asc) rather than
+// assumed, mirroring the Jira collector's "the JQL carries no ORDER BY" note
+// (jira.go:186) — a watermark advanced from unordered results skips events.
 func (c *Client) ListPullRequests(repo string, since time.Time) ([]PullRequest, error)
 ```
 
-Fake-ability for offline tests: `Client` takes an injected `runner func(args ...string)
-([]byte, error)` (or an equivalent seam), so `internal/collector/github`'s tests construct a
-`Client` backed by canned JSON fixtures with zero subprocess execution — the same shape
-`clients/jira`/`clients/openai` achieve with `httptest`, just substituting "a fake process runner"
-for "a fake HTTP server." A **live** tier (`internal/live`, `live` build tag, exactly as the Jira
-collector spec's own live tier works) runs the real `gh` binary against a real (public, low-stakes)
-repo — this codebase's own `jcogilvie/unjira` is the natural target, since it is already the
-project's own GitHub remote.
+Offline tests use `httptest`, the idiom `clients/jira` and `clients/openai` already establish — one
+testing pattern for every remote system rather than a second one for subprocesses. A **live** tier
+(`internal/live`, `live` build tag, as the Jira collector spec's live tier works) hits real GitHub
+against a low-stakes public repo; this project's own `jcogilvie/unjira` is the natural target.
 
-**Rejected: a hybrid** (SDK for reads, `gh` for auth token extraction). Considered and dropped: it
-combines both surfaces' costs (a new dependency AND a `gh auth token` shell-out) for neither's
-benefit.
+**Rejected: a hybrid** (HTTP for reads, `gh auth token` shelled out for the credential). That keeps the
+runtime binary dependency and its undiagnosable failure modes to save one `export`, and puts a
+subprocess call on the critical path of every authenticated request.
 
 ## 2. What is collected: PR lifecycle only, in this slice
 
@@ -207,7 +228,7 @@ phase 1 can actually *do*," not from completeness:
 
 | `ExternalID` | `OccurredAt` | Source data |
 |---|---|---|
-| `<owner>/<repo>#<N>:opened` | PR's `created_at` | `gh pr list`/`pr view`, at collection time nearest to creation |
+| `<owner>/<repo>#<N>:opened` | PR's `created_at` | the PR list response, at collection time nearest to creation |
 | `<owner>/<repo>#<N>:merged` or `:closed` | PR's `merged_at` or `closed_at` | same, once the PR leaves the open state |
 
 Both carry the PR's title + body as `Summary` (format: `"<owner>/<repo>#<N>: <title>\n\n<body>"`,
@@ -244,7 +265,7 @@ strongest available signal that it finished. Everything else considered and defe
 - **Reviews / review comments.** Real, valuable (`rules/review-staleness.md`,
   `rules/bot-pr-noise.md` are both precedent-established norms this data would eventually feed), but
   add a genuinely new identity question this slice does not need to answer to ship (§3's "editable
-  after submission" gap) and a second API shape (`gh pr view --json reviews,latestReviews`). Deferred
+  after submission" gap) and a second API shape (`/pulls/{n}/reviews`). Deferred
   to slice 2, once PR-lifecycle events are live and reviewed.
 - **CI / check runs.** High-churn (reruns, flaky retries) in a way that mirrors
   `rules/bot-pr-noise.md`'s own documented failure mode almost exactly — a check-run stream risks
@@ -256,7 +277,7 @@ strongest available signal that it finished. Everything else considered and defe
   messages for every commit *authored through a Claude Code session*, which is unjira's primary
   interface with git per `CLAUDE.md`. A GitHub-side commit collector's *marginal* value is commits
   made outside a Claude Code session (another tool, another teammate) — real, but a second event
-  kind and a second API call (`gh pr view --json commits`) this slice does not need to ship to prove
+  kind and a second API call (`/pulls/{n}/commits`) this slice does not need to ship to prove
   the seam.
 - **Releases.** No consumer: phase 1 proposes comments and transitions, never anything a release
   event would inform. Same "an action type needs it, it gets emitted" discipline the Jira collector
@@ -349,30 +370,35 @@ or removing a repo from config changes which cursor *rows* exist, not what an ex
 watermark means — so there is nothing analogous to the Jira collector's "widening `project_keys`
 invalidates the old watermark" hazard.
 
-`gh pr list --search "updated:>=<watermark>"` bounds *which PRs are fetched*, mirroring the Jira
-collector's own watermark discipline: it must not be read as bounding which events are emitted for a
-PR that matches. In practice this matters less here than for Jira's changelog case (a PR usually has
-few lifecycle transitions, not months of history), but the principle transfers identically — a PR
-whose `updated_at` just crossed the watermark (say, it was just merged) still gets its `:opened`
-event emitted if this collector has never seen it before (e.g., a repo just added to config).
-Watermark advances only after a repo's list-and-fetch completes without error, to the max
-`updated_at` observed — same all-or-nothing-per-scope discipline as the Jira collector's
-per-query advance, scoped here to per-repo.
+The watermark bounds *which PRs are fetched*, mirroring the Jira collector's own discipline: it must
+not be read as bounding which events are emitted for a PR that matches. In practice this matters less
+here than for Jira's changelog case (a PR usually has few lifecycle transitions, not months of
+history), but the principle transfers identically — a PR whose `updated_at` just crossed the watermark
+(say, it was just merged) still gets its `:opened` event emitted if this collector has never seen it
+before, e.g. a repo just added to config. The watermark advances only after a repo's list-and-fetch
+completes without error, to the max `updated_at` observed — the same all-or-nothing-per-scope
+discipline as the Jira collector's per-query advance, scoped here to per-repo.
 
-**`gh pr list`'s two rate-limit buckets, verified live in this environment**: a plain `gh pr list
---state all --json ...` call (no `--search`) consumes the **`core`** bucket (5000/hr, confirmed via
-`gh api rate_limit` before/after — unchanged at 5000 either way, meaning `gh`'s own GraphQL-backed
-list path is cheap enough not to register against a 5-item pull in this test), while `gh api
-"search/issues?q=...`" explicitly hits the **`search`** bucket (30/min, confirmed: it dropped from
-30 to unchanged-but-separately-tracked). **Recommendation: avoid `--search`/the search endpoint for
-the incremental watermark query** — 30 requests/minute is a real constraint for a `watch` loop
-running hourly-ish across several configured repos, where `core`'s 5000/hr has enormous headroom for
-this collector's actual call volume (one list call per repo per pass, plus, if needed, one detail
-call per new/changed PR). `gh pr list --json ... ` without `--search` still supports filtering by
-state and returns `updated_at`, so the watermark comparison can be done client-side (fetch a page,
-stop once `updated_at` falls below the watermark) rather than pushed into a search query string — an
-intentional trade of "one extra client-side comparison" for "stay in the generous rate-limit bucket
-entirely."
+**GitHub's two rate-limit buckets are the real constraint, and they are far apart**: `core` allows
+5000 requests/hour while `search` allows **30/minute**, tracked separately (verified against
+`/rate_limit` in this environment). That gap decides the query shape.
+
+**Recommendation: use `GET /repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc` — a
+`core` endpoint — and never the search API for the incremental query.** 30/minute is a genuine
+constraint for a `watch` loop across several configured repos; `core`'s 5000/hour has enormous
+headroom for this collector's volume (one list call per repo per pass, plus pagination only as far
+back as the watermark). The watermark comparison happens client-side: page through descending
+`updated_at` and **stop at the first PR older than the watermark**, which also bounds pagination
+naturally instead of fetching a repo's whole history. That is an intentional trade of one client-side
+comparison for staying entirely inside the generous bucket.
+
+`sort=updated&direction=desc` is requested explicitly rather than assumed — the endpoint's default
+ordering is by PR number, and an early-stop scan over unordered results would skip events silently,
+which is the failure mode the Jira collector's "the JQL carries no `ORDER BY`" note guards against.
+
+Reading `X-RateLimit-Remaining` and `Retry-After` off the response is available here and worth using
+for a warning when headroom runs low. That visibility is one of the concrete reasons this transport
+was chosen over a subprocess, which reports neither.
 
 ## 5. Issue-key provenance — no new tier, reusing the existing ladder
 
@@ -565,15 +591,18 @@ inventing a new shape:
 "collectors": {
   "github": {
     "enabled": true,
-    "repos": ["yourorg/yourrepo", "yourorg/other-repo"],
+    "repos": ["yourorg/yourrepo", "github.acme.corp/platform/infra"],
     "backfill_days": 30
   }
 }
 ```
 
-- **`repos`**, a flat list of `owner/repo` strings — no per-repo query customization the way Jira's
-  `queries[]` has, because there is exactly one query this slice runs (list PRs since watermark) and
-  nothing analogous to Jira's "several views on one site" need.
+- **`repos`**, a flat list of `owner/repo` strings, optionally host-qualified as
+  `host/owner/repo` — no per-repo query customization the way Jira's `queries[]` has, because there is
+  exactly one query this slice runs (list PRs since watermark) and nothing analogous to Jira's "several
+  views on one site" need. The host determines both which credential is used and which API base URL is
+  called; see "Credentials are keyed by HOST" below for the parsing rule and why locality lives here
+  rather than in a second parallel list.
 - **`backfill_days`**, mirroring `collector/claudecode`'s own option name and default shape
   (`DefaultBackfillDays = 14`, `claudecode.go:28`) — how far back to look on a repo's first-ever
   collection pass (no existing cursor row). A GitHub-specific default of 30 is proposed (PRs often
@@ -584,12 +613,114 @@ inventing a new shape:
   `IsProjectWritable`'s whole reason for existing (gating `gate.Applier`) has no counterpart here
   until a write path exists, which this spec does not add.
 - **No credential field in config**, per `CLAUDE.md`'s "credentials come from the environment, never
-  config files." Unlike Jira's `UNJIRA_JIRA_CREDENTIALS`, this collector needs **no new environment
-  variable at all** — §1's `gh auth login` reasoning is precisely why: the credential already lives
-  outside unjira's process, in `gh`'s own keychain-backed storage, and unjira's role is only to
-  invoke a binary that already knows how to authenticate itself. If `gh` is not authenticated,
-  `Collect` fails loudly naming the remedy (`run gh auth login`), matching the "credentials come from
-  the environment" spirit even though the mechanism differs from Jira's.
+  config files." The credential arrives through the same mechanism as Jira's —
+  `UNJIRA_GITHUB_CREDENTIALS`, decoded by `internal/credentials`, handed to the collector through
+  `CollectContext.Credentials` (which `RunCollect` already passes "so a remote collector can
+  authenticate without reading the environment itself"). But it is **keyed by host, not by a config
+  connection name** — see below.
+
+### Credentials are keyed by HOST, because GitHub is an identity provider
+
+An earlier draft copied Jira's `map[connectionName]Credential` wholesale and proposed
+`{"oss":{"token":"..."}}`. **That key was undefined**: this collector's config has no connections, only
+a flat `repos` list, so nothing said what `"oss"` meant or which repos it covered. The symmetry with
+Jira was carried further than the systems actually match.
+
+**Where the two systems genuinely differ.** A Jira connection is a tenant: separate site, separate URL,
+separate token, genuinely separate auth surface — so keying by connection name models something real.
+GitHub is an **IDP**: one token carries org membership, and you do not authenticate per org. A user
+belonging to five orgs on github.com has one auth surface, not five. Keying those by connection name
+would ask an operator to invent names for distinctions that do not exist.
+
+**But more than one auth surface does exist — by host.** A self-hosted GitHub Enterprise Server
+instance and github.com are two credentials, two base URLs, and two account namespaces: structurally
+the same as two Jira sites. That is the axis worth keying on, and the only one.
+
+So the map stays (it is the same parser and the same package) and the key becomes the host:
+
+```
+UNJIRA_GITHUB_CREDENTIALS='{
+  "github.com":        {"token": "ghp_..."},
+  "github.acme.corp":  {"token": "ghp_..."}
+}'
+```
+
+**`github.com` is the well-known key**, spelled exactly as the host. Not a sentinel like `"default"` or
+`""`: an operator looking at a `repos` entry can read off which key applies without consulting a
+mapping, and a typo produces "no credential for host github.com" rather than silently selecting a
+default that happens to exist.
+
+**Repo locality resolves from the repo string itself**, so nothing needs declaring twice:
+
+```json
+"repos": [
+  "yourorg/yourrepo",                    // short form -> github.com
+  "github.acme.corp/platform/infra"      // explicit host -> that GHES instance
+]
+```
+
+A two-segment `owner/repo` **elides to `github.com`**, which keeps the common case exactly as short as
+it is today and makes the existing example config still correct. A leading segment containing a `.` is
+a host, and the remainder is `owner/repo`. Parsing rule, stated so an implementer does not improvise:
+**split on `/`; if the first segment contains a `.`, it is the host, otherwise the host is
+`github.com`.** Exactly two segments must remain after the host is removed, and anything else is a
+config error naming the offending entry — a three-segment string whose first segment has no dot is
+ambiguous, and guessing is how a repo gets silently collected from the wrong instance.
+
+The API base URL derives from the same host: `github.com` → `https://api.github.com`, and a GHES host
+→ `https://<host>/api/v3` (GHES's documented REST prefix). One field in config drives both the
+credential lookup and the endpoint, which is the property that makes this better than a second
+parallel list of hosts.
+
+**Why not a flat `{"token": "..."}`.** It is tempting, and for a github.com-only deployment it is all
+anyone needs. Rejected because GHES is not hypothetical and the migration is worse than the upfront
+cost: a flat form would have to grow into a keyed form later, breaking every configured env var, to buy
+the removal of one well-known key today. **Open question left open:** whether to also accept the flat
+form as sugar for `{"github.com": ...}`. It costs one branch in the decoder and removes a small papercut
+for the overwhelmingly common case, but two accepted shapes for one variable is exactly the kind of
+thing that makes an error message harder to write. Not resolved here.
+
+**Multiple identities on one host: out of scope, and sufficient rather than a compromise.** A bot
+account alongside a human account on github.com is a real configuration this shape cannot express —
+the host is the key, so there is one credential per host. That is not a trade-off for slice 1, it is
+adequate: **a read needs *a* token that can reach the host, not a particular account.** `GET
+/repos/{owner}/{repo}/pulls` succeeds with any token holding access, so host keying is exactly the
+right granularity for a read-only collector.
+
+Identity becomes a real requirement for two things, and both are write-adjacent: **which account
+performs a write**, and **self-authorship detection** (`ArtifactAuthoredByUnjira` — F28's second gap,
+where a tracker-collector without a self-identity narrates unjira's own output back at itself). So the
+constraint is better stated as: reads and writes want different things from a credential, and this
+shape models reads.
+
+When that moment comes, the mechanism should be **discovery, not a naming convention.** `GET /user` is
+GitHub's `Myself()`, and `collector/jira` already establishes the pattern — `SelfAccountID`, "from one
+`Myself()` call per pass" (`collector/jira/events.go:71`), one call per connection per pass. The
+authenticated account is a *fact about the token*, so deriving it cannot drift; a config label can.
+Two shapes are therefore **rejected in advance**, because both are natural guesses:
+
+- **`"user@github.com"` as the credential key.** Reads well, and matches how git remotes and SSH
+  configs look — but it duplicates what the token already knows. A key reading `bot@github.com` over a
+  token that is actually the human's is a stale label nothing detects, the same defect class as the
+  `"oss"` key this section removed. It also still does not say which identity a given repo should use,
+  so it needs a second mechanism pointing at it.
+- **User-specified opaque keys** (`"bot"`, `"personal"`). Honest about being arbitrary, but they move
+  the question rather than answering it: something in config still has to reference them, which is the
+  invented-key problem one level up.
+
+The likely shape instead: a write destination names its identity (`"write_identity": "bot"`, omitted
+meaning "the read token"), `UNJIRA_GITHUB_CREDENTIALS` grows a nested `identities` map only for hosts
+that need one, and the composite `bot@github.com` form appears where it is genuinely load-bearing — as
+the **discovered** identity stamped on events for per-host self-authorship comparison, derived from
+`/user` rather than declared in config.
+
+Not designed here, because **selection is a write-path question and the write path is F29's
+territory** (per-tracker write authority, deny-by-default). Designing identity selection before
+knowing what a write destination looks like means guessing at the thing that does the selecting.
+
+A missing or empty credential fails loudly at `Collect`, naming the env var and the **host** it was
+looked up under — `credentials.Set.For` already distinguishes "missing" from "empty" for precisely this
+reason.
 
 **Registration** (`cmd/unjira/main.go:60`'s `registry` map):
 
@@ -640,7 +771,7 @@ Every regression test gets the break-it drill this codebase's own conventions re
 has caught four tests this month that looked like coverage and were not").
 
 **Live tier.** `internal/live` (the `live` build tag, `UNJIRA_LIVE=1`) gets a new test file running
-the real `gh` binary against a real, low-stakes repo — `jcogilvie/unjira` itself is the natural
+real GitHub against a real, low-stakes repo — `jcogilvie/unjira` itself is the natural
 choice, since it is already this project's own remote and the operator (verified in this
 environment: `gh auth status` shows an authenticated `jcogilvie` session) already has push access for
 a throwaway branch+PR the live test can open and close as part of its own setup/teardown, mirroring
@@ -651,6 +782,10 @@ a throwaway branch+PR the live test can open and close as part of its own setup/
 Left genuinely open, per `CLAUDE.md`'s "the record of what was uncertain is worth more than a doc
 that looks prescient" — none resolved by picking arbitrarily:
 
+- **Whether the flat credential form is also accepted.** `{"token": "..."}` as sugar for
+  `{"github.com": {"token": "..."}}` costs one decoder branch and removes a papercut for the
+  overwhelmingly common single-host case. Against: two accepted shapes for one env var makes the
+  error message harder to write, and "no credential for host X" is the message that has to stay clear.
 - **Reopened PRs.** GitHub permits reopening a closed PR. This design's two-event lifecycle
   (`:opened`, `:merged`/`:closed`) has no slot for "reopened, and possibly re-closed again later" —
   a second closure would collide with the first `:closed` `ExternalID` and dedupe away silently

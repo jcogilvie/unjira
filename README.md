@@ -351,6 +351,24 @@ data/                   SQLite database lives here (gitignored)
   JSON-blob env var
   (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
   connection count.
+- **Every remote system authenticates the same way: one JSON env var per credential kind, decoded by
+  `internal/credentials`. No system reads another tool's stored state at runtime.** The planned GitHub
+  collector takes `UNJIRA_GITHUB_CREDENTIALS` in that shape, **keyed by host** rather than by a config
+  connection name: GitHub is an identity provider and one token carries org membership, so the auth
+  surfaces that genuinely differ are github.com and a GHES instance. A short `owner/repo` in `repos`
+  elides to `github.com`; a leading segment containing a dot names a GHES host, and that host drives
+  both the credential lookup and the API base URL. So `gh` is a convenient way to *mint* a token and
+  never a runtime dependency:
+
+  ```sh
+  export UNJIRA_GITHUB_CREDENTIALS="{\"github.com\":{\"token\":\"$(gh auth token)\"}}"
+  ```
+
+  A PAT or fine-grained token works identically. An external binary's version, auth state and output
+  shape are things unjira cannot introspect: a subprocess reports "exit 1 and a line of text" where an
+  HTTP client distinguishes 401 from 403 from 404 and can read `X-RateLimit-Remaining`. Taking one
+  system's secret from the environment and another's from a CLI's keychain would also mean two things
+  to explain and two places to look when a cron cannot authenticate.
 - **A transition may cross several statuses in one action, because unjira has no guaranteed run
   cadence.** Between two collects a ticket legitimately traverses `Ready for Dev -> In Progress ->
   In Review` — sprint planning moves it outside unjira, work starts, and a small change is submitted
