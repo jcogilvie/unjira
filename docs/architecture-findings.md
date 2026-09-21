@@ -257,6 +257,61 @@ wrong-field trap design-notes #32 records, and is now a true result rather than 
 
 ---
 
+### F30 — the match watermark's strict inequality fails inside one millisecond
+
+`TestNarrativesWithoutPrimaryLink_ExaminedIsAWatermarkNotATombstone` is **flaky on `main`**, and the
+flake is a real defect rather than a slow test. Reproduced while reviewing the GitHub collector, which
+did not cause it:
+
+```
+go test ./internal/store/ -run TestNarrativesWithoutPrimaryLink_ExaminedIsAWatermarkNotATombstone -count=30
+  FAIL — "new work past the watermark must re-open the narrative for matching:
+          recording 'never match this' would make an early absence permanent"
+```
+
+`-count=5` passes; `-count=30` fails. Root cause is the **granularity of the comparison**, not the
+format: `matchExaminationPredicate` re-opens a narrative with `ne.linked_at > me.examined_at`, both
+columns written as `strftime('%Y-%m-%dT%H:%M:%fZ','now')` — millisecond precision. Two `now` calls
+inside one millisecond are byte-identical:
+
+```
+sqlite3 :memory: "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  2026-09-21T20:49:09.492Z|2026-09-21T20:49:09.492Z
+```
+
+So a narrative examined and then linked within the same millisecond is **never re-admitted**: the
+strict `>` is false and the watermark behaves as the tombstone its own doc comment says it must not be.
+The test surfaces it because it writes both in quick succession, but the production path has the same
+hazard — a fast `collect`→`match` sequence on a small store can link an event inside the millisecond the
+examination was recorded, and that narrative silently stops being a matching candidate until *another*
+event arrives.
+
+Note this is a **different** bug from the one the format was chosen to avoid: F22's implementation hit
+`%f` vs `%S` inversion (`.` sorting before `Z`), and the fix was to align formats. Both columns are
+correctly aligned here. The residual is that equal timestamps are indistinguishable under `>`, which no
+amount of format agreement fixes.
+
+The same shape exists in `reconcileExaminationPredicate` (F26's fix, `store/reconcilewatermark.go`),
+which compares `linked_at > examined_at` identically. Not yet observed failing there — a reconcile pass
+does more work between the two writes — but the hazard is structural, not incidental to matching.
+
+Open because the fix is a judgement call, and the obvious ones each have a cost:
+
+- **`>=` instead of `>`.** One character, and it makes a same-millisecond link re-open the narrative. But
+  it also re-admits a narrative whose *examination* was the last thing to touch it, so a pass could
+  re-examine the same narrative indefinitely — reintroducing the livelock the watermark exists to break.
+- **Higher-resolution timestamps.** SQLite's `strftime` offers no sub-millisecond precision, so this
+  means generating the value in Go and giving up the "written SQL-side only" property that keeps the two
+  columns' formats from drifting — the exact discipline F22 needed.
+- **A monotonic sequence rather than a timestamp.** Correct, and the biggest change: a counter column or
+  `rowid` comparison sidesteps clock granularity entirely, at the cost of no longer being human-readable
+  in a `sqlite3` session, which is how most of this codebase's watermark bugs have been diagnosed.
+
+A fourth option worth stating because it is tempting and wrong: making the *test* slower (a sleep
+between writes) would hide the defect rather than fix it, and the production hazard would remain.
+
+---
+
 ### F1 — refs and fanout await a wiring decision, not a missing collector
 
 **Narrowed 2026-09-21: the GitHub collector this entry was waiting for now exists**
@@ -476,6 +531,7 @@ the natural moment to decide.
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
+| F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | open. Flaky on `main` at `-count=30`, and a real production hazard: a narrative examined and linked in the same millisecond is never re-admitted, so the watermark acts as a tombstone. Same shape in both `matchwatermark.go:50` and `reconcilewatermark.go:56`. Three candidate fixes, each with a cost — do NOT "fix" it by slowing the test |
 | F29 — nothing expresses which tracker a narrative's work belongs to | open, **deferred deliberately**. Many-to-many collector↔tracker routing, plus per-tracker write authority. Not reachable with one real tracker; the write-authority half must land BEFORE any tracker that could be public, since a missing gate is discovered by publishing. Decide with F7/**#178** and F28 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
