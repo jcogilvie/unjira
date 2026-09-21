@@ -51,6 +51,17 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 		fmt.Fprintf(b, "excluded %d tracker record(s) — the tracker's own bookkeeping, not work evidence\n",
 			r.ExcludedTrackerRecords)
 	}
+
+	// Only when the bound actually fired (finding F16). Silent at zero for the same
+	// reason ExcludedTrackerRecords is: an unreported exclusion reads as "nothing was
+	// left out", and this bound is deliberately unmeasured, so an operator needs the
+	// count to tune it against evidence rather than guessing blind.
+	if r.ExcludedContextNarratives > 0 {
+		fmt.Fprintf(b,
+			"excluded %d existing narrative(s) as context — "+
+				"raise correlator.max_context_narratives to keep more\n",
+			r.ExcludedContextNarratives)
+	}
 	fmt.Fprintf(b, "llm      %d call(s), %d split(s), %d merge check(s)\n",
 		r.Stats.Calls, r.Stats.Splits, r.Stats.MergeChecks)
 	// Completion tokens are reported PER CLUSTER as well as in total, because that

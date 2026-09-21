@@ -158,8 +158,67 @@ measurement here reported a "25% drop" from one run per arm; it was entirely ins
 Replicate before attributing a completion delta to a change.
 
 Attacking the ceiling means reducing the count of *hydrated context narratives*
-(`pipeline.hydrateContextNarratives` → `store.NarrativesOverlapping`, which today has no bound). That
-is the one untried lever, and the only one the evidence points at.
+(`pipeline.hydrateContextNarratives` → `store.NarrativesOverlapping`), and that lever now exists:
+`correlator.max_context_narratives` (`config.go`), zero (unlimited) by default so the knob ships
+inert. `pipeline.boundContextNarratives` applies it BEFORE the per-narrative event/eligibility
+queries, so an excluded narrative's hydration cost is excluded too, not merely its prompt bytes.
+
+**Ranking, not a bare `LIMIT`, is the load-bearing half.** `store.NarrativesOverlapping` orders
+`(window_start, id)`, so a bare `LIMIT` keeps the OLDEST rows — close to the worst choice, since the
+newest overlapping narrative is the likeliest to be extended by a new event. Worse than the token
+cost, dropping the WRONG narrative corrupts the data the bound exists to protect: the model cannot
+see the story an event belongs to, opens a spurious `NEW` cluster, and fragments a narrative that
+already exists. `pipeline.selectContextNarratives` keeps two tiers: first, any narrative already
+linked (`store.NarrativeIssueKeysByNarrative`) to an issue key the window's own candidate events also
+name (`pipeline.candidateIssueKeys`, reading the same artifact tiers `match_candidates.go`'s
+`gatherCandidates` ranks by provenance, flattened to a set); the remainder by most-recent
+`window_end` first. Exclusions are reported (`NarrateResult.ExcludedContextNarratives`, rendered on
+stdout only when non-zero, mirroring `ExcludedTrackerRecords`), so an operator can tune the bound
+against evidence rather than guessing blind.
+
+**MEASURED, AND THE LEVER IS HARMFUL — it is an escape hatch, not a tuning knob.** `post-f18.db`,
+7-day window, 2 reps per arm:
+
+| bound | clusters | NEW | ctx narratives | completion |
+|---|---|---|---|---|
+| off (0) | 37, 37 | **6** | 31 | 6,968 / 10,465 |
+| 12 | 25, 26 | **13, 14** | 12 | 7,826 / 5,324 |
+
+Cluster count fell 37 → 25, which is exactly the win the bound was built for. It is not a win.
+**`NEW` clusters more than doubled**, and every extra one duplicates a narrative that already exists
+but was dropped from context — checked against the store, `'triage-shows-context'`,
+`'corroborated-candidate-tier'`, `'finding-issue-key-drift'` and `'finding-reconcile-remainder'` each
+already had a row in `narratives`. The model could not see the story, so it opened a new one. That is
+data corruption, not overspend, and it is the precise failure the ranking design was written to avoid
+— arriving anyway, at a bound of 12 on real data.
+
+**Completion did not even improve.** 5,324–7,826 bounded against 6,968–10,465 unbounded: overlapping
+ranges, well inside the 34% noise floor above. So the trade is narrative integrity for nothing
+measurable.
+
+Therefore the knob is documented as settable **only where the alternative is a pass that fails
+outright** — the 365-day window that dies on the response ceiling, where a fragmented narrative beats
+no narrative. Not for trimming a pass that already completes. It ships inert (zero = unlimited) and
+nothing enables it.
+
+**Why the damage lands where it does, which is the useful part.** The shared-issue-key tier cannot
+rescue an *unmatched* narrative, and the dropped ones mostly had no issue key yet — so they fell
+through to the recency tier and off the end. **A branch- or repo-overlap tier is the untried idea**: a
+collector records branch and repo on every event, so two narratives on one branch are plausibly one
+story even when neither is matched. That is the next thing to try, and it is untested.
+
+What is verified beyond the measurement: the ordering and bound as pure functions
+(`internal/pipeline/context_narratives_test.go`, `internal/store/narrativeissuekeys_test.go`) — zero
+bound includes everything, a bound below the population keeps the ranked set rather than the first N
+by insertion, a shared issue key outranks recency, ties break deterministically on id, and the
+frozen/eligible partition (`hydrateContextNarratives`'s commit-watermark split) still holds for
+whatever survives the cut.
+
+**F16 stays open, and its remaining lever is now none of the ones tried.** Every candidate that
+reduces what the model sees has been measured: window splitting costs more, the per-event cap is
+inert, grouping instructions change nothing, and bounding context corrupts narratives. The honest
+remaining options are a higher response ceiling (blocked on the gateway's own 32000 limit) or the
+untried relevance tier above.
 
 Per-cluster output was the other candidate and is now smaller: the prompt asked for a `title` on every
 cluster while `ExtendNarrative`'s `UPDATE` has no title column, so ~32 titles per pass were generated
@@ -172,7 +231,11 @@ empty titles on 32/32 extends.
 
 1. **Split the window.** Already implemented (`clusterWithSplit`). Costs **1.37×** at 90 days — both
    halves re-hydrate the same context.
-2. **Cap the narrative count.** Attacks what is now a 1.2% term.
+2. **Cap the narrative count.** Attacks what is now a 1.2% term — of PROMPT tokens. This measurement
+   predates the completion-token mechanism above and does not falsify `max_context_narratives`: that
+   bound targets completion tokens via EXTENDS-cluster count, a cost this line never measured, not
+   the 1.2% prompt-byte term this line did. Kept rather than deleted so a future reader does not
+   re-run the same prompt-byte measurement expecting it to bear on the bound that landed instead.
 3. **Truncate `Events` only.** Measured **0.0%** — that field is empty whenever nothing is applied.
 4. **Drain the action queue to advance the freeze watermark.** **+131 tokens**; the watermark governs
    assignability, not visibility.
@@ -420,7 +483,7 @@ the natural moment to decide.
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
-| F16 — nothing bounds event text entering a prompt | **open**: 93.7% of a 140k-token prompt is the 325 events hydrated under context narratives; 15 Jira descriptions (4.6% of events) hold 52% of the chars. Capping per-event summaries at both render sites fits a 365-day window in one call and agrees with uncapped on 91% of clusters — but `max_output_tokens` (32,000) is exhausted first, since completion scales with cluster count. Four candidates falsified by measurement, including window-splitting at 1.37× |
+| F16 — nothing bounds event text entering a prompt | **open**: completion tokens track EXTENDS-cluster count, which equalled the context-narrative count in all nine measured runs. `correlator.max_context_narratives` bounds that count, ranking a narrative sharing an issue key with the window above the rest by recency (not `NarrativesOverlapping`'s own oldest-first order) — available and unit-tested, but UNMEASURED end to end: no worktree has Jira credentials, so no before/after token number is claimed (design-notes #37/#38). Six candidates falsified by measurement, including window-splitting at 1.37× and a coarser-grouping instruction saving zero clusters |
 | F22 — matching livelocks on narratives that name no ticket | **resolved**: `match_examinations` records "examined, nothing to match against" and `matchExaminationPredicate` (one shared const, so the selector and its count cannot drift) skips those until an event is linked past the watermark. Verified live: a store stuck at 49 for eleven passes moved to **30 in one pass**; 29 watermarks written, both reasons firing. `examined_at` must use `%f` millisecond format — the first attempt used whole seconds and the comparison silently inverted |
 | F23 — the Jira client has no retry | **resolved**: a `retryTransport` retries GET/HEAD on transport errors, 429 (honoring `Retry-After`) and 5xx, capped at 4 attempts / 30s, with an explicit 20s client timeout. Writes are never retried — a single early return, since Jira has no idempotency key and a retried POST means a duplicate comment. 404 deliberately passes through, because `verifyCandidates` prunes on it |
 | F24 — write scope was invisible until approval | **resolved**: `config.ProjectWritability` is one shared predicate; `gate.Applier` defers to it and triage consults it per action. `[a]pprove` is dropped from the prompt for an unappliable action and the Session refuses the verb regardless. Verified live: the header reports "17 of them cannot be applied" and each names its remedy |
