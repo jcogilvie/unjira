@@ -1,6 +1,141 @@
 # GitHub collector — design
 
-**Status: design**
+## Status: landed 2026-09-21
+
+Implemented as `internal/clients/github` (the facade) and `internal/collector/github` (the
+collector), registered in `cmd/unjira/main.go`'s `registry`, config filled in at
+`config/unjira.example.json`.
+
+**The two decisions this spec left open are now closed, and the implementation follows them —
+not always identically to what this document's body still says below.** Per this codebase's own
+"leave the original open questions as written" convention, the body text is left untouched; read
+this Status section as the authority on what actually shipped.
+
+**Decision 1 — `ExternalID` uses GitHub's own timeline-event id, not a bare `:closed`/`:merged`
+suffix.** §3 below still describes the bare form (`<owner>/<repo>#<N>:merged` /
+`:closed`) as if it were final; it was not. The shipped scheme is
+`<owner>/<repo>#<N>:merged:<id>` / `:closed:<id>`, where `<id>` is the immutable numeric id GitHub
+assigns to each entry of `GET /repos/{owner}/{repo}/issues/{n}/events`. This is what fixes the
+reopened-PR collision §3 and the Open Questions section both flag as unresolved: a PR that is
+closed, reopened, and re-closed mints a **second, distinct** `:closed:<id>` rather than colliding
+with (and being silently dropped by `INSERT OR IGNORE` alongside) the first. `:opened` keeps its
+bare form (`<owner>/<repo>#<N>:opened`) — a PR is created exactly once and has no reopen-shaped
+collision to fix. Implemented in `internal/collector/github/events.go`'s `CompletionEvents`, tested
+by `TestCompletionEvents_ReopenedThenReclosedProducesTwoDistinctClosedEvents`.
+
+**Decision 2 — a merge produces BOTH a `:merged` and a `:closed` event, deliberately, not one.**
+This reverses an instruction given mid-implementation and is worth recording exactly because it was
+retracted rather than followed. The task that commissioned this work initially asked for "exactly
+one lifecycle-completion event" per merged PR, reasoning by analogy to F18's 8.3× clustering-cost
+reduction. That analogy does not hold: F18's cost was the **size** of tracker-record payloads
+excluded from the clustering pool (15 whale events up to 15,037 characters), not event **count** —
+and a PR lifecycle event summary measures ~90–115 characters across this project's own recent PRs,
+nothing like that cost. The corrected, shipped behavior is to consume GitHub's timeline naively: a
+merge genuinely emits two independent timeline entries (measured live on this project's own PR #69:
+`merged id=31343430711`, `closed id=31343430804`, 93ms apart), each gets its own event with its own
+`ExternalID`, and nothing suppresses either. Deduplicating them would be this collector making a
+judgment CLAUDE.md's "collectors are dumb and deterministic" reserves for the reconciler — GitHub
+recorded two distinct facts, and collapsing them is an interpretation, not an extraction. A
+downstream consumer that needs to tell the two apart reads the collector-private
+`completion_kind` artifact (`"merged"` or `"closed"`) rather than re-deriving it from the
+`ExternalID`'s suffix. Tested by
+`TestCompletionEvents_MergedPRProducesBothMergedAndClosedEvents`, drilled by re-introducing the
+retracted suppression and confirming the test fails.
+
+**Decision 2, continued — `:merged` and `:closed` are distinct event kinds, and a closed-unmerged
+PR is real work evidence, not suppressed.** A closed-but-never-merged PR (someone opened it and
+abandoned it) produces exactly one `:closed:<id>` event and no `:merged` event, and that event is
+ordinary work evidence — not marked as a tracker record, not filtered out. What differs from a merge
+is **dispositiveness** (a merge is strong evidence work completed; an abandonment is evidence work
+happened without completing), which is exactly what `completion_kind` exists to let a downstream
+consumer read without re-deriving it. Tested by
+`TestCompletionEvents_ClosedUnmergedProducesOneClosedEvent`.
+
+**Deviation from this spec's own §6 recommendation: `refs.ParsePRRefs` is NOT called.** §6 below
+recommends extracting GitHub cross-references from PR bodies and storing them as a private artifact
+"cheap, and it means the data exists the day a consumer is designed" — extract-now, consume-later.
+The task that commissioned this implementation explicitly narrowed that to "leave it alone," on the
+grounds that a half-designed extraction with zero consumers and zero tests exercising its shape is
+its own kind of debt, and F1 already records the reasoning for why `refs` has no caller. So this
+slice does not call `refs.ParsePRRefs` at all — a real, if small, gap from what §6 recommends, not
+an oversight. If a future slice designs a PR-to-PR relationship consumer, this is the first place to
+revisit.
+
+**`fanout` is not wired**, as this design's own §6 says to defer. Unaffected by anything above.
+
+**Credential shape shipped as designed**: `UNJIRA_GITHUB_CREDENTIALS`, keyed by host, decoded via
+`credentials.GitHubEnvVar` (a second constant/env-var on the existing `credentials.Credential` type
+and `JSONSet`/`FromEnv` machinery — no second decoder). `internal/clients/github` composes its own
+`retryTransport`, duplicated from (not shared with) `clients/jira/retry.go` — see that file's own
+doc comment for why duplication, not extraction, was the right call at two call sites.
+
+**Verification.** `go build ./...`, `go vet ./...`, `go test ./...` (all packages, including the new
+`internal/clients/github` and `internal/collector/github`), `golangci-lint run ./...`, and
+`go vet -tags=live ./internal/live/` all pass — exact output quoted in the implementing commit. No
+live GitHub *test file* was added: the implementing worktree has no `.env`/credentials (gitignored by
+design, per `docs/design-notes.md` #37), so a live test written there could not be run or verified
+against real GitHub response shapes, and an unverified live test asserting a shape nobody checked is
+worse than no test.
+
+**Verified manually against real GitHub instead, from an environment holding credentials.** Two runs:
+
+```
+jcogilvie/unjira          192 new event(s);  re-collect: 0 new event(s)   (idempotent)
+jcogilvie/unjira-sandbox    9 new event(s)
+```
+
+`tracker_record` absent on all 192, `scm_keys` and `git_branch` present on 192/192 — so these events
+feed `gatherCandidates`'s provenance ladder with no changes to matching.
+
+### The fixture repo: `jcogilvie/unjira-sandbox` (private)
+
+**`jcogilvie/unjira` is not a fixture.** Collecting from it works, but driving PRs through reopen and
+abandonment cycles there would pollute a repo of real work with test artifacts — the same reason
+DEVSBX exists for Jira. `jcogilvie/unjira-sandbox` is the GitHub equivalent: private, disposable,
+containing no real work, safe to delete and recreate. Four PRs, one per lifecycle path:
+
+| PR | branch | state | exercises |
+|---|---|---|---|
+| #1 | `DEVSBX-101-merged` | merged | `:opened` + both completion events (a merge emits `merged` AND `closed`) |
+| #2 | `DEVSBX-102-abandoned` | closed unmerged | work evidence that is not dispositive |
+| #3 | `DEVSBX-103-reopened` | closed → reopened → re-closed | **the reopen collision** |
+| #4 | `DEVSBX-104-open` | open | `:opened` only, no completion event |
+
+**PR #3 is why the sandbox is necessary rather than merely tidy.** Nothing in `jcogilvie/unjira` has
+ever been reopened (`reopened` event count: 0), so the collision this spec's identity scheme exists to
+prevent had never been exercised end to end — only reasoned about, plus an id-distinctness check
+against an unrelated public *issue*. Driving it in the sandbox produced two genuinely distinct
+`closed` timeline entries:
+
+```
+closed    id=31572443906   2026-09-22T03:00:57Z
+reopened  id=31572445588   2026-09-22T03:01:00Z
+closed    id=31572447208   2026-09-22T03:01:04Z
+```
+
+and the collector recorded both:
+
+```
+jcogilvie/unjira-sandbox#3:closed:31572443906
+jcogilvie/unjira-sandbox#3:closed:31572447208
+jcogilvie/unjira-sandbox#3:opened
+```
+
+**Quantified:** 9 events under the id-suffixed scheme, **8** if the suffix were stripped. Exactly one
+event would have been silently discarded by `INSERT OR IGNORE`, never backfilled (F21), with no error
+and no log line. That is the defect measured rather than predicted.
+
+A `live`-tagged test against this repo remains the outstanding piece — the fixture it needs now
+exists, which was the actual blocker. Note the fixture is **read-only** for this slice: the collector
+has no write path, so nothing unjira does can alter the sandbox's state, and the PR states above have
+to be driven by hand (or by a future helper) when a new path needs covering.
+
+**Not implemented, matching declared scope**: no `backfill_days` measurement (the Open Questions
+section's own flag stands — 30 is still a guess), no flat-credential-form sugar, no secondary
+rate-limit backoff beyond the retry transport's generic 403+Retry-After handling (added defensively,
+untested against a real secondary-limit response since none was observed live).
+
+---
 
 Pulls GitHub pull-request activity into the event log as a second **work-evidence** source,
 alongside `claude_code`. This is the moment `internal/correlator/refs` and

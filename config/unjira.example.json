@@ -27,7 +27,8 @@
       "enabled": false,
       "repos": [
         "yourorg/yourrepo"
-      ]
+      ],
+      "backfill_days": 30
     },
     "slack": {
       "enabled": false,

@@ -19,6 +19,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/local"
 	"github.com/jcogilvie/unjira/internal/clients/openai"
 	"github.com/jcogilvie/unjira/internal/collector/claudecode"
+	collectorgithub "github.com/jcogilvie/unjira/internal/collector/github"
 	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
@@ -58,17 +59,19 @@ const backendJira = "jira"
 // registry maps collector names to factories, mirroring
 // internal/collectors.REGISTRY in the Python implementation.
 var registry = map[string]func() pipeline.Collector{
-	"claude_code": func() pipeline.Collector { return claudecode.New() },
-	backendJira:   func() pipeline.Collector { return collectorjira.New() },
+	"claude_code":        func() pipeline.Collector { return claudecode.New() },
+	backendJira:          func() pipeline.Collector { return collectorjira.New() },
+	collectorgithub.Name: func() pipeline.Collector { return collectorgithub.New() },
 }
 
-// appContext carries the loaded config, open store, and Jira credentials to
-// every command.
+// appContext carries the loaded config, open store, and Jira/GitHub
+// credentials to every command.
 type appContext struct {
-	config          config.Config
-	store           *store.Store
-	jiraCredentials credentials.JSONSet
-	llmAPIKey       string
+	config            config.Config
+	store             *store.Store
+	jiraCredentials   credentials.JSONSet
+	githubCredentials credentials.JSONSet
+	llmAPIKey         string
 	// log is the one logger, built in run() from the --log-level/--log-format flags and
 	// injected here rather than reached for as a package global. Passed DOWN to the
 	// packages that need it via their existing functional-option seams
@@ -362,7 +365,7 @@ func (c *collectCmd) Run(app *appContext) error {
 		return err
 	}
 
-	results, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set(), app.log)
+	results, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set(), app.githubCredentials.Set(), app.log)
 	if err != nil {
 		return err
 	}
@@ -588,7 +591,7 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	}
 	defer app.releasePipelineLease(runID)
 
-	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set(), app.log); err != nil {
+	if _, err := pipeline.RunCollect(app.config, app.store, registry, linkExclusions, app.jiraCredentials.Set(), app.githubCredentials.Set(), app.log); err != nil {
 		return err
 	}
 
@@ -954,7 +957,7 @@ func (a *appContext) runWatchPass(
 	since time.Duration,
 	dryRun bool,
 ) error {
-	if _, err := pipeline.RunCollect(a.config, a.store, registry, linkExclusions, a.jiraCredentials.Set(), a.log); err != nil {
+	if _, err := pipeline.RunCollect(a.config, a.store, registry, linkExclusions, a.jiraCredentials.Set(), a.githubCredentials.Set(), a.log); err != nil {
 		return err
 	}
 
@@ -1009,9 +1012,10 @@ func (a *appContext) runWatchPass(
 }
 
 var cli struct {
-	Config          string              `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
-	JiraCredentials credentials.JSONSet `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
-	LLMAPIKey       string              `name:"llm-api-key" env:"UNJIRA_LLM_API_KEY" help:"API key for the LLM backend."`
+	Config            string              `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
+	JiraCredentials   credentials.JSONSet `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
+	GitHubCredentials credentials.JSONSet `env:"UNJIRA_GITHUB_CREDENTIALS" help:"JSON object mapping host to {token}."`
+	LLMAPIKey         string              `name:"llm-api-key" env:"UNJIRA_LLM_API_KEY" help:"API key for the LLM backend."`
 
 	// Kong's enum: validates at parse time, so a typo fails with a usage message
 	// rather than silently defaulting — see logging.New for why a bad value is an
@@ -1080,11 +1084,12 @@ func run() error {
 	s.SetLogger(log)
 
 	return ctx.Run(&appContext{
-		config:          cfg,
-		store:           s,
-		jiraCredentials: cli.JiraCredentials,
-		llmAPIKey:       cli.LLMAPIKey,
-		log:             log,
+		config:            cfg,
+		store:             s,
+		jiraCredentials:   cli.JiraCredentials,
+		githubCredentials: cli.GitHubCredentials,
+		llmAPIKey:         cli.LLMAPIKey,
+		log:               log,
 	})
 }
 
