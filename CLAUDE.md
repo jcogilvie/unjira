@@ -37,6 +37,19 @@ go run ./cmd/unjira collect | digest | status
 UNJIRA_LIVE=1 go test -tags=live ./internal/live/...   # writes to the dev Jira instance; needs creds
 ```
 
+**Fixture instances, not real ones.** Jira has DEVSBX; GitHub has the private, disposable
+`jcogilvie/unjira-sandbox`. Point live/manual GitHub testing at the sandbox, never at
+`jcogilvie/unjira` — driving PRs through reopen and abandonment cycles in a repo of real work pollutes
+it with test artifacts. The sandbox holds four PRs, one per lifecycle path, including the
+closed→reopened→re-closed case that nothing in the real repo has ever exercised; see
+`docs/superpowers/specs/2026-09-17-github-collector-design.md`'s Status section for the table and why
+each exists. Reading from the real repo is fine — it is only *mutating* it for test purposes that is
+not.
+
+```sh
+export UNJIRA_GITHUB_CREDENTIALS="{\"github.com\":{\"token\":\"$(gh auth token)\"}}"
+```
+
 ## Architecture invariants
 
 These are load-bearing — `docs/design-notes.md` explains the incidents behind each:
