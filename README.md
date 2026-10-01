@@ -229,7 +229,10 @@ internal/
   tasktracker/          TaskReader / TaskWriter / TaskTracker — the split that makes
                         write authority visible in a signature
   collector/
-    claudecode/         Claude Code session transcripts (~/.claude/projects/**/*.jsonl)
+    claudecode/         Claude Code transcripts — root sessions and the subagents they
+                        dispatch (~/.claude/projects/<slug>/<session>.jsonl and
+                        <session>/subagents/**/*.jsonl): one event per branch run, plus
+                        one anchor per pull request a tool call created
     jira/               Jira issues and changelogs as an observed stream
     github/             GitHub PR lifecycle (opened, merged, closed) as an observed
                         stream — PRs are work evidence, never a tracker record

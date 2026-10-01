@@ -37,15 +37,26 @@ import (
 // Ordered, and that order is the render order: a declared sequence rather than
 // observation order, so two sessions doing the same things read alike and one
 // session's summary does not churn between passes.
+//
+// "opened a PR" is the one rule decided by an invocation rather than a substring
+// (ghPRCreateInvocations, shell.go): the anchor events use the same recognizer, and a
+// substring fired on heredoc bodies and grep patterns that merely quote the phrase, so
+// the summary claimed a PR nobody opened. The other rules still match substrings; see
+// the finding on authoringVerbs for what that costs.
 var factRules = []struct {
-	phrase  string
-	pattern *regexp.Regexp
+	phrase string
+	match  func(command string) bool
 }{
-	{"committed", regexp.MustCompile(`git commit`)},
-	{"created a branch", regexp.MustCompile(`git checkout -b|git switch -c`)},
-	{"opened a PR", regexp.MustCompile(`gh pr create`)},
-	{"updated a PR", regexp.MustCompile(`gh pr edit`)},
-	{"ran tests", regexp.MustCompile(`helm unittest|go test|\./test\.sh|pytest|make e2e`)},
+	{"committed", substring(`git commit`)},
+	{"created a branch", substring(`git checkout -b|git switch -c`)},
+	{"opened a PR", func(command string) bool { return len(ghPRCreateInvocations(command)) > 0 }},
+	{"updated a PR", substring(`gh pr edit`)},
+	{"ran tests", substring(`helm unittest|go test|\./test\.sh|pytest|make e2e`)},
+}
+
+// substring is a factRule matcher over a regular expression anywhere in the command.
+func substring(pattern string) func(string) bool {
+	return regexp.MustCompile(pattern).MatchString
 }
 
 // sessionFacts returns the phrases a segment's tool calls license, deduplicated and in
@@ -60,7 +71,7 @@ func sessionFacts(lines []map[string]any) []string {
 	for _, line := range lines {
 		for _, cmd := range toolCommands(line) {
 			for _, rule := range factRules {
-				if rule.pattern.MatchString(cmd) && !slices.Contains(seen, rule.phrase) {
+				if rule.match(cmd) && !slices.Contains(seen, rule.phrase) {
 					seen = append(seen, rule.phrase)
 				}
 			}
@@ -108,7 +119,7 @@ func toolCommands(line map[string]any) []string {
 	var out []string
 	for _, block := range blocks {
 		b, ok := block.(map[string]any)
-		if !ok || b["type"] != "tool_use" {
+		if !ok || b["type"] != blockTypeToolUse {
 			continue
 		}
 

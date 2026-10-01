@@ -47,17 +47,49 @@ func collect(t *testing.T, root string, options map[string]any) (*store.Store, [
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 
+	return s, collectWith(t, s, root, options)
+}
+
+// collectWith runs one collection pass against an existing store, so a test can observe
+// what a SECOND pass over a grown transcript emits.
+func collectWith(t *testing.T, s *store.Store, root string, options map[string]any) []events.Event {
+	t.Helper()
+
 	opts := map[string]any{"transcript_root": root}
 	maps.Copy(opts, options)
 
 	var out []events.Event
-	err = claudecode.New().Collect(
+	err := claudecode.New().Collect(
 		pipeline.CollectContext{Store: s, Options: opts},
 		func(e events.Event) { out = append(out, e) },
 	)
 	require.NoError(t, err)
 
-	return s, out
+	return out
+}
+
+// insertAll stores evts as RunCollect would.
+func insertAll(t *testing.T, s *store.Store, evts []events.Event) {
+	t.Helper()
+
+	countInserted(t, s, evts)
+}
+
+// countInserted stores evts and reports how many were new rather than ignored as
+// already held — the INSERT OR IGNORE outcome that decides whether data survives.
+func countInserted(t *testing.T, s *store.Store, evts []events.Event) int {
+	t.Helper()
+
+	n := 0
+	for _, e := range evts {
+		ok, err := s.InsertEvent(e)
+		require.NoError(t, err)
+		if ok {
+			n++
+		}
+	}
+
+	return n
 }
 
 func TestCollect_SessionYieldsEventWithoutExclusion(t *testing.T) {
