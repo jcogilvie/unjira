@@ -125,8 +125,20 @@ jcogilvie/unjira-sandbox#3:opened
 event would have been silently discarded by `INSERT OR IGNORE`, never backfilled (F21), with no error
 and no log line. That is the defect measured rather than predicted.
 
-A `live`-tagged test against this repo remains the outstanding piece — the fixture it needs now
-exists, which was the actual blocker. Note the fixture is **read-only** for this slice: the collector
+**The `live`-tagged test now exists:** `internal/live/github_test.go`
+(`UNJIRA_LIVE=1 go test -tags=live -run TestLiveGitHub -v ./internal/live/`). It drives the real
+collector through `pipeline.RunCollect` against the sandbox and asserts structure, not the pinned ids
+above, so recreating the sandbox does not break it: 9 events; per-PR kind counts; ExternalID shape;
+PR #3's two `:closed` events carrying distinct ids; PR #1 carrying both `:merged` and `:closed`;
+`completion_kind` only on completions; no `tracker_record`; `scm_keys` equal to each PR's own
+`DEVSBX-10N`. It also checks that a fresh store inserts every emitted event (fewer inserts would mean a
+silent ExternalID collision), and that a second pass re-emits events but inserts none. With
+`UNJIRA_LIVE=1` and no usable `github.com` credential it **fails** instead of skipping (#37). It was
+written in a worktree with no credentials, so the reviewer verified it:
+
+TODO(reviewer): paste live run output.
+
+Note the fixture is **read-only** for this slice: the collector
 has no write path, so nothing unjira does can alter the sandbox's state, and the PR states above have
 to be driven by hand (or by a future helper) when a new path needs covering.
 
