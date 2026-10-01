@@ -94,7 +94,11 @@ go-lint:
   # pin current; Renovate's weekly schedule bounds the staleness to days, not
   # months.
   RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
-  RUN golangci-lint run ./...
+  # --build-tags=live so internal/live is linted too. Without it the tag excludes
+  # that package from the build entirely and the linter never sees it — which hid
+  # three real issues there (a gofumpt drift, an ineffectual assignment, a missing
+  # prealloc) until a GitHub live test was added and linted by hand.
+  RUN golangci-lint run --build-tags=live ./...
 
 go-modules-tidy:
   FROM +go-deps

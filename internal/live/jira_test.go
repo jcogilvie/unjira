@@ -80,22 +80,26 @@ func TestMain(m *testing.M) {
 
 // testCredential resolves this tier's credential from UNJIRA_JIRA_CREDENTIALS.
 //
-// A missing var skips (this tier is simply not configured to run); a
-// malformed var fails loudly via require.NoError, since a broken credential
-// blob is a misconfiguration to fix, not a reason to silently skip.
+// Every caller reaches this only after UNJIRA_LIVE=1 has been checked, so a
+// missing credential here means someone ASKED for the live run and cannot get
+// one. That fails rather than skips: a skipped live run prints PASS, which reads
+// as "the live tier passed" when nothing ran — design-notes #37. A malformed var
+// fails too, via require.NoError. The "this tier is not configured" case is
+// UNJIRA_LIVE being unset, which testClient already skips on.
 func testCredential(t *testing.T) credentials.Credential {
 	t.Helper()
 
 	set, found, err := credentials.FromEnv()
 	require.NoError(t, err)
 	if !found {
-		t.Skipf("set %s to run", credentials.EnvVar)
+		t.Fatalf("UNJIRA_LIVE=1 but %s is unset (checked the environment and .env): "+
+			"this is a FAILURE, not a skip, since a skipped live run reads as a passing one", credentials.EnvVar)
 	}
 
 	name := liveConnectionName()
 	cred, ok := set.For(name)
 	if !ok {
-		t.Skipf("no credential for connection %q in %s", name, credentials.EnvVar)
+		t.Fatalf("UNJIRA_LIVE=1 but %s has no credential for connection %q", credentials.EnvVar, name)
 	}
 
 	return cred
@@ -140,7 +144,7 @@ func TestAuthAndProjectVisible(t *testing.T) {
 	projects, err := client.SearchProjects()
 	require.NoError(t, err)
 
-	var keys []string
+	keys := make([]string, 0, len(projects))
 	for _, p := range projects {
 		keys = append(keys, p["key"].(string))
 	}
@@ -337,7 +341,6 @@ func collectUntilMatched(
 
 		return collected, nil
 	}, settings...)
-
 	if err != nil {
 		// Re-search WITHOUT the watermark, using the collector's own scoped query.
 		// If the issue is invisible even unbounded, nothing the collector rendered
@@ -354,15 +357,19 @@ func collectUntilMatched(
 		conn := cc.Config.Jira[0]
 		unbounded, jqlErr := conn.EffectiveJQL(conn.Queries[0])
 
-		// UNDETERMINED is the default, never INFRASTRUCTURE. A check that could not
-		// RUN must not resolve to a confident verdict — an earlier version of this
-		// defaulted to "infrastructure, re-run", and when a deliberately-broken
-		// watermarkClause (a real bug, exactly what this test exists to catch) made
-		// the re-search return nothing, it reported "not caused by your change".
-		// Confidently wrong is worse than ambiguous, especially for a contributor
-		// deciding whether their PR is at fault.
-		verdict := "UNDETERMINED — the discriminating re-search did not complete, so this " +
-			"failure could be either cause. Treat it as suspicious, not as flake"
+		// A check that could not RUN must never resolve to a confident verdict — an
+		// earlier version of this defaulted to "infrastructure, re-run", and when a
+		// deliberately-broken watermarkClause (a real bug, exactly what this test
+		// exists to catch) made the re-search return nothing, it reported "not caused
+		// by your change". Confidently wrong is worse than ambiguous, especially for a
+		// contributor deciding whether their PR is at fault.
+		//
+		// So every path below assigns verdict explicitly, and both paths where the
+		// discriminating check did not complete (jqlErr, searchErr) say UNDETERMINED.
+		// There is deliberately no default value: an initial "UNDETERMINED" here was
+		// overwritten on every branch and never read (ineffassign), so it protected
+		// nothing — the explicit branches are what carry the rule.
+		var verdict string
 
 		if jqlErr != nil {
 			verdict = "UNDETERMINED — could not even build the unbounded query, which is " +

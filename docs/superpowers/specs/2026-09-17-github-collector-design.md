@@ -136,7 +136,49 @@ silent ExternalID collision), and that a second pass re-emits events but inserts
 `UNJIRA_LIVE=1` and no usable `github.com` credential it **fails** instead of skipping (#37). It was
 written in a worktree with no credentials, so the reviewer verified it:
 
-TODO(reviewer): paste live run output.
+**Run against real GitHub on 2026-10-01, from an environment holding credentials:**
+
+```
+$ UNJIRA_LIVE=1 go test -tags=live -run TestLiveGitHub -v -count=1 ./internal/live/
+=== RUN   TestLiveGitHubCollectorSandboxLifecycle
+    github_test.go:263: collected from jcogilvie/unjira-sandbox: 9 event(s):
+          jcogilvie/unjira-sandbox#1:closed:31572442369
+          jcogilvie/unjira-sandbox#1:merged:31572442284
+          jcogilvie/unjira-sandbox#1:opened
+          jcogilvie/unjira-sandbox#2:closed:31572443233
+          jcogilvie/unjira-sandbox#2:opened
+          jcogilvie/unjira-sandbox#3:closed:31572443906
+          jcogilvie/unjira-sandbox#3:closed:31572447208
+          jcogilvie/unjira-sandbox#3:opened
+          jcogilvie/unjira-sandbox#4:opened
+--- PASS: TestLiveGitHubCollectorSandboxLifecycle (2.09s)
+    --- PASS: .../PR#1_DEVSBX-101-merged
+    --- PASS: .../PR#2_DEVSBX-102-abandoned
+    --- PASS: .../PR#3_DEVSBX-103-reopened
+    --- PASS: .../PR#4_DEVSBX-104-open
+    --- PASS: .../PR#3_reclosed_has_two_distinct_closed_ids
+=== RUN   TestLiveGitHubCollectorSecondPassAddsNothing
+    github_test.go:384: second pass re-emitted 1 event(s):
+          jcogilvie/unjira-sandbox#4:opened
+--- PASS: TestLiveGitHubCollectorSecondPassAddsNothing (1.17s)
+ok  	github.com/jcogilvie/unjira/internal/live	3.620s
+```
+
+The second pass re-emits only #4 — the one still-open PR, the only one whose `updated_at` can
+still clear the watermark — and inserts nothing, so the idempotency assertion is not a hollow zero.
+
+**Drilled, not just passed.** Restoring the pre-decision ExternalID (stripping the
+`:<timeline-id>` suffix from `:merged`/`:closed`) makes the test fail on exactly the bug it
+exists for:
+
+```
+--- FAIL: TestLiveGitHubCollectorSandboxLifecycle
+    emitted 9 events but the fresh store inserted only 8: some ExternalIDs collided and were
+    silently dropped.
+    --- FAIL: .../PR#1_DEVSBX-101-merged
+    --- FAIL: .../PR#3_DEVSBX-103-reopened
+    --- FAIL: .../PR#3_reclosed_has_two_distinct_closed_ids
+```
 
 Note the fixture is **read-only** for this slice: the collector
 has no write path, so nothing unjira does can alter the sandbox's state, and the PR states above have
