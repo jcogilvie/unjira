@@ -123,6 +123,22 @@ jobs:
         run: |
           printf 'UNJIRA_JIRA_CREDENTIALS=%s\n' \
             "$(jq -cn '{dev: {email: $ENV.CI_EMAIL, token: $ENV.CI_TOKEN}}')" >> "$GITHUB_ENV"
+      # The GitHub live tests read jcogilvie/unjira-sandbox, a PUBLIC fixture repo
+      # holding no real work (see CLAUDE.md, "Fixture instances"). Public is what
+      # lets the job's built-in GITHUB_TOKEN read it, so no repository secret
+      # exists to create, scope or rotate. Composed with jq for the same reason
+      # as the Jira blob above: the token is never interpolated into a command
+      # line. Keyed by host, matching UNJIRA_GITHUB_CREDENTIALS's shape.
+      #
+      # Required, not optional: under UNJIRA_LIVE=1 those tests FAIL without a
+      # github.com credential rather than skip, since a skipped live run prints
+      # PASS (docs/design-notes.md #37).
+      - name: Compose GitHub credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf 'UNJIRA_GITHUB_CREDENTIALS=%s\n' \
+            "$(jq -cn '{"github.com": {token: $ENV.GH_TOKEN}}')" >> "$GITHUB_ENV"
       - run: UNJIRA_LIVE=1 go test -tags=live ./internal/live/...
         env:
           UNJIRA_JIRA_SITE: https://unjira.atlassian.net
