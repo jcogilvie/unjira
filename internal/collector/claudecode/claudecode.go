@@ -1,8 +1,10 @@
 // Package claudecode collects Claude Code session transcripts.
 //
-// Sessions live as JSONL under ~/.claude/projects/<project-slug>/<session-id>.jsonl
-// and grow as the session continues. Each changed file yields one snapshot
-// event (external ID includes the file size, so a session that grows
+// Sessions live as JSONL under ~/.claude/projects/<project-slug>/<session-id>.jsonl,
+// and the subagents a session dispatches under
+// <project-slug>/<session-id>/subagents/agent-<agentId>.jsonl (see transcripts.go).
+// Both grow as the work continues. Each changed file yields one snapshot event per
+// branch run (external ID includes the file size, so a transcript that grows
 // produces a new snapshot; identical re-reads dedupe at insert).
 //
 // This collector is deliberately deterministic: it extracts metadata,
@@ -16,7 +18,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -94,13 +95,13 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 		normalizedExcludes[i] = normalizeDir(p)
 	}
 
-	matches, err := filepath.Glob(filepath.Join(root, "*", "*.jsonl"))
+	transcripts, err := discoverTranscripts(root)
 	if err != nil {
-		return fmt.Errorf("globbing transcripts under %s: %w", root, err)
+		return err
 	}
-	sort.Strings(matches)
 
-	for _, path := range matches {
+	for _, t := range transcripts {
+		path := t.path
 		stat, err := os.Stat(path)
 		if err != nil {
 			continue // file may have been removed between glob and stat
@@ -123,7 +124,7 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 			continue
 		}
 
-		evts, err := sessionEvents(path, mtime, normalizedExcludes, minSegment)
+		evts, err := sessionEvents(t, mtime, normalizedExcludes, minSegment)
 		if err != nil {
 			return fmt.Errorf("reading session %s: %w", path, err)
 		}
@@ -147,7 +148,7 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 // opening ask, so three unrelated bodies of work were all described as "putting together
 // an architectural vision document" — the summary clustering and the review queue both
 // read.
-func segmentSummary(project string, seg segment) string {
+func segmentSummary(project string, t transcript, seg segment) string {
 	opening := strings.TrimSpace(strings.ReplaceAll(seg.userTexts[0], "\n", " "))
 	if len(opening) > 160 {
 		opening = opening[:157] + "..."
@@ -171,9 +172,22 @@ func segmentSummary(project string, seg segment) string {
 	}
 
 	return fmt.Sprintf(
-		`Claude Code session in %s%s: %d user messages. Opened with: "%s"%s`,
-		project, branchNote, len(seg.userTexts), opening, factsNote,
+		`%s in %s%s: %d user messages. Opened with: "%s"%s`,
+		sessionLabel(t), project, branchNote, len(seg.userTexts), opening, factsNote,
 	)
+}
+
+// sessionLabel names the kind of transcript a summary describes.
+//
+// A subagent's opening message is its dispatching agent's prompt, not a human's ask, so
+// the summary says so; the format is otherwise the root session's, so clustering reads
+// both alike.
+func sessionLabel(t transcript) string {
+	if t.sub != nil {
+		return "Claude Code subagent session"
+	}
+
+	return "Claude Code session"
 }
 
 // sessionEvents turns one transcript into one event per contiguous branch run.
@@ -190,13 +204,24 @@ func segmentSummary(project string, seg segment) string {
 // segment also carries the full branch set (see segment.allBranches): slicing only helps
 // sessions that change branch, and 42 of 79 multi-day sessions never do.
 func sessionEvents(
-	path string, mtime time.Time, excludeCwds []string, minSegment int,
+	t transcript, mtime time.Time, excludeCwds []string, minSegment int,
 ) ([]events.Event, error) {
-	sessionID := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	path := t.path
 
 	lines, err := jsonlLines(path)
 	if err != nil {
 		return nil, err
+	}
+
+	if t.sub != nil {
+		// A subagent's gitBranch is its PARENT's branch (see
+		// subagentBranchOmittedReason), so it is cleared before segmenting rather
+		// than only withheld from the output: the parent changing branch is not a
+		// boundary in the subagent's work, and splitting on it would fragment one
+		// dispatched task on a signal that is about something else.
+		for _, l := range lines {
+			delete(l, "gitBranch")
+		}
 	}
 
 	segs := segments(lines, minSegment)
@@ -219,13 +244,8 @@ func sessionEvents(
 			continue // unjira's own repo etc. — skip to avoid self-reference loops
 		}
 
-		project := filepath.Base(filepath.Dir(path))
-		if seg.cwd != "" {
-			project = filepath.Base(seg.cwd)
-		}
-
 		occurredAt := mtime
-		if parsed, err := time.Parse(time.RFC3339, strings.Replace(seg.lastTS, "Z", "+00:00", 1)); err == nil {
+		if parsed, ok := parseTimestamp(seg.lastTS); ok {
 			occurredAt = parsed
 		}
 
@@ -235,15 +255,22 @@ func sessionEvents(
 		// snapshot while still deduping an unchanged re-read at insert. The index
 		// rather than the branch name because a branch can legitimately appear twice
 		// when runs are far enough apart not to coalesce.
+		//
+		// The prefix is t.id — the root session's filename stem or `agent-<agentId>`
+		// — never the JSONL sessionId, which a subagent shares with its parent.
 		evt := events.NewEvent(
 			Name,
-			fmt.Sprintf("%s:%d:%d", sessionID, stat.Size(), i),
+			fmt.Sprintf("%s:%d:%d", t.id, stat.Size(), i),
 			occurredAt,
-			segmentSummary(project, seg),
+			segmentSummary(projectName(t, seg.cwd), t, seg),
 		)
-		evt.Artifacts["session_id"] = sessionID
+		setTranscriptArtifacts(evt.Artifacts, t)
 		evt.Artifacts["cwd"] = seg.cwd
-		evt.Artifacts[events.ArtifactGitBranch] = seg.gitBranch
+		if t.sub == nil {
+			evt.Artifacts[events.ArtifactGitBranch] = seg.gitBranch
+		} else {
+			evt.Artifacts[artifactGitBranchOmitted] = subagentBranchOmittedReason
+		}
 		events.SetTicketKeys(&evt, seg.orderedKeys)
 		// Kept as its own artifact, not appended to the prose keys: a key committed
 		// under is stronger evidence than one mentioned, and the correlator ranks on
@@ -262,6 +289,28 @@ func sessionEvents(
 	}
 
 	return out, nil
+}
+
+// projectName is the human-readable project an event is about: the working directory's
+// base name, or the project slug when no cwd was recorded. The slug comes from the
+// transcript rather than the file's parent directory, which for a subagent is
+// `subagents`.
+func projectName(t transcript, cwd string) string {
+	if cwd != "" {
+		return filepath.Base(cwd)
+	}
+
+	return t.slug
+}
+
+// parseTimestamp parses a transcript line's RFC 3339 timestamp.
+func parseTimestamp(ts string) (time.Time, bool) {
+	parsed, err := time.Parse(time.RFC3339, strings.Replace(ts, "Z", "+00:00", 1))
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	return parsed, true
 }
 
 func jsonlLines(path string) ([]map[string]any, error) {
