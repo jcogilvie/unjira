@@ -8,7 +8,7 @@ package reconciler
 // ORDER BY (window_start, id) LIMIT 20 — a STABLE order. The 20 oldest linked
 // narratives were all pure tracker-echo, so suppressTrackerEcho correctly declined
 // to comment. Suppression wrote no action row; no row meant no watermark; and
-// DeltaEvents bounds on MAX(created_at) over actions, so the same 20 were selected
+// DeltaEvents bounds on the narrative's latest action, so the same 20 were selected
 // again. Three consecutive passes examined the identical 20 and the 35 narratives
 // at position 21+ were never reached.
 //
@@ -28,7 +28,6 @@ package reconciler
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -199,11 +198,11 @@ func TestPersist_NoSuppressionWritesNothing(t *testing.T) {
 func linkEventToNarrative(t *testing.T, s *store.Store, narrativeID int64, evt events.Event) {
 	t.Helper()
 
-	// A later linked_at than the suppression row's created_at is what puts the event
-	// past the watermark, and both default to the wall clock at write time. The
-	// event's own occurred_at is irrelevant to that comparison — DeltaEvents bounds
-	// on linked_at, not on when the work happened.
-	time.Sleep(2 * time.Millisecond)
+	// Linking after the suppression row was written is what puts the event past the
+	// watermark: DeltaEvents bounds on link sequence position (finding F30), not on
+	// any clock, so no wall-clock gap is needed. The event's own occurred_at is
+	// irrelevant to that comparison — the delta is about when the work was LINKED,
+	// not when it happened.
 
 	inserted, err := s.InsertEvent(evt)
 	require.NoError(t, err)

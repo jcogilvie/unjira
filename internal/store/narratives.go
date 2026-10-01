@@ -398,30 +398,52 @@ func (s *Store) AllNarrativeEvents(narrativeID int64) ([]events.Event, error) {
 	return out, rows.Err()
 }
 
+// linkedSinceLastAction is the reconciler's delta test for one narrative_events row
+// `ne`: was this link made after the narrative's most recent action, of ANY status?
+//
+// Shared verbatim by DeltaEvents (which events a pass drafts from) and
+// hasUnexaminedDelta (which narratives a pass selects, and what the remainder
+// counts), because those two drifting apart is F10's failure mode: a count describing
+// a population the pass never examines. Correlated on ne.narrative_id, so it drops
+// into either query whatever the outer query calls its narrative, and it carries no
+// bound parameters.
+//
+// Compares link SEQUENCE positions, not timestamps (finding F30):
+// actions.created_link_seq is the link high-water mark recorded when the action was
+// inserted, so a link made after it has a strictly greater link_seq however little
+// time passed. The old `linked_at > MAX(created_at)` compared two millisecond
+// timestamps, and a link made in the same millisecond as the action was invisible
+// forever — the failure the narrative_events schema comment once documented at
+// whole-second resolution, recurring one tick finer.
+//
+// With no prior action the COALESCE gives 0, below every link_seq, so every link is
+// delta.
+const linkedSinceLastAction = `ne.link_seq > COALESCE(
+	(SELECT MAX(a.created_link_seq) FROM actions a WHERE a.narrative_id = ne.narrative_id), 0)`
+
 // DeltaEvents returns the events linked to narrativeID since the most recent
 // action proposed for it — "what's new since a reviewer last saw this."
 //
-// Bounded by the last action's created_at (not decided_at or executed_at)
-// deliberately: created_at is always set, so a proposal sitting unreviewed in
-// the queue still suppresses re-proposing its delta. decided_at is NULL while
+// Bounded by the last action's CREATION (not its decision or execution)
+// deliberately: every action has one, so a proposal sitting unreviewed in the
+// queue still suppresses re-proposing its delta. decided_at is NULL while
 // unreviewed, which would make every pass re-propose the same thing; and a
 // rejected action never gets an executed_at, so bounding on that would
 // re-propose a rejected action identically forever, giving the reviewer's "no"
 // no weight. See the design spec's comparison table.
 //
-// With no prior action every linked event is returned (COALESCE to ""; all
-// real timestamps sort above the empty string), which is the first-pass case:
-// the whole narrative is the delta.
+// The predicate is linkedSinceLastAction, shared with hasUnexaminedDelta. With no
+// prior action every linked event is returned, which is the first-pass case: the
+// whole narrative is the delta.
 func (s *Store) DeltaEvents(narrativeID int64) ([]events.Event, error) {
 	rows, err := s.db.Query(
 		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
 		 FROM narrative_events ne
 		 JOIN events e ON e.id = ne.event_id
 		 WHERE ne.narrative_id = ?
-		   AND ne.linked_at > COALESCE(
-		       (SELECT MAX(created_at) FROM actions WHERE narrative_id = ?), '')
+		   AND `+linkedSinceLastAction+`
 		 ORDER BY e.occurred_at, e.id`,
-		narrativeID, narrativeID,
+		narrativeID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying delta events for narrative %d: %w", narrativeID, err)

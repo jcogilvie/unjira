@@ -381,10 +381,6 @@ func TestProposeCreates_ADeclineIsReconsideredWhenNewWorkArrives(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got[0].Proposed)
 
-	// linked_at has millisecond precision; sleep past the decline's created_at
-	// rather than racing it.
-	time.Sleep(5 * time.Millisecond)
-
 	later := events.NewEvent("claude_code", "dc:2",
 		time.Date(2026, 8, 28, 14, 0, 0, 0, time.UTC), "it turned into a real project")
 	_, err = s.InsertEvent(later)

@@ -125,17 +125,13 @@ func TestCountNarrativesWithDelta_CountsANarrativeWithEventsNewerThanItsAction(t
 	})
 	require.NoError(t, err)
 
-	// New work arrives AFTER that action, so linked_at lands past the watermark.
+	// New work is linked AFTER that action, so it is past the action's watermark.
 	//
-	// The sleep is load-bearing, not padding. Both timestamps default to the wall
-	// clock at MILLISECOND precision (%f — see narrative_events.linked_at's schema
-	// comment for why not whole seconds), and DeltaEvents compares them lexically as
-	// TEXT with a strict `>`. Inserting both inside the same millisecond makes the
-	// new event read as NOT newer, which flaked this test roughly one run in four
-	// before the sleep was added. Waiting is the honest fix: the invariant under
-	// test is "an event linked after the action counts", so the fixture has to
-	// actually satisfy it rather than assume scheduling will.
-	time.Sleep(2 * time.Millisecond)
+	// No sleep, deliberately. This test once flaked about one run in four, because
+	// the delta compared two millisecond timestamps with a strict `>` and an event
+	// linked in the same millisecond as the action read as NOT newer. A sleep hid
+	// that; finding F30 fixed it — the delta now compares link sequence positions,
+	// so "linked after" holds however little time separates the two writes.
 
 	_, err = s.InsertEvent(
 		events.NewEvent("claude_code", "evt-new", base.Add(2*time.Hour), "more work"))

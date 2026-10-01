@@ -203,7 +203,8 @@ func proposeCreateOne(
 
 	// A previous pass already judged this work not worth tracking. Ask again only
 	// if something has changed since — which is exactly what DeltaEvents answers,
-	// since it is bounded by max(actions.created_at) and the decline IS an action
+	// since it is bounded by the narrative's latest action (by link sequence —
+	// actions.created_link_seq) and the decline IS an action
 	// row. Probed:
 	//
 	//	delta BEFORE any decline row:   1

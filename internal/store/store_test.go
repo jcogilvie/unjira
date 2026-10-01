@@ -1076,18 +1076,15 @@ func TestDeltaEventsIsEmptyWhenAnActionAlreadyCoversEveryEvent(t *testing.T) {
 }
 
 // TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction pins the
-// precision decision. At whole-second granularity this event is invisible
+// precision decision. At whole-second granularity this event was invisible
 // forever: the action's created_at never advances, so `linked_at > created_at`
 // stays false on every future pass. Measured on modernc.org/sqlite v1.56.0.
 //
-// The sleep below is deliberate, not a smell: %f gives millisecond precision,
-// and on a fast machine the action insert and the immediately-following event
-// link can land in the same millisecond (measured empirically: roughly 1 in 5
-// runs without the sleep). That's the exact same class of collision the
-// design already accepted at whole-second granularity, just with a much
-// smaller window. A few milliseconds' separation keeps the test deterministic
-// about crossing a millisecond boundary while still landing well within the
-// same wall-clock second, which is what this test needs to demonstrate.
+// Moving to milliseconds only shrank that window, and this test used to need a
+// sleep to step past it (roughly 1 in 5 runs failed without one). The delta now
+// compares link sequence positions (finding F30), so the event is found with no
+// gap at all — inside the same second, or the same millisecond. linkseq_test.go
+// pins the same-millisecond case explicitly.
 func TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction(t *testing.T) {
 	s := openStore(t)
 
@@ -1107,10 +1104,8 @@ func TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Linked a millisecond later but still inside the same wall-clock second,
-	// which is the case under test. See this test's doc comment for why the
-	// separation is needed and why removing it flakes.
-	time.Sleep(5 * time.Millisecond)
+	// Linked immediately after the action: same wall-clock second, very likely the
+	// same millisecond. See this test's doc comment.
 	_, err = s.InsertEvent(makeEvent("fresh"))
 	require.NoError(t, err)
 	fresh, err := s.EventIDByExternalID("claude_code", "fresh")
@@ -1126,10 +1121,12 @@ func TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction(t *testing.T) {
 	assert.Equal(t, "fresh", delta[0].ExternalID)
 }
 
-// TestLinkedAtAndActionCreatedAtUseTheSameFormat guards the lexical-comparison
-// trap: these are TEXT columns, so mixing %S and %f inverts the ordering
-// ("...10.597Z" < "...10Z" because '.' is 0x2E and 'Z' is 0x5A). A later event
-// would compare as earlier and silently drop out of the delta.
+// TestLinkedAtAndActionCreatedAtUseTheSameFormat keeps the two display
+// timestamps in one format. They no longer decide anything — the delta compares
+// link sequence positions (finding F30) — but they are still read side by side
+// in sqlite3 sessions and ad-hoc queries, where mixing %S and %f inverts the
+// ordering ("...10.597Z" < "...10Z" because '.' is 0x2E and 'Z' is 0x5A) and a
+// reader would see a later event as earlier.
 //
 // This file is package store_test (external test package), so it cannot read
 // s.db directly. NarrativeEventLinkedAt is a small test-support introspection
@@ -1164,8 +1161,8 @@ func TestLinkedAtAndActionCreatedAtUseTheSameFormat(t *testing.T) {
 
 	assert.Contains(t, linkedAt, ".", "linked_at must carry sub-second precision")
 	assert.Contains(t, createdAt, ".",
-		"actions.created_at must use the SAME sub-second format as linked_at, or the "+
-			"lexical TEXT comparison in DeltaEvents inverts")
+		"actions.created_at must use the SAME sub-second format as linked_at, or an "+
+			"ad-hoc query ordering the two reads them inverted")
 	assert.Len(t, createdAt, len(linkedAt),
 		"identical format strings produce identical lengths")
 }

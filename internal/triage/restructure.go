@@ -36,9 +36,9 @@ type commitState struct {
 // is an org-level decision, not one a review loop should make silently.
 //
 // This is also what keeps the per-narrative watermark sound under
-// restructuring. EligibleEventIDs compares against the narrative's OWN
-// max(executed_at), so relinking a frozen event onto a never-committed
-// narrative would make it eligible again — probed directly while designing
+// restructuring. EligibleEventIDs compares against the narrative's OWN last
+// commit (its max actions.executed_link_seq), so relinking a frozen event onto a
+// never-committed narrative would make it eligible again — probed directly while designing
 // this: frozen on A, eligible on B. Because the committed narrative is always
 // the target, frozen events are never relinked at all, so that hazard is
 // unreachable rather than merely forbidden.

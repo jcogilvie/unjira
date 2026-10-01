@@ -151,12 +151,12 @@ func (s *Store) CountNarrativesWithoutPrimaryLink() (int, error) {
 // correlated `n.id` makes it a per-narrative test, so it drops into either query's
 // WHERE clause unchanged.
 //
-// The bound MUST stay identical to DeltaEvents': MAX(created_at) over actions of
-// ANY status, COALESCEd to ” so a narrative with no action has no watermark and
-// every link counts. Any status is deliberate — a declined or suppressed row still
-// means the narrative was examined and nothing new has happened since. Contrast
-// EligibleEvents, which bounds on status='applied' only because it asks a different
-// question ("what has no tracker mutation claimed yet").
+// The delta bound is linkedSinceLastAction, the same const DeltaEvents uses, so the
+// two cannot drift: the narrative's latest action of ANY status, compared by link
+// sequence (finding F30). Any status is deliberate — a declined or suppressed row
+// still means the narrative was examined and nothing new has happened since.
+// Contrast EligibleEvents, which bounds on status='applied' only because it asks a
+// different question ("what has no tracker mutation claimed yet").
 //
 // Also carries reconcileExaminationPredicate (finding F26): hasUnexaminedDelta alone
 // cannot see that a narrative's surviving delta is entirely self-authored, because
@@ -169,8 +169,7 @@ func (s *Store) CountNarrativesWithoutPrimaryLink() (int, error) {
 const hasUnexaminedDelta = `EXISTS (
 	              SELECT 1 FROM narrative_events ne
 	              WHERE ne.narrative_id = n.id
-	                AND ne.linked_at > COALESCE(
-	                    (SELECT MAX(created_at) FROM actions WHERE narrative_id = n.id), '')
+	                AND ` + linkedSinceLastAction + `
 	          )` + reconcileExaminationPredicate
 
 // CountNarrativesWithDelta is how many linked narratives a reconcile pass would
@@ -186,9 +185,10 @@ const hasUnexaminedDelta = `EXISTS (
 // nothing new, so it told an operator to re-run for work that did not exist, and
 // each re-run bills for the sweep.
 //
-// The delta bound MUST stay identical to DeltaEvents': MAX(created_at) over actions
-// of ANY status, COALESCEd to ” so a narrative with no action has no watermark and
-// every link counts. Any status is deliberate rather than sloppy — a DECLINED
+// The delta bound is identical to DeltaEvents' by construction — both interpolate
+// linkedSinceLastAction: the narrative's latest action of ANY status, compared by
+// link sequence, so a narrative with no action has no watermark and every link
+// counts. Any status is deliberate rather than sloppy — a DECLINED
 // proposal still means the narrative was examined and nothing new has happened
 // since, which is exactly the state this must not report as outstanding. (Contrast
 // EligibleEvents, which bounds on status='applied' only: that one asks "what has no

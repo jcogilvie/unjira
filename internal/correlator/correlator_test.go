@@ -701,6 +701,91 @@ func TestPersist_ExtendUnknownNarrativeIDErrorsLoudly(t *testing.T) {
 	assert.Contains(t, err.Error(), "999")
 }
 
+// TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen pins relinkEvents' effect on
+// the freeze rule (finding F30). An EXTENDS can name an event the narrative already
+// holds; relinkEvents then deletes nothing (UnlinkEventFromOtherNarratives spares the
+// target) and AddNarrativeEvents is INSERT OR IGNORE, so the existing link — and its
+// position in the link sequence — survives. Were a re-link to replace the row, the
+// event would read as linked after the narrative's applied action and become movable
+// again, un-freezing work a posted comment already describes.
+func TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	e1 := seedPersistedEvent(t, s, "e1", "posted about", base)
+	id, err := s.InsertNarrative(base, base.Add(time.Minute), "Story", "summary")
+	require.NoError(t, err)
+	eid, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+	linkedBefore, err := s.NarrativeEventLinkedAt(id, eid)
+	require.NoError(t, err)
+
+	actionID, err := s.InsertAction(store.ActionRow{
+		NarrativeID: id, Type: "comment", IssueKey: "PROJ-1",
+		Payload: `{"body":"posted"}`, Status: store.StatusProposed,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatus(actionID, store.StatusApplied))
+
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+	_, _, err = correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: id, Summary: "same story",
+		Events: []correlator.Event{e1},
+	}}, cfg)
+	require.NoError(t, err)
+
+	eligible, err := s.EligibleEventIDs(id)
+	require.NoError(t, err)
+	assert.Empty(t, eligible, "re-linking a committed event must not make it movable again")
+
+	delta, err := s.DeltaEvents(id)
+	require.NoError(t, err)
+	assert.Empty(t, delta, "nor make it the reconciler's delta again")
+
+	linkedAfter, err := s.NarrativeEventLinkedAt(id, eid)
+	require.NoError(t, err)
+	assert.Equal(t, linkedBefore, linkedAfter, "the link row itself is untouched")
+}
+
+// TestPersist_ExtendMovingAnEventIsANewLinkOnTheTarget pins the other half of
+// relinkEvents: an event reassigned from another narrative is a NEW link on the
+// target — as it was under linked_at, where the target's row got a fresh timestamp —
+// so it is part of the target's delta even though the target already has an action.
+func TestPersist_ExtendMovingAnEventIsANewLinkOnTheTarget(t *testing.T) {
+	s := persistStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	e1 := seedPersistedEvent(t, s, "e1", "misfiled work", base)
+	source, err := s.InsertNarrative(base, base.Add(time.Minute), "Source", "s")
+	require.NoError(t, err)
+	eid, err := s.EventIDByExternalID("claude_code", "e1")
+	require.NoError(t, err)
+	require.NoError(t, s.AddNarrativeEvents(source, []int64{eid}))
+
+	target, err := s.InsertNarrative(base, base.Add(time.Minute), "Target", "t")
+	require.NoError(t, err)
+	_, err = s.InsertAction(store.ActionRow{
+		NarrativeID: target, Type: "comment", IssueKey: "PROJ-2",
+		Payload: `{"body":"earlier"}`, Status: store.StatusDeclined,
+	})
+	require.NoError(t, err)
+
+	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
+	_, _, err = correlator.Persist(t.Context(), s, &fakeLLM{}, []correlator.ClusterResult{{
+		Kind: correlator.ClusterExtends, NarrativeID: target, Summary: "now holds e1",
+		Events: []correlator.Event{e1},
+	}}, cfg)
+	require.NoError(t, err)
+
+	n, err := s.NarrativeEventCount(source)
+	require.NoError(t, err)
+	assert.Zero(t, n, "moved off the source")
+
+	delta, err := s.DeltaEvents(target)
+	require.NoError(t, err)
+	require.Len(t, delta, 1, "a moved-in event is linked after the target's action")
+	assert.Equal(t, "e1", delta[0].ExternalID)
+}
+
 func TestPersist_EventNotInStoreErrorsLoudly(t *testing.T) {
 	s := persistStore(t)
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)

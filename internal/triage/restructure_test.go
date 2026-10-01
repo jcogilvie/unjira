@@ -75,7 +75,6 @@ func TestStoreHandler_MergeMovesOnlyEligibleEvents(t *testing.T) {
 	target, targetEvents := seedHandlerNarrative(t, s, "target", base, "sh:t1", "sh:t2")
 	commitAgainstNarrative(t, s, target)
 
-	time.Sleep(5 * time.Millisecond)
 	source, sourceEvents := seedHandlerNarrative(t, s, "source", base.Add(time.Hour), "sh:s1", "sh:s2")
 
 	h := NewStoreHandler(s, nil, nil, nil, config.CorrelatorConfig{}, 0)
