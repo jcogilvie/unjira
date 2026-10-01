@@ -66,7 +66,7 @@ which is why it is recorded now rather than rediscovered then.
 
 ---
 
-### F34 — a branch run with no user message is dropped, taking its SCM keys and branch with it
+### F35 — a branch run with no user message is dropped, taking its SCM keys and branch with it
 
 `sessionEvents` skips any segment with `len(seg.userTexts) == 0`
 (`internal/collector/claudecode/claudecode.go`, the `continue` at the top of its segment loop), and
@@ -82,10 +82,10 @@ the SCM-command and branch tiers, the two strongest the correlator has. That is 
 `absorb`'s own comment says folding must never cause. Frequency on real transcripts is **unmeasured**.
 
 Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is cleared before segmenting
-(F31), so it has no branch change to split on and is one run. PR anchors are unaffected too —
+(F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
 `transcriptAnchors` reads every line independently of segmentation.
 
-### F32 — a resumed session copies its history, so root segment events are counted twice
+### F33 — a resumed session copies its history, so root segment events are counted twice
 
 A resumed Claude Code session writes earlier history into a NEW transcript file. Measured across
 `~/.claude/projects`: **1,841** `tool_use` ids appear in more than one root transcript, and **3**
@@ -541,7 +541,7 @@ paths. When it has three consumers in three packages, the resolver living in one
 At one consumer this is not worth moving. `tasktracker` is the obvious home if it grows, and #177 is
 the natural moment to decide.
 
-### F33 — SCM keys and most session facts still match a substring, so a mention reads as authorship
+### F34 — SCM keys and most session facts still match a substring, so a mention reads as authorship
 
 `authoringVerbs` (`internal/collector/claudecode/scm.go`) and every `factRules` entry except "opened a
 PR" (`facts.go`) match their verb anywhere in a command. Measured over the real corpus for the one
@@ -557,7 +557,7 @@ evidence F20 measured on its current behaviour, and changing it changes matching
 work explicitly did not. `ghPRCreateInvocations`' lexer is general enough to recognize any verb at
 command position if that is wanted.
 
-### F31 — a subagent transcript's `gitBranch` is its parent's branch, not its own
+### F32 — a subagent transcript's `gitBranch` is its parent's branch, not its own
 
 Claude Code writes the PARENT session's branch into every line of a subagent transcript. Of 31 subagent
 metas naming a `worktreeBranch`, 27 never show it in `gitBranch`, which instead holds the parent's
@@ -582,10 +582,10 @@ does not yet do. Not fixable at the source; recorded so nobody "restores" the fi
 | F3 — concrete backend in the correlator | **#183** |
 | F5 — dead schema (estimates, ledger) | **resolved**: both dropped. Only TWO tables, not the three the finding claimed — a miscount nobody had checked. Existing databases keep their orphans, since this package has no migration mechanism, which is harmless because nothing referenced them |
 | F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here |
-| F31 — subagent `gitBranch` is the parent's | open, mitigated: never emitted as `ArtifactGitBranch` for a subagent. Not fixable at the source |
-| F32 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
-| F33 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
-| F34 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
+| F32 — subagent `gitBranch` is the parent's | open, mitigated: never emitted as `ArtifactGitBranch` for a subagent. Not fixable at the source |
+| F33 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
+| F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
+| F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |

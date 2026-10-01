@@ -1363,7 +1363,7 @@ Widening it had its own trap, found only by reading the real files before writin
 lines carry its **parent's** `sessionId`. Today's ExternalIDs took the session from the filename, so
 nothing collided; but an implementation keying on the field — the natural reading — would have given a
 parent and its subagent the same `<id>:<size>:<index>` and let INSERT OR IGNORE discard one, silently
-and permanently (F21). The same reading showed that `gitBranch` is the parent's too (F31), and that
+and permanently (F21). The same reading showed that `gitBranch` is the parent's too (F32), and that
 the session directory holds `tool-results/*.jsonl` that a recursive walk would ingest as sessions.
 
 **Generalizations worth carrying:**
