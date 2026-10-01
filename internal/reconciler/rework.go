@@ -85,8 +85,8 @@ func ReworkOne(
 				"to redraft against", narrativeID)
 	}
 
-	// EligibleEvents, NOT DeltaEvents. DeltaEvents is bounded by
-	// max(actions.created_at), so once the action being edited exists it returns
+	// EligibleEvents, NOT DeltaEvents. DeltaEvents is bounded by the narrative's
+	// latest action of any status, so once the action being edited exists it returns
 	// nothing at all — see store.EligibleEvents' doc comment for the probe. The
 	// commit watermark is both correct here and the same bound every restructure
 	// uses, so an edit and a merge agree on which events are in play.

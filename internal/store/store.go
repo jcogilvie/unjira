@@ -66,17 +66,34 @@ CREATE TABLE IF NOT EXISTS narratives (
 );
 
 CREATE TABLE IF NOT EXISTS narrative_events (
+    -- The link's position in one store-wide sequence, and the ONLY thing that
+    -- decides whether a link is newer than an examination or an action (finding
+    -- F30). Every such comparison is link_seq against a high-water mark recorded
+    -- by linkSeqHighWater: match_examinations.examined_link_seq,
+    -- reconcile_examinations.examined_link_seq, actions.created_link_seq (the
+    -- reconciler's delta) and actions.executed_link_seq (the freeze rule).
+    --
+    -- AUTOINCREMENT, not a plain INTEGER PRIMARY KEY, because links are deleted
+    -- (restructures unlink; relinking an event elsewhere deletes its old row) and a
+    -- plain rowid reissues a deleted newest number — which would then compare
+    -- equal to a high-water mark taken while that row existed.
+    --
+    -- A re-link of an event to the narrative it is already on is INSERT OR IGNORE
+    -- against the UNIQUE below, so it keeps this row and this position: a
+    -- re-linked frozen event stays frozen.
+    link_seq     INTEGER PRIMARY KEY AUTOINCREMENT,
     narrative_id INTEGER NOT NULL REFERENCES narratives (id),
     event_id     INTEGER NOT NULL REFERENCES events (id),
-    -- Sub-second (%f, milliseconds), not %S. The reconciler's delta is
-    -- linked_at > (last action's created_at); at whole-second granularity an
-    -- event linked in the same second as the action is invisible forever,
-    -- because that action's created_at never advances. actions.created_at uses
-    -- this identical format on purpose: both are TEXT and compared lexically,
-    -- and mixing %f with %S inverts the comparison ('.' 0x2E sorts before
-    -- 'Z' 0x5A), so a later event would read as earlier.
+    -- DISPLAY ONLY. Kept because a human-readable time is how most watermark bugs
+    -- here have been diagnosed in a sqlite3 session, and it stays useful in ad-hoc
+    -- queries. It must NEVER again appear in a > / < comparison that decides
+    -- behaviour: it is written at millisecond resolution, so two writes in one
+    -- millisecond are byte-identical and a strict > between them is false — which
+    -- made every watermark compared on it a tombstone for anything inside one
+    -- tick (F30). Compare link_seq instead. (The format is still %f, matching the
+    -- other display timestamps, so they sort together when read by eye.)
     linked_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (narrative_id, event_id)
+    UNIQUE (narrative_id, event_id)
 );
 
 CREATE TABLE IF NOT EXISTS narrative_issues (
@@ -124,7 +141,15 @@ CREATE TABLE IF NOT EXISTS actions (
                                       --   which is a human's ruling — see
                                       --   reconciler.StatusDeclined)
     decided_at   TEXT,
+    -- executed_at is DISPLAY ONLY, like created_at below: the freeze rule reads
+    -- executed_link_seq, never this. See narrative_events.linked_at for why a
+    -- millisecond timestamp must not decide behaviour.
     executed_at  TEXT,
+    -- The link high-water mark when this action was last executed (applied or
+    -- failed), stamped in the same statement as executed_at. The freeze rule —
+    -- "a link made before the narrative's last APPLIED action is frozen" — is
+    -- narrative_events.link_seq > MAX(executed_link_seq). NULL until executed.
+    executed_link_seq INTEGER,
     -- Written by slice 6's triage/rework loop, nothing today. Added now so
     -- that slice does not need a second schema change (see the phase-1 spec's
     -- schema-additions section, where it was specified but never landed).
@@ -140,11 +165,17 @@ CREATE TABLE IF NOT EXISTS actions (
     -- successful apply, so a retried-and-fixed action never reports a stale
     -- reason.
     error        TEXT,
-    -- Same %f format as narrative_events.linked_at, and for the same reason:
-    -- DeltaEvents compares these two TEXT columns lexically
-    -- (linked_at > created_at), so both must share the identical format
-    -- string or the comparison silently inverts.
-    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    -- DISPLAY and ORDERING only — ORDER BY created_at, id is safe because id
+    -- breaks the tie. It must never again be compared with > / < against
+    -- narrative_events.linked_at to decide what is delta; created_link_seq does
+    -- that. Same %f format as linked_at so the two still read side by side.
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- The link high-water mark when this action was created. The reconciler's
+    -- delta (DeltaEvents, hasUnexaminedDelta) is narrative_events.link_seq >
+    -- MAX(created_link_seq) over the narrative's actions of any status. NOT NULL
+    -- with no DEFAULT on purpose: a default would be a guess about which links
+    -- predate the action, and an INSERT that forgets it should fail loudly.
+    created_link_seq INTEGER NOT NULL
 );
 
 -- The estimates and ledger tables were declared here as phase-2 placeholders, with no Go
@@ -257,6 +288,19 @@ func Open(dbPath string) (*Store, error) {
 	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
+	}
+
+	// Checked BEFORE any schema statement, never after. CREATE TABLE IF NOT EXISTS
+	// leaves an older database's existing tables as they were — so a store created
+	// before the link sequence (F30) keeps its old columns — but it also CREATES
+	// whichever tables that store never had, in the new shape. Checking afterwards
+	// therefore refused the store only after already mutating it: a real pre-F30
+	// store came back from a refused open with a new-shaped reconcile_examinations,
+	// which the old build cannot use, breaking the README's "run learn on the old
+	// build first" escape hatch.
+	if err := checkLinkSeqSchema(db, dbPath); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 
 	if _, err := db.Exec(schema + localIssuesSchema + matchExaminationsSchema + reconcileExaminationsSchema); err != nil {

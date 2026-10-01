@@ -51,9 +51,6 @@ func TestMergeFlow_CommittedNarrativeIsTheTarget(t *testing.T) {
 	a, aEvents := seedN(t, s, "A committed", "m:a1", "m:a2")
 	commitAgainst(t, s, a)
 
-	// linked_at has millisecond precision, so sleep past the commit instant
-	// rather than racing it.
-	time.Sleep(5 * time.Millisecond)
 	b, bEvents := seedN(t, s, "B uncommitted", "m:b1")
 
 	eligibleOnB, err := s.EligibleEventIDs(b)

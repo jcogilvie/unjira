@@ -118,9 +118,6 @@ func TestSplitNarrative_KeepsCommittedEventsOnTheSource(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(aid, "applied"))
 
-	// linked_at has millisecond precision; sleep past the commit instant.
-	time.Sleep(5 * time.Millisecond)
-
 	base := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	for i, ext := range []string{"sp:later1", "sp:later2"} {
 		e := events.NewEvent("claude_code", ext, base.Add(time.Duration(i)*time.Hour), "later work")
@@ -170,8 +167,6 @@ func TestSplitNarrative_OnlyEligibleEventsAreOffered(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(aid, "applied"))
-
-	time.Sleep(5 * time.Millisecond)
 
 	base := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	for i, ext := range []string{"sp:free1", "sp:free2"} {

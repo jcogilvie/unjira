@@ -87,11 +87,6 @@ func TestEligibleEventIDs_MixedStateFreezesOnlyThePast(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(id, "applied"))
 
-	// linked_at uses millisecond precision, so sleep past the commit instant
-	// rather than racing it — two links inside the same millisecond would be
-	// indistinguishable and make this test flaky rather than wrong.
-	time.Sleep(5 * time.Millisecond)
-
 	after := events.NewEvent("claude_code", "elig:after", time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC), "later work")
 	_, err = s.InsertEvent(after)
 	require.NoError(t, err)
@@ -212,8 +207,6 @@ func TestEligibleEvents_ExcludesWhatACommitAlreadyDescribed(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(id, "applied"))
 
-	time.Sleep(5 * time.Millisecond)
-
 	later := events.NewEvent("claude_code", "elig:later", time.Date(2026, 8, 28, 11, 0, 0, 0, time.UTC), "more work")
 	_, err = s.InsertEvent(later)
 	require.NoError(t, err)
@@ -244,7 +237,6 @@ func TestEligibleEvents_AgreesWithEligibleEventIDs(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(id, "applied"))
 
-	time.Sleep(5 * time.Millisecond)
 	for i, ext := range []string{"agree:1", "agree:2"} {
 		e := events.NewEvent("claude_code", ext, time.Date(2026, 8, 28, 12, i, 0, 0, time.UTC), "w")
 		_, err := s.InsertEvent(e)

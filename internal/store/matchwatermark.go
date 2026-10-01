@@ -10,20 +10,25 @@ import "fmt"
 // TABLE lands on an existing database while a new COLUMN would need an ALTER nothing
 // runs. A one-row-per-narrative side table gets the same effect and is additive.
 //
-// examined_at is the watermark itself, compared lexically against
-// narrative_events.linked_at, so it MUST use that column's exact format:
-// %Y-%m-%dT%H:%M:%fZ — milliseconds, not whole seconds.
+// examined_link_seq is the watermark itself: the narrative_events link sequence's
+// high-water mark (linkSeqHighWater) at the moment of examination, compared against
+// narrative_events.link_seq. A link made after the examination has a strictly greater
+// link_seq, however little time separates the two writes (finding F30).
 //
-// The narrative_events schema comment states why, and this got it wrong on the first
-// attempt: mixing %f with %S inverts the comparison, because '.' (0x2E) sorts before
-// 'Z' (0x5A), so "…:05Z" > "…:05.123Z" and a LATER event reads as earlier. The
-// re-admission then silently never fires and the watermark becomes a tombstone —
-// exactly the failure the rest of this file argues against. Written by SQLite's own
-// strftime rather than Go's time.Format so there is one source of the format.
+// examined_at is DISPLAY ONLY — how a human reads "when" in a sqlite3 session — and
+// must never again appear in a comparison that decides behaviour. It used to be the
+// watermark, compared as `linked_at > examined_at`, and two millisecond timestamps
+// written inside one millisecond are byte-identical: a narrative examined and linked
+// in the same tick was never re-admitted, so the watermark was a tombstone. Before
+// that, the first attempt wrote whole seconds against linked_at's milliseconds and
+// the comparison inverted outright ('.' 0x2E sorts before 'Z' 0x5A). Two different
+// failures of the same idea; the sequence retires the idea. Still %f, so it reads
+// alongside linked_at by eye.
 const matchExaminationsSchema = `
 CREATE TABLE IF NOT EXISTS match_examinations (
     narrative_id INTEGER PRIMARY KEY REFERENCES narratives (id),
     examined_at  TEXT NOT NULL,
+    examined_link_seq INTEGER NOT NULL,
     reason       TEXT NOT NULL
 );`
 
@@ -38,16 +43,18 @@ CREATE TABLE IF NOT EXISTS match_examinations (
 // population the pass never examined — how F22 presented in the first place.
 //
 // Carries no bound parameters, so it can be concatenated without disturbing either
-// query's argument order. Comparing linked_at > examined_at makes this a watermark: an
-// EXTENDS that links new events re-opens the narrative, because those events can carry
-// keys it did not have when examined.
+// query's argument order. Comparing link_seq > examined_link_seq makes this a
+// watermark: an EXTENDS that links new events re-opens the narrative, because those
+// events can carry keys it did not have when examined. Sequence, not timestamp — see
+// the schema comment above for the millisecond collision that made a timestamp
+// comparison a tombstone (F30).
 const matchExaminationPredicate = `
 		 AND NOT EXISTS (
 		     SELECT 1 FROM match_examinations me
 		     WHERE me.narrative_id = n.id
 		       AND NOT EXISTS (
 		           SELECT 1 FROM narrative_events ne
-		           WHERE ne.narrative_id = n.id AND ne.linked_at > me.examined_at
+		           WHERE ne.narrative_id = n.id AND ne.link_seq > me.examined_link_seq
 		       )
 		 )`
 
@@ -67,10 +74,11 @@ const matchExaminationPredicate = `
 // create is ever proposed.
 //
 // A WATERMARK, NOT A TOMBSTONE. Upserting rather than inserting keeps one row per
-// narrative, and the row records WHEN. A narrative can gain events later via
-// ClusterExtends, and those events can carry keys it did not have when examined — so
-// NarrativesWithoutPrimaryLink re-admits it as soon as an event is linked after
-// examined_at. Recording "never match this" would make an early absence permanent,
+// narrative, and the row records WHEN — as a link-sequence position, which is what
+// decides, and as examined_at, which is for reading. A narrative can gain events later
+// via ClusterExtends, and those events can carry keys it did not have when examined —
+// so NarrativesWithoutPrimaryLink re-admits it as soon as an event is linked after the
+// examination. Recording "never match this" would make an early absence permanent,
 // which is the mistake StatusSuppressed's own doc comment warns about for its case.
 //
 // reason is stored for the operator, never read as control flow: "no candidate keys in
@@ -78,10 +86,12 @@ const matchExaminationPredicate = `
 // telling apart when someone asks why a narrative is quiet.
 func (s *Store) RecordMatchExamined(narrativeID int64, reason string) error {
 	if _, err := s.db.Exec(
-		`INSERT INTO match_examinations (narrative_id, examined_at, reason)
-		 VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?)
+		`INSERT INTO match_examinations (narrative_id, examined_at, examined_link_seq, reason)
+		 VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), `+linkSeqHighWater+`, ?)
 		 ON CONFLICT(narrative_id) DO UPDATE SET
-		     examined_at = excluded.examined_at, reason = excluded.reason`,
+		     examined_at = excluded.examined_at,
+		     examined_link_seq = excluded.examined_link_seq,
+		     reason = excluded.reason`,
 		narrativeID, reason,
 	); err != nil {
 		return fmt.Errorf("recording match examination for narrative %d: %w", narrativeID, err)

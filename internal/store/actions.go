@@ -49,9 +49,12 @@ type ActionRow struct {
 	CreatedAt  string  `json:"created_at"`
 }
 
-// InsertAction writes one proposed action and returns its id. created_at
-// comes from the column DEFAULT so it shares narrative_events.linked_at's
-// format exactly — see DeltaEvents.
+// InsertAction writes one proposed action and returns its id.
+//
+// created_link_seq records the link sequence's high-water mark in the same
+// statement, and is what DeltaEvents bounds on: links made after this insert
+// are the next pass's delta. created_at comes from the column DEFAULT and is for
+// display and ordering only (finding F30).
 func (s *Store) InsertAction(a ActionRow) (int64, error) {
 	return insertActionImpl(s.db, a)
 }
@@ -65,8 +68,8 @@ func (t *Tx) InsertAction(a ActionRow) (int64, error) {
 func insertActionImpl(c dbConn, a ActionRow) (int64, error) {
 	res, err := c.Exec(
 		`INSERT INTO actions
-		   (narrative_id, type, issue_key, payload, confidence, rationale, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		   (narrative_id, type, issue_key, payload, confidence, rationale, status, created_link_seq)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, `+linkSeqHighWater+`)`,
 		a.NarrativeID, a.Type, nullable(a.IssueKey), a.Payload,
 		a.Confidence, nullable(a.Rationale), a.Status,
 	)
@@ -164,9 +167,11 @@ func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, er
 // decided_at and/or executed_at as that state implies.
 //
 // Both stamps are set with the same strftime format the columns default to, so
-// every timestamp in this table remains directly comparable. Terminal-state
-// semantics: any human ruling sets decided_at; only a write that actually
-// reached the tracker sets executed_at.
+// every timestamp in this table reads consistently. Terminal-state semantics:
+// any human ruling sets decided_at; only a write that actually reached the
+// tracker sets executed_at — and, in the same statement, executed_link_seq,
+// which is what the freeze rule compares (EligibleEventIDs). executed_at itself
+// decides nothing (finding F30).
 func (s *Store) UpdateActionStatus(id int64, status string) error {
 	return updateActionStatusImpl(s.db, id, status, nil, nil)
 }
@@ -238,7 +243,12 @@ func updateActionStatusImpl(c dbConn, id int64, status string, feedback, errText
 		// An applied action was necessarily decided, but decided_at may
 		// already be set from an earlier approval — COALESCE preserves the
 		// original ruling time rather than overwriting it.
-		query += `, decided_at = COALESCE(decided_at, ` + ts + `), executed_at = ` + ts
+		//
+		// executed_link_seq is restamped with executed_at on every execution, so
+		// a retried write freezes against the moment it last ran, as executed_at
+		// always recorded.
+		query += `, decided_at = COALESCE(decided_at, ` + ts + `), executed_at = ` + ts +
+			`, executed_link_seq = ` + linkSeqHighWater
 	}
 	query += ` WHERE id = ?`
 	args = append(args, id)

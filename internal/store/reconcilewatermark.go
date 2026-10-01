@@ -19,16 +19,17 @@ import "fmt"
 // database via CREATE TABLE IF NOT EXISTS while a new COLUMN would need an ALTER
 // nothing here runs.
 //
-// examined_at is the watermark itself, compared lexically against
-// narrative_events.linked_at exactly as match_examinations.examined_at is, and for
-// the identical reason: it MUST use that column's %f (millisecond) format, not %S.
-// Mixing formats inverts the lexical comparison ('.' 0x2E sorts before 'Z' 0x5A) and
-// turns the watermark into a tombstone — see design-notes #33's corollary, which cost
-// a debugging cycle on match_examinations before this table existed.
+// examined_link_seq is the watermark itself, exactly as match_examinations'
+// is: the link sequence's high-water mark at the moment of examination, compared
+// against narrative_events.link_seq. examined_at is DISPLAY ONLY and must never again
+// decide anything — compared as `linked_at > examined_at` it was a tombstone for a link
+// made in the same millisecond as the examination (finding F30; see
+// matchExaminationsSchema for the full history, including the earlier %S/%f inversion).
 const reconcileExaminationsSchema = `
 CREATE TABLE IF NOT EXISTS reconcile_examinations (
     narrative_id INTEGER PRIMARY KEY REFERENCES narratives (id),
     examined_at  TEXT NOT NULL,
+    examined_link_seq INTEGER NOT NULL,
     reason       TEXT NOT NULL
 );`
 
@@ -42,8 +43,8 @@ CREATE TABLE IF NOT EXISTS reconcile_examinations (
 // drifting apart is F10's failure mode a third time, a count describing a population
 // the pass never actually examines.
 //
-// Comparing linked_at > examined_at makes this a watermark, not a tombstone: a
-// narrative that gains an event after examined_at is re-admitted, because that event
+// Comparing link_seq > examined_link_seq makes this a watermark, not a tombstone: a
+// narrative that gains an event after the examination is re-admitted, because that event
 // might not be self-authored — dropSelfAuthored runs per-pass on whatever DeltaEvents
 // returns, so a fresh non-unjira event reopens the narrative exactly as a fresh
 // candidate key reopens one in match_examinations.
@@ -53,7 +54,7 @@ const reconcileExaminationPredicate = `
 		     WHERE re.narrative_id = n.id
 		       AND NOT EXISTS (
 		           SELECT 1 FROM narrative_events ne
-		           WHERE ne.narrative_id = n.id AND ne.linked_at > re.examined_at
+		           WHERE ne.narrative_id = n.id AND ne.link_seq > re.examined_link_seq
 		       )
 		 )`
 
@@ -81,10 +82,12 @@ const reconcileExaminationPredicate = `
 // passes re-examine it — see CountReconcileExaminations' test.
 func (s *Store) RecordReconcileExamined(narrativeID int64, reason string) error {
 	if _, err := s.db.Exec(
-		`INSERT INTO reconcile_examinations (narrative_id, examined_at, reason)
-		 VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?)
+		`INSERT INTO reconcile_examinations (narrative_id, examined_at, examined_link_seq, reason)
+		 VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), `+linkSeqHighWater+`, ?)
 		 ON CONFLICT(narrative_id) DO UPDATE SET
-		     examined_at = excluded.examined_at, reason = excluded.reason`,
+		     examined_at = excluded.examined_at,
+		     examined_link_seq = excluded.examined_link_seq,
+		     reason = excluded.reason`,
 		narrativeID, reason,
 	); err != nil {
 		return fmt.Errorf("recording reconcile examination for narrative %d: %w", narrativeID, err)

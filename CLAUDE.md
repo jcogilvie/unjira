@@ -72,8 +72,11 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   declares a tracker record with `events.SetTrackerRecord` (its doc comment says why the producer is
   the only party that can know). The exclusion at clustering does *not* replace the reconciler's exit
   filters — `AnyWorkEvidence`, `suppressTrackerEcho`, `dropSelfAuthored` all stay, because narratives
-  linked before the filter existed still hold tracker records and `narrative_events` rows are never
-  deleted. Entrance stops the pipeline *paying*; exit stops it *speaking*.
+  linked before the filter existed still hold tracker records — `narrative_events` rows are never
+  garbage-collected. They ARE deleted when a link moves (`UnlinkEventFromOtherNarratives` inside a
+  relink, `UnlinkNarrativeEvents` for a triage merge/split), which is why `link_seq` is
+  `AUTOINCREMENT`: a plain rowid would reissue a deleted newest number and make an old position
+  look new. Entrance stops the pipeline *paying*; exit stops it *speaking*.
 - **`internal/correlator/refs` and `internal/correlator/fanout` have no callers yet, and that is
   deliberate.** They are pure, tested implementations of two GitHub-PR-shaped problems: env-mirror
   fan-out (one infra change becoming ~12 near-identical per-region PRs — see

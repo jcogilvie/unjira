@@ -6,6 +6,33 @@ import (
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
+// linkedSinceLastCommit is the freeze rule for one narrative_events row `ne`: was
+// this link made after the narrative's most recent APPLIED action? A link that was
+// not is frozen — a posted comment already describes it.
+//
+// Shared verbatim by EligibleEventIDs (what a restructure may move) and
+// EligibleEvents (what a redraft describes), so the two cannot disagree about which
+// events are still in play. Correlated on ne.narrative_id and free of bound
+// parameters, so it drops into either query unchanged.
+//
+// Compares link SEQUENCE positions, not timestamps (finding F30).
+// actions.executed_link_seq is the link high-water mark stamped in the same statement
+// as executed_at, so a link made after the commit has a strictly greater link_seq.
+// This rule used to read `linked_at > max(executed_at)`: two millisecond timestamps,
+// so an event linked in the same millisecond as the commit read as linked BEFORE it
+// and was frozen — permanently unmovable by any restructure, for a reason no reviewer
+// could see. The sequence is only meaningful because executed_link_seq is recorded
+// against the SAME counter link_seq is drawn from; comparing a link's position with a
+// different table's clock was the whole problem.
+//
+// COALESCE to 0 when no action is applied: below every link_seq, so every link is
+// eligible. MAX ignores an applied row whose executed_link_seq is NULL (one inserted
+// as 'applied' directly, never executed), exactly as the old max(executed_at) ignored
+// its NULL executed_at.
+const linkedSinceLastCommit = `ne.link_seq > COALESCE(
+	(SELECT MAX(a.executed_link_seq) FROM actions a
+	  WHERE a.narrative_id = ne.narrative_id AND a.status = '` + StatusApplied + `'), 0)`
+
 // EligibleEventIDs returns the narrative's event links that may still be
 // reshuffled by a reviewer-driven re-cluster: those linked AFTER the
 // narrative's most recent committed action.
@@ -23,11 +50,9 @@ import (
 // comment can be redrafted, a posted one cannot be unposted. The watermark for
 // "the past" is therefore the last commit, not the narrative's existence.
 //
-// The comparison is lexical on TEXT columns and safe because linked_at and
-// executed_at share the identical strftime('%Y-%m-%dT%H:%M:%fZ') format —
-// deliberately, and the same property DeltaEvents depends on. Mixing %f with
-// %S would silently invert it ('.' 0x2E sorts before 'Z' 0x5A), which is why
-// the actions.created_at schema comment spells that out.
+// The predicate is linkedSinceLastCommit, shared with EligibleEvents, and it
+// compares link SEQUENCE positions rather than timestamps — see that const for
+// why (finding F30).
 //
 // Only status='applied' counts, not merely executed_at being set.
 // UpdateActionStatus stamps executed_at for failed writes too — a failed
@@ -39,21 +64,16 @@ import (
 // real inconsistency caught while planning, not a subtlety worth keeping.
 //
 // A narrative with no committed action has no watermark, so every link is
-// eligible — expressed as "max(executed_at) IS NULL" rather than a separate
+// eligible — expressed inside the one predicate rather than as a separate
 // query, so there is one code path rather than two that could disagree.
 func (s *Store) EligibleEventIDs(narrativeID int64) ([]int64, error) {
 	rows, err := s.db.Query(
 		`SELECT ne.event_id
 		 FROM narrative_events ne
 		 WHERE ne.narrative_id = ?
-		   AND (
-		     (SELECT max(executed_at) FROM actions
-		       WHERE narrative_id = ? AND status = 'applied') IS NULL
-		     OR ne.linked_at > (SELECT max(executed_at) FROM actions
-		       WHERE narrative_id = ? AND status = 'applied')
-		   )
+		   AND `+linkedSinceLastCommit+`
 		 ORDER BY ne.event_id`,
-		narrativeID, narrativeID, narrativeID,
+		narrativeID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying eligible event links for narrative %d: %w", narrativeID, err)
@@ -141,10 +161,11 @@ func (t *Tx) UnlinkEventFromOtherNarratives(keepNarrativeID, eventID int64) erro
 // full events and ordered for reading (occurred_at, then id).
 //
 // This is the redraft delta, and it is deliberately NOT DeltaEvents. DeltaEvents
-// is bounded by max(actions.created_at), so once ANY action exists for a
-// narrative it returns nothing — which is right for "should we propose again"
-// and exactly wrong for "redraft the action that already exists," because the
-// action being edited is itself what suppresses its own source events. Verified
+// is bounded by the narrative's latest action of any status, so once ANY action
+// exists for a narrative it returns none of the events already linked — which is
+// right for "should we propose again" and exactly wrong for "redraft the action
+// that already exists," because the action being edited is itself what
+// suppresses its own source events. Verified
 // by probe: 1 event before inserting an action, 0 after.
 //
 // The commit watermark is the correct bound instead, and not merely as a
@@ -158,14 +179,9 @@ func (s *Store) EligibleEvents(narrativeID int64) ([]events.Event, error) {
 		 FROM narrative_events ne
 		 JOIN events e ON e.id = ne.event_id
 		 WHERE ne.narrative_id = ?
-		   AND (
-		     (SELECT max(executed_at) FROM actions
-		       WHERE narrative_id = ? AND status = 'applied') IS NULL
-		     OR ne.linked_at > (SELECT max(executed_at) FROM actions
-		       WHERE narrative_id = ? AND status = 'applied')
-		   )
+		   AND `+linkedSinceLastCommit+`
 		 ORDER BY e.occurred_at, e.id`,
-		narrativeID, narrativeID, narrativeID,
+		narrativeID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying eligible events for narrative %d: %w", narrativeID, err)
