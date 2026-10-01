@@ -47,7 +47,7 @@ config:
 ---
 flowchart TB
     subgraph sources["Event sources"]
-        CC["Claude Code transcripts<br/>(JSONL on disk;<br/>sliced per branch run)"]
+        CC["Claude Code transcripts<br/>(root + subagent JSONL on disk;<br/>sliced per branch run,<br/>plus one anchor per PR created)"]
         JIRA["Jira Cloud<br/>(issue bodies + changelog<br/>+ comments)"]
         GH["GitHub<br/>(PR opened + merged/closed,<br/>via issue-events timeline)"]
     end
@@ -107,6 +107,15 @@ GitHub-Issues-as-tracker deployment is a materially different, unbuilt feature; 
 `docs/architecture-findings.md` F28). So every arrow out of `GHC` in the diagram above only ever
 reaches `CLUSTER`, never the `SPLIT -->|"tracker state"|` branch — there is no code path for it to
 take.
+
+**A pull request is seen from both sides, under one identifier.** `collector/claudecode` reads root
+session transcripts and the subagent transcripts beneath them (`<session>/subagents/`), and emits two
+event shapes: one per branch run, and one *anchor* per tool call that created a pull request
+(`gh pr create` or the GitHub MCP), keyed on the immutable `tool_use` id. When the call's own result
+names exactly one PR, the anchor carries `events.ArtifactPullRequest` (`<owner>/<repo>#<N>`) — the same
+value `collector/github` sets on every PR event — and both summaries name it, so clustering sees the
+two sides of one fact under the same identifier. Nothing joins on the artifact yet; anchors feed no
+provenance tier, so `gatherCandidates` and matching read exactly what they did before.
 
 **Seven LLM call sites**, all in two packages — `correlator/correlator.go:229`, `:618`, `:1020`,
 `correlator/match.go:574`, `reconciler/draft.go:90`, `:337`, `reconciler/create.go:240`. Nothing

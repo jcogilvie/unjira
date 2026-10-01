@@ -1345,6 +1345,37 @@ tests, one of them an ordinary relink. And the timestamps stay: they are how mos
 diagnosed in a `sqlite3` session. Every schema comment now labels them display-only, so the next
 reader knows they may be read but must not be compared.
 
+## 41. A source one directory too shallow loses the bulk of the data, and nothing reports it
+
+The `claude_code` collector globbed `<root>/*/*.jsonl`. Subagent transcripts live one level deeper,
+at `<slug>/<session>/subagents/agent-<agentId>.jsonl`, and were never read. On disk: **991** subagent
+transcripts against **187** root sessions. In subagent-first development the subagents are where the
+implementation happens, so the collector had been describing the dispatching conversation and
+missing the work it dispatched — and a measurement of ~21 PRs covered by 5 transcript segments was the
+first sign, read at first as a clustering problem.
+
+Nothing failed. A glob that matches fewer files is not an error, a collector that emits fewer events is
+not an error, and every downstream stage worked correctly on what it was given. The loss was only
+visible by comparing what the source *holds* against what the collector *read* — a count nobody had
+taken because the glob looked obviously right.
+
+Widening it had its own trap, found only by reading the real files before writing code: a subagent's
+lines carry its **parent's** `sessionId`. Today's ExternalIDs took the session from the filename, so
+nothing collided; but an implementation keying on the field — the natural reading — would have given a
+parent and its subagent the same `<id>:<size>:<index>` and let INSERT OR IGNORE discard one, silently
+and permanently (F21). The same reading showed that `gitBranch` is the parent's too (F31), and that
+the session directory holds `tool-results/*.jsonl` that a recursive walk would ingest as sessions.
+
+**Generalizations worth carrying:**
+
+- For any file-backed source, count what is on disk against what was collected, once, when the
+  collector is written and whenever its source's layout might have changed. A shallow glob is silent
+  data loss with a clean exit code.
+- Before keying on a field, check whose value it holds. A field shared between parent and child
+  records is an identity for the conversation, not for the record.
+- Read a sample of the real files before designing against a description of them. The description
+  this work started from said a subagent's `gitBranch` reads `main`; it reads the parent's branch,
+  whatever that is — 27 of 31 checkable cases were not `main` at all.
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
