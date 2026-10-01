@@ -136,6 +136,18 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 ./unjira learn --all                 # write all of them
 ```
 
+**The store has no migrations; a schema change needs a fresh one.** Every table is
+`CREATE TABLE IF NOT EXISTS`, so an existing database keeps its old shape. The most recent
+such change orders `narrative_events` links by a monotonic sequence instead of millisecond
+timestamps (finding F30), and a store created before it is refused when opened, naming the
+missing columns and the fix: *delete the database and re-collect* — `rm data/unjira.db`
+(or whatever `db_path` names), then `./unjira collect`. Events re-collect from their
+sources, as far back as each collector's configuration reaches (a JQL `updated >= -14d`
+reaches two weeks). What does not come back is the review queue, its recorded decisions,
+reviewer feedback `learn` has not yet distilled, and — if the `local` tracker backend is
+configured — its issues. The new build cannot open the old store at all, so to keep
+undistilled corrections, run `unjira learn` with the build that created it first.
+
 **Scope your collector JQL to work that is plausibly yours.** unjira reconciles what
 *you* did against what the tracker believes — so a query like `project = PAAS AND
 updated >= -120d` collects every colleague's ticket too, and you end up reviewing

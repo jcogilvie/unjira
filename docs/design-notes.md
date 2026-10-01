@@ -1298,6 +1298,53 @@ The knob ships anyway, inert, reframed as an escape hatch for the one case where
 pass that fails outright: a fragmented narrative beats no narrative. Keeping it is not sunk cost — it
 is the only lever that works at all when the response ceiling would otherwise abort the pass.
 
+## 40. A watermark compared at the clock's resolution is a tombstone inside one tick
+
+F30. Every "is this link newer than that?" decision compared two `strftime('%Y-%m-%dT%H:%M:%fZ','now')`
+values with a strict `>`. Two writes inside one millisecond are byte-identical, so a link made in the
+same millisecond as the examination or action it should have outrun was never newer — and since each
+of these comparisons is a watermark, "never newer" meant *never re-admitted*. The match watermark's own
+doc comment insisted it was "a watermark, not a tombstone". For anything inside one tick, it was a
+tombstone.
+
+> A comparison between two clock readings can only distinguish events the clock can distinguish. If
+> the comparison decides behaviour, its resolution is the clock's, and everything inside one tick is
+> silently resolved in one direction.
+
+**This was the second time.** The `narrative_events` schema comment recorded the first: at whole
+seconds, *"an event linked in the same second as the action is invisible forever."* The fix then was
+`%S` → `%f`. That shrank the window a thousandfold and closed nothing — it converted a failure into a
+flake, which is harder to notice. A finer format answers "how often?", not "whether".
+
+**The flake had been sighted at least four times, and each sighting was filed as a test problem.**
+Twelve `time.Sleep` calls across four packages stepped fixtures past the millisecond, and three of
+their comments measured the defect directly — *"flaked this test roughly one run in four before the
+sleep was added"*, *"failed roughly one run in three before the wait"*, *"roughly 1 in 5 runs without
+the sleep"* — before concluding *"Waiting is the honest fix."* It was honest about the fixture and
+wrong about the system: production does not sleep between a link and an examination. It took
+`TestNarrativesWithoutPrimaryLink_ExaminedIsAWatermarkNotATombstone`, which nobody had padded, to fail
+on `main` (15 of 100 runs) before the shared cause was named.
+
+> A sleep that makes a test pass is a measurement of a race. Before adding one, ask whether production
+> has the gap the sleep provides.
+
+**The finding undercounted, which is incident 29's lesson again.** F30 named two comparisons, the two
+watermarks. A grep for `linked_at` used in a comparison found **six**: those two, the reconciler delta
+(`DeltaEvents` and `hasUnexaminedDelta`), and the freeze rule (`EligibleEventIDs` and `EligibleEvents`).
+The freeze pair was the instructive one — it compared a `narrative_events` timestamp against a
+*different table's* `executed_at`, so a sequence on links alone could not fix it. The fix that works
+is the general one: whatever is on the other side of a comparison records the link sequence's
+high-water mark at the moment it happens (`linkSeqHighWater`), so every comparison is sequence against
+sequence and nothing compares across clocks.
+
+Two details that would have been easy to get wrong. The sequence is `AUTOINCREMENT`, because links
+*are* deleted — restructures unlink, and relinking an event elsewhere deletes its old row — and a plain
+rowid reissues a deleted newest number, which then compares equal to a high-water mark taken while
+that row existed. Dropping `AUTOINCREMENT` (with `MAX(link_seq)` as the high-water mark) fails two
+tests, one of them an ordinary relink. And the timestamps stay: they are how most of these bugs were
+diagnosed in a `sqlite3` session. Every schema comment now labels them display-only, so the next
+reader knows they may be read but must not be compared.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
