@@ -402,6 +402,55 @@ CREATE TABLE narrative_events (
 	require.ErrorContains(t, err, "delete the database and re-collect", "names the fix")
 }
 
+// TestOpen_RefusingAnOldStoreLeavesItUntouched: the refusal must happen BEFORE any
+// schema statement runs. CREATE TABLE IF NOT EXISTS is not harmless on an old store:
+// it creates whichever tables the old build never had, in the NEW shape. That breaks
+// the README's escape hatch ("run learn on the old build first"), since the old
+// build then meets a new-shaped table it cannot use, and it shortens the error,
+// because a table created in the new shape no longer reports its column missing.
+// Found by opening a copy of a real pre-F30 store: the refused open had added
+// reconcile_examinations.
+func TestOpen_RefusingAnOldStoreLeavesItUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+CREATE TABLE narrative_events (
+    narrative_id INTEGER NOT NULL,
+    event_id     INTEGER NOT NULL,
+    linked_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (narrative_id, event_id)
+);`)
+	require.NoError(t, err)
+
+	tables := func() []string {
+		rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`)
+		require.NoError(t, err)
+		defer func() { _ = rows.Close() }()
+
+		var names []string
+		for rows.Next() {
+			var n string
+			require.NoError(t, rows.Scan(&n))
+			names = append(names, n)
+		}
+		require.NoError(t, rows.Err())
+
+		return names
+	}
+	before := tables()
+
+	s, err := store.Open(path)
+	if s != nil {
+		_ = s.Close()
+	}
+	require.Error(t, err)
+
+	assert.Equal(t, before, tables(), "a refused open must not create any table")
+	require.NoError(t, db.Close())
+}
+
 // TestOpen_AFreshStoreOpensTwice: the schema check must pass on a store this build
 // created, including on reopen.
 func TestOpen_AFreshStoreOpensTwice(t *testing.T) {

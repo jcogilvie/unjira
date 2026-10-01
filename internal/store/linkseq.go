@@ -65,6 +65,19 @@ func checkLinkSeqSchema(db *sql.DB, dbPath string) error {
 	var missing []string
 
 	for _, c := range linkSeqColumns {
+		// Runs before the schema is applied, so a table that does not exist yet is
+		// not "missing a column": this build is about to create it in the new shape.
+		// Only a table that already exists without the column marks an old store.
+		var exists int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, c.table,
+		).Scan(&exists); err != nil {
+			return fmt.Errorf("checking %s for table %s: %w", dbPath, c.table, err)
+		}
+		if exists == 0 {
+			continue
+		}
+
 		var n int
 		if err := db.QueryRow(
 			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column,

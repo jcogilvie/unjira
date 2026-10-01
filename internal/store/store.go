@@ -290,16 +290,22 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
 	}
 
-	if _, err := db.Exec(schema + localIssuesSchema + matchExaminationsSchema + reconcileExaminationsSchema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
-	}
-
-	// CREATE TABLE IF NOT EXISTS leaves an older database's tables as they were,
-	// so a store created before the link sequence (F30) arrives here without it.
+	// Checked BEFORE any schema statement, never after. CREATE TABLE IF NOT EXISTS
+	// leaves an older database's existing tables as they were — so a store created
+	// before the link sequence (F30) keeps its old columns — but it also CREATES
+	// whichever tables that store never had, in the new shape. Checking afterwards
+	// therefore refused the store only after already mutating it: a real pre-F30
+	// store came back from a refused open with a new-shaped reconcile_examinations,
+	// which the old build cannot use, breaking the README's "run learn on the old
+	// build first" escape hatch.
 	if err := checkLinkSeqSchema(db, dbPath); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+
+	if _, err := db.Exec(schema + localIssuesSchema + matchExaminationsSchema + reconcileExaminationsSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
 	return &Store{db: db}, nil
