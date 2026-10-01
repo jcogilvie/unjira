@@ -77,7 +77,7 @@ func scmKeys(line map[string]any) []string {
 	var keys []string
 	for _, block := range blocks {
 		b, ok := block.(map[string]any)
-		if !ok || b["type"] != "tool_use" {
+		if !ok || b["type"] != blockTypeToolUse {
 			continue
 		}
 

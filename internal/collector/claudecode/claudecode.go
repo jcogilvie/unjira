@@ -5,7 +5,8 @@
 // <project-slug>/<session-id>/subagents/agent-<agentId>.jsonl (see transcripts.go).
 // Both grow as the work continues. Each changed file yields one snapshot event per
 // branch run (external ID includes the file size, so a transcript that grows
-// produces a new snapshot; identical re-reads dedupe at insert).
+// produces a new snapshot; identical re-reads dedupe at insert), plus one anchor
+// event per pull-request-creating tool call (see anchors.go).
 //
 // This collector is deliberately deterministic: it extracts metadata,
 // ticket-key candidates, and the opening ask. Judging what the session
@@ -52,6 +53,10 @@ const DefaultMinSegmentMessages = 3
 // Named because three call sites compare against it and a typo in any of them would
 // silently produce a session with zero user messages, which reads as "empty transcript".
 const lineTypeUser = "user"
+
+// blockTypeToolUse is the content-block type of a tool call. Three readers — scmKeys,
+// toolCommands and prCreateCalls — select on it, so one spelling.
+const blockTypeToolUse = "tool_use"
 
 // Collector scans Claude Code session transcripts for new work.
 type Collector struct{}
@@ -190,7 +195,8 @@ func sessionLabel(t transcript) string {
 	return "Claude Code session"
 }
 
-// sessionEvents turns one transcript into one event per contiguous branch run.
+// sessionEvents turns one transcript into one event per contiguous branch run, plus one
+// anchor per pull-request-creating tool call whose result it holds (anchors.go).
 //
 // Finding F15: this used to return a single event dated to the session's LAST message.
 // Session e951ef78 ran 71 days across three branches; the run that produced the merge
@@ -225,7 +231,8 @@ func sessionEvents(
 	}
 
 	segs := segments(lines, minSegment)
-	if len(segs) == 0 {
+	resolved, awaiting := transcriptAnchors(lines, excludeCwds)
+	if len(segs) == 0 && len(resolved) == 0 {
 		return nil, nil
 	}
 
@@ -234,7 +241,7 @@ func sessionEvents(
 		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}
 
-	out := make([]events.Event, 0, len(segs))
+	out := make([]events.Event, 0, len(segs)+len(resolved))
 
 	for i, seg := range segs {
 		if len(seg.userTexts) == 0 {
@@ -283,9 +290,20 @@ func sessionEvents(
 		// timestamp — see F15's third consequence.
 		evt.Artifacts["ended_at"] = seg.lastTS
 		evt.Artifacts["session_branches"] = seg.allBranches
+		// Transcript-level, so on every segment of this snapshot: which segment an
+		// in-flight call belongs to does not matter for the one thing this is for,
+		// which is that a deferred anchor leaves a durable trace (see
+		// transcriptAnchors).
+		if len(awaiting) > 0 {
+			evt.Artifacts[artifactAwaitingResult] = marshalStrings(awaiting)
+		}
 		evt.RawRef = path
 
 		out = append(out, evt)
+	}
+
+	for _, a := range resolved {
+		out = append(out, anchorEvent(t, a, mtime))
 	}
 
 	return out, nil

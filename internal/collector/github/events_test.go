@@ -311,3 +311,25 @@ func TestCompletionEvents_ArtifactsMatchOpenedEvent(t *testing.T) {
 	assert.ElementsMatch(t, []string{"PROJ-1", "PROJ-2"}, events.SCMKeysOf(evts[0]))
 	assert.False(t, events.IsTrackerRecord(evts[0]))
 }
+
+// TestEveryPREventCarriesArtifactPullRequest pins the shared identifier both collectors
+// write: the same "<owner>/<repo>#<N>" the ExternalID is built from, on :opened and on
+// every completion event, so a join on events.ArtifactPullRequest needs no parsing of
+// ExternalIDs.
+func TestEveryPREventCarriesArtifactPullRequest(t *testing.T) {
+	pr := samplePR()
+	opened := collectorgithub.OpenedEvent(testRef(t), pr)
+	assert.Equal(t, "o/r#42", opened.Artifacts[events.ArtifactPullRequest])
+
+	pr.State = "closed"
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	pr.ClosedAt = &closedAt
+
+	completions, err := collectorgithub.CompletionEvents(testRef(t), pr,
+		[]ghclient.IssueEvent{closedTimelineEvent(1, closedAt)})
+	require.NoError(t, err)
+	require.NotEmpty(t, completions)
+	for _, evt := range completions {
+		assert.Equal(t, "o/r#42", evt.Artifacts[events.ArtifactPullRequest], evt.ExternalID)
+	}
+}

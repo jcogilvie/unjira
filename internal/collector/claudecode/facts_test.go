@@ -83,6 +83,23 @@ func TestSessionFacts_IgnoresReadingCommands(t *testing.T) {
 	}
 }
 
+// TestSessionFacts_PRMentionIsNotOpeningOne: "opened a PR" is claimed only for an actual
+// `gh pr create` invocation. A substring match fired on a plan document appended through
+// a heredoc and on a python heredoc grepping transcripts for the phrase — both measured
+// in real transcripts — so the summary asserted a PR that was never opened.
+func TestSessionFacts_PRMentionIsNotOpeningOne(t *testing.T) {
+	for _, cmd := range []string{
+		"cat >> docs/plan.md <<'PLANEOF'\n```sh\ngh pr create --title x\n```\nPLANEOF",
+		"python3 - <<'PY'\nWRITE = 'gh pr create'\nPY",
+		`grep -rn "gh pr create" .`,
+	} {
+		assert.NotContains(t, sessionFacts([]map[string]any{factLine(cmd)}), "opened a PR",
+			"command %q only mentions gh pr create", cmd)
+	}
+
+	assert.Contains(t, sessionFacts([]map[string]any{factLine(`cd /w/u && rtk gh pr create --fill`)}), "opened a PR")
+}
+
 // TestSessionFacts_IsBoundedAndDeduplicated is the F16 guard. The whole point is a
 // FIXED-size addition to the summary — a session that commits forty times must add
 // the same handful of words as one that commits once.

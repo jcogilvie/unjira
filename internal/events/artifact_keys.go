@@ -63,6 +63,24 @@ const (
 	//
 	// Same []any storage contract as ArtifactTicketKeys — use SetSCMKeys/SCMKeysOf.
 	ArtifactSCMKeys = "scm_keys"
+
+	// ArtifactPullRequest is the canonical "<owner>/<repo>#<N>" of the pull request
+	// an event is about — the same string the github collector builds its
+	// ExternalIDs from (RepoRef.OwnerRepo() + "#" + number), host omitted, so two
+	// GHES hosts with the same owner/repo are not told apart here either.
+	//
+	// Two writers, one fact seen from both sides. The github collector sets it on
+	// every PR event (:opened, :merged, :closed). The claudecode collector sets it on
+	// a pull-request-creation anchor ONLY when the tool call's own result named
+	// exactly one PR URL — never from flags, context, or inference, so its presence
+	// means "this transcript's call created this PR".
+	//
+	// No reader yet. The intended reader is a deterministic join between a
+	// transcript's anchor and GitHub's :opened event for the same PR, which a later
+	// measurement decides whether to build: the identifier is also in both events'
+	// summaries, which clustering already reads. Until then it is written for that
+	// join, deliberately, rather than orphaned (see F6).
+	ArtifactPullRequest = "pull_request"
 )
 
 // SetTicketKeys records keys on evt as the ArtifactTicketKeys artifact, for a

@@ -156,3 +156,75 @@ func TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchAndSCMKeys(t *tes
 	assert.Equal(t, correlator.ProvenanceSCMCommand, byKey["PROJ-100"].Provenance,
 		"a title/body key read via events.SCMKeysOf must land on ProvenanceSCMCommand, not a prose tier")
 }
+
+// TestArtifactKeyContract_PRAnchorAndGitHubOpenedAgreeOnArtifactPullRequest guards the
+// one artifact with two writers: a claude_code anchor for a `gh pr create` call and the
+// github collector's :opened event for the PR it created must carry the SAME
+// events.ArtifactPullRequest, or the join it exists for would silently match nothing.
+//
+// Both sides are the REAL producers — the claudecode collector reading a transcript
+// file, and collectorgithub.OpenedEvent — for the reason the claude_code contract test
+// above gives: a hand-built event is a third spelling that agrees with neither.
+//
+// It also pins that the anchor adds no matching candidates: anchors are new
+// clusterable evidence, not a new provenance input, and this task changes no matching.
+func TestArtifactKeyContract_PRAnchorAndGitHubOpenedAgreeOnArtifactPullRequest(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "proj-a")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	var raw []byte
+	for _, line := range []map[string]any{
+		{
+			"type": "user", "timestamp": "2026-09-20T10:00:00Z", "cwd": "/w/r",
+			"message": map[string]any{"content": "open the PR for PROJ-42"},
+		},
+		{
+			"type": "assistant", "timestamp": "2026-09-20T10:01:00Z", "cwd": "/w/r",
+			"message": map[string]any{"content": []any{map[string]any{
+				"type": "tool_use", "id": "toolu_01Contract", "name": "Bash",
+				"input": map[string]any{"command": `gh pr create --title "Fix PROJ-42 crash"`},
+			}}},
+		},
+		{
+			"type": "user", "timestamp": "2026-09-20T10:01:05Z", "cwd": "/w/r",
+			"message": map[string]any{"content": []any{map[string]any{
+				"type": "tool_result", "tool_use_id": "toolu_01Contract",
+				"content": "https://github.com/o/r/pull/7\n",
+			}}},
+		},
+	} {
+		b, err := json.Marshal(line)
+		require.NoError(t, err)
+		raw = append(append(raw, b...), '\n')
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "s1.jsonl"), raw, 0o644))
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	var anchor *events.Event
+	require.NoError(t, claudecode.New().Collect(
+		pipeline.CollectContext{Store: s, Options: map[string]any{"transcript_root": root}},
+		func(e events.Event) {
+			if e.Artifacts["anchor_kind"] == "pr_create" {
+				anchor = &e
+			}
+		},
+	))
+	require.NotNil(t, anchor, "the collector must emit an anchor for the gh pr create call")
+
+	ref, err := ghclient.ParseRepoRef("o/r")
+	require.NoError(t, err)
+	opened := collectorgithub.OpenedEvent(ref, ghclient.PullRequest{
+		Number: 7, Title: "Fix PROJ-42 crash", CreatedAt: time.Date(2026, 9, 20, 10, 1, 4, 0, time.UTC),
+	})
+
+	require.NotEmpty(t, opened.Artifacts[events.ArtifactPullRequest])
+	assert.Equal(t, opened.Artifacts[events.ArtifactPullRequest], anchor.Artifacts[events.ArtifactPullRequest],
+		"both sides of the same PR must spell its identifier identically")
+
+	assert.Empty(t, correlator.GatherCandidatesForTest([]correlator.Event{*anchor}, nil, 10, nil),
+		"an anchor must not change matching's inputs")
+}

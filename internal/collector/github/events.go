@@ -75,9 +75,16 @@ func prSummary(ref ghclient.RepoRef, pr ghclient.PullRequest) string {
 // about that issue" (ProvenanceJiraEvent's tier), and a PR merely mentioning a
 // key is a weaker, inferred signal that belongs on ArtifactSCMKeys/
 // ArtifactGitBranch instead.
-func annotate(evt *events.Event, pr ghclient.PullRequest) {
+//
+// It also sets events.ArtifactPullRequest, the "<owner>/<repo>#<N>" this
+// collector's ExternalIDs are built from. The claudecode collector writes the same
+// value on an anchor whose `gh pr create` result named this PR, so the two sides of
+// one fact share an identifier a later deterministic join can read without parsing
+// an ExternalID.
+func annotate(evt *events.Event, ref ghclient.RepoRef, pr ghclient.PullRequest) {
 	evt.Actor = pr.User.Login
 	evt.RawRef = pr.HTMLURL
+	evt.Artifacts[events.ArtifactPullRequest] = fmt.Sprintf("%s#%d", ref.OwnerRepo(), pr.Number)
 	evt.Artifacts[events.ArtifactGitBranch] = pr.Head.Ref
 	events.SetSCMKeys(evt, events.ExtractTicketKeys(pr.Title+" "+pr.Body))
 }
@@ -95,7 +102,7 @@ func OpenedEvent(ref ghclient.RepoRef, pr ghclient.PullRequest) events.Event {
 		prSummary(ref, pr),
 	)
 
-	annotate(&evt, pr)
+	annotate(&evt, ref, pr)
 
 	return evt
 }
@@ -159,7 +166,7 @@ func CompletionEvents(ref ghclient.RepoRef, pr ghclient.PullRequest, timeline []
 			prSummary(ref, pr),
 		)
 		evt.Artifacts[artifactCompletionKind] = kind
-		annotate(&evt, pr)
+		annotate(&evt, ref, pr)
 
 		out = append(out, evt)
 	}
