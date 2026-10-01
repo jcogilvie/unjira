@@ -5,11 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	ghclient "github.com/jcogilvie/unjira/internal/clients/github"
 	"github.com/jcogilvie/unjira/internal/collector/claudecode"
+	collectorgithub "github.com/jcogilvie/unjira/internal/collector/github"
 	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
@@ -110,4 +113,46 @@ func TestArtifactKeyContract_ClaudeCodeCollectorToCorrelator_BranchAndTicketKeys
 	}
 	assert.Contains(t, keys, "PROJ-100", "prose candidates read via events.TicketKeysOf must still surface")
 	assert.Contains(t, keys, "PROJ-205")
+}
+
+// TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchAndSCMKeys is the
+// same end-to-end guard for the github collector, driving its REAL
+// OpenedEvent constructor (not a hand-built events.Event) into the REAL
+// correlator gatherer — mirroring
+// TestArtifactKeyContract_ClaudeCodeCollectorToCorrelator_BranchAndTicketKeys.
+//
+// This collector reuses claudecode's ArtifactGitBranch key verbatim (§2 of
+// the design), so the branch candidate must rank as ProvenanceBranch exactly
+// as it does for a claude_code-sourced event, with zero gatherCandidates
+// changes. The title/body keys land on ArtifactSCMKeys (ProvenanceSCMCommand),
+// not ArtifactTicketKeys — a different tier than claudecode's own prose keys,
+// which is the collector's own deliberate §5 decision.
+func TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchAndSCMKeys(t *testing.T) {
+	ref, err := ghclient.ParseRepoRef("o/r")
+	require.NoError(t, err)
+
+	pull := ghclient.PullRequest{
+		Number: 7, Title: "Fix PROJ-42 crash", Body: "Also touches PROJ-100.",
+		CreatedAt: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC),
+	}
+	pull.Head.Ref = "feature/PROJ-42"
+
+	evt := collectorgithub.OpenedEvent(ref, pull)
+
+	got := correlator.GatherCandidatesForTest([]correlator.Event{evt}, nil, 10, nil)
+
+	keys := make([]string, 0, len(got))
+	byKey := make(map[string]correlator.Candidate, len(got))
+	for _, c := range got {
+		keys = append(keys, c.IssueKey)
+		byKey[c.IssueKey] = c
+	}
+
+	require.Contains(t, keys, "PROJ-42")
+	assert.Equal(t, correlator.ProvenanceBranch, byKey["PROJ-42"].Provenance,
+		"the branch candidate, re-derived from events.ArtifactGitBranch, must outrank the SCM-command tier")
+
+	require.Contains(t, keys, "PROJ-100")
+	assert.Equal(t, correlator.ProvenanceSCMCommand, byKey["PROJ-100"].Provenance,
+		"a title/body key read via events.SCMKeysOf must land on ProvenanceSCMCommand, not a prose tier")
 }

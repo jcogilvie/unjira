@@ -28,6 +28,18 @@ type CollectContext struct {
 	Store       *store.Store
 	Config      config.Config
 	Credentials credentials.Set
+	// GitHubCredentials is a second, independently-keyed credential.Set: Jira's
+	// Credentials is keyed by config connection NAME (a tenant concept — see
+	// config.JiraConnection), while GitHub's is keyed by HOST
+	// (github.com/a GHES instance), because GitHub is an identity provider
+	// rather than a multi-tenant system the way Jira is — one token carries
+	// org membership, so there is no per-connection auth surface to name. Both
+	// are the same credentials.Set type; only the keyspace differs, which is
+	// exactly what that type's generic map[string]Credential shape already
+	// supports without a parallel type. See
+	// docs/superpowers/specs/2026-09-17-github-collector-design.md §8 and
+	// credentials.GitHubEnvVar.
+	GitHubCredentials credentials.Set
 	// Options is this collector's own block from config.Collectors[<name>],
 	// including the "enabled" key that got it selected.
 	Options map[string]any
@@ -56,12 +68,16 @@ type Collector interface {
 //
 // creds is passed to every collector via CollectContext.Credentials, so a
 // remote collector can authenticate without reading the environment itself.
+// githubCreds is the same shape but keyed by host rather than by connection
+// name — see CollectContext.GitHubCredentials's own doc comment for why this
+// is a second Set rather than a second key inside creds.
 func RunCollect(
 	cfg config.Config,
 	s *store.Store,
 	registry map[string]func() Collector,
 	linkExclusions []*regexp.Regexp,
 	creds credentials.Set,
+	githubCreds credentials.Set,
 	log *slog.Logger,
 ) (map[string]int, error) {
 	results := make(map[string]int)
@@ -78,11 +94,12 @@ func RunCollect(
 		var collectErr error
 
 		cc := CollectContext{
-			Store:       s,
-			Config:      cfg,
-			Credentials: creds,
-			Options:     options,
-			Log:         log,
+			Store:             s,
+			Config:            cfg,
+			Credentials:       creds,
+			GitHubCredentials: githubCreds,
+			Options:           options,
+			Log:               log,
 		}
 
 		err := collector.Collect(cc, func(event events.Event) {

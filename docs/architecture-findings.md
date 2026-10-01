@@ -257,7 +257,74 @@ wrong-field trap design-notes #32 records, and is now a true result rather than 
 
 ---
 
-### F1 — refs and fanout await a collector that does not exist yet
+### F30 — the match watermark's strict inequality fails inside one millisecond
+
+`TestNarrativesWithoutPrimaryLink_ExaminedIsAWatermarkNotATombstone` is **flaky on `main`**, and the
+flake is a real defect rather than a slow test. Reproduced while reviewing the GitHub collector, which
+did not cause it:
+
+```
+go test ./internal/store/ -run TestNarrativesWithoutPrimaryLink_ExaminedIsAWatermarkNotATombstone -count=30
+  FAIL — "new work past the watermark must re-open the narrative for matching:
+          recording 'never match this' would make an early absence permanent"
+```
+
+`-count=5` passes; `-count=30` fails. Root cause is the **granularity of the comparison**, not the
+format: `matchExaminationPredicate` re-opens a narrative with `ne.linked_at > me.examined_at`, both
+columns written as `strftime('%Y-%m-%dT%H:%M:%fZ','now')` — millisecond precision. Two `now` calls
+inside one millisecond are byte-identical:
+
+```
+sqlite3 :memory: "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now');"
+  2026-09-21T20:49:09.492Z|2026-09-21T20:49:09.492Z
+```
+
+So a narrative examined and then linked within the same millisecond is **never re-admitted**: the
+strict `>` is false and the watermark behaves as the tombstone its own doc comment says it must not be.
+The test surfaces it because it writes both in quick succession, but the production path has the same
+hazard — a fast `collect`→`match` sequence on a small store can link an event inside the millisecond the
+examination was recorded, and that narrative silently stops being a matching candidate until *another*
+event arrives.
+
+Note this is a **different** bug from the one the format was chosen to avoid: F22's implementation hit
+`%f` vs `%S` inversion (`.` sorting before `Z`), and the fix was to align formats. Both columns are
+correctly aligned here. The residual is that equal timestamps are indistinguishable under `>`, which no
+amount of format agreement fixes.
+
+The same shape exists in `reconcileExaminationPredicate` (F26's fix, `store/reconcilewatermark.go`),
+which compares `linked_at > examined_at` identically. Not yet observed failing there — a reconcile pass
+does more work between the two writes — but the hazard is structural, not incidental to matching.
+
+Open because the fix is a judgement call, and the obvious ones each have a cost:
+
+- **`>=` instead of `>`.** One character, and it makes a same-millisecond link re-open the narrative. But
+  it also re-admits a narrative whose *examination* was the last thing to touch it, so a pass could
+  re-examine the same narrative indefinitely — reintroducing the livelock the watermark exists to break.
+- **Higher-resolution timestamps.** SQLite's `strftime` offers no sub-millisecond precision, so this
+  means generating the value in Go and giving up the "written SQL-side only" property that keeps the two
+  columns' formats from drifting — the exact discipline F22 needed.
+- **A monotonic sequence rather than a timestamp.** Correct, and the biggest change: a counter column or
+  `rowid` comparison sidesteps clock granularity entirely, at the cost of no longer being human-readable
+  in a `sqlite3` session, which is how most of this codebase's watermark bugs have been diagnosed.
+
+A fourth option worth stating because it is tempting and wrong: making the *test* slower (a sleep
+between writes) would hide the defect rather than fix it, and the production hazard would remain.
+
+---
+
+### F1 — refs and fanout await a wiring decision, not a missing collector
+
+**Narrowed 2026-09-21: the GitHub collector this entry was waiting for now exists**
+(`internal/collector/github`, PR lifecycle slice — opened, merged, closed). That does not close
+this finding, because the collector's own slice deliberately does not wire either package in — see
+`docs/superpowers/specs/2026-09-17-github-collector-design.md`'s §6, unchanged by that slice
+landing. `fanout` has a real integration point designed (`groupByFanoutFamily` feeding
+`correlator.WithInstruction`, at the pipeline layer) but deferred to a later slice pending real
+fan-out data; `refs` has no consumer even with a collector in hand, because matching resolves a
+narrative to a *Jira issue key* and nothing in the pipeline represents a GitHub PR-to-PR
+relationship. So the finding's shape has changed — "no collector" is no longer true — but its
+substance has not: both packages remain uncalled, and the reasoning below (unchanged) still
+explains why deleting them would be wrong.
 
 `internal/correlator/refs` and `internal/correlator/fanout` are pure, thoroughly tested, and have
 **zero production callers**. `refs.ParsePRRefs`, `fanout.ClusterFanout` and `fanout.NormalizeTitle`
@@ -273,8 +340,8 @@ Both facts are settled:
   neither can join a Jira event to a Claude Code session. Anything proposing them as the fix for
   disjoint clustering is mistaken about their shape.
 - The problems are real and still expected. `rules/env-mirror-fanout.md` is live at
-  `confidence: high`, drawn from predecessor operational experience, and the README's pipeline
-  diagram lists `(GitHub)` among the planned collectors. Deleting working implementations of a rule
+  `confidence: high`, drawn from predecessor operational experience, and `internal/collector/github`
+  is exactly the collector this finding named as missing. Deleting working implementations of a rule
   the repo still holds would leave the rule describing nothing.
 
 Two commits ever, both from the Python→Go port (`git log -- internal/correlator/refs
@@ -283,20 +350,10 @@ wired in any version, rather than lost in the port.
 
 **What remains open:** nothing in the code. CLAUDE.md's invariant used to claim these two were
 load-bearing today, which was false; it now names `gatherCandidates` and `runSuppression` as the
-pre-filters that actually run, and records these two as awaiting the GitHub collector. This entry
-stays only so a future reader who greps for uncalled packages finds the reasoning instead of
-re-deriving it.
-
-**The GitHub collector now has a design**
-(`docs/superpowers/specs/2026-09-17-github-collector-design.md`), which resolves how each package
-wires in rather than leaving it implied. `fanout` gets a real integration point — a deterministic
-pre-filter feeding `correlator.WithInstruction`, not a physical event merge — but is deferred past
-that design's own first slice pending real fan-out data to validate the heuristic against. `refs`
-turns out to have no consumer even once a GitHub collector exists: matching resolves a narrative to
-a *Jira issue key*, and nothing in the pipeline represents a GitHub PR-to-PR relationship, so
-`refs.Ref.Key()`'s output has nowhere to go yet. That is a **new, more specific instance of this same
-finding** — not a fix, and not a reason to reconsider deletion (the rule these packages implement is
-still live; see that spec's own §6 for why a half-designed consumer would be worse than none).
+pre-filters that actually run, and records these two as awaiting a wiring decision now that the
+GitHub collector exists (see the opening paragraph above for what that decision resolved to, per
+`docs/superpowers/specs/2026-09-17-github-collector-design.md`'s §6). This entry stays only so a
+future reader who greps for uncalled packages finds the reasoning instead of re-deriving it.
 
 ### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
 
@@ -474,6 +531,7 @@ the natural moment to decide.
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
+| F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | open. Flaky on `main` at `-count=30`, and a real production hazard: a narrative examined and linked in the same millisecond is never re-admitted, so the watermark acts as a tombstone. Same shape in both `matchwatermark.go:50` and `reconcilewatermark.go:56`. Three candidate fixes, each with a cost — do NOT "fix" it by slowing the test |
 | F29 — nothing expresses which tracker a narrative's work belongs to | open, **deferred deliberately**. Many-to-many collector↔tracker routing, plus per-tracker write authority. Not reachable with one real tracker; the write-authority half must land BEFORE any tracker that could be public, since a missing gate is discovered by publishing. Decide with F7/**#178** and F28 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |

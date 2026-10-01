@@ -31,6 +31,23 @@ import (
 // any number of configured connections without a new env var per one.
 const EnvVar = "UNJIRA_JIRA_CREDENTIALS"
 
+// GitHubEnvVar is UNJIRA_GITHUB_CREDENTIALS, the GitHub collector's own
+// credential var — same JSON shape and same JSONSet decoder as EnvVar, but a
+// second variable rather than a second key inside EnvVar's object, because
+// the two are unrelated credential kinds (a Jira {email, token} pair per
+// connection name vs. a GitHub {token} per HOST — see
+// docs/superpowers/specs/2026-09-17-github-collector-design.md §8 for why
+// GitHub is keyed by host rather than by a config connection name: GitHub is
+// an identity provider, not a multi-tenant system the way Jira is).
+//
+//	UNJIRA_GITHUB_CREDENTIALS='{"github.com":{"token":"ghp_..."},"github.acme.corp":{"token":"..."}}'
+//
+// Credential.Email is unused for this kind (GitHub needs no email) and is
+// simply left empty — reusing the type rather than adding a parallel
+// Jira-shaped one keeps exactly one decoder for both kinds, which is this
+// package's whole reason for existing as a single parser.
+const GitHubEnvVar = "UNJIRA_GITHUB_CREDENTIALS"
+
 // Credential is one connection's email/token pair.
 type Credential struct {
 	Email string `json:"email"`

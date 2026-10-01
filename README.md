@@ -11,7 +11,7 @@ record; "pushed a branch" never qualifies.
 ## Pipeline
 
 ```
-Claude Code    Jira    (GitHub)   (Slack)       (collectors: deterministic, pluggable;
+Claude Code    Jira    GitHub    (Slack)         (collectors: deterministic, pluggable;
      \           |        |          /            parenthesized = not built yet)
       +----------+--------+---------+
                  |
@@ -203,10 +203,13 @@ internal/
                         narrative_events, narrative_issues, actions, estimates, ledger,
                         pipeline_lock
   config/               config loading (unjira.config.json) and validation
-  credentials/          the JSON-blob credential set from UNJIRA_JIRA_CREDENTIALS
+  credentials/          the JSON-blob credential sets from UNJIRA_JIRA_CREDENTIALS and
+                        UNJIRA_GITHUB_CREDENTIALS
   envfile/              .env loader with repo-root walk-up
   clients/
     jira/               Jira facade over go-jira/v2/cloud (reads + gated writes)
+    github/             GitHub REST facade (reads only, this slice) — PR listing and
+                        per-PR issue-events timeline
     local/              local mimicked tracker — no real tracker reachable
     openai/             OpenAI-shaped LLM facade (litellm, etc.)
   llm/                  backend-agnostic LLM contract: Client, Usage, CredentialSource,
@@ -216,6 +219,8 @@ internal/
   collector/
     claudecode/         Claude Code session transcripts (~/.claude/projects/**/*.jsonl)
     jira/               Jira issues and changelogs as an observed stream
+    github/             GitHub PR lifecycle (opened, merged, closed) as an observed
+                        stream — PRs are work evidence, never a tracker record
   correlator/
     refs/               fully-qualified, range-aware PR/issue reference extraction
     fanout/             env-mirror fan-out clustering
@@ -305,10 +310,11 @@ data/                   SQLite database lives here (gitignored)
   the event log, not a replacement for it.
 - **Buy over build, behind our seam.** Every remote-system client lives under
   `internal/clients/<system>` as a thin facade over its upstream SDK — `clients/jira` over
-  go-jira/v2/cloud today, `clients/litellm`/`clients/github`/`clients/slack` as later
-  integrations land — so the community absorbs that API's churn and divergence stays
-  trivial to reconcile. Hand-rolled only where no wheel exists (the Claude transcript
-  parser).
+  go-jira/v2/cloud, `clients/github` over plain `encoding/json` (the REST surface this slice
+  needs is one listing call plus one per-PR follow-up, not large enough to earn an SDK dependency
+  yet — see the design's own §1), `clients/litellm`/`clients/slack` as later integrations land —
+  so the community absorbs that API's churn and divergence stays trivial to reconcile. Hand-rolled
+  only where no wheel exists (the Claude transcript parser).
 - **Corrections become rules.** Review-queue edits and rejections are distilled into markdown
   rules under `rules/`, fed forward into correlator and reconciler prompts. Approval history
   drives per-action-type autonomy graduation.
@@ -352,12 +358,13 @@ data/                   SQLite database lives here (gitignored)
   (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
   connection count.
 - **Every remote system authenticates the same way: one JSON env var per credential kind, decoded by
-  `internal/credentials`. No system reads another tool's stored state at runtime.** The planned GitHub
-  collector takes `UNJIRA_GITHUB_CREDENTIALS` in that shape, **keyed by host** rather than by a config
-  connection name: GitHub is an identity provider and one token carries org membership, so the auth
-  surfaces that genuinely differ are github.com and a GHES instance. A short `owner/repo` in `repos`
-  elides to `github.com`; a leading segment containing a dot names a GHES host, and that host drives
-  both the credential lookup and the API base URL. So `gh` is a convenient way to *mint* a token and
+  `internal/credentials`. No system reads another tool's stored state at runtime.** The GitHub
+  collector (`internal/collector/github`, PR lifecycle only — opened, merged, closed) takes
+  `UNJIRA_GITHUB_CREDENTIALS` in that shape, **keyed by host** rather than by a config connection
+  name: GitHub is an identity provider and one token carries org membership, so the auth surfaces
+  that genuinely differ are github.com and a GHES instance. A short `owner/repo` in `repos` elides
+  to `github.com`; a leading segment containing a dot names a GHES host, and that host drives both
+  the credential lookup and the API base URL. So `gh` is a convenient way to *mint* a token and
   never a runtime dependency:
 
   ```sh

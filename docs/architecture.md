@@ -49,11 +49,13 @@ flowchart TB
     subgraph sources["Event sources"]
         CC["Claude Code transcripts<br/>(JSONL on disk;<br/>sliced per branch run)"]
         JIRA["Jira Cloud<br/>(issue bodies + changelog<br/>+ comments)"]
+        GH["GitHub<br/>(PR opened + merged/closed,<br/>via issue-events timeline)"]
     end
 
     subgraph collectors["Collectors"]
         CCC["collector/claudecode"]
         JC["collector/jira"]
+        GHC["collector/github"]
     end
 
     STORE[("internal/store<br/>SQLite")]
@@ -82,6 +84,7 @@ flowchart TB
 
     CC --> CCC --> STORE
     JIRA --> JC --> STORE
+    GH --> GHC --> STORE
     STORE --> SPLIT -->|"work evidence"| CLUSTER --> PERSIST --> STORE
     SPLIT -->|"tracker state · never clustered"| STORE
     STORE --> CAND --> MATCH --> STORE
@@ -93,9 +96,17 @@ flowchart TB
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,MATCH,DRAFT llm
-    class CCC,JC,PERSIST,CAND,FILTERS,DECIDE,SPLIT det
+    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT det
     class APPLY danger
 ```
+
+**GitHub PR events never enter `SPLIT`'s tracker-state branch.** A pull request is a thing
+somebody did, work evidence in every deployment `collector/github` supports today — never the
+tracker's own account of itself, since this slice collects no issue-shaped artifacts (a
+GitHub-Issues-as-tracker deployment is a materially different, unbuilt feature; see
+`docs/architecture-findings.md` F28). So every arrow out of `GHC` in the diagram above only ever
+reaches `CLUSTER`, never the `SPLIT -->|"tracker state"|` branch — there is no code path for it to
+take.
 
 **Seven LLM call sites**, all in two packages — `correlator/correlator.go:229`, `:618`, `:1020`,
 `correlator/match.go:574`, `reconciler/draft.go:90`, `:337`, `reconciler/create.go:240`. Nothing
@@ -254,10 +265,12 @@ flowchart TB
     STORE["store"]
     CONFIG["config"]
     CJIRA["clients/jira"]
+    CGH["clients/github"]
     CLOCAL["clients/local"]
     COAI["clients/openai"]
     COLLJ["collector/jira"]
     COLLC["collector/claudecode"]
+    COLLGH["collector/github"]
 
     subgraph contracts["Shared contracts"]
         EVENTS["events"]
@@ -265,6 +278,7 @@ flowchart TB
         LLM["llm"]
         WF["workflow"]
         RULES["rules"]
+        CRED["credentials"]
     end
 
     subgraph orphans["Uncalled — findings F1"]
@@ -273,7 +287,7 @@ flowchart TB
     end
 
     CMD --> PIPE & TRIAGE & GATE & CORR & STORE & CONFIG
-    CMD --> CJIRA & CLOCAL & COAI & COLLJ & COLLC
+    CMD --> CJIRA & CGH & CLOCAL & COAI & COLLJ & COLLC & COLLGH
     PIPE --> RECON & CORR & GATE & STORE & CONFIG
     TRIAGE --> RECON & CORR & STORE
     RECON --> CORR & STORE & CONFIG & WF & LLM & RULES & EVENTS & TT
@@ -287,6 +301,8 @@ flowchart TB
     COAI --> LLM
     COLLJ --> CJIRA & CONFIG & EVENTS & PIPE
     COLLC --> EVENTS & PIPE
+    COLLGH --> CGH & CONFIG & EVENTS & PIPE & CRED
+    PIPE --> CRED
 
     classDef orphan fill:#eaeaea,stroke:#888,stroke-dasharray: 5 5,color:#1a1a1a
     class REFS,FANOUT orphan
