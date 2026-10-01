@@ -35,6 +35,8 @@ golangci-lint run ./...       # or: earthly +lint
 earthly +reviewable           # lint + test; run before opening a PR
 go run ./cmd/unjira collect | digest | status
 UNJIRA_LIVE=1 go test -tags=live ./internal/live/...   # writes to the dev Jira instance; needs creds
+UNJIRA_LIVE=1 go test -tags=live -run TestLiveGitHub -v ./internal/live/   # reads jcogilvie/unjira-sandbox;
+                               # needs UNJIRA_GITHUB_CREDENTIALS (below) and FAILS, not skips, without it
 ```
 
 **Fixture instances, not real ones.** Jira has DEVSBX; GitHub has the private, disposable

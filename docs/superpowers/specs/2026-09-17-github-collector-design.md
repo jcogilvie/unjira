@@ -125,8 +125,62 @@ jcogilvie/unjira-sandbox#3:opened
 event would have been silently discarded by `INSERT OR IGNORE`, never backfilled (F21), with no error
 and no log line. That is the defect measured rather than predicted.
 
-A `live`-tagged test against this repo remains the outstanding piece — the fixture it needs now
-exists, which was the actual blocker. Note the fixture is **read-only** for this slice: the collector
+**The `live`-tagged test now exists:** `internal/live/github_test.go`
+(`UNJIRA_LIVE=1 go test -tags=live -run TestLiveGitHub -v ./internal/live/`). It drives the real
+collector through `pipeline.RunCollect` against the sandbox and asserts structure, not the pinned ids
+above, so recreating the sandbox does not break it: 9 events; per-PR kind counts; ExternalID shape;
+PR #3's two `:closed` events carrying distinct ids; PR #1 carrying both `:merged` and `:closed`;
+`completion_kind` only on completions; no `tracker_record`; `scm_keys` equal to each PR's own
+`DEVSBX-10N`. It also checks that a fresh store inserts every emitted event (fewer inserts would mean a
+silent ExternalID collision), and that a second pass re-emits events but inserts none. With
+`UNJIRA_LIVE=1` and no usable `github.com` credential it **fails** instead of skipping (#37). It was
+written in a worktree with no credentials, so the reviewer verified it:
+
+**Run against real GitHub on 2026-10-01, from an environment holding credentials:**
+
+```
+$ UNJIRA_LIVE=1 go test -tags=live -run TestLiveGitHub -v -count=1 ./internal/live/
+=== RUN   TestLiveGitHubCollectorSandboxLifecycle
+    github_test.go:263: collected from jcogilvie/unjira-sandbox: 9 event(s):
+          jcogilvie/unjira-sandbox#1:closed:31572442369
+          jcogilvie/unjira-sandbox#1:merged:31572442284
+          jcogilvie/unjira-sandbox#1:opened
+          jcogilvie/unjira-sandbox#2:closed:31572443233
+          jcogilvie/unjira-sandbox#2:opened
+          jcogilvie/unjira-sandbox#3:closed:31572443906
+          jcogilvie/unjira-sandbox#3:closed:31572447208
+          jcogilvie/unjira-sandbox#3:opened
+          jcogilvie/unjira-sandbox#4:opened
+--- PASS: TestLiveGitHubCollectorSandboxLifecycle (2.09s)
+    --- PASS: .../PR#1_DEVSBX-101-merged
+    --- PASS: .../PR#2_DEVSBX-102-abandoned
+    --- PASS: .../PR#3_DEVSBX-103-reopened
+    --- PASS: .../PR#4_DEVSBX-104-open
+    --- PASS: .../PR#3_reclosed_has_two_distinct_closed_ids
+=== RUN   TestLiveGitHubCollectorSecondPassAddsNothing
+    github_test.go:384: second pass re-emitted 1 event(s):
+          jcogilvie/unjira-sandbox#4:opened
+--- PASS: TestLiveGitHubCollectorSecondPassAddsNothing (1.17s)
+ok  	github.com/jcogilvie/unjira/internal/live	3.620s
+```
+
+The second pass re-emits only #4 — the one still-open PR, the only one whose `updated_at` can
+still clear the watermark — and inserts nothing, so the idempotency assertion is not a hollow zero.
+
+**Drilled, not just passed.** Restoring the pre-decision ExternalID (stripping the
+`:<timeline-id>` suffix from `:merged`/`:closed`) makes the test fail on exactly the bug it
+exists for:
+
+```
+--- FAIL: TestLiveGitHubCollectorSandboxLifecycle
+    emitted 9 events but the fresh store inserted only 8: some ExternalIDs collided and were
+    silently dropped.
+    --- FAIL: .../PR#1_DEVSBX-101-merged
+    --- FAIL: .../PR#3_DEVSBX-103-reopened
+    --- FAIL: .../PR#3_reclosed_has_two_distinct_closed_ids
+```
+
+Note the fixture is **read-only** for this slice: the collector
 has no write path, so nothing unjira does can alter the sandbox's state, and the PR states above have
 to be driven by hand (or by a future helper) when a new path needs covering.
 
