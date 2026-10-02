@@ -40,6 +40,18 @@ commands for a treatment rep, a two-pass M7 rep (`SHARED_CUT`), and the baseline
 arm runs the same metric code on `main`, which was verified by compiling both probe files against
 `main`'s tree.
 
+**F43 fixed after slice 1, by pre-assignment rather than a hint.** Before clustering,
+`internal/pipeline/preassign.go` joins an unplaced event to a narrative when its
+`events.ArtifactPullRequest` matches a member of exactly one open narrative. The join writes a member
+link at confidence 1.0 with `member_placement = 'identity'` and moves `window_end`, and the event never
+reaches the model. Zero holders, two or more, or a holder that is not open all fall back to the model
+and are reported. The artifact became host-qualified (`<host>/<owner>/<repo>#<N>`) in both writers, so
+the baseline arm's stored values are host-less and the treatment arm's are not. M3 keys on the raw
+value, so each arm is self-consistent. The probe now prints, per pass, what identity placed and every
+fallback (`printPRIdentity`), and M3 counts identity placements. M4's confidence distribution counts
+only the model's placements. The two-pass M3 re-measurement (expected 26/26) needs a credentialed run
+and has not been made. See `docs/architecture-findings.md` F45 and F46 for what the join leaves open.
+
 Verified offline, in the worktree:
 
 ```

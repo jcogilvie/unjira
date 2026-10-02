@@ -85,22 +85,37 @@ Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is clea
 (F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
 `transcriptAnchors` reads every line independently of segmentation.
 
-### F43 — a PR whose lifecycle events land in different passes splits into two narratives
+### F45 — the model can still reshuffle a PR's placed members apart
 
-Measured during slice 1's acceptance run, on BOTH arms, so it is pre-existing. With the window cut at
-2026-09-21, #72's and #73's `:opened` events were clustered in pass 1, and their `:merged`/`:closed`
-events — collected after the cut — were placed in pass 2 into a NEW narrative instead of extending the
-one holding the same PR's `:opened`. All six two-pass reps, treatment and baseline alike; M3 drops from
-26/26 to 24/26.
+The PR identity join (`internal/pipeline/preassign.go`, `planPRIdentity` at `:76`) places only
+UNPLACED events. A narrative's eligible members, the PR's `:opened` among them, are still numbered in
+the clustering prompt whenever that narrative is context, and `Persist` moves any the model puts in
+another cluster (`moveMembers`, `internal/correlator/correlator.go:1522`). The join makes this more
+likely to be offered, though not more likely to be taken: placing a merge extends its narrative's
+`window_end` into the current window, so the narrative becomes context in the very pass that placed
+it (`hidePreAssigned`, `preassign.go:235`, hides only the placed event). A reshuffle that moves
+`:opened` away splits the PR again, with the merge left where identity put it, and a later event for
+that PR then finds two holders and falls back to the model (`PRSeveralHolders`).
 
-**Consequence: this is the common case in production, not an edge.** `watch` runs on a short window,
-and a PR is opened in one pass and merged hours or days later in another, so its two halves meet the
-model in different prompts, one of them only as context-narrative text. The events already share a
-deterministic key, `events.ArtifactPullRequest` (`owner/repo#N`), written by both collectors and read
-today only by the dispute re-ask's evidence. A deterministic pre-filter — an event whose
-`ArtifactPullRequest` matches an existing narrative's member is offered as extending it, or the
-narrative is surfaced to the model as the obvious home — would close it without moving judgment out
-of the model. Unbuilt; the shape is a judgment call (hint versus pre-assignment).
+Not introduced by the join. Every eligible member has always been open to reshuffling, and the
+single-pass acceptance reps held M3 at 26/26, so the model does not appear to do this. Unmeasured
+since the join landed: the two-pass reps will show it as an M3 split whose identity half was placed
+by `identity` (`narrative_events.member_placement`). If it occurs, the remedy is to number no eligible
+member whose PR an open narrative already holds by identity. That is a prompt-shape decision, and is
+not taken here.
+
+### F46 — a dry run's clustering context can differ from the real pass's when the PR join fires
+
+`NarrateOptions.DryRun` (`internal/pipeline/narrate.go:18`) promises the reported narratives are
+"exactly what would have been persisted". When the PR identity join places an event, the real pass
+writes first, moving the holder's `window_end` into the window, so `NarrativesOverlapping`
+(`internal/store/narratives.go:291`) returns the holder as clustering context. A dry run writes
+nothing (`preassign.go:157`), so a holder whose stored window ends before the pass's window is not
+context in the dry run's prompt. The dry run reports the placement itself correctly, but it clusters
+the remaining events against one fewer context narrative than the real pass would, and can cluster
+them differently. **Consequence:** a dry run is a slightly weaker preview exactly in the steady-state
+`watch` case, a PR merging days after it opened. Fixing it means hydrating each planned target as if
+extended. Not done here because no measurement shows the difference matters. Frequency unmeasured.
 
 ### F44 — one malformed model response kills the whole pass
 
@@ -670,13 +685,15 @@ action). F41's ruling sequence would be the natural place.
 | F1 — refs/fanout await the GitHub collector | resolved: keep, invariant corrected. Not a blocker. |
 | F3 — concrete backend in the correlator | **#183** |
 | F5 — dead schema (estimates, ledger) | **resolved**: both dropped. Only TWO tables, not the three the finding claimed — a miscount nobody had checked. Existing databases keep their orphans, since this package has no migration mechanism, which is harmless because nothing referenced them |
-| F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here. Narrowed 2026-10-02: `events.ArtifactPullRequest` gained a reader, the dispute re-ask's evidence |
+| F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here. Narrowed 2026-10-02: `events.ArtifactPullRequest` gained readers, the dispute re-ask's evidence and then the PR identity join (F43) |
 | F32 — subagent `gitBranch` is the parent's | open, mitigated: never emitted as `ArtifactGitBranch` for a subagent. Not fixable at the source |
 | F33 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
 | F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
 | F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
 | F39 — the dispute re-ask's prompt is unbounded | open. Found building slice 1's F36 test |
-| F43 — cross-pass PR split | open. #72/#73 split in all 6 two-pass acceptance reps, both arms; `ArtifactPullRequest` is the deterministic key with no reader for this yet |
+| F43 — cross-pass PR split | **resolved**: PR-identity pre-assignment before clustering (`pipeline/preassign.go`). An unplaced event whose host-qualified `ArtifactPullRequest` matches a member of exactly one open narrative joins it, unseen by the model; ambiguity falls back to the model and is reported. Drills: removing the exactly-one, open-status and host guards each fail a named test. Two-pass M3 re-measurement awaits a credentialed run |
+| F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Unmeasured |
+| F46 — a dry run's clustering context can differ when the PR join fires | open. A dry run does not extend the holder's window, so it may not be context. Unmeasured |
 | F44 — a malformed model response kills the pass | open. 1 death in 11 passes; re-ask-once-then-fail is the likely shape |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |

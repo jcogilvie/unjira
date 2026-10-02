@@ -140,11 +140,13 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 
 **The store has no migrations; a schema change needs a fresh one.** There will be none until
 unjira is productionized. Every table is `CREATE TABLE IF NOT EXISTS`, so an existing database
-keeps its old shape. The most recent such change gives every `narrative_events` link a kind
-(`member` or `context`) and every member link a confidence
-(`docs/superpowers/specs/2026-10-02-shared-context-design.md`); the one before ordered links
-by a monotonic sequence instead of millisecond timestamps (finding F30). A store created before
-either is refused when opened, BEFORE any schema statement runs, naming the missing columns, the
+keeps its old shape. The most recent such change records who placed every member link
+(`narrative_events.member_placement`: the model, an exact pull-request identity, or a reviewer;
+finding F43's fix). The one before gave every `narrative_events` link a kind (`member` or
+`context`) and every member link a confidence
+(`docs/superpowers/specs/2026-10-02-shared-context-design.md`), and the one before that ordered
+links by a monotonic sequence instead of millisecond timestamps (finding F30). A store created
+before any of them is refused when opened, BEFORE any schema statement runs, naming the missing columns, the
 change that added them, and the fix: *rename the database to a backup and re-collect*:
 `mv data/unjira.db data/unjira.db.bak` (or whatever `db_path` names), then `./unjira collect`.
 Events re-collect from their
@@ -323,6 +325,15 @@ data/                   SQLite database lives here (gitignored)
   model placed below it in triage, as attributions for a reviewer to confirm. It starts off because a
   model's stated confidence is uncalibrated, and is meant to be set from reviewer rulings. See
   `docs/superpowers/specs/2026-10-02-shared-context-design.md`.
+- **A pull request's later events join its narrative by identity, not by the model.** A PR is opened
+  in one pass and merged in another, and the model, shown the merge alone, filed it as a new story
+  (finding F43). So before clustering, an event carrying the exact pull request
+  (`<host>/<owner>/<repo>#<N>`, host included so a GHES PR never joins a github.com one) that a member
+  of exactly one open narrative carries joins that narrative, as new work the reconciler can act on,
+  and the model never sees it. The narrative's summary is not rewritten for it. Exact identity only:
+  issue keys never join anything, since one PR can touch several issues and one issue several PRs. When
+  the identity is ambiguous (several narratives already hold the PR, or its one holder is not open),
+  the event goes to the model as before, and the pass summary's `identity` lines say which and why.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.
