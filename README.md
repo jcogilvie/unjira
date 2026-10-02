@@ -202,7 +202,9 @@ Testing: `go test ./...` runs the offline tiers and is what CI runs per-push (th
 build tag excludes `internal/live` entirely — it won't even compile without it).
 `UNJIRA_LIVE=1 go test -tags=live ./internal/live/...` runs the live suite, which writes to
 the dev Jira instance and cleans up after itself; in CI that's the `integration` job, gated
-behind the `live-jira` environment.
+behind the `live-jira` environment. The rule that decides whether a failed Jira collector test
+blames the change or Jira's search index is a pure function with offline tests, runnable without
+credentials: `go test -tags=live -run 'TestClassify|TestGitHubAnnotation' ./internal/live/`.
 
 ## Layout
 

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	jiracloud "github.com/andygrunwald/go-jira/v2/cloud"
@@ -127,12 +128,56 @@ type searchPage struct {
 	NextPageToken string           `json:"nextPageToken"`
 }
 
+// maxReconcileIssues is Jira's documented cap on /search/jql's reconcileIssues.
+const maxReconcileIssues = 50
+
 // SearchIssues walks every page of a JQL search (via /search/jql), calling
 // visit for each issue, up to limit results.
+//
+// The results are EVENTUALLY consistent: Atlassian documents that a write can
+// take "from a few seconds to minutes" to appear in search. See
+// SearchIssuesReconciled for the read-after-write form.
 func (c *Client) SearchIssues(jql string, fields []string, limit int, visit func(map[string]any)) error {
+	return c.search(jql, fields, limit, nil, visit)
+}
+
+// SearchIssuesReconciled is SearchIssues with read-after-write consistency for
+// the issues named in reconcile: Jira evaluates the JQL against their CURRENT
+// state rather than the lagging search index, so a just-created or just-edited
+// issue in that list is returned exactly when it satisfies the JQL. Issues not in
+// the list are still served from the index. At most 50 ids, per Jira; more is an
+// error rather than a silent truncation, because a dropped id is a consistency
+// guarantee quietly not given.
+//
+// See https://developer.atlassian.com/cloud/jira/platform/search-and-reconcile/.
+func (c *Client) SearchIssuesReconciled(
+	jql string, fields []string, limit int, reconcile []int64, visit func(map[string]any),
+) error {
+	if len(reconcile) > maxReconcileIssues {
+		return fmt.Errorf("cannot reconcile %d issue ids in one search: Jira accepts at most %d",
+			len(reconcile), maxReconcileIssues)
+	}
+
+	return c.search(jql, fields, limit, reconcile, visit)
+}
+
+// search is the pagination loop behind SearchIssues and SearchIssuesReconciled.
+// reconcile, when non-empty, is sent on EVERY page: Atlassian requires the list
+// to be "consistent with each paginated request across different pages".
+func (c *Client) search(
+	jql string, fields []string, limit int, reconcile []int64, visit func(map[string]any),
+) error {
 	fieldParam := "*all"
 	if len(fields) > 0 {
 		fieldParam = joinComma(fields)
+	}
+
+	// An exploded array, one param per id, as the OpenAPI spec declares it. Built
+	// once: it is identical on every page by requirement.
+	var reconcileParams strings.Builder
+	for _, id := range reconcile {
+		reconcileParams.WriteString("&reconcileIssues=")
+		reconcileParams.WriteString(strconv.FormatInt(id, 10))
 	}
 
 	var token string
@@ -144,7 +189,7 @@ func (c *Client) SearchIssues(jql string, fields []string, limit int, visit func
 		path := fmt.Sprintf(
 			"rest/api/3/search/jql?jql=%s&fields=%s&maxResults=%d",
 			urlQueryEscape(jql), urlQueryEscape(fieldParam), pageSize,
-		)
+		) + reconcileParams.String()
 		if token != "" {
 			path += "&nextPageToken=" + urlQueryEscape(token)
 		}

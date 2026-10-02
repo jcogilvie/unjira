@@ -591,6 +591,20 @@ place it. Not fixed alongside that check because the right semantics depend on t
 double-assignment design (`docs/superpowers/specs/2026-10-02-shared-context-design.md`): give an
 eligible event to one half only, or dedupe at merge with a stated winner.
 
+### F38 — the live tier discards every seed-issue delete error
+
+Seven cleanups in the live tier delete the issue they created and discard the result:
+`t.Cleanup(func() { _ = client.DeleteIssue(key) })` (`internal/live/jira_test.go` lines 174, 584,
+624, 687, 760, 794; `internal/live/autocommit_test.go:66`). `DeleteIssue` is a DELETE, which the
+client's retry transport deliberately does not retry (`internal/clients/jira/retry.go`), so one
+transient 5xx leaks the issue. **Consequence:** if deletes have been failing, the SCRUM sandbox is
+quietly accumulating `unjira-seed` issues, one per affected test per CI run, and nothing reports it.
+Key numbers climbing proves nothing either way, since Jira never reuses them. Unmeasured: checking
+needs credentials (`labels = unjira-seed AND created < -1d`). The collector tests' shared issue is
+the exception. `deleteCollectorFixture` (`internal/live/index_test.go`) announces a failed delete on
+stderr and as a GitHub `::warning` without failing the run. Applying the same treatment to these
+seven is the obvious fix. It was left out of the index-lag change to keep that diff about one thing.
+
 ---
 
 ## Task cross-references
@@ -605,6 +619,7 @@ eligible event to one half only, or dedupe at merge with a stated winner.
 | F33 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
+| F38 — live-tier delete errors discarded | open. Shared collector fixture already reports its own; seven per-test cleanups still `_ =` |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |

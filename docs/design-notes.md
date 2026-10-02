@@ -694,8 +694,10 @@ because the fix belongs in exactly one place:
 - **Size a timeout for the TAIL, not the median — and know which bound actually binds.** The lag's
   median (~3s) was measured correctly and written down correctly; every timeout in this tier was then
   sized against it. The tail is 24s. The original 20x1s poll gave exactly 20s and failed ~1 run in 3;
-  an 8-try exponential budget exhausted at ~24.6s, landing *on* the worst observed value, which
-  improved the rate enough to look fixed without being fixed. Separately: `WithMaxTries(8)` and
+  an 8-try exponential budget, recorded here as exhausting at ~24.6s, improved the rate enough to
+  look fixed without being fixed. (That figure, and the "~57s" claimed for the 10-try budget that
+  replaced it, counted tries as waits. N tries is N−1 waits, so the real figures are ~16s and ~37s
+  of sleep. See #43.) Separately: `WithMaxTries(8)` and
   `WithMaxElapsedTime(45s)` were set as independent bounds, but tries always tripped first, so the
   elapsed-time ceiling was dead code that read like protection.
 - **Re-measure before enlarging a budget.** A steadily-growing tail is a fact about the dependency
@@ -1403,6 +1405,65 @@ The same shape applies anywhere a model returns a selection over numbered inputs
 verdicts per candidate, the reconciler's actions per narrative. Each such site should ask what an
 *absent* entry means, and whether anything would notice one.
 
+## 43. A discriminator that re-runs the query under test cannot detect a bug in that query
+
+The Jira collector's live tests failed with `VERDICT: INFRASTRUCTURE` in two CI runs within one
+hour (37042794135 on PR #79, 37053871018 on a docs-only PR #80). Counted by *attempt*, not by each
+run's latest attempt, which hides anything a re-run turned green, that was ~2 in 13 recent
+integration runs. That is a blocker, not a rare flake. The second run lost **two** issues, SCRUM-2270
+and SCRUM-2271, created ~36s apart, for ~80 consecutive seconds. The lag was run-wide, not per-issue
+bad luck.
+
+Three things were wrong, and only the first was the one being chased.
+
+**The budget was smaller than written down.** #26 sized the collector retry at "10 tries, ~57s,
+comfortably past the 24s tail". But 10 tries is 9 waits, and the library's 500ms × 1.5ⁿ schedule sums
+to ~37s. The failing tests took 36–46s each, which is exactly that plus ~1s per collector pass. The
+margin past the measured tail was half what the comment claimed, and the real tail is longer anyway:
+Atlassian documents search lag as ["from a few seconds to
+minutes"](https://developer.atlassian.com/cloud/jira/platform/search-and-reconcile/), and these runs
+saw ≥46s and ≥80s. Both are lower bounds, because the test gave up and the index did not report.
+
+**One budget was doing two jobs.** The collector retry had to be long enough to outlast lag *and*
+short enough to report a real watermark bug promptly, since a broken `watermarkClause` fails every
+attempt identically and reports only when the budget runs out. Raising it to minutes would make
+every real bug take minutes to report. The fix separates them. A long, cheap readiness wait (one
+key-only search per poll, 3 minutes, paid once per run because both collector tests now share one
+seeded, never-mutated issue) waits for the index to return the issue at all. The short collector
+retry then absorbs only the non-monotonic flaps #26 describes. This is not the probe #26 rejected.
+That probe *replaced* the collector retry. This one precedes it.
+
+**The verdict could not see a scoping bug.** On failure, the test re-ran the collector's *own*
+unbounded JQL against the index and blamed the index if the issue was absent. But that JQL is part of
+what is under test: a broken `EffectiveJQL` (say, a mis-quoted project clause, which Jira answers with
+200-and-nothing) makes the issue invisible to the re-search too, and was therefore reported as
+INFRASTRUCTURE. With a minutes-long readiness wait, it would also have cost minutes before saying so.
+The instrument shared the defect it was meant to detect.
+
+The independent check exists: `/search/jql`'s `reconcileIssues` evaluates the JQL against the named
+issues' *current* state, immune to index lag (`jira.Client.SearchIssuesReconciled`). The live tier now
+runs that consistent read *before* waiting. If the collector's JQL does not match the issue's current
+state while a bare `key = X` control does, three times over ~10s, that is a REAL BUG, reported then
+rather than after the readiness wait. (It must reproduce because if reconcile were silently ignored,
+both probes would be index reads, and #26 saw those two query shapes converge at different moments.)
+If even the control misses, reconcile itself is not behaving as documented, and the eventual verdict
+is UNDETERMINED rather than a guess. Only "the JQL matches fresh state, the index still does not return
+it" is INFRASTRUCTURE. The decision table is a pure function with its own tests
+(`internal/live/index_verdict_test.go`), mutation-checked, rather than a branch drilled once by hand.
+
+**Generalizations worth carrying:**
+
+- **N tries is N−1 waits.** Compute a retry budget from the library's actual schedule, then check it
+  against how long a real failure took. The failure duration is a free measurement of the budget.
+- **When one wait must be both long and short, it is two waits.** Name what each one is for, and size
+  them separately.
+- **A discriminator must not share the defect it discriminates.** "Re-run the thing and see" cannot
+  tell a bug in the thing from an environment fault. Find a check that takes a different path to the
+  truth, such as a consistent read, a fetch by key, or a control query, and give it a control of its
+  own.
+- **Count failures by attempt.** `gh run list` reports each run's latest attempt, so a flake that a
+  re-run turned green disappears from the count. The rate was believed to be 1 in 40 until it was
+  counted properly.
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
