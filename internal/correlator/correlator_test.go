@@ -262,7 +262,8 @@ func TestCluster_HydratedNarrativeEventsAppearAsContextNotAssignable(t *testing.
 	inWindow := []correlator.Event{
 		mustEvent(t, "claude_code", "e1", "debugging cache eviction", base.Add(5*time.Minute)),
 	}
-	llm := &fakeLLM{responses: []string{"[]"}}
+	// A complete response, so no coverage re-ask adds a second prompt.
+	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0]}]`}}
 
 	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 
@@ -1213,7 +1214,9 @@ func TestCluster_EligibleNarrativeEventsAreAssignable(t *testing.T) {
 	inWindow := []correlator.Event{
 		mustEvent(t, "claude_code", "e1", "in-window work", base.Add(5*time.Minute)),
 	}
-	llm := &fakeLLM{responses: []string{"[]"}}
+	// A complete response (in-window index 0, eligible index 1), so no coverage
+	// re-ask adds a second prompt.
+	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0,1]}]`}}
 
 	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 	require.NoError(t, err)
@@ -1254,7 +1257,7 @@ func TestCluster_NoEligibleEventsMatchesTodaysBehaviour(t *testing.T) {
 	inWindow := []correlator.Event{
 		mustEvent(t, "claude_code", "e1", "debugging cache eviction", base.Add(5*time.Minute)),
 	}
-	llm := &fakeLLM{responses: []string{"[]"}}
+	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0]}]`}}
 
 	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 	require.NoError(t, err)
@@ -1285,15 +1288,17 @@ func TestCluster_EligibleEventIndexResolvesToTheRightEvent(t *testing.T) {
 	inWindow := []correlator.Event{
 		mustEvent(t, "claude_code", "e1", "in-window work", base.Add(5*time.Minute)),
 	}
-	// index 0 = in-window, index 1 = the eligible narrative event.
+	// index 0 = in-window, index 1 = the eligible narrative event. Index 0 gets
+	// a cluster of its own so the response is complete and no re-ask runs.
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"title":"t","summary":"s","event_indices":[1]}]`,
+		`[{"kind":"extends","narrative_id":9,"title":"t","summary":"s","event_indices":[1]},` +
+			`{"kind":"new","title":"other","summary":"s","event_indices":[0]}]`,
 	}}
 
 	got, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 
 	require.NoError(t, err, "index 1 must be in range: the parser sees the combined slice")
-	require.Len(t, got, 1)
+	require.Len(t, got, 2)
 	require.Len(t, got[0].Events, 1)
 	assert.Equal(t, "THE ELIGIBLE ONE", got[0].Events[0].Summary,
 		"index 1 must resolve to the eligible narrative event, not an in-window one")

@@ -572,6 +572,25 @@ development — has no branch-tier provenance at all. A subagent's real branch i
 its own tool calls (a `git checkout -b` or `gh pr create --head`), which is extraction this collector
 does not yet do. Not fixable at the source; recorded so nobody "restores" the field.
 
+### F36 — a bisected window numbers a spanning narrative's eligible events in BOTH halves
+
+`clusterWithSplit` recurses with the full `existing` slice (`internal/correlator/correlator.go:612`,
+`:618`), and each half re-filters it with `filterAdjacentOrOverlapping` (`:262`). A context narrative
+whose window overlaps or touches both halves therefore contributes its `EligibleEvents` to both
+halves' `assignableEvents` (`:274`). The model sees the same eligible event numbered in two separate
+calls and can place it differently in each. A probe confirmed this: one eligible event spanning a
+split came back in narrative 9's extend from the first half and in a new cluster from the second.
+`mergeSplitResults` unions the halves without deduplicating by event.
+
+**Consequence:** a cross-half double assignment that no single response contains, so it is invisible
+to anything checking one response. Persist then relinks the event to whichever result it applies
+last (`relinkEvents`). That is a silent, order-dependent choice of narrative. The per-call coverage
+check does NOT make this more likely: it covers only in-window events, and an eligible context event
+either half leaves out simply keeps the link it has. The exposure is only when BOTH halves choose to
+place it. Not fixed alongside that check because the right semantics depend on the pending
+double-assignment design (`docs/superpowers/specs/2026-10-02-shared-context-design.md`): give an
+eligible event to one half only, or dedupe at merge with a stated winner.
+
 ---
 
 ## Task cross-references
