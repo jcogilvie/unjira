@@ -9,20 +9,23 @@ package claudecode
 // had no transcript evidence at all. An anchor per call gives each PR its own.
 //
 // The identity comes from the call's RESULT, not its arguments: `gh pr create` prints
-// the created PR's URL and the GitHub MCP returns it in JSON, which yields
-// `<owner>/<repo>#<N>` exactly — the identifier the github collector keys on. Only the
-// result paired with a recognized PR-creating call is read; tool results in general
-// stay plumbing (see messageText).
+// the created PR's URL and the GitHub MCP returns it in JSON, which yields host, owner,
+// repo and number exactly — the identity the github collector keys on, written as
+// events.PullRequestRef by both. Only the result paired with a recognized PR-creating
+// call is read; tool results in general stay plumbing (see messageText).
 //
 // Anchors are work evidence — opening a PR is a thing somebody did — and deliberately
 // feed no provenance tier: no ArtifactGitBranch, no keys. They add a clusterable event
-// whose summary names the PR; whether that shared identifier is enough, or a
-// deterministic join on events.ArtifactPullRequest is needed, is a later measurement.
+// whose summary names the PR. Only an anchor whose outcome is "created" carries
+// events.ArtifactPullRequest, and that is what the clustering pre-filter's PR-identity
+// join reads: an anchor collected after its PR's narrative exists joins it without a
+// model call, while one collected with its PR's :opened goes to the model with it.
 
 import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,8 +85,9 @@ const (
 )
 
 // pullRequestURL matches a PR's web URL on any host, so a GHES instance resolves too.
+// The host is captured because it is part of the PR's identity (events.PullRequestRef).
 // Requiring digits excludes push output's `/pull/new/<branch>` suggestion.
-var pullRequestURL = regexp.MustCompile(`https?://[^/\s"'<>]+/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)`)
+var pullRequestURL = regexp.MustCompile(`https?://([^/\s"'<>]+)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)`)
 
 // ghAlreadyExists is gh's message when the branch already has a PR. The output carries
 // that PR's URL, so without this check a failure hidden by `| tail` would resolve as a
@@ -111,9 +115,11 @@ type prAnchor struct {
 	outcome    string
 	resolution string
 	reasons    []string
-	pr, url    string
-	candidates []string
-	ts         string
+	// pr is the created PR as the summary names it ("<owner>/<repo>#<N>", the URL's
+	// own spelling); prKey is its events.ArtifactPullRequest value, host-qualified.
+	pr, prKey, url string
+	candidates     []string
+	ts             string
 }
 
 // prCreateCalls returns the PR-creating calls among a line's tool_use blocks.
@@ -260,7 +266,7 @@ func resolvePRAnchor(call prCreateCall, res toolResult) prAnchor {
 		a.ts = call.ts
 	}
 
-	refs, urls := pullRequestRefs(res.text)
+	refs, keys, urls := pullRequestRefs(res.text)
 
 	switch {
 	case res.isError:
@@ -272,7 +278,7 @@ func resolvePRAnchor(call prCreateCall, res toolResult) prAnchor {
 	case len(refs) == 1:
 		a.outcome = outcomeCreated
 		a.resolution = resolutionToolResult
-		a.pr, a.url = refs[0], urls[0]
+		a.pr, a.prKey, a.url = refs[0], keys[0], urls[0]
 
 		return a
 	case len(refs) > 1:
@@ -294,19 +300,32 @@ func resolvePRAnchor(call prCreateCall, res toolResult) prAnchor {
 	return a
 }
 
-// pullRequestRefs returns the distinct `<owner>/<repo>#<N>` a text names, in order of
-// first appearance, with the URL each was first seen as.
-func pullRequestRefs(text string) (refs, urls []string) {
+// pullRequestRefs returns the distinct pull requests a text names, in order of first
+// appearance: each as `<owner>/<repo>#<N>` in the URL's own spelling (for summaries and
+// candidates), as its host-qualified events.PullRequestRef key, and as the URL it was
+// first seen as.
+//
+// Distinct BY KEY: one PR spelled in two cases is one PR, and one owner/repo#N on two
+// hosts is two — which deduplicating on the host-less ref used to merge into one, so a
+// result naming both read as an exact creation.
+//
+// A number too large for an int is no GitHub PR, and is not a URL this matches.
+func pullRequestRefs(text string) (refs, keys, urls []string) {
 	for _, m := range pullRequestURL.FindAllStringSubmatch(text, -1) {
-		ref := fmt.Sprintf("%s/%s#%s", m[1], m[2], m[3])
-		if slices.Contains(refs, ref) {
+		number, err := strconv.Atoi(m[4])
+		if err != nil {
 			continue
 		}
-		refs = append(refs, ref)
+		key := events.PullRequestRef(m[1], m[2], m[3], number)
+		if slices.Contains(keys, key) {
+			continue
+		}
+		refs = append(refs, fmt.Sprintf("%s/%s#%d", m[2], m[3], number))
+		keys = append(keys, key)
 		urls = append(urls, m[0])
 	}
 
-	return refs, urls
+	return refs, keys, urls
 }
 
 // excerpt is the first non-empty line of a result, bounded, for a reason string.
@@ -351,8 +370,8 @@ func anchorEvent(t transcript, a prAnchor, fallback time.Time) events.Event {
 	evt.Artifacts[artifactPROutcome] = a.outcome
 	evt.Artifacts[artifactPRResolution] = a.resolution
 
-	if a.pr != "" {
-		evt.Artifacts[events.ArtifactPullRequest] = a.pr
+	if a.prKey != "" {
+		evt.Artifacts[events.ArtifactPullRequest] = a.prKey
 		evt.Artifacts[artifactPRURL] = a.url
 
 		return evt

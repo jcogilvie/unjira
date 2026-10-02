@@ -76,15 +76,17 @@ func prSummary(ref ghclient.RepoRef, pr ghclient.PullRequest) string {
 // key is a weaker, inferred signal that belongs on ArtifactSCMKeys/
 // ArtifactGitBranch instead.
 //
-// It also sets events.ArtifactPullRequest, the "<owner>/<repo>#<N>" this
-// collector's ExternalIDs are built from. The claudecode collector writes the same
-// value on an anchor whose `gh pr create` result named this PR, so the two sides of
-// one fact share an identifier a later deterministic join can read without parsing
-// an ExternalID.
+// It also sets events.ArtifactPullRequest, the PR's host-qualified identity
+// (events.PullRequestRef). The claudecode collector writes the same value on an anchor
+// whose `gh pr create` result named this PR, so the two sides of one fact share an
+// identifier the clustering pre-filter joins on (pipeline's PR-identity
+// pre-assignment) without parsing an ExternalID. The host is the configured repo's,
+// so a GHES PR never joins a github.com PR with the same owner/repo#N. ExternalIDs and
+// summaries keep the host-less "<owner>/<repo>#<N>" they always had.
 func annotate(evt *events.Event, ref ghclient.RepoRef, pr ghclient.PullRequest) {
 	evt.Actor = pr.User.Login
 	evt.RawRef = pr.HTMLURL
-	evt.Artifacts[events.ArtifactPullRequest] = fmt.Sprintf("%s#%d", ref.OwnerRepo(), pr.Number)
+	evt.Artifacts[events.ArtifactPullRequest] = events.PullRequestRef(ref.Host, ref.Owner, ref.Repo, pr.Number)
 	evt.Artifacts[events.ArtifactGitBranch] = pr.Head.Ref
 	events.SetSCMKeys(evt, events.ExtractTicketKeys(pr.Title+" "+pr.Body))
 }

@@ -224,6 +224,11 @@ func TestArtifactKeyContract_PRAnchorAndGitHubOpenedAgreeOnArtifactPullRequest(t
 	require.NotEmpty(t, opened.Artifacts[events.ArtifactPullRequest])
 	assert.Equal(t, opened.Artifacts[events.ArtifactPullRequest], anchor.Artifacts[events.ArtifactPullRequest],
 		"both sides of the same PR must spell its identifier identically")
+	assert.Equal(t, "github.com/o/r#7", anchor.Artifacts[events.ArtifactPullRequest],
+		"host-qualified (F43): without the host, one owner/repo#N on two hosts would be one key")
+	assert.Equal(t, "github.com/o/r#7", events.PullRequestOf(*anchor),
+		"and in the shape the pre-assignment join reads, or both writers agree on a value nothing joins")
+	assert.Equal(t, events.PullRequestOf(opened), events.PullRequestOf(*anchor))
 
 	assert.Empty(t, correlator.GatherCandidatesForTest([]correlator.Event{*anchor}, nil, 10, nil),
 		"an anchor must not change matching's inputs")

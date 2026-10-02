@@ -34,7 +34,12 @@ import (
 
 // probeKindContext is narrative_events.kind's context value, spelled here rather than
 // as store.LinkContext so this file compiles on the baseline arm, which has no kinds.
-const probeKindContext = "context"
+// The placements are spelled here for the same reason.
+const (
+	probeKindContext      = "context"
+	probePlacedByModel    = "model"
+	probePlacedByIdentity = "identity"
+)
 
 // probeLink is one narrative_events row joined to its event and narrative.
 type probeLink struct {
@@ -43,6 +48,10 @@ type probeLink struct {
 	eventID    int64
 	kind       string // "member" or "context"; "member" on a pre-kind store
 	confidence sql.NullFloat64
+	// placement is narrative_events.member_placement: "model", "identity" or
+	// "reviewer" on a member, "" on a context link and on a store that predates it
+	// (the baseline arm), where every member was the model's or a reviewer's.
+	placement  string
 	source     string
 	externalID string
 	occurredAt time.Time
@@ -81,12 +90,23 @@ func loadProbeLinks(db *sql.DB) ([]probeLink, error) {
 		return nil, fmt.Errorf("checking for narrative_events.kind: %w", err)
 	}
 
+	var hasPlacement int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('narrative_events') WHERE name = 'member_placement'`,
+	).Scan(&hasPlacement); err != nil {
+		return nil, fmt.Errorf("checking for narrative_events.member_placement: %w", err)
+	}
+
 	kindCols := `'member', NULL`
 	if hasKind > 0 {
 		kindCols = `ne.kind, ne.member_confidence`
 	}
+	placementCol := `''`
+	if hasPlacement > 0 {
+		placementCol = `COALESCE(ne.member_placement, '')`
+	}
 
-	rows, err := db.Query(`SELECT ne.link_seq, ne.narrative_id, ne.event_id, ` + kindCols + `,
+	rows, err := db.Query(`SELECT ne.link_seq, ne.narrative_id, ne.event_id, ` + kindCols + `, ` + placementCol + `,
 	        e.source, e.external_id, e.occurred_at, e.artifacts, n.status
 	   FROM narrative_events ne
 	   JOIN events e ON e.id = ne.event_id
@@ -104,7 +124,7 @@ func loadProbeLinks(db *sql.DB) ([]probeLink, error) {
 			occurred  string
 			artifacts string
 		)
-		if err := rows.Scan(&l.seq, &l.narrative, &l.eventID, &l.kind, &l.confidence,
+		if err := rows.Scan(&l.seq, &l.narrative, &l.eventID, &l.kind, &l.confidence, &l.placement,
 			&l.source, &l.externalID, &occurred, &artifacts, &l.status); err != nil {
 			return nil, fmt.Errorf("scanning a link: %w", err)
 		}
@@ -172,8 +192,14 @@ type acceptanceMetrics struct {
 	PRProblems     []string
 	// M4: sharing structure and invariant violations.
 	ContextLinks, SharedEvents, MaxFanOut int
-	MemberConfidences                     []float64 // ascending; empty on a pre-kind store
-	Violations                            []string
+	// MemberConfidences is the MODEL's placements only, ascending; empty on a pre-kind
+	// store. An identity placement records 1.0 as a fact and a reviewer's as a ruling;
+	// neither is the model's stated confidence, which is what the distribution is for.
+	MemberConfidences []float64
+	// IdentityPlacements counts member links the PR-identity join placed (F43): the
+	// share of M3's integrity that no longer depends on the model.
+	IdentityPlacements int
+	Violations         []string
 }
 
 // measureAcceptance computes M1–M4 over links for the window; workless is
@@ -192,7 +218,10 @@ func measureAcceptance(links []probeLink, workless []int64, window correlator.Ti
 			continue
 		}
 		memberHome[l.eventID] = append(memberHome[l.eventID], l.narrative)
-		if l.confidence.Valid {
+		if l.placement == probePlacedByIdentity {
+			m.IdentityPlacements++
+		}
+		if l.confidence.Valid && (l.placement == "" || l.placement == probePlacedByModel) {
 			m.MemberConfidences = append(m.MemberConfidences, l.confidence.Float64)
 		}
 	}
@@ -434,7 +463,8 @@ func renderAcceptance(m acceptanceMetrics) string {
 	for _, p := range m.AnchorProblems {
 		fmt.Fprintf(&b, "      %s\n", p)
 	}
-	fmt.Fprintf(&b, "M3  PR integrity: %d/%d\n", m.PRsIntact, m.PRs)
+	fmt.Fprintf(&b, "M3  PR integrity: %d/%d (%d member link(s) placed by pull-request identity)\n",
+		m.PRsIntact, m.PRs, m.IdentityPlacements)
 	for _, p := range m.PRProblems {
 		fmt.Fprintf(&b, "      %s\n", p)
 	}
@@ -442,7 +472,7 @@ func renderAcceptance(m acceptanceMetrics) string {
 		m.ContextLinks, m.SharedEvents, m.MaxFanOut, len(m.Violations))
 	if n := len(m.MemberConfidences); n > 0 {
 		q := func(p float64) float64 { return m.MemberConfidences[int(p*float64(n-1))] }
-		fmt.Fprintf(&b, "      member confidence min %.2f q1 %.2f median %.2f q3 %.2f max %.2f (n=%d)\n",
+		fmt.Fprintf(&b, "      model's member confidence min %.2f q1 %.2f median %.2f q3 %.2f max %.2f (n=%d)\n",
 			q(0), q(0.25), q(0.5), q(0.75), q(1), n)
 	}
 	for _, v := range m.Violations {

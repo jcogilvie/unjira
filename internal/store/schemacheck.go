@@ -21,6 +21,8 @@ const (
 		"sequence rather than by timestamp"
 	changeLinkKinds = "member and context links (docs/superpowers/specs/2026-10-02-shared-context-design.md), " +
 		"which give every narrative_events link a kind and every member link a confidence"
+	changeMemberPlacement = "member placement (finding F43's pull-request identity join), which records " +
+		"whether the model, an exact pull-request identity or a reviewer placed each member link"
 )
 
 // requiredColumns are the columns this build's queries read that an older store can lack.
@@ -40,6 +42,7 @@ var requiredColumns = []requiredColumn{
 	{"reconcile_examinations", "examined_link_seq", changeLinkSeq},
 	{tableNarrativeEvents, "kind", changeLinkKinds},
 	{tableNarrativeEvents, "member_confidence", changeLinkKinds},
+	{tableNarrativeEvents, "member_placement", changeMemberPlacement},
 }
 
 const tableNarrativeEvents = "narrative_events"
@@ -55,7 +58,9 @@ const tableNarrativeEvents = "narrative_events"
 // actions is exactly what the old timestamps could not establish. The link kinds': that
 // backfill would be exact (every older link is a member, one per event), but it would be
 // unjira's first migration, a precedent to set deliberately for a store someone cannot
-// afford to lose, not inside a feature change against a disposable one.
+// afford to lose, not inside a feature change against a disposable one. Member
+// placement's: a backfill would be a guess, since an older member link may have been
+// placed by the model or by a reviewer's merge, and the store kept no record of which.
 //
 // MUST run before any schema statement: see Open.
 func checkRequiredColumns(db *sql.DB, dbPath string) error {

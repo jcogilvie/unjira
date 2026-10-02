@@ -67,7 +67,7 @@ func TestMergeFlow_CommittedNarrativeIsTheTarget(t *testing.T) {
 	// fails that index on exactly this ordinary case.
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 		for _, eid := range eligibleOnB {
-			if err := tx.MoveMember(a, eid, store.ReviewerMemberConfidence); err != nil {
+			if err := tx.MoveMember(a, eid, store.ReviewerMemberConfidence, store.PlacedByReviewer); err != nil {
 				return err
 			}
 		}

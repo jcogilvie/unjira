@@ -224,7 +224,7 @@ func writeClaimant(b *strings.Builder, pos int, r ClusterResult, disputed Event)
 // reader; this slice deliberately reads none of them.
 func writeEvidence(b *strings.Builder, d dispute, results []ClusterResult) {
 	var lines []string
-	pr := stringArtifact(d.event, events.ArtifactPullRequest)
+	pr := events.PullRequestOf(d.event)
 	branch := stringArtifact(d.event, events.ArtifactGitBranch)
 
 	for _, pos := range d.claimants {
@@ -232,7 +232,7 @@ func writeEvidence(b *strings.Builder, d dispute, results []ClusterResult) {
 			if EventKey(e) == EventKey(d.event) {
 				continue
 			}
-			otherPR := stringArtifact(e, events.ArtifactPullRequest)
+			otherPR := events.PullRequestOf(e)
 			if otherPR == "" {
 				continue
 			}

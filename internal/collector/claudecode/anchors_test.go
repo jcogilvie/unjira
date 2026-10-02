@@ -52,7 +52,8 @@ func TestAnchor_ResolvesOwnerRepoNumberFromToolResult(t *testing.T) {
 
 	a := onlyAnchor(t, got)
 	assert.Equal(t, "pr_create:toolu_01Create", a.ExternalID)
-	assert.Equal(t, "jcogilvie/unjira#76", a.Artifacts[events.ArtifactPullRequest])
+	assert.Equal(t, "github.com/jcogilvie/unjira#76", a.Artifacts[events.ArtifactPullRequest],
+		"host-qualified, so a GHES PR with the same owner/repo#N is a different key (F43)")
 	assert.Equal(t, "created", a.Artifacts["pr_create_outcome"])
 	assert.Equal(t, "tool_result", a.Artifacts["pr_resolution"])
 	assert.Equal(t, "https://github.com/jcogilvie/unjira/pull/76", a.Artifacts["pr_url"])
@@ -81,8 +82,10 @@ func TestAnchor_MCPCreatePullRequestIsRecognized(t *testing.T) {
 	_, got := collect(t, root, nil)
 
 	a := onlyAnchor(t, got)
-	assert.Equal(t, "Sanyaku/helm-charts#445", a.Artifacts[events.ArtifactPullRequest],
-		"the number comes from the URL, not the result's id, which is GitHub's node id")
+	assert.Equal(t, "github.com/sanyaku/helm-charts#445", a.Artifacts[events.ArtifactPullRequest],
+		"the number comes from the URL, not the result's id, which is GitHub's node id; case is folded, "+
+			"since GitHub resolves owner and repo case-insensitively and the github collector reads them from config")
+	assert.Contains(t, a.Summary, "Sanyaku/helm-charts#445", "the summary keeps the URL's own spelling")
 	assert.Equal(t, "mcp__github__create_pull_request", a.Artifacts["tool"])
 }
 
@@ -203,6 +206,42 @@ func TestAnchor_AmbiguousResultNamesEveryCandidate(t *testing.T) {
 	assert.Contains(t, a.Summary, "Sanyaku/b#556")
 }
 
+// TestAnchor_GHESHostIsPartOfTheIdentity: a GHES result yields its own host, and the
+// same owner/repo#N on two hosts is two pull requests — so a result naming both is
+// ambiguous, never one creation. Before host qualification the two URLs collapsed to one
+// "o/r#7" and the call read as an exact creation of a PR it may not have made.
+func TestAnchor_GHESHostIsPartOfTheIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, result, outcome, pr string
+	}{
+		{"one GHES URL", "https://ghes.corp.example/o/r/pull/7\n", "created", "ghes.corp.example/o/r#7"},
+		{
+			"one owner/repo#N on two hosts",
+			"https://github.com/o/r/pull/7\nhttps://ghes.corp.example/o/r/pull/7\n", "ambiguous", "",
+		},
+		{"one PR in two spellings", "https://github.com/O/R/pull/7\nhttps://github.com/o/r/pull/7\n", "created", "github.com/o/r#7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			prSession(t).
+				Bash("2026-09-20T10:01:00Z", "toolu_01Host", "gh pr create --fill").
+				ToolResult("2026-09-20T10:01:05Z", "toolu_01Host", tc.result, false).
+				WriteRoot(root, slug, parentSession)
+
+			_, got := collect(t, root, nil)
+
+			a := onlyAnchor(t, got)
+			assert.Equal(t, tc.outcome, a.Artifacts["pr_create_outcome"])
+			if tc.pr == "" {
+				assert.NotContains(t, a.Artifacts, events.ArtifactPullRequest)
+
+				return
+			}
+			assert.Equal(t, tc.pr, a.Artifacts[events.ArtifactPullRequest])
+		})
+	}
+}
+
 func TestAnchor_MentionIsNotAnAnchor(t *testing.T) {
 	root := t.TempDir()
 	prSession(t).
@@ -278,7 +317,7 @@ func TestAnchor_AwaitingResultIsDeferredVisiblyThenEmitted(t *testing.T) {
 	second := collectWith(t, s, root, nil)
 
 	a := onlyAnchor(t, second)
-	assert.Equal(t, "o/r#10", a.Artifacts[events.ArtifactPullRequest])
+	assert.Equal(t, "github.com/o/r#10", a.Artifacts[events.ArtifactPullRequest])
 	assert.NotContains(t, segmentEvents(second)[0].Artifacts, "pr_creates_awaiting_result")
 }
 

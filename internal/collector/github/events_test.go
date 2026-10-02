@@ -313,13 +313,13 @@ func TestCompletionEvents_ArtifactsMatchOpenedEvent(t *testing.T) {
 }
 
 // TestEveryPREventCarriesArtifactPullRequest pins the shared identifier both collectors
-// write: the same "<owner>/<repo>#<N>" the ExternalID is built from, on :opened and on
-// every completion event, so a join on events.ArtifactPullRequest needs no parsing of
-// ExternalIDs.
+// write: the host-qualified "<host>/<owner>/<repo>#<N>" (events.PullRequestRef), on
+// :opened and on every completion event, so a join on events.ArtifactPullRequest needs
+// no parsing of ExternalIDs.
 func TestEveryPREventCarriesArtifactPullRequest(t *testing.T) {
 	pr := samplePR()
 	opened := collectorgithub.OpenedEvent(testRef(t), pr)
-	assert.Equal(t, "o/r#42", opened.Artifacts[events.ArtifactPullRequest])
+	assert.Equal(t, "github.com/o/r#42", opened.Artifacts[events.ArtifactPullRequest])
 
 	pr.State = "closed"
 	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
@@ -330,6 +330,19 @@ func TestEveryPREventCarriesArtifactPullRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, completions)
 	for _, evt := range completions {
-		assert.Equal(t, "o/r#42", evt.Artifacts[events.ArtifactPullRequest], evt.ExternalID)
+		assert.Equal(t, "github.com/o/r#42", evt.Artifacts[events.ArtifactPullRequest], evt.ExternalID)
 	}
+}
+
+// TestArtifactPullRequest_CarriesTheConfiguredHost: a GHES repo's PR events carry the
+// GHES host, so they never join a github.com PR with the same owner/repo#N (F43). The
+// ExternalID and summary are unchanged; only the join key is qualified.
+func TestArtifactPullRequest_CarriesTheConfiguredHost(t *testing.T) {
+	ref, err := ghclient.ParseRepoRef("ghes.corp.example/o/r")
+	require.NoError(t, err)
+
+	opened := collectorgithub.OpenedEvent(ref, samplePR())
+
+	assert.Equal(t, "ghes.corp.example/o/r#42", opened.Artifacts[events.ArtifactPullRequest])
+	assert.Equal(t, "o/r#42:opened", opened.ExternalID)
 }

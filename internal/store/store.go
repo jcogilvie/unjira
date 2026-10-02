@@ -116,6 +116,18 @@ CREATE TABLE IF NOT EXISTS narrative_events (
     member_confidence REAL CHECK (
         (kind = 'member' AND member_confidence IS NOT NULL AND member_confidence BETWEEN 0 AND 1)
         OR (kind = 'context' AND member_confidence IS NULL)),
+    -- WHO placed a MEMBER link (MemberPlacement): 'model' (a clustering or split answer, at the
+    -- model's stated confidence), 'identity' (the clustering pre-filter joined the event to the
+    -- one open narrative already holding its exact pull request, never shown to the model), or
+    -- 'reviewer' (triage's merge). member_confidence alone cannot say: identity and reviewer both
+    -- record 1.0, and so can the model. A reader calibrating the model's confidence against
+    -- reviewer rulings must count only 'model'. A context link places no member and carries none.
+    --
+    -- Same CHECK shape as member_confidence, and the IS NOT NULL for the same reason: NULL IN (...)
+    -- is NULL, which a CHECK passes (design-notes #44).
+    member_placement TEXT CHECK (
+        (kind = 'member' AND member_placement IS NOT NULL AND member_placement IN ('model', 'identity', 'reviewer'))
+        OR (kind = 'context' AND member_placement IS NULL)),
     UNIQUE (narrative_id, event_id)
 );
 

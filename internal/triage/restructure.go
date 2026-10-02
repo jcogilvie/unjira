@@ -168,9 +168,10 @@ type MergeResult struct {
 // re-homed with Tx.AddContext (a no-op where the target already holds the event) and
 // then deleted from the source.
 //
-// A moved member's confidence becomes store.ReviewerMemberConfidence: the reviewer has
-// ruled that the source's work is the target's, which is a human attribution, not the
-// model's original guess about a different narrative.
+// A moved member's confidence becomes store.ReviewerMemberConfidence, recorded as
+// store.PlacedByReviewer: the reviewer has ruled that the source's work is the target's,
+// which is a human attribution, not the model's original guess about a different
+// narrative.
 //
 // Runs in one transaction. A crash part-way would leave links on both narratives or
 // on neither.
@@ -192,7 +193,7 @@ func (h *StoreHandler) MergeNarratives(targetID, sourceID int64) (MergeResult, e
 
 	if err := h.store.WithTx(func(tx *store.Tx) error {
 		for _, eid := range members {
-			if err := tx.MoveMember(targetID, eid, store.ReviewerMemberConfidence); err != nil {
+			if err := tx.MoveMember(targetID, eid, store.ReviewerMemberConfidence, store.PlacedByReviewer); err != nil {
 				return err
 			}
 		}

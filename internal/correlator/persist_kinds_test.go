@@ -211,6 +211,7 @@ func TestPersist_RecordsConfidenceAndReportsSharing(t *testing.T) {
 				home = n
 				require.NotNil(t, l.MemberConfidence)
 				assert.InDelta(t, tc.want, *l.MemberConfidence, 1e-9, tc.e.ExternalID)
+				assert.Equal(t, store.PlacedByModel, l.Placement, tc.e.ExternalID)
 			}
 		}
 		assert.NotZero(t, home, "%s has a member home", tc.e.ExternalID)
