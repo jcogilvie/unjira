@@ -119,7 +119,15 @@ type Stats struct {
 	// configured (finding F16). Carried on Stats because that is what already flows
 	// from Cluster to internal/pipeline to the rendered pass summary — the same route
 	// EstimatedTokens takes, and reporting the cut is the point of having the cap.
-	Truncation       TruncationReport
+	Truncation TruncationReport
+	// OmittedEvents counts numbered events a clustering response put in no
+	// cluster, and RecoveredEvents how many of those the one follow-up call then
+	// assigned. Both sum across a bisected pass. They differ only on a pass that
+	// failed, because an event still unassigned after the re-ask is a loud error;
+	// on a pass that returned, a non-zero OmittedEvents says the model needed a
+	// second call to account for everything, which an operator should see.
+	OmittedEvents    int
+	RecoveredEvents  int
 	PromptTokens     int64
 	CompletionTokens int64
 	EstimatedTokens  int
@@ -146,6 +154,8 @@ func (s *Stats) Add(other Stats) {
 	if other.Truncation.LongestOriginal > s.Truncation.LongestOriginal {
 		s.Truncation.LongestOriginal = other.Truncation.LongestOriginal
 	}
+	s.OmittedEvents += other.OmittedEvents
+	s.RecoveredEvents += other.RecoveredEvents
 	s.PromptTokens += other.PromptTokens
 	s.CompletionTokens += other.CompletionTokens
 	s.EstimatedTokens += other.EstimatedTokens
@@ -298,12 +308,41 @@ func Cluster(
 	}
 	stats.AddUsage(usage)
 
-	results, err := parseClusterResponse(raw, assignable)
+	results, indices, err := parseClusterResponse(raw, assignable)
 	if err != nil {
 		return nil, stats, err
 	}
 
-	return results, stats, nil
+	// Coverage is checked HERE, per model call, and not after clusterWithSplit
+	// merges two halves: an index means something only against the assignable
+	// slice the prompt that produced it numbered, and a re-ask must show the model
+	// that same prompt. After a merge there is no single prompt to re-ask against,
+	// and rebuilding one for the whole window would be the very prompt that was
+	// too big to send. Each half recurses through this function, so each half's
+	// call is checked here; mergeSplitResults only unions events, never drops one.
+	omitted := unassignedIndices(indices, len(assignable))
+	if len(omitted) == 0 {
+		return results, stats, nil
+	}
+
+	recovered, reaskStats, err := recoverOmittedEvents(ctx, client, reaskRequest{
+		window:              window,
+		userPrompt:          userPrompt,
+		assignable:          assignable,
+		first:               results,
+		firstIndices:        indices,
+		omitted:             omitted,
+		rules:               o.rules,
+		instruction:         o.instruction,
+		contextWindowTokens: contextWindowTokens,
+		log:                 o.log,
+	})
+	stats.Add(reaskStats)
+	if err != nil {
+		return nil, stats, err
+	}
+
+	return recovered, stats, nil
 }
 
 // filterEventsInWindow returns the events in evts whose OccurredAt falls in
@@ -393,15 +432,7 @@ func assignableEvents(inWindow []Event, existing []Narrative) []Event {
 func buildClusterPrompt(
 	evts []Event, existing []Narrative, learnedRules []rules.Rule, instruction string,
 ) (systemPrompt, userPrompt string) {
-	systemPrompt = clusterSystemPrompt
-	if rendered := rules.Render(learnedRules); rendered != "" {
-		systemPrompt += "\n\n" + rendered
-	}
-	// After the rules deliberately — see WithInstruction. A reviewer's judgment
-	// about the narrative in front of them outranks a rule distilled from others.
-	if instruction != "" {
-		systemPrompt += "\n\n" + instruction
-	}
+	systemPrompt = withRulesAndInstruction(clusterSystemPrompt, learnedRules, instruction)
 
 	var b strings.Builder
 	b.WriteString("Events to cluster:\n")
@@ -434,14 +465,46 @@ func buildClusterPrompt(
 	return systemPrompt, b.String()
 }
 
+// withRulesAndInstruction appends the rendered learned rules and then the
+// caller's instruction to a base system prompt. Shared by the first clustering
+// call and its re-ask (cluster_reask.go), so a learned rule or a reviewer's
+// split directive cannot govern where events go on one call and be absent from
+// the other.
+func withRulesAndInstruction(base string, learnedRules []rules.Rule, instruction string) string {
+	systemPrompt := base
+	if rendered := rules.Render(learnedRules); rendered != "" {
+		systemPrompt += "\n\n" + rendered
+	}
+	// After the rules deliberately — see WithInstruction. A reviewer's judgment
+	// about the narrative in front of them outranks a rule distilled from others.
+	if instruction != "" {
+		systemPrompt += "\n\n" + instruction
+	}
+
+	return systemPrompt
+}
+
 const clusterSystemPrompt = `Cluster the given events into narratives. "Events to cluster" are numbered; assign each to exactly one cluster via event_indices. "Existing narratives" are CONTEXT ONLY — never put their events in event_indices; use them only to decide whether a numbered event extends one of them. Tag each cluster "new" or "extends" (include narrative_id when extending). Return ONLY a JSON array matching this shape, no prose, no markdown fences:
 [{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"..., only if new","summary":"...","event_indices":[0,2,5]}]
 
 Omit title when extending: an extended narrative keeps the title it already has, so a title supplied there is discarded unread.
 
-Grouping criterion: a narrative is one logical unit of work — the same underlying piece of work, whatever raw events it took to produce it. Group events into the SAME cluster when they are steps toward the same outcome: the same ticket, branch, PR, or topic; a sequence of commits/comments/status-changes that tell one story end to end. Do NOT group events only because they are close in time, from the same source, or from the same author — those are weak signals, not a reason to merge unrelated work. Conversely, do not split one continuous piece of work into several clusters just because it produced several events.
+` + clusterGroupingCriterion + `
 
 Default to the coarsest grouping that is still accurate. Do not create a separate cluster for every event: a numbered list of N events should very rarely produce N clusters. Before emitting a cluster tagged "new", check the clusters you have ALREADY emitted in this response: if one covers the same ticket/branch/PR/topic, put these events there instead of opening a new one. You cannot revise a cluster once emitted. Only leave two events in separate clusters when they are genuinely unrelated work.`
+
+// clusterGroupingCriterion is what makes events one narrative. Its own constant
+// because the re-ask (clusterReaskSystemPrompt) must judge by the same criterion
+// as the call it follows up on, and two copies would drift.
+const clusterGroupingCriterion = `Grouping criterion: a narrative is one logical unit of work — the same underlying piece of work, whatever raw events it took to produce it. Group events into the SAME cluster when they are steps toward the same outcome: the same ticket, branch, PR, or topic; a sequence of commits/comments/status-changes that tell one story end to end. Do NOT group events only because they are close in time, from the same source, or from the same author — those are weak signals, not a reason to merge unrelated work. Conversely, do not split one continuous piece of work into several clusters just because it produced several events.`
+
+// The response schema's spellings of ClusterKind. Shared by parseClusterResponse,
+// the re-ask's parser, and the re-ask prompt's listing of first-response clusters,
+// so the three cannot spell a kind differently.
+const (
+	wireKindNew     = "new"
+	wireKindExtends = "extends"
+)
 
 // clusterResponseItem is the wire shape of one element in the model's JSON
 // array response.
@@ -459,31 +522,39 @@ type clusterResponseItem struct {
 // kind — is a loud error including the raw response, never a partial or
 // best-effort result.
 //
+// It also returns each result's event_indices as the model wrote them, aligned
+// with the results. Well-formed is not the same as complete: a response can
+// leave a numbered event in no cluster, and only the indices can show that, so
+// Cluster checks coverage on them (unassignedIndices) and the re-ask lists them
+// back to the model. An index in two clusters is accepted here, unchanged:
+// double assignment is a contract a separate design is about to revise.
+//
 // raw is run through llm.JSONArrayPayload first, which strips a markdown fence
 // and wraps a lone object into a one-element array — see that function for why
 // each is treated as a property of the interface, not a prompt bug.
-func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, error) {
+func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, [][]int, error) {
 	var items []clusterResponseItem
 	if err := json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items); err != nil {
-		return nil, fmt.Errorf("parsing cluster response %q: %w", raw, err)
+		return nil, nil, fmt.Errorf("parsing cluster response %q: %w", raw, err)
 	}
 
 	results := make([]ClusterResult, 0, len(items))
+	indices := make([][]int, 0, len(items))
 	for _, item := range items {
 		var kind ClusterKind
 		switch item.Kind {
-		case "new":
+		case wireKindNew:
 			kind = ClusterNew
-		case "extends":
+		case wireKindExtends:
 			kind = ClusterExtends
 		default:
-			return nil, fmt.Errorf("parsing cluster response %q: unknown kind %q", raw, item.Kind)
+			return nil, nil, fmt.Errorf("parsing cluster response %q: unknown kind %q", raw, item.Kind)
 		}
 
 		clusterEvents := make([]Event, 0, len(item.EventIndices))
 		for _, idx := range item.EventIndices {
 			if idx < 0 || idx >= len(evts) {
-				return nil, fmt.Errorf("parsing cluster response %q: event_indices value %d out of range [0,%d)", raw, idx, len(evts))
+				return nil, nil, fmt.Errorf("parsing cluster response %q: event_indices value %d out of range [0,%d)", raw, idx, len(evts))
 			}
 			clusterEvents = append(clusterEvents, evts[idx])
 		}
@@ -495,9 +566,10 @@ func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, error) {
 			Summary:     item.Summary,
 			Events:      clusterEvents,
 		})
+		indices = append(indices, item.EventIndices)
 	}
 
-	return results, nil
+	return results, indices, nil
 }
 
 // clusterWithSplit bisects window in half by time and recurses on each

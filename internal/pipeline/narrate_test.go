@@ -222,7 +222,7 @@ func TestRunNarrate_HydratesOverlappingNarrativeEventsAsContext(t *testing.T) {
 	seedNarrateEvent(t, s, "new", "fixed the cache eviction bug", base.Add(time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -265,7 +265,7 @@ func TestRunNarrate_BoundsContextNarrativesAndReportsWhatWasExcluded(t *testing.
 	seedNarrateEvent(t, s, "new", "new work", base.Add(30*time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1,2]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -304,7 +304,7 @@ func TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited(t *testing.T) {
 	seedNarrateEvent(t, s, "new", "new work", base.Add(30*time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1,2,3]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -364,8 +364,12 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	seedNarrateEvent(t, s, "e3", "third thing", base.Add(2*time.Minute))
 	seedNarrateEvent(t, s, "e4", "fourth thing", base.Add(3*time.Minute))
 	seedNarrateEvent(t, s, "e5", "fifth thing", base.Add(4*time.Minute))
+	// Indices 0-2 are e3-e5 (unlinked); 3-4 are e1-e2, the narrative's eligible
+	// (uncommitted) events, which Cluster numbers too and requires to be assigned.
+	// Re-listing them leaves the compaction arithmetic unchanged, because
+	// mergePostBoundaryEvents dedupes them against the narrative's linked tail.
 	client.responses = append(client.responses,
-		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s1","event_indices":[0,1,2]}]`, narrativeID),
+		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s1","event_indices":[0,1,2,3,4]}]`, narrativeID),
 		"recap of e1-e3",
 	)
 	window2 := correlator.TimeRange{Start: base.Add(time.Minute), End: base.Add(5 * time.Minute)}
@@ -386,8 +390,9 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	// and e5 (2 events) — NOT the 3 events pass 2 already folded plus these 2.
 	seedNarrateEvent(t, s, "e6", "sixth thing", base.Add(5*time.Minute))
 	seedNarrateEvent(t, s, "e7", "seventh thing", base.Add(6*time.Minute))
+	// Indices 0-1 are e6-e7; 2-3 are e4-e5, the still-eligible visible tail.
 	client.responses = append(client.responses,
-		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s2","event_indices":[0,1]}]`, narrativeID),
+		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s2","event_indices":[0,1,2,3]}]`, narrativeID),
 		"recap of e4-e5",
 	)
 	window3 := correlator.TimeRange{Start: base.Add(4 * time.Minute), End: base.Add(7 * time.Minute)}
@@ -441,7 +446,7 @@ func TestHydrateContextNarratives_UncommittedPriorEventsAreAssignable(t *testing
 	require.NoError(t, err)
 
 	seedNarrateEvent(t, s, "h2", "new work", base.Add(2*time.Minute))
-	client.responses = append(client.responses, `[{"kind":"new","title":"T2","summary":"s2","event_indices":[0]}]`)
+	client.responses = append(client.responses, `[{"kind":"new","title":"T2","summary":"s2","event_indices":[0,1]}]`)
 	// window2 starts at base so it OVERLAPS narrative 1's window — otherwise
 	// NarrativesOverlapping excludes it and there is no prior narrative in the
 	// prompt to be assignable or not, which would make this test vacuous.

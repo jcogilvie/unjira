@@ -89,6 +89,17 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 			t.Truncated, t.LongestOriginal)
 	}
 
+	// Only when the model left something out. Rendered even though the pass
+	// succeeded: recovered omissions are how often the model fails to account for
+	// every event it was shown, and the one re-ask is all that stands between that
+	// and a failed pass, so an operator should see how close it came. On a pass
+	// that renders at all the two numbers are equal, since an unrecovered omission
+	// is an error; both are printed so a mismatch could not hide.
+	if r.Stats.OmittedEvents > 0 {
+		fmt.Fprintf(b, "re-asked %d event(s) the model left in no cluster; recovered %d\n",
+			r.Stats.OmittedEvents, r.Stats.RecoveredEvents)
+	}
+
 	for _, c := range r.Compactions {
 		fmt.Fprintf(b, "compact  narrative %d: folded %d event(s) up to %s\n",
 			c.NarrativeID, c.EventsFolded, c.Boundary.Format(time.RFC3339))

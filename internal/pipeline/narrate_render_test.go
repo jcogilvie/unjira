@@ -99,6 +99,23 @@ func TestRenderNarrateResult(t *testing.T) {
 			"names the knob an operator would raise, matching the truncation line's own convention")
 	})
 
+	t.Run("events the model omitted and a re-ask recovered are reported", func(t *testing.T) {
+		reasked := full
+		reasked.Stats.OmittedEvents = 5
+		reasked.Stats.RecoveredEvents = 5
+
+		out := pipeline.RenderNarrateResult(reasked)
+
+		assert.Contains(t, out, "re-asked 5 event(s) the model left in no cluster; recovered 5",
+			"a pass that needed a second call to account for everything says so")
+	})
+
+	t.Run("zero omitted events prints nothing extra", func(t *testing.T) {
+		out := pipeline.RenderNarrateResult(full)
+
+		assert.NotContains(t, out, "re-asked", "silent at zero, like the other exclusion lines")
+	})
+
 	t.Run("zero excluded context narratives prints nothing extra", func(t *testing.T) {
 		out := pipeline.RenderNarrateResult(full)
 
