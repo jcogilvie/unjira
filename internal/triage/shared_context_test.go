@@ -61,6 +61,7 @@ func TestStoreHandler_MergeOntoATargetHoldingTheEventAsContextKeepsItAMember(t *
 	require.NotNil(t, l.MemberConfidence)
 	assert.InDelta(t, store.ReviewerMemberConfidence, *l.MemberConfidence, 1e-9,
 		"the reviewer's merge is a human attribution")
+	assert.Equal(t, store.PlacedByReviewer, l.Placement, "and recorded as one, not as the model's")
 	_, err = s.NarrativeEventLink(source, e)
 	require.ErrorIs(t, err, sql.ErrNoRows)
 }

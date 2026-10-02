@@ -153,10 +153,10 @@ func TestCluster_DisputePromptCarriesWhatTheModelNeeds(t *testing.T) {
 func TestCluster_DisputePresentsEvidenceWithoutApplyingIt(t *testing.T) {
 	f := newCoverageFixture(t)
 	opened := f.evts[2]
-	opened.Artifacts[events.ArtifactPullRequest] = "jcogilvie/unjira#7"
+	opened.Artifacts[events.ArtifactPullRequest] = "github.com/jcogilvie/unjira#7"
 	opened.Artifacts[events.ArtifactGitBranch] = "fix/cache"
 	segment := f.evts[0]
-	segment.Artifacts[events.ArtifactPullRequest] = "jcogilvie/unjira#7"
+	segment.Artifacts[events.ArtifactPullRequest] = "github.com/jcogilvie/unjira#7"
 	segment.Artifacts[events.ArtifactGitBranch] = "fix/cache"
 
 	client := &fakeLLM{responses: []string{
@@ -170,10 +170,31 @@ func TestCluster_DisputePresentsEvidenceWithoutApplyingIt(t *testing.T) {
 
 	require.NoError(t, err)
 	prompt := client.prompts[1]
-	assert.Contains(t, prompt, "carries pull request jcogilvie/unjira#7, and so does cluster_position=1")
-	assert.Contains(t, prompt, `recorded git branch "fix/cache", the head branch of pull request jcogilvie/unjira#7 in cluster_position=1`)
+	assert.Contains(t, prompt, "carries pull request github.com/jcogilvie/unjira#7, and so does cluster_position=1")
+	assert.Contains(t, prompt, `recorded git branch "fix/cache", the head branch of pull request github.com/jcogilvie/unjira#7 in cluster_position=1`)
 	assert.Contains(t, idsOf(results[0].Events), "claude_code/e0", "evidence is presented, never applied")
 	assert.Contains(t, idsOf(results[1].ContextEvents), "claude_code/e0")
+}
+
+// TestCluster_DisputeIgnoresAHostlessPullRequest: the pre-F43 "<owner>/<repo>#<N>" value
+// cannot tell two hosts apart, so two such values are not evidence of one PR. The
+// dispute reads the artifact through events.PullRequestOf, as the pre-assignment join
+// does, so the two readers agree on what counts as the same pull request.
+func TestCluster_DisputeIgnoresAHostlessPullRequest(t *testing.T) {
+	f := newCoverageFixture(t)
+	f.evts[2].Artifacts[events.ArtifactPullRequest] = "jcogilvie/unjira#7"
+	f.evts[0].Artifacts[events.ArtifactPullRequest] = "jcogilvie/unjira#7"
+
+	client := &fakeLLM{responses: []string{
+		`[{"kind":"extends","narrative_id":9,"summary":"cache","confidence":0.9,"event_indices":[0,1]},` +
+			`{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[0,2,3]}]`,
+		`[{"rationale":"r","event_index":0,"member":{"cluster_position":0},"confidence":0.7}]`,
+	}}
+
+	_, _, err := f.cluster(t, client)
+
+	require.NoError(t, err)
+	assert.NotContains(t, client.prompts[1], "carries pull request")
 }
 
 func TestCluster_MalformedDisputeAnswersErrorLoudly(t *testing.T) {

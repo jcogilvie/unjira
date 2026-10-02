@@ -62,10 +62,17 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   `cmd/unjira/main.go`'s registry, enable it in config.
 - **All verification lives in the reconciler.** Never emit a state-bearing action from transcript
   intent; confirm current state against live Jira/GitHub first (see `rules/intent-not-outcome.md`).
-- **A deterministic pre-filter runs before every model call.** Before *clustering* it is
+- **A deterministic pre-filter runs before every model call.** Before *clustering* there are two.
   `events.PartitionByTrackerRecord`: only work evidence becomes a candidate, because a tracker record
   is the *other side* of the diff unjira computes, and narrating one produces a story that restates a
-  ticket. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
+  ticket. Then the pull-request identity join (`pipeline/preassign.go`): an event whose
+  `events.ArtifactPullRequest` matches a member of exactly one open narrative joins it and is never
+  shown to the model, because "these are the same PR" is a fact about event structure, not a judgment
+  (F43: a PR merged a pass after it opened otherwise became a second narrative). The line it draws is
+  **exact identity, never issue keys**. The artifact is host-qualified (`<host>/<owner>/<repo>#<N>`)
+  and set only where identity is exact, and issue↔PR is many-to-many, so "same ticket, same work" stays
+  the model's call. Anything it cannot settle exactly (no holder, several, a holder not `open`) goes to
+  the model unchanged and is reported. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
   issue-key candidates by provenance (branch name > SCM authoring command > Jira event > corroborated
   prose > first-mention prose > later-mention prose). In the reconciler it is `runSuppression`'s
   four-filter chain, plus route resolution. Keep judgment the model's job and extraction a pure
@@ -83,7 +90,9 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   A `narrative_events` link is a `member` (the event is this narrative's work, and the unit of token
   attribution) or `context` (relevant background, some other narrative's work). At most one member
   per event is the partial unique index `one_member_link_per_event`; at least one is `Persist`'s
-  commit check. Every reader that feeds the reconciler, matching or a watermark filters on
+  commit check. Each member link records who placed it (`member_placement`: `model`, `identity` or
+  `reviewer`). Identity and reviewer placements both record 1.0, so calibrating against the model's
+  stated confidence must count `model` placements alone. Every reader that feeds the reconciler, matching or a watermark filters on
   `kind = 'member'`, and the ones whose meaning narrowed were renamed so their callers could not
   keep the old meaning by accident. Do not let context reach a delta, a drafting or create prompt,
   `gatherCandidates`, or a backlog count. A shared investigation drafted onto three tickets is the

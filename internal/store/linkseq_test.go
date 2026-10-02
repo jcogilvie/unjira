@@ -319,7 +319,7 @@ func TestRelink_SameNarrativeKeepsTheLinksPosition(t *testing.T) {
 
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 		for _, id := range ids {
-			if err := tx.MoveMember(nid, id, 0.5); err != nil {
+			if err := tx.MoveMember(nid, id, 0.5, store.PlacedByModel); err != nil {
 				return err
 			}
 		}
@@ -346,7 +346,7 @@ func TestRelink_MovingToAnotherNarrativeIsANewLink(t *testing.T) {
 		`UPDATE match_examinations SET examined_at = ? WHERE narrative_id = ?`, farFuture, dest))
 
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
-		return tx.MoveMember(dest, ids[0], 0.9)
+		return tx.MoveMember(dest, ids[0], 0.9, store.PlacedByModel)
 	}))
 
 	n, err := s.NarrativeEventCount(source)

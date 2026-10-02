@@ -1521,7 +1521,7 @@ func prepareExtend(
 // that would delete context links if it survived.
 func moveMembers(tx *store.Tx, narrativeID int64, p preparedResult) error {
 	for i, eventID := range p.eventIDs {
-		if err := tx.MoveMember(narrativeID, eventID, p.confidences[i]); err != nil {
+		if err := tx.MoveMember(narrativeID, eventID, p.confidences[i], store.PlacedByModel); err != nil {
 			return err
 		}
 	}

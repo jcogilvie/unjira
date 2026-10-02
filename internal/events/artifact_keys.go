@@ -64,23 +64,28 @@ const (
 	// Same []any storage contract as ArtifactTicketKeys — use SetSCMKeys/SCMKeysOf.
 	ArtifactSCMKeys = "scm_keys"
 
-	// ArtifactPullRequest is the canonical "<owner>/<repo>#<N>" of the pull request
-	// an event is about — the same string the github collector builds its
-	// ExternalIDs from (RepoRef.OwnerRepo() + "#" + number), host omitted, so two
-	// GHES hosts with the same owner/repo are not told apart here either.
+	// ArtifactPullRequest is the host-qualified identity of the pull request an event
+	// is about: "<host>/<owner>/<repo>#<N>", case-folded. Write it with
+	// PullRequestRef and read it with PullRequestOf, never by hand — the value is a
+	// join key, so two spellings of one PR would silently not join.
+	//
+	// The host is part of the identity because acme/infra#12 on github.com and on a
+	// GHES instance are different pull requests (F43). ExternalIDs and summaries still
+	// spell a PR "<owner>/<repo>#<N>"; only this key carries the host.
 	//
 	// Two writers, one fact seen from both sides. The github collector sets it on
 	// every PR event (:opened, :merged, :closed). The claudecode collector sets it on
 	// a pull-request-creation anchor ONLY when the tool call's own result named
 	// exactly one PR URL — never from flags, context, or inference, so its presence
-	// means "this transcript's call created this PR".
+	// means "this transcript's call created this PR". Nothing else sets it: a
+	// transcript segment that merely mentions a PR never carries it.
 	//
-	// One reader: the clustering dispute re-ask (correlator/cluster_dispute.go), which
-	// tells the model when an event two clusters both claim carries the same PR as one
-	// claimant's PR event. That is evidence the model weighs, and code never applies it.
-	// A deterministic join between a transcript's anchor and GitHub's :opened event for
-	// the same PR is still a later measurement's decision; the identifier is also in
-	// both events' summaries, which clustering already reads.
+	// Two readers. The clustering pre-filter's PR-identity pre-assignment
+	// (internal/pipeline/preassign.go) joins an unplaced event to the one open
+	// narrative already holding a member with the same value — exact identity, so a
+	// fact about event structure rather than a judgment, the same kind of fact as a
+	// tracker record. The dispute re-ask (correlator/cluster_dispute.go) shows the
+	// model when a disputed event carries a claimant's PR, as evidence it weighs.
 	ArtifactPullRequest = "pull_request"
 )
 

@@ -42,13 +42,15 @@ func TestMeasureAcceptance_ReadsTheStoreNotTheReport(t *testing.T) {
 	base := time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
 	window := correlator.TimeRange{Start: base, End: base.Add(24 * time.Hour)}
 
-	opened1 := probeFixtureEvent(t, s, "github", "o/r#1:opened", base, map[string]any{events.ArtifactPullRequest: "o/r#1"})
+	pr1, pr2 := events.PullRequestRef("github.com", "o", "r", 1), events.PullRequestRef("github.com", "o", "r", 2)
+	opened1 := probeFixtureEvent(t, s, "github", "o/r#1:opened", base, map[string]any{events.ArtifactPullRequest: pr1})
+	merged1 := probeFixtureEvent(t, s, "github", "o/r#1:merged", base, map[string]any{events.ArtifactPullRequest: pr1})
 	anchor1 := probeFixtureEvent(t, s, "claude_code", "pr_create:1", base, map[string]any{
-		"anchor_kind": "pr_create", "pr_create_outcome": "created", events.ArtifactPullRequest: "o/r#1",
+		"anchor_kind": "pr_create", "pr_create_outcome": "created", events.ArtifactPullRequest: pr1,
 	})
 	segment := probeFixtureEvent(t, s, "claude_code", "root:1", base, map[string]any{"session_id": "S1"})
-	opened2 := probeFixtureEvent(t, s, "github", "o/r#2:opened", base, map[string]any{events.ArtifactPullRequest: "o/r#2"})
-	merged2 := probeFixtureEvent(t, s, "github", "o/r#2:merged", base, map[string]any{events.ArtifactPullRequest: "o/r#2"})
+	opened2 := probeFixtureEvent(t, s, "github", "o/r#2:opened", base, map[string]any{events.ArtifactPullRequest: pr2})
+	merged2 := probeFixtureEvent(t, s, "github", "o/r#2:merged", base, map[string]any{events.ArtifactPullRequest: pr2})
 
 	n1, err := s.InsertNarrative(base, base, "PR 1", "s")
 	require.NoError(t, err)
@@ -60,6 +62,11 @@ func TestMeasureAcceptance_ReadsTheStoreNotTheReport(t *testing.T) {
 	require.NoError(t, s.LinkMembers(n2, []int64{opened2, segment}, 0.6))
 	require.NoError(t, s.LinkMembers(n3, []int64{merged2}, 0.3))
 	require.NoError(t, s.LinkContext(n1, []int64{segment}))
+	// PR 1's merge joined by identity (F43), at 1.0: part of M3's integrity, but not the
+	// model's stated confidence, so not in the confidence distribution.
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		return tx.MoveMember(n1, merged1, store.IdentityMemberConfidence, store.PlacedByIdentity)
+	}))
 	empty, err := s.InsertNarrative(base, base, "emptied by a reshuffle", "s")
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
@@ -87,10 +94,13 @@ func TestMeasureAcceptance_ReadsTheStoreNotTheReport(t *testing.T) {
 	assert.Equal(t, 1, m.ContextLinks)
 	assert.Equal(t, 1, m.SharedEvents)
 	assert.Equal(t, 1, m.MaxFanOut)
-	assert.Equal(t, []float64{0.3, 0.6, 0.6, 0.9, 0.9}, m.MemberConfidences)
+	assert.Equal(t, []float64{0.3, 0.6, 0.6, 0.9, 0.9}, m.MemberConfidences,
+		"the model's placements only: the identity-placed merge's 1.0 is not the model being confident")
+	assert.Equal(t, 1, m.IdentityPlacements)
 	assert.Equal(t, []string{fmt.Sprintf("open narrative %d holds no member event (F37's shape)", empty)}, m.Violations,
 		"a narrative with no links at all is invisible to the link rows, so it needs its own query")
 	assert.Contains(t, renderAcceptance(m), "M1  PR narratives with transcript evidence: member-only 1/3, member-or-context 2/3")
+	assert.Contains(t, renderAcceptance(m), "M3  PR integrity: 1/2 (1 member link(s) placed by pull-request identity)")
 }
 
 // TestMeasureAttraction_ScreensPassTwoPlacementsAgainstPassOneStreams: after pass 1,

@@ -40,15 +40,46 @@ const memberLink = `ne.kind = '` + string(LinkMember) + `'`
 // confidence 1.0 (triage.relinkPrimary).
 const ReviewerMemberConfidence = 1.0
 
+// IdentityMemberConfidence is the member_confidence of a link the clustering
+// pre-filter placed by exact pull-request identity (PlacedByIdentity): the event
+// carries the same events.ArtifactPullRequest as a member of the one open narrative it
+// joined. 1.0 because it is a fact about the events' structure, not anyone's estimate,
+// and for ReviewerMemberConfidence's second reason: it must not resurface in triage as
+// an attribution to confirm.
+const IdentityMemberConfidence = 1.0
+
+// MemberPlacement is who placed a member link: narrative_events.member_placement.
+//
+// Recorded because member_confidence cannot say it — identity and reviewer placements
+// record 1.0, and so may the model — and because the one planned reader of
+// member_confidence needs the difference: correlator.member_confidence_floor is to be
+// calibrated against reviewer rulings, which measures the MODEL's stated confidence,
+// and counting identity placements as the model being right would inflate it.
+type MemberPlacement string
+
+// The three placements.
+const (
+	// PlacedByModel is a clustering answer (Persist), including a split's.
+	PlacedByModel MemberPlacement = "model"
+	// PlacedByIdentity is the clustering pre-filter's pull-request identity join: the
+	// event was never shown to the model.
+	PlacedByIdentity MemberPlacement = "identity"
+	// PlacedByReviewer is triage's merge.
+	PlacedByReviewer MemberPlacement = "reviewer"
+)
+
 // MoveMember makes eventID a member of narrativeID, removing its member link from
 // wherever else it is: what an event's appearance in a cluster's event_indices means.
+// confidence and by are recorded on the new member link (member_confidence,
+// member_placement).
 //
 // Its counterpart is AddContext. Two operations with different names, replacing the
 // old relinkEvents, so that no caller can express "add another home" while meaning
 // "move this event" or the reverse (shared-context spec §4). Cases:
 //
-//   - eventID is already narrativeID's member: nothing changes. The row, its link_seq
-//     and its member_confidence are kept, so a re-linked frozen event stays frozen
+//   - eventID is already narrativeID's member: nothing changes. The row, its link_seq,
+//     its member_confidence and its member_placement are kept, so a re-linked frozen
+//     event stays frozen
 //     (TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen).
 //   - eventID is another narrative's member: that link is deleted FIRST — the partial
 //     unique index rejects a second member row — and must be ELIGIBLE (linked after its
@@ -63,7 +94,7 @@ const ReviewerMemberConfidence = 1.0
 //     reconciler would never draft about it.
 //
 // Context links held by other narratives are untouched.
-func (t *Tx) MoveMember(narrativeID, eventID int64, confidence float64) error {
+func (t *Tx) MoveMember(narrativeID, eventID int64, confidence float64, by MemberPlacement) error {
 	var (
 		holder   int64
 		eligible int
@@ -105,8 +136,9 @@ func (t *Tx) MoveMember(narrativeID, eventID int64, confidence float64) error {
 	}
 
 	if _, err := t.tx.Exec(
-		`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?, ?, ?, ?)`,
-		narrativeID, eventID, string(LinkMember), confidence,
+		`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement)
+		 VALUES (?, ?, ?, ?, ?)`,
+		narrativeID, eventID, string(LinkMember), confidence, string(by),
 	); err != nil {
 		return fmt.Errorf("linking event %d to narrative %d as a member: %w", eventID, narrativeID, err)
 	}
@@ -168,10 +200,13 @@ func (t *Tx) EventsWithoutMemberHome(eventIDs []int64) ([]int64, error) {
 	return out, nil
 }
 
-// LinkMembers links each event to narrativeID as a member, at confidence.
+// LinkMembers links each event to narrativeID as a member, at confidence, recorded as
+// PlacedByModel.
 //
-// For seeding a store directly — tests, and any future caller placing events by a
-// means other than a cluster. It ADDS and never moves: an event that is another
+// For seeding a store directly, which is what every caller does: each seeds links
+// standing in for a clustering answer, hence PlacedByModel. A production caller placing
+// events by any other means uses Tx.MoveMember, which makes it name its placement. It
+// ADDS and never moves: an event that is another
 // narrative's member fails on one_member_link_per_event rather than being taken from
 // it, and an event this narrative holds as context fails on the (narrative_id,
 // event_id) uniqueness rather than being silently upgraded. Use Tx.MoveMember for a
@@ -190,8 +225,9 @@ func (s *Store) LinkMembers(narrativeID int64, eventIDs []int64, confidence floa
 		}
 
 		if _, err := s.db.Exec(
-			`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?, ?, ?, ?)`,
-			narrativeID, eid, string(LinkMember), confidence,
+			`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement)
+			 VALUES (?, ?, ?, ?, ?)`,
+			narrativeID, eid, string(LinkMember), confidence, string(PlacedByModel),
 		); err != nil {
 			return fmt.Errorf("linking event %d to narrative %d as a member: %w", eid, narrativeID, err)
 		}
@@ -222,6 +258,8 @@ type NarrativeLink struct {
 	LinkSeq int64
 	// MemberConfidence is nil for a context link.
 	MemberConfidence *float64
+	// Placement is who placed a member link; empty for a context link.
+	Placement MemberPlacement
 }
 
 // NarrativeEventLink returns the (narrativeID, eventID) link, or an error wrapping
@@ -233,15 +271,18 @@ func (s *Store) NarrativeEventLink(narrativeID, eventID int64) (NarrativeLink, e
 		out        NarrativeLink
 		kind       string
 		confidence sql.NullFloat64
+		placement  sql.NullString
 	)
 	if err := s.db.QueryRow(
-		`SELECT kind, link_seq, member_confidence FROM narrative_events WHERE narrative_id = ? AND event_id = ?`,
+		`SELECT kind, link_seq, member_confidence, member_placement
+		 FROM narrative_events WHERE narrative_id = ? AND event_id = ?`,
 		narrativeID, eventID,
-	).Scan(&kind, &out.LinkSeq, &confidence); err != nil {
+	).Scan(&kind, &out.LinkSeq, &confidence, &placement); err != nil {
 		return NarrativeLink{}, fmt.Errorf("reading narrative %d's link to event %d: %w", narrativeID, eventID, err)
 	}
 
 	out.Kind = LinkKind(kind)
+	out.Placement = MemberPlacement(placement.String)
 	if confidence.Valid {
 		c := confidence.Float64
 		out.MemberConfidence = &c

@@ -56,7 +56,7 @@ func link(t *testing.T, s *store.Store, nid, eid int64) store.NarrativeLink {
 func moveMember(t *testing.T, s *store.Store, nid, eid int64, confidence float64) error {
 	t.Helper()
 
-	return s.WithTx(func(tx *store.Tx) error { return tx.MoveMember(nid, eid, confidence) })
+	return s.WithTx(func(tx *store.Tx) error { return tx.MoveMember(nid, eid, confidence, store.PlacedByModel) })
 }
 
 // -- old stores --------------------------------------------------------------------
@@ -99,6 +99,38 @@ CREATE TABLE narrative_events (
 	require.NoError(t, db.Close())
 }
 
+// TestOpen_RefusesAStoreThatPredatesMemberPlacement: a store with link kinds but no
+// member_placement would fail mid-pass on the first member insert. Refused before any
+// DDL, naming only the column it lacks.
+func TestOpen_RefusesAStoreThatPredatesMemberPlacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-placement.db")
+
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+CREATE TABLE narrative_events (
+    link_seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+    narrative_id INTEGER NOT NULL,
+    event_id     INTEGER NOT NULL,
+    linked_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    kind         TEXT NOT NULL,
+    member_confidence REAL,
+    UNIQUE (narrative_id, event_id)
+);`)
+	require.NoError(t, err)
+
+	s, err := store.Open(path)
+	if s != nil {
+		_ = s.Close()
+	}
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "narrative_events.member_placement")
+	require.ErrorContains(t, err, "re-collect")
+	assert.NotContains(t, err.Error(), "narrative_events.kind", "a store that HAS kinds is not blamed for lacking them")
+	require.NoError(t, db.Close())
+}
+
 func countTables(t *testing.T, db *sql.DB) int {
 	t.Helper()
 
@@ -119,12 +151,17 @@ func TestSchema_EnforcesOneMemberHomeAndKindShape(t *testing.T) {
 		name string
 		stmt string
 	}{
-		{"a second member link for one event", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?2, ?3, 'member', 0.5)`},
+		{"a second member link for one event", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?2, ?3, 'member', 0.5, 'model')`},
 		{"a link with no kind", `INSERT INTO narrative_events (narrative_id, event_id) VALUES (?2, ?3)`},
 		{"an unknown kind", `INSERT INTO narrative_events (narrative_id, event_id, kind) VALUES (?2, ?3, 'supporting')`},
-		{"a member with no confidence", `INSERT INTO narrative_events (narrative_id, event_id, kind) VALUES (?2, ?4, 'member')`},
-		{"a member confidence above 1", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?2, ?4, 'member', 1.5)`},
+		{"a member with no confidence", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_placement) VALUES (?2, ?4, 'member', 'model')`},
+		{"a member confidence above 1", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?2, ?4, 'member', 1.5, 'model')`},
 		{"a context link with a confidence", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?2, ?3, 'context', 0.5)`},
+		// member_placement mirrors member_confidence: required on a member, absent on
+		// context, and the IS NOT NULL is what makes "required" true (design-notes #44).
+		{"a member with no placement", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?2, ?4, 'member', 0.5)`},
+		{"an unknown placement", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?2, ?4, 'member', 0.5, 'guess')`},
+		{"a context link with a placement", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_placement) VALUES (?2, ?3, 'context', 'model')`},
 	}
 
 	for _, tt := range tests {
@@ -163,6 +200,29 @@ func TestMoveMember_MovesAnEligibleMemberWithANewPosition(t *testing.T) {
 	assert.Greater(t, after.LinkSeq, before.LinkSeq, "a move is a new link on the destination")
 	require.NotNil(t, after.MemberConfidence)
 	assert.InDelta(t, 0.7, *after.MemberConfidence, 1e-9)
+}
+
+// TestMoveMember_RecordsWhoPlacedTheMember: a member link says how it was placed, so a
+// reader can tell the model's stated confidence from a reviewer's ruling or an exact
+// pull-request identity, all three of which can carry 1.0. Calibrating
+// correlator.member_confidence_floor against reviewer rulings is the reader that needs
+// it: an identity placement is not the model being right. A context link carries none.
+func TestMoveMember_RecordsWhoPlacedTheMember(t *testing.T) {
+	for _, by := range []store.MemberPlacement{store.PlacedByModel, store.PlacedByIdentity, store.PlacedByReviewer} {
+		t.Run(string(by), func(t *testing.T) {
+			s := openStore(t)
+			base := time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
+			a := seedNarrative(t, s, "a", base)
+			b := seedNarrative(t, s, "b", base)
+			e := insertBareEvent(t, s, "e", base)
+
+			require.NoError(t, s.WithTx(func(tx *store.Tx) error { return tx.MoveMember(a, e, 1.0, by) }))
+			require.NoError(t, s.LinkContext(b, []int64{e}))
+
+			assert.Equal(t, by, link(t, s, a, e).Placement)
+			assert.Empty(t, link(t, s, b, e).Placement, "a context link places no member")
+		})
+	}
 }
 
 // TestMoveMember_RefusesAFrozenMember: a frozen member is never numbered and never on

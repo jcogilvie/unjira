@@ -16,7 +16,8 @@ import (
 	"github.com/jcogilvie/unjira/internal/store"
 )
 
-// reportTreatment prints, per pass, the dispute record M4 asks for, then M6a.
+// reportTreatment prints, per pass, the dispute record M4 asks for and the pull-request
+// identity join's record (F43), then M6a.
 func reportTreatment(t *testing.T, s *store.Store, results []NarrateResult, links []probeLink) {
 	t.Helper()
 
@@ -26,9 +27,33 @@ func reportTreatment(t *testing.T, s *store.Store, results []NarrateResult, link
 		for _, d := range r.Stats.Disputes {
 			fmt.Printf("      dispute %s: %s chosen from %v at %.2f — %s\n", d.Event, d.Chosen, d.Claimants, d.Confidence, d.Rationale)
 		}
+		printPRIdentity(i+1, r)
 	}
 
 	printDeltaExclusivity(t, s, links)
+}
+
+// printPRIdentity is one pass's pull-request identity join: how many events it placed
+// without the model, and every fallback with its reason. In a two-pass rep, pass 2's
+// placements are F43's fix at work — #72's and #73's merges should appear here — and a
+// several-holders fallback is a PR pass 1 had already split.
+func printPRIdentity(pass int, r NarrateResult) {
+	unheld := 0
+	for _, f := range r.PreAssignFallbacks {
+		if f.Reason == PRNoHolder {
+			unheld++
+		}
+	}
+	fmt.Printf("pass %d: F43 %d event(s) pre-assigned by pull-request identity; %d fallback(s), %d of them nothing-holds-it-yet\n",
+		pass, len(r.PreAssigned), len(r.PreAssignFallbacks), unheld)
+	for _, p := range r.PreAssigned {
+		fmt.Printf("      placed %s/%s -> narrative %d (%s)\n", p.Event.Source, p.Event.ExternalID, p.NarrativeID, p.PullRequest)
+	}
+	for _, f := range r.PreAssignFallbacks {
+		if f.Reason != PRNoHolder {
+			fmt.Printf("      FALLBACK %s/%s (%s): %s %v\n", f.Event.Source, f.Event.ExternalID, f.PullRequest, f.Reason, f.Holders)
+		}
+	}
 }
 
 // printDeltaExclusivity is M6a, deterministic and model-free: for every event with two

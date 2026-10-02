@@ -61,6 +61,7 @@ flowchart TB
     STORE[("internal/store<br/>SQLite")]
 
     SPLIT["PartitionByTrackerRecord<br/>deterministic · work evidence<br/>vs tracker state"]
+    PRID["preassignByPullRequest<br/>deterministic · exact PR identity<br/>joins its one open holder"]
 
     subgraph correlate["internal/correlator"]
         CLUSTER["Cluster<br/>LLM · groups events into narratives:<br/>one member home per event,<br/>context links elsewhere"]
@@ -86,8 +87,9 @@ flowchart TB
     CC --> CCC --> STORE
     JIRA --> JC --> STORE
     GH --> GHC --> STORE
-    STORE --> SPLIT -->|"work evidence"| CLUSTER --> DISPUTE --> PERSIST --> STORE
+    STORE --> SPLIT -->|"work evidence"| PRID -->|"no exact single home"| CLUSTER --> DISPUTE --> PERSIST --> STORE
     SPLIT -->|"tracker state · never clustered"| STORE
+    PRID -->|"joined by identity · never shown to the model"| STORE
     STORE --> CAND --> MATCH --> STORE
     STORE --> VERIFY --> DRAFT --> FILTERS --> STORE
     STORE --> TRIAGE --> STORE
@@ -97,7 +99,7 @@ flowchart TB
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,DISPUTE,MATCH,DRAFT llm
-    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT det
+    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID det
     class APPLY danger
 ```
 
@@ -113,11 +115,31 @@ take.
 session transcripts and the subagent transcripts beneath them (`<session>/subagents/`), and emits two
 event shapes: one per branch run, and one *anchor* per tool call that created a pull request
 (`gh pr create` or the GitHub MCP), keyed on the immutable `tool_use` id. When the call's own result
-names exactly one PR, the anchor carries `events.ArtifactPullRequest` (`<owner>/<repo>#<N>`) — the same
-value `collector/github` sets on every PR event — and both summaries name it, so clustering sees the
-two sides of one fact under the same identifier. Nothing joins on the artifact; its one reader is the
-dispute re-ask (below), which shows it to the model as evidence. Anchors feed no provenance tier, so
-`gatherCandidates` and matching read exactly what they did before.
+names exactly one PR, the anchor carries `events.ArtifactPullRequest` — the same value
+`collector/github` sets on every PR event. The value is the PR's host-qualified, case-folded identity,
+`<host>/<owner>/<repo>#<N>`, written by one function (`events.PullRequestRef`) in both collectors and
+read through `events.PullRequestOf`, which accepts only that shape. The host is part of it because
+`acme/infra#12` on github.com and on a GHES instance are different pull requests. An anchor whose
+result named no PR, several, or a failure carries none, and nothing else sets it: a segment that merely
+mentions a PR never does. Two readers: the PR identity join (below), and the dispute re-ask, which shows
+it to the model as evidence. Anchors feed no provenance tier, so `gatherCandidates` and matching read
+exactly what they did before.
+
+**Before clustering, an exact pull-request identity places an event without the model**
+(`internal/pipeline/preassign.go`). After `PartitionByTrackerRecord`, each candidate carrying
+`ArtifactPullRequest` is looked up (`store.PullRequestMemberHolders`, over all narratives, not just
+the window's). If exactly one narrative holds a member event with the same value and that narrative
+is `open`, the event joins it in one transaction: a member link via `Tx.MoveMember` with a fresh
+`link_seq` (so the reconciler sees it as new work, even on a committed narrative), confidence 1.0,
+`member_placement = 'identity'`, and `window_end` moved forward to cover it. The summary is not
+rewritten, since the model never saw the event. The event then leaves the candidates, and
+`hidePreAssigned` keeps it out of its narrative's hydrated context, so no prompt numbers it. Zero
+holders, two or more holders, or a holder that is not `open` (an allowlist) all send the event to the
+model unchanged, and the pass summary reports each with its reason. The join keys on exact PR identity
+only, never on issue keys, which are many-to-many with PRs. It does not group in-window events among
+themselves; a PR's first events go to the model together. It writes before clustering rather than
+after `Persist`, so a pass whose model call fails still places what identity settles, and dry runs
+decide without writing.
 
 **Clustering produces two kinds of link** (`narrative_events.kind`,
 `docs/superpowers/specs/2026-10-02-shared-context-design.md`). A **member** link says the event is the
@@ -132,7 +154,10 @@ per pass, after any bisection has merged its halves, asking which claimant the e
 work of (rationale first, per-event confidence, PR and branch evidence presented but not applied). The
 others keep it as context. `Persist` writes members with `Tx.MoveMember` (moves the one home, refuses a
 frozen one, upgrades a context row to a member with a new `link_seq`), then context with
-`Tx.AddContext` (never deletes). Windows, summaries and compaction come from members only.
+`Tx.AddContext` (never deletes). Windows, summaries and compaction come from members only. Every
+member link records who placed it in `member_placement`: `model` (`Persist`, including a triage
+split), `identity` (the PR identity join), or `reviewer` (triage merge), because a 1.0
+`member_confidence` alone cannot say which.
 
 **Nothing downstream of clustering reads a context link.** The reconciler's delta, the create and
 redraft inputs, matching's candidates, and both examination watermarks read member links only, so a
@@ -441,6 +466,10 @@ change to unjira's architecture, not a refactor — treat it accordingly.
 - **No layering inversions.** Nothing in `internal/` imports `cmd/`. No import cycles.
 - **The store is the only channel between stages**, which is what makes per-narrative failure
   isolation work.
+- **Two deterministic pre-filters run before clustering.** `PartitionByTrackerRecord` keeps tracker
+  state out, and the PR identity join places an event whose exact, host-qualified pull request one open
+  narrative already holds. The join never reasons from issue keys, and anything it cannot settle
+  exactly goes to the model unchanged.
 - **Deterministic filters run before and after the model** in the reconciler, in an order asserted by
   a test rather than implied by statement sequence.
 - **Every linked event has exactly one member home, and only member links reach a tracker path.** The

@@ -62,6 +62,9 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 				"raise correlator.max_context_narratives to keep more\n",
 			r.ExcludedContextNarratives)
 	}
+
+	writePRIdentityLines(b, r)
+
 	fmt.Fprintf(b, "llm      %d call(s), %d split(s), %d merge check(s)\n",
 		r.Stats.Calls, r.Stats.Splits, r.Stats.MergeChecks)
 	// Completion tokens are reported PER CLUSTER as well as in total, because that
@@ -140,6 +143,54 @@ func writeNarratedNarrative(b *strings.Builder, n NarratedNarrative) {
 		fmt.Fprintf(b, "  context (%d) — another narrative's work, linked as background:\n", len(n.ContextEvents))
 		for _, e := range n.ContextEvents {
 			fmt.Fprintf(b, "    - [%s] %s  %s\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+		}
+	}
+}
+
+// writePRIdentityLines reports the pull-request identity join (F43), each line only when
+// non-zero, as the other pre-filters' exclusions are.
+//
+// Placements are listed one per event, with the narrative and the PR: the model never
+// saw these, so this is the only place a reader judging the pass can see where they
+// went. An ambiguous identity is listed one per event with its reason and holders,
+// because two or more holders is F43's damage already persisted, which nothing else
+// reports. An identity nothing holds yet is the normal path for a PR's first event, so
+// it is a count, not a list.
+func writePRIdentityLines(b *strings.Builder, r NarrateResult) {
+	if n := len(r.PreAssigned); n > 0 {
+		fmt.Fprintf(b, "identity %d event(s) joined their pull request's narrative by exact identity — "+
+			"never shown to the model\n", n)
+		for _, p := range r.PreAssigned {
+			fmt.Fprintf(b, "         %s/%s -> narrative %d (%s)\n",
+				p.Event.Source, p.Event.ExternalID, p.NarrativeID, p.PullRequest)
+		}
+	}
+
+	var ambiguous []PRFallback
+	unheld := 0
+	for _, f := range r.PreAssignFallbacks {
+		if f.Reason == PRNoHolder {
+			unheld++
+
+			continue
+		}
+		ambiguous = append(ambiguous, f)
+	}
+
+	if unheld > 0 {
+		fmt.Fprintf(b, "identity %d event(s) carry a pull request no narrative holds yet — clustered by the model\n", unheld)
+	}
+
+	if len(ambiguous) > 0 {
+		fmt.Fprintf(b, "identity %d event(s) carry a pull request that names no single open narrative — "+
+			"clustered by the model:\n", len(ambiguous))
+		for _, f := range ambiguous {
+			holders := make([]string, 0, len(f.Holders))
+			for _, h := range f.Holders {
+				holders = append(holders, fmt.Sprintf("%d (%s)", h.NarrativeID, h.Status))
+			}
+			fmt.Fprintf(b, "         %s/%s (%s): %s — narrative(s) %s\n",
+				f.Event.Source, f.Event.ExternalID, f.PullRequest, f.Reason, strings.Join(holders, ", "))
 		}
 	}
 }

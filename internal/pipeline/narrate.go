@@ -51,10 +51,25 @@ type NarrateResult struct {
 	// count to tune correlator.max_context_narratives against evidence rather
 	// than guessing blind.
 	ExcludedContextNarratives int
-	DryRun                    bool
-	Stats                     correlator.Stats
-	Narratives                []NarratedNarrative
-	Compactions               []Compaction
+	// PreAssigned are the unplaced events this pass joined to an existing narrative by
+	// exact pull-request identity, BEFORE clustering — so the model never saw them
+	// (F43). Under DryRun, what would have been joined; nothing was written.
+	//
+	// PreAssignFallbacks are the events that carried a pull-request identity and went
+	// to the model anyway, each with the reason the identity did not name exactly one
+	// open home. Reported, like the exclusions above, because a join that silently
+	// declined would read as "the model chose this", and the two-or-more-holders case
+	// is F43's damage already persisted, which an operator should see.
+	//
+	// On NarrateResult rather than correlator.Stats, alongside ExcludedTrackerRecords,
+	// its precedent: both are this stage's deterministic pre-filters, decided before
+	// the correlator is called, and Stats is the correlator's own accounting.
+	PreAssigned        []PRPreAssignment
+	PreAssignFallbacks []PRFallback
+	DryRun             bool
+	Stats              correlator.Stats
+	Narratives         []NarratedNarrative
+	Compactions        []Compaction
 }
 
 // NarratedNarrative is one narrative this pass produced, with the member
@@ -137,8 +152,17 @@ func RunNarrate(
 	// makes it unlike design-notes #29's livelock, where narratives were re-examined
 	// at full model cost. Do not "fix" this with a watermark.
 	candidates, trackerRecords := events.PartitionByTrackerRecord(unlinked)
-	result.UnlinkedEvents = len(candidates)
 	result.ExcludedTrackerRecords = len(trackerRecords)
+
+	// The second pre-filter (F43): an event carrying the exact pull request a member of
+	// one open narrative carries joins it here, written before clustering, and never
+	// reaches the model. See preassign.go for the line it draws — exact identity, never
+	// issue keys — and every case that falls back to the model.
+	candidates, result.PreAssigned, result.PreAssignFallbacks, err = preassignByPullRequest(s, candidates, opts.DryRun)
+	if err != nil {
+		return NarrateResult{}, err
+	}
+	result.UnlinkedEvents = len(candidates)
 
 	if len(candidates) == 0 {
 		// Nothing to narrate is a normal outcome. Return before spending a
@@ -150,6 +174,7 @@ func RunNarrate(
 	if err != nil {
 		return NarrateResult{}, err
 	}
+	existing, hiddenMembers := hidePreAssigned(existing, result.PreAssigned)
 	result.ContextNarratives = len(existing)
 	result.ExcludedContextNarratives = excludedContext
 
@@ -177,7 +202,7 @@ func RunNarrate(
 		return result, nil
 	}
 
-	return finishNarrate(ctx, s, client, cfg, existing, clustered, result)
+	return finishNarrate(ctx, s, client, cfg, existing, hiddenMembers, clustered, result)
 }
 
 // finishNarrate is RunNarrate's persisting tail, split out to keep
@@ -189,6 +214,7 @@ func finishNarrate(
 	client llm.Client,
 	cfg config.Config,
 	existing []correlator.Narrative,
+	hiddenMembers map[int64]int,
 	clustered []correlator.ClusterResult,
 	result NarrateResult,
 ) (NarrateResult, error) {
@@ -209,7 +235,7 @@ func finishNarrate(
 		return NarrateResult{}, err
 	}
 
-	result.Compactions, err = collectCompactions(s, existing, clustered, persisted, persistStats)
+	result.Compactions, err = collectCompactions(s, existing, hiddenMembers, clustered, persisted, persistStats)
 	if err != nil {
 		return NarrateResult{}, err
 	}
@@ -527,6 +553,7 @@ func eventWindow(evts []correlator.Event) (lo, hi time.Time) {
 func collectCompactions(
 	s *store.Store,
 	existing []correlator.Narrative,
+	hiddenMembers map[int64]int,
 	clustered []correlator.ClusterResult,
 	persisted []correlator.Narrative,
 	stats correlator.Stats,
@@ -544,7 +571,11 @@ func collectCompactions(
 		// EventsFolded too small, which is exactly what
 		// TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal caught
 		// when eligibility was introduced.
-		priorVisible[n.ID] = len(n.Events) + len(n.EligibleEvents)
+		//
+		// hiddenMembers adds back the members this pass placed by pull-request identity
+		// (hidePreAssigned): kept out of the prompt, but in the store, so in what
+		// Persist's compaction saw and in V1.
+		priorVisible[n.ID] = len(n.Events) + len(n.EligibleEvents) + hiddenMembers[n.ID]
 	}
 
 	// K counts only events NOT already visible on that narrative. Persist's
