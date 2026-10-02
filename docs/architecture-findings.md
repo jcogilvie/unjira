@@ -85,6 +85,29 @@ Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is clea
 (F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
 `transcriptAnchors` reads every line independently of segmentation.
 
+### F37 — an event placed in two clusters persists in one, and can leave an empty narrative behind
+
+`clusterSystemPrompt` tells the model to put each numbered event in exactly one cluster
+(`internal/correlator/correlator.go:437`), but `parseClusterResponse` (`:465`) never checks, and the model
+does it unprompted: on 2026-10-01 it put the F16 investigation's subagent transcript in both #70's and
+#73's narratives. `Persist` then resolves it by order. Each result's window and summary are computed from
+its events in `prepareOneResult` (`:826`), then `relinkEvents` (`:943`) deletes the event's link to every
+narrative but the last one written. For `[NEW{E}, EXTENDS 5{E, F}]` that leaves the new narrative **open,
+with zero events**, and a title, summary and window describing `E` (read from the code, not executed).
+Nothing excludes an empty `open` narrative from `NarrativesOverlapping`, so it rides along as context in
+every later pass.
+
+A second consequence is an instrument trap. `describePersisted` (`internal/pipeline/narrate.go`) renders
+member events from the cluster result rather than the store, so even a persisted `dev narrate` prints `E`
+under both narratives while the store holds it under one. A measurement read off that output counts
+sharing that never persisted.
+
+Fixed by the first slice of `docs/superpowers/specs/2026-10-02-shared-context-design.md` (§4): one member
+home per event. A multiply-placed member is resolved by a dispute re-ask that asks the model which
+workstream the event is primarily the work of (rationale first, with a per-event confidence); the other
+claimants get context links, and the outcome is reported. Not by response order, which has no bearing
+on the right answer.
+
 ### F33 — a resumed session copies its history, so root segment events are counted twice
 
 A resumed Claude Code session writes earlier history into a NEW transcript file. Measured across
@@ -98,6 +121,10 @@ repeated id IS the same call), and subagent segments key on `agent-<agentId>`, s
 dedupes. Root segments have no such call-level identity to key on, which is why this is a finding and
 not a one-line fix: deduplicating them means deciding which copy owns a shared prefix, and a resumed
 session's new file also holds new work after it.
+
+`docs/superpowers/specs/2026-10-02-shared-context-design.md` §7 multiplies this: every root-segment
+snapshot can collect its own context links, so links grow as snapshots × narratives. That spec's
+acceptance measurement counts distinct transcripts as well as events so a duplicate cannot inflate it.
 
 ### F16 — the prompt is unbounded in the window, and the response ceiling binds first
 
@@ -284,6 +311,12 @@ empty titles on 32/32 extends.
    (harmless — `mergeSplitResults` unions `ClusterExtends` sharing a `NarrativeID`, and a persisted
    run shows no duplicate titles — but not an improvement).
 
+**Shared context adds to completion, and does not change this finding's status.**
+`docs/superpowers/specs/2026-10-02-shared-context-design.md` §7 adds `context_indices` to every cluster.
+That costs completion tokens, unmeasured. It adds no event to the prompt, since a context link can only
+reference an event that is already numbered. Its acceptance measurement (§9) holds it to this finding's
+34% noise floor.
+
 Measurements live in `internal/pipeline/f16_probe_test.go` (env-gated, skipped by default). Note the
 probe truncates `Events` and so shows a per-event cap having no effect — which is the same
 wrong-field trap design-notes #32 records, and is now a true result rather than an instrument error.
@@ -392,8 +425,17 @@ the package level. The comment names the cycle as the blocker, which is the acti
 `pr_repo`, `pr_head_branch`, `pr_candidates`, and segments `pr_creates_awaiting_result`. None is read in
 production yet, and that is the plan, not an oversight: their intended reader is the next step,
 attaching a root session's shared context to the narratives its subagents and PRs produced — which
-needs exactly the relationship these record. `events.ArtifactPullRequest` has two writers (claudecode
-anchors, every github PR event) and no reader; its reader is the deterministic anchor↔`:opened` join a
+needs exactly the relationship these record.
+
+**That reader is now designed:** `docs/superpowers/specs/2026-10-02-shared-context-design.md`. Its first
+slice reads none of these. Context links are assigned by the model, and the measured gap is closable
+without lineage. Its second slice is the reader: it renders each subagent's parent and dispatching root
+segment into the clustering prompt, from `session_id`, `parent_session_id`, `agent_id`,
+`parent_agent_id`, `dispatch_tool_use_id`, `subagent_description`, `spawn_depth`, and the root segments'
+`started_at`/`ended_at`. That design reads none of the anchor artifacts, so it leaves their readers
+undecided, except for `events.ArtifactPullRequest`, whose planned reader is the join described next.
+
+`events.ArtifactPullRequest` has two writers (claudecode anchors, every github PR event) and no reader; its reader is the deterministic anchor↔`:opened` join a
 later measurement decides whether to build. The test that reads it today
 (`TestArtifactKeyContract_PRAnchorAndGitHubOpenedAgreeOnArtifactPullRequest`) pins only that both
 writers agree.
@@ -572,6 +614,10 @@ development — has no branch-tier provenance at all. A subagent's real branch i
 its own tool calls (a `git checkout -b` or `gh pr create --head`), which is extraction this collector
 does not yet do. Not fixable at the source; recorded so nobody "restores" the field.
 
+Nor by the back door. `docs/superpowers/specs/2026-10-02-shared-context-design.md` §3 keeps context links
+out of matching entirely, so linking a subagent's narrative to its parent's root segment as context does
+not hand it the parent's branch as provenance.
+
 ### F36 — a bisected window numbers a spanning narrative's eligible events in BOTH halves
 
 `clusterWithSplit` recurses with the full `existing` slice (`internal/correlator/correlator.go:612`,
@@ -603,6 +649,8 @@ eligible event to one half only, or dedupe at merge with a stated winner.
 | F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here |
 | F32 — subagent `gitBranch` is the parent's | open, mitigated: never emitted as `ArtifactGitBranch` for a subagent. Not fixable at the source |
 | F33 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
+| F36 — a bisected window numbers a spanning narrative's eligible events in both halves | open. Found with the re-ask (#79), not fixed there: both halves of `clusterWithSplit` get the full context list, so a narrative spanning the split point can have an eligible event placed by both, and Persist keeps whichever it applies last. Not made likelier by #79's coverage check, which covers in-window events only. Semantics settled by the shared-context design: give an eligible event to one half only, or dedupe at merge with a stated winner |
+| F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | open, **designed**: fixed by the first slice of `docs/superpowers/specs/2026-10-02-shared-context-design.md`. Found reading `Persist` against the 2026-10-01 observation, which may itself have been read off `dev narrate` output that disagrees with the store |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
