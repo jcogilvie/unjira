@@ -1,0 +1,593 @@
+# Shared context — one event, several narratives — design
+
+**Status: design**
+
+Step 4 of the subagent-collection work: let one event — typically a root session's investigation,
+reused across several fixes — attach to more than one narrative, as **context**, without becoming
+any of them's **work**. This is the reader `docs/architecture-findings.md` F6 names for the subagent
+artifacts written on 2026-10-01. Nothing here is implemented; §"First slice" says what to build
+first and §"What follows" what comes after, with the condition that gates each.
+
+## The problem, restated precisely
+
+The user develops subagent-first. One problem cascades into several issues and PRs, issues are filed
+as they are discovered, and the context assembled for one fix is reused for the next. A transcript is
+therefore not a linear, one-issue-at-a-time timeline: the investigation in a root session is
+legitimate evidence for every issue it produced.
+
+That is **relevance, not ownership**, and the distinction is the design. "This investigation is why
+PR #73 exists" is true of #70 and #73 at once. "This investigation is #73's work" can be true of at
+most one of them, because the reconciler turns a narrative's work into prose on that narrative's
+ticket — and the highest-stakes failure available here is one shared paragraph drafted onto three
+tickets. So the relation needs two kinds of link, and only one of them may ever reach a tracker.
+
+Relevance is a judgment, so it is the correlator's, made by the model in `Cluster`. Collectors stay
+dumb (CLAUDE.md's first invariant): the claudecode collector records who dispatched whom
+(`parent_session_id`, `dispatch_tool_use_id`, …) and asserts nothing about what that means.
+
+## What was measured, and what checking it against the code found
+
+### The 2026-10-01 measurement (as reported; the store it ran against no longer exists)
+
+A real store, three clustering runs, with subagent transcripts and PR anchors present:
+
+- Anchors coalesced with their GitHub PR every time (20/20, 21/21, 21/21); no PR was split.
+- PR narratives with any transcript evidence: **12–15 of 20–21**.
+- The remaining gap is **root-session context**: one root segment covers work for several PRs and
+  can join only one narrative.
+- Unprompted, the model put one subagent transcript (the F16 investigation) in **two** narratives,
+  #70's and #73's. Its work did feed both.
+
+I could not re-run it. The store was a temp copy that is gone, `data/unjira.db` is currently empty
+(0 events), and a worktree has no credentials (design-notes #37). The PR range is recoverable: PRs
+#58–#78 were created between 2026-09-16 and 2026-10-01, which is exactly 21 PRs (20 merged, #63
+closed) — consistent with "20–21". §9 names that window.
+
+### Five places the measured picture is incomplete or wrong in a way that changes the design
+
+**1. The one-narrative rule does not live only in the prompt, the parser and `relinkEvents`.**
+The prompt does say "assign each to exactly one cluster" (`correlator.go:437`). The parser does
+**not** enforce it — `parseClusterResponse` (`:465`) resolves every index it is given and never checks
+for repeats, which is why the double assignment reached `Persist` at all. And four more places depend
+on the rule, each of which breaks silently — no error, wrong rows — once an event can hold two links:
+
+- **Triage split depends on last-writer-wins.** `markSourceIfEmptied` (`triage/split.go:121`) says
+  so: *"Verified by probe that Persist's relinkEvents empties the source."* Remove the unlink and a
+  split leaves every event on the source as well as on the new narratives, and the source is never
+  marked `split`.
+- **Triage merge adds before it unlinks, through `INSERT OR IGNORE`** (`restructure.go:170`,
+  `narratives.go:201`). With two kinds of link, a target that already holds an event as context keeps
+  that row, the source's work link is then deleted, and the event has lost its home — no error.
+- **`UnlinkedEventsInRange`** (`narratives.go:285`) selects "no link at all", and its doc comment
+  states the rule outright: *"an event belongs to exactly one narrative, so once linked it is never a
+  candidate again."*
+- **Four link-sequence watermarks treat every new link as new work**: the reconciler's delta
+  (`linkedSinceLastAction`, `narratives.go:421`, shared by `DeltaEvents` and `hasUnexaminedDelta`),
+  the match watermark (`matchExaminationPredicate`, `matchwatermark.go:51`), and the reconcile
+  watermark (`reconcileExaminationPredicate`, `reconcilewatermark.go:51`). Each would re-admit a
+  narrative — at model cost — the moment it gained a context link.
+
+**2. The persisted effect of a double assignment is worse than last-writer-wins.** Read from
+`prepareOneResult` (`correlator.go:826`) and `applyPrepared` (`:953`); not executed, since this is a
+spec-only change. For a response `[NEW{E}, EXTENDS 5{E, F}]`: the NEW narrative's window and summary
+are computed from `E` and written; then `relinkEvents(5, [E, F])` deletes the NEW narrative's only
+link. The result is an **empty open narrative** whose title and summary describe an event it does not
+hold — the dead weight `NarrativesOverlapping` already excludes `split` narratives to avoid, but with
+status `open`, so nothing excludes it. Recorded as finding **F36**.
+
+**3. The run's printed output disagrees with its store.** `describePersisted`
+(`pipeline/narrate.go`) renders each narrative's member events from the *cluster result*, not from
+the store — so even a persisted `dev narrate` prints the double-assigned event under both narratives
+while the store holds it under one. Any measurement read off the printout counts sharing that never
+persisted. §9 measures from the store for this reason.
+
+**4. `suppressDuplicates` cannot catch the failure this design must prevent.** It drops an action
+when *another narrative already has an open proposal on the same issue* (`reconciler.go:429`). One
+shared paragraph drafted onto three *different* tickets shares no issue key, so it passes. The
+defense has to be structural and upstream (§2), not a filter.
+
+**5. "Transcript evidence" must exclude anchors, or the metric is trivially perfect.** Anchors are
+`claude_code` events and coalesced with their PR 100% of the time, so a PR narrative containing its
+anchor "has transcript evidence" by construction. The 12–15 figure must have meant segment events
+(branch runs), not anchors; §9 defines it that way and lists confirming the baseline's definition as
+an open question.
+
+### Two numbers checked against a real store
+
+Measured read-only against a copy of `data/unjira.db.pre-f30` (2026-10-01 15:15, 795 events, before
+subagent collection):
+
+- **The link table was one-to-one in practice**: 298 links over 298 distinct events, no event with
+  two links, no narrative with zero links. So the schema has always *permitted* many-to-many
+  (`UNIQUE (narrative_id, event_id)`), and nothing has ever *written* it.
+- **Shared transcript events carry many keys**: 29 of 419 `claude_code` events carry ≥17 prose keys
+  (maximum 77), and the maximum `scm_keys` on one event is **37** — the `scm_command` tier, which ranks
+  above `jira_event`. §3 rests on this.
+
+---
+
+## Design
+
+Vocabulary used below: a **member** link says the event is part of this narrative's work; a
+**context** link says the event is relevant background for this narrative and belongs to some other
+narrative's work. §1 explains why these names and not `primary`/`supporting`.
+
+### 1. Link kinds
+
+**Recommendation.** A `kind` column on `narrative_events`, `'member' | 'context'`, `NOT NULL` with
+**no default** — the precedent `actions.created_link_seq` set: *"a default would be a guess … and an
+INSERT that forgets it should fail loudly."* Plus a partial unique index mirroring
+`one_primary_per_narrative` (`store.go:117`):
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS one_member_link_per_event
+    ON narrative_events (event_id) WHERE kind = 'member';
+```
+
+**Every linked event has exactly one member home; context-only events are forbidden.** At most one is
+the index above, enforced by the database. At least one is checked at `Persist`'s commit: every event
+that received a context link in the transaction must hold a member link when it closes, or the pass
+fails loudly. Three reasons a context-only event cannot be allowed:
+
+- it would never be in any narrative's delta, so the work it records would never be reconciled — a
+  silent drop, which CLAUDE.md forbids;
+- the re-ask for omitted events (branch `correlator/reask-omitted-events`, assumed landed) guarantees
+  every event is *assigned*; "assigned" must mean "has a home", or the guarantee is satisfied by an
+  event that has none;
+- the create path's untracked-work detection reads member events; an event nobody owns could never be
+  proposed as untracked work.
+
+The rejected alternative is supporting-only for "pure investigation that produced no work of its
+own". But an investigation *is* work evidence, and unjira already has a home for it: a narrative of
+its own, or membership of the narrative it most belongs to. The cost of forcing a choice is that one
+ticket hears about the investigation as work and the others see it as context — which is today's
+behaviour for the one ticket and strictly better for the others.
+
+**Who assigns kinds: the model, in `Cluster`'s output.** Each cluster gains an optional
+`context_indices` beside `event_indices`, resolved against the same numbered slice:
+
+```json
+[{"kind":"new","title":"…","summary":"…","event_indices":[3,4],"context_indices":[0]}]
+```
+
+The prompt's contract becomes: every numbered event appears in **exactly one** cluster's
+`event_indices`; it may additionally appear in any number of other clusters' `context_indices`, when
+it is genuinely the background for that cluster's work.
+
+Rejected alternatives:
+
+- **Deterministic, from lineage.** The subagent artifacts say which root session dispatched which
+  subagent. Auto-linking a dispatching root segment as context to every narrative its subagents
+  joined is mechanical and plausible — and wrong often enough to matter: 42 of 79 multi-day sessions
+  never change branch (F15), so one root segment can span weeks and topics, and dispatching a subagent
+  says nothing about which of that segment's content the subagent's narrative needs. Lineage is a
+  strong *hint*, and §"What follows" renders it as one; relevance stays the model's call.
+- **Declared by a collector.** Collectors are dumb by invariant, and relevance is judgment.
+- **A second, separate call after clustering** ("given these clusters, which events are background
+  for which?"). This genuinely protects clustering from the prompt change — F16 measured that
+  clustering is sensitive to small schema changes (reasoning-first key order made it *worse*, 38/38/36
+  clusters) — and it is separable and skippable. It also re-sends the whole prompt (~100k prompt
+  tokens in F16's attribution table) for a judgment the model already made inline, unprompted. **Recommended as the
+  fallback**, not the default: if §9 shows the inline change damages clustering (anchor coalescing
+  below 100%, or `NEW` counts outside the noise band), switch to it. Listed as an open question.
+
+**Names: `member`/`context`, not `primary`/`supporting`.** `narrative_issues.role` already has
+`primary`, guarded by `one_primary_per_narrative`, and code reads "the primary link" constantly. Two
+tables one join apart, each with a "primary" meaning something different, is the vocabulary collision
+incident 21 warns about at the artifact level. `member` matches what `NarratedNarrative` already calls
+a narrative's events ("member events", `pipeline/narrate.go`). `work` was considered and rejected
+because "work evidence" already names a different axis (`events.AnyWorkEvidence`, versus tracker
+record): an old narrative's member event can be a tracker record.
+
+**An old store is refused before any DDL.** Generalize `checkLinkSeqSchema` (`linkseq.go:64`) into a
+required-columns check that also lists `narrative_events.kind`, run where it runs now — before the
+schema `Exec` (`store.go:301`), whose own comment records why after is wrong: a refused open must not
+have mutated the store. The message names this spec and the fix, delete the database and re-collect,
+in the form the README already documents. The README's "no migrations" paragraph, which names F30 as
+the most recent such change, is updated in the implementing PR.
+
+Rejected: `ALTER TABLE narrative_events ADD COLUMN kind TEXT NOT NULL DEFAULT 'member'`. Unlike F30,
+this backfill would be **exact** — every pre-feature link is a member link and there is one per event
+(298/298 above). It is rejected anyway, because it would be unjira's first migration, and that is a
+precedent to set deliberately, for a store someone cannot afford to lose, not inside a feature PR
+against a disposable one. The same trigger F21 names applies: the first non-disposable store.
+
+### 2. The reconciler: context is invisible, not merely de-emphasized
+
+**Recommendation.** In the first slice, the reconciler sees **no context links at all**. Not in the
+delta, not in the drafting prompt, not in the create prompt, not in redraft, not in any watermark.
+Concretely:
+
+- `linkedSinceLastAction` gains `ne.kind = 'member'`. Because it is one const interpolated into both
+  `DeltaEvents` and `hasUnexaminedDelta`, the selector, the count and the delta cannot drift — the
+  property F10 and F12 were about.
+- `reconcileExaminationPredicate` and `matchExaminationPredicate` count member links only, so adding a
+  context link re-admits nothing.
+- `EligibleEvents` (redraft's delta, `rework.go:93`) and the create path's events (`create.go:173`)
+  read member links only.
+- `AllNarrativeEvents` is **renamed** (to `AllMemberEvents`) rather than quietly re-scoped, so each of
+  its two callers fails to compile and gets revisited. Context events get their own accessor,
+  `ContextEvents(narrativeID)`, which no reconciler path calls. Incident 13's lesson: make the unsafe
+  read inexpressible rather than relying on each caller to filter.
+
+Why every one of those, rather than "show context, tell the model not to describe it":
+
+- **`suppressDuplicates` is keyed on the issue** (finding 4 above), so nothing downstream catches the
+  same content drafted onto different tickets.
+- **`suppressTrackerEcho` would be satisfied by somebody else's work.** It asks whether the delta
+  holds any work evidence (`tracker_echo.go:54`). A shared root segment *is* work evidence, so a
+  narrative whose only new event is a context link would pass it and draft a comment from another
+  ticket's investigation.
+- **`suppressStaleTransitions` would date this ticket's work by another ticket's evidence.**
+  `newestWorkEvidence` (`recency.go:116`) takes the newest work event in the delta as the date the
+  work happened. A context event dated after the last status change would license a transition the
+  narrative's own work does not.
+- **A prompt rule cannot enforce a structural precondition** — incident 24, and incident 30 again.
+  "Use this only as background; never describe it as new work" is a phrasing rule standing in for an
+  eligibility rule, and it is exactly the shape that produced 18 of 21 tracker-echo comments while
+  being obeyed.
+
+Self-authored filtering (`dropSelfAuthored`) is unchanged; it runs over a member-only delta. The gate
+is untouched: this design adds no write path and no action type.
+
+**The residual leak is the narrative summary, and the design does not pretend to close it.** `Cluster`
+writes each cluster's `summary` after seeing its `context_indices`, and the drafting prompt opens with
+that summary (`draft.go:251`). A summary that narrates the shared investigation carries it onto every
+ticket whose narrative holds it as context. Three mitigations, only two of them structural:
+
+1. Compaction folds **member** events only, so a recap never absorbs context.
+2. An `EXTENDS` that carries only `context_indices` **does not overwrite the summary** (nor
+   `window_end`) — there is no new work to summarize.
+3. The cluster prompt says a summary describes the cluster's member events. This is a phrasing rule
+   and is expected to leak; §9's reconcile-level check exists to measure how much.
+
+### 3. Matching: context links do not feed it at all
+
+**Recommendation.** `gatherCandidates` (`match_candidates.go:83`) reads member events only, at every
+tier. Context events do not reach matching's classifier prompt either, and do not re-admit a narrative
+to matching's backlog.
+
+The numbers decide it. A shared root segment routinely carries ≥17 prose keys (29 of 419 events,
+maximum 77) and up to 37 `scm_command` keys, a tier that outranks `jira_event`. Fed at full
+provenance, every narrative it supports inherits all of them.
+
+The obvious compromise — a new lowest tier, `context`, below `prose_later` — is rejected on one line
+of `resolveVerified` (`match.go:434`): **a lone verified candidate becomes primary deterministically,
+at confidence 1.0, with no model call.** A PR narrative whose own events name no ticket, holding one
+context event that names one real ticket, would be attributed to that ticket with certainty. The tier
+would be weakest in the ranking and strongest in effect. It would also spend a `GetIssue` per key per
+narrative.
+
+Showing context events to the classifier *without* making them candidates is plausible — they might
+help it tell the ticket a narrative implements from one it only mentions — and unmeasured. Left open.
+
+One consequence worth stating so nobody "fixes" it: F32 records that subagent work has no branch-tier
+provenance, because a subagent's `gitBranch` is its parent's. A context link to the parent's root
+segment must not become the route that restores it — the branch on that segment names the
+*parent's* work, which is exactly why the collector stopped emitting it.
+
+### 4. Persist: "move this event" and "add another home" are different operations
+
+**Recommendation.** `relinkEvents` (`correlator.go:943`) is replaced by two operations with different
+names, so no caller can express one while meaning the other:
+
+- **`moveMember(narrative, event)`** — `event_indices`. Delete the event's member link wherever it is,
+  then insert a member link here. Delete first, because the partial unique index rejects a second
+  member row. The link being deleted is eligible by construction (§5: only an eligible member link is
+  numbered); finding a frozen one is a bug and an error, never a silent move. If this narrative already
+  holds the event as a member, keep that row and its `link_seq` — the existing `INSERT OR IGNORE`
+  behaviour `TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen` pins. If it holds the event as
+  context, replace that row with a member row, with a **new** `link_seq`.
+- **`addContext(narrative, event)`** — `context_indices`. If this narrative holds the event under
+  either kind, do nothing (member wins; a repeated context link keeps its position). Otherwise insert a
+  context link. **Never deletes anything.** Context links held by other narratives are untouched by
+  both operations.
+
+So last-writer-wins does not survive for intentional sharing, and the unintentional case — one event
+in two clusters' `event_indices` — gets a deterministic rule in the parser instead of a silent
+collapse in the transaction: **the first cluster in response order keeps it as a member; every later
+`event_indices` occurrence becomes a context link there**, counted on `Stats` and printed in the pass
+summary when non-zero. If that rule would leave a `NEW` cluster with no member events, the response
+is malformed and the pass fails loudly, naming both clusters. Whether a re-ask should resolve these
+instead is an open question.
+
+**Why the upgrade issues a new sequence number.** A link's `link_seq` must mean *when it acquired its
+current kind*. The delta asks "is this new **work** for this narrative", and an event that has been
+background since last week but became this narrative's work today is new work today. Keeping the old
+position would put it below the last action's `created_link_seq`, and the reconciler would never
+draft about it — silent loss, the kind incident 40's sequence exists to prevent.
+
+**The freeze rule is per link and kind-agnostic, unchanged.** `linkedSinceLastCommit`
+(`eligibility.go:32`) still compares one link's position against its own narrative's last applied
+action. What that means for each combination:
+
+| Situation | Meaning |
+|---|---|
+| Frozen member on A, new context link on B | Fine, and the common case. A's posted comment described `E`; B's drafts never see `E` (§2), so nothing claims it twice. |
+| Frozen member on A, model wants `E` as B's member | Unreachable: a frozen member is never numbered (§5), so `E` has no index to place. |
+| Eligible member on A, frozen context on B, model makes it B's member | Allowed: delete A's member (eligible), replace B's context row with a member row. Nothing committed is reattributed — B's posted comment drew on `E` as background, and unlinking background un-says nothing. |
+| Frozen context link on A, A is restructured | Stays, like any frozen link. |
+
+Incident 13's laundering shape needs a frozen *member* link to move. Every path above that moves a
+member link requires it to be eligible, checked where the move happens.
+
+**Windows come from member events only.** A context event dated weeks earlier would otherwise widen
+every narrative it supports, `NarrativesOverlapping` would return them for more windows, and context
+hydration — F16's cost — would grow with sharing.
+
+`requireNonEmptyClusters` (`pipeline/narrate.go:217`) changes accordingly: a `NEW` cluster needs at
+least one member event; an `EXTENDS` needs at least one member or one context event.
+
+**Coupling with the re-ask branch.** Its notion of an omitted event must be "appears in no cluster's
+`event_indices`". Counting a `context_indices` mention as assignment would let an event with no home
+satisfy the guarantee — the context-only case §1 forbids. Whichever lands second must check this.
+
+### 5. Context hydration and the index space
+
+**Recommendation for the first slice: one index space, collision-free by a database constraint, and
+nothing new numbered.**
+
+The numbered slice stays exactly what it is — `assignableEvents` (`correlator.go:383`), shared by
+`buildClusterPrompt` and `parseClusterResponse` so they cannot drift — with one tightening of what goes
+in it:
+
+1. in-window events with **no member link** (`UnlinkedEventsInRange` asks that question, not "no link
+   at all" — the question it means, per incident 28), then
+2. each context narrative's **eligible member** links, in `existing` order.
+
+Both `event_indices` and `context_indices` resolve against that one slice. No event can appear twice
+in it: an in-window event has no member link, each event has at most one member link
+(`one_member_link_per_event`), and context links are not numbered. `assignableEvents` still **checks**
+for a repeated `(Source, ExternalID)` and returns an error rather than deduplicating. A duplicate would
+mean the invariant had broken, and deduplicating would hide that, which is the shape of every
+`assignableEvents` incident so far — prompt and parser numbering different slices, silently.
+
+`correlator.Narrative` gains `ContextEvents` beside `Events` (frozen members) and `EligibleEvents`
+(eligible members). `hydrateContextNarratives` partitions on kind as well as eligibility. The prompt's
+context section renders them under their own heading. A context event that is *also* in the numbered
+slice — `E` is eligible member of A and context of B, both in context — renders under B as a
+back-reference, `-> #7`, from a map built off the same assignable slice. That ties the two renderings
+deterministically and costs a few tokens instead of a repeated summary.
+
+**What this deliberately cannot do: share a frozen event.** Once a root segment's member home has an
+applied action, the segment is frozen, so it has no number and can be shown but not linked. Frozen
+events become shareable in the second slice, through a **second** index space: `context_refs`, labels
+`c0..cK` assigned once per distinct event in first-appearance order across the whole prompt, so every
+rendering of one event carries one label. Both slices still come from one function returning both,
+which is the property `assignableEvents` exists to keep. Deferred because the measured gap is a
+fresh-store single pass, where nothing is frozen, and because a second numbering is exactly where
+prompt/parser drift lives.
+
+### 6. Triage merge and split
+
+**Merge** (`MergeNarratives`, `restructure.go:157`) moves the source's eligible links with the §4
+operations, by kind: an eligible member uses `moveMember` (and upgrades a target context row), an
+eligible context link uses `addContext` and is then deleted from the source. Direction-by-commitment is
+unchanged; frozen links stay on the source, as now. The ordering bug in finding 1 — add through
+`INSERT OR IGNORE`, then unlink — is the first test the implementation writes: today's order fails the
+new unique index on the ordinary case and silently drops the event's home in the context case.
+
+**Split** (`SplitNarrative`) re-clusters the source's eligible **member** links only. The resulting
+`Persist` uses `moveMember`, which deletes only the source's member link (the split's `Cluster` call
+gets no context narratives, so everything numbered is the source's). `context_indices` between the
+halves are allowed — the investigation in one half may genuinely be background for the other.
+
+The source's own context links: kept if the source retains any member link, deleted if the split
+empties it of members, and counted in the split's report either way. No data is lost by deleting them,
+since by §1's invariant each such event keeps its member home elsewhere. `markSourceIfEmptied`
+(`split.go:121`) counts member links, or a source holding only background would never be marked
+`split` and would sit in every later prompt as a narrative with no work.
+
+Rejected: letting the split prompt redistribute the source's context links to the halves (more model
+judgment inside a reviewer-attended command, for background nobody asked about), and copying them to
+every half (it over-shares, inflating exactly what §7 bounds). Also rejected: refusing to merge or
+split any narrative involved in sharing. That is the cheapest implementation and it makes the
+reviewer's correction impossible precisely on the narratives this workflow produces most —
+`EligibleEventIDs`' own doc comment rejects a narrative-level freeze on the same grounds.
+
+Retarget and edit are unaffected beyond §2's member-only redraft delta.
+
+### 7. Cost, and the F16 ceiling
+
+**What the first slice adds.** Prompt: one line per context link in each context narrative's context
+section, most of them back-references. Completion: the `context_indices` arrays, a few tokens per
+index. **What bounds it:** a context link can only reference an event already in the prompt, so no
+event enters a clustering prompt because of this design — the payload F16 attributes grows by
+references, not by events. Matching and the reconciler add **zero** calls, because §2 and §3 make
+every watermark ignore context links. That is a testable property, not an estimate: adding a context
+link must not change `CountNarrativesWithDelta` or `CountNarrativesWithoutPrimaryLink`.
+
+**What it does to the ceiling.** F16 measured completion tracking cluster count, with a 34%
+run-to-run spread, and a 365-day window already dying at 32,000 completion tokens. Context indices
+make that marginally worse and change nothing about F16's status. The magnitude is unmeasured; §9
+measures completion per cluster with and without it.
+
+**Three growth paths, and why the first slice adds no cap for them:**
+
+- **Accumulation between compactions.** Compaction folds member history; context links on a
+  long-lived narrative accumulate. The compaction boundary does bound them — `NarrativeEventsForContext`
+  filters every link by event position, whatever its kind — but only once member history trips the
+  threshold.
+- **Resumed and growing sessions (F33).** A growing root transcript re-emits every segment under a new
+  `ExternalID` (size is part of it), and each snapshot can collect its own context links, so links grow
+  as snapshots × narratives. Not created by this design; multiplied by it.
+- **Bisection.** A pass that splits its window numbers each half separately, so sharing cannot cross
+  the seam. That under-shares and never mis-shares. The measured pass should not bisect.
+
+No `max_context_links_per_event` knob. Incident 27: a knob whose correct value is a band nobody can
+calibrate is a latent bug with a default, and there is no measurement to calibrate it against yet. The
+first slice reports the distribution instead: context links per pass, distinct events shared, and the
+largest fan-out per event. The cap waits for a number that says it is needed.
+
+### 8. Discovery links
+
+Phase 2's "spin-off tickets with discovery links" — issue B discovered while working on A — relates
+**narratives** (and, when applied, issues), with a direction and a time order. This design relates
+**events** to narratives with no direction. They are different relations and should stay different
+records.
+
+But this design produces most of what a discovery-link pass would need, by derivation: B holds a
+context link to `E`, `E`'s member home is A, and A's window opens before B's. That is a candidate
+"B was discovered while working on A", computable from rows this design writes — so **record nothing
+new now**:
+
+- Rejected: a `narrative_relations` table now. It would be written with no reader (F6's shape), and
+  incident 28 records what a denormalization with no reader costs. Derive, don't store.
+- Rejected: a third link kind such as `discovered_from`. Direction is a separate judgment from
+  relevance, and the matching vocabulary already decided the analogous question:
+  `discovered_while` was considered and folded into `mentioned` (`match_types.go`) because it had no
+  behavioural difference. A discovery link will have one — a tracker write — so it deserves its own
+  design, not a value squeezed into this column.
+
+One thing the design must do to keep that derivation possible: **context links are not deleted in
+routine operation**. They are only removed by a split that empties their narrative, or moved by a
+merge. Not by compaction, not when the member home commits.
+
+### 9. Acceptance measurement
+
+**Where and what.** Run where the credentials live (the main checkout's `.env`), never from a
+worktree (#37). A temp store, `db_path` pointing at it, never `data/unjira.db`. This repo's own
+transcripts with `collectors.claude_code.exclude_cwds` set to `[]` ("exclusions off"), the GitHub
+collector reading `jcogilvie/unjira` (reading the real repo is fine; only mutating it is not), the Jira
+collector off. **Window: `[2026-09-16T00:00:00Z, 2026-10-02T00:00:00Z)`**, which holds PRs #58–#78.
+
+**Procedure.**
+
+1. Collect **once**, with every collector's `backfill_days` reaching 2026-09-16 (the example config's
+   14 does not, and a short reach silently shrinks the corpus — #41's shape). Record, before
+   narrating, the root and subagent transcript files on disk with activity in the window against the
+   distinct transcripts collected. Snapshot this un-narrated store.
+2. Arms: **baseline** = `main` with the re-ask branch landed; **treatment** = the first slice. ≥3 reps
+   per arm, each on a **fresh copy of the snapshot** — never re-collected, because live transcripts keep
+   growing, and never chained, because a rep must not start from another rep's output (#35).
+3. Each rep narrates the window in **one persisted pass**, through an env-gated probe in the
+   `f16_probe_test.go` mould, taking an **absolute** window. `dev narrate --since` is relative to now,
+   so the window would drift between reps. Not `--dry-run`: #38's placeholders, and finding 3 above —
+   a dry run renders cluster output, not what persisted.
+4. Every metric is read from the store with SQL, never from printed output.
+5. The harness refuses to report a number from a failed run (#37): it prints `DIED` and the error
+   instead of zero.
+6. Optionally, a second scenario of one pass per day, which exercises sharing across passes through
+   eligible members. Reported, not gating.
+
+**Metrics.** Ranges across reps, not just means.
+
+| | Metric | Baseline | Acceptance |
+|---|---|---|---|
+| M1 | PR narratives with transcript evidence: narratives holding a GitHub PR event in the window **and** at least one `claude_code` segment event that is not an anchor (no `anchor_kind`). Reported twice: by member links only, and by member or context. | 12–15 of 20–21 (re-measured, per #36) | member-or-context rises, with ranges not overlapping baseline's; **member-only does not fall**, or the gain is reshuffling rather than sharing |
+| M2 | Anchor↔PR coalescing: every anchor with `pr_create_outcome=created` has the same member home as the `:opened` event carrying its `ArtifactPullRequest` | 100% (20/20, 21/21, 21/21) | 100% in every rep |
+| M3 | PR integrity: each PR's GitHub events share one member home | 100% | 100% in every rep |
+| M4 | Sharing structure: context links, distinct events shared, maximum fan-out, duplicate-member downgrades, invariant violations | — | violations = 0; the rest reported |
+| M5 | Cost: prompt tokens, completion tokens, completion per cluster, cluster count, `NEW` count | measured | completion range overlaps baseline's or the excess is attributed (#32: zero the context rendering and the context indices one at a time); cluster count inside noise — #39's damage column, not only the cost column |
+| M6a | Delta exclusivity, deterministic, no model: for every event with ≥2 links, how many narratives' `DeltaEvents` / `AllMemberEvents` / redraft delta contain it | — | exactly 1, for every such event |
+| M6b | Cross-ticket content, model in the loop: below | — | 0 confirmed duplications |
+
+**M6b in detail.** Reconcile drafts only against linked issues, and this repo's work has no Jira keys.
+So on each treatment rep's store, with `tracker.backend: local`: seed one local issue per PR narrative
+(`store.InsertLocalIssue`, titled from the PR), link it as that narrative's primary with
+`ProvenanceReviewer`, run `Reconcile` with the real model, and collect every proposed comment. Nothing
+reaches a real tracker — the local backend and the review queue are the whole write surface, and no
+apply runs. For every pair of comments on *different* issues whose narratives share a context event,
+compute a word-shingle overlap. Calibrate the threshold on the **baseline** arm (same seeding), whose
+pairs share no context links, to learn the background similarity of this repo's comments to each
+other. Then a human reads every pair above threshold, and a sample below it, asking one question:
+*does the comment on the context-holding ticket describe the shared event's work as that ticket's
+work?* The automated overlap is a screen; the reading is the verdict. A confirmed duplication — most
+likely via the summary leak named in §2 — fails acceptance and goes to slice 3's question, not into a
+prompt patch.
+
+**Traps, collected.**
+
+- #37 — a pass that died reports zero. The harness checks errors and prints `DIED`.
+- #38 — dry-run placeholders, plus finding 3: printed output disagrees with the store.
+- #35 — the "before" must precede the work: every rep starts from the same snapshot; check
+  `link_seq` and `created_at` on the rows, not totals.
+- #36 — the 12–15 baseline predates the re-ask branch, which changes it. Re-measure baseline in the
+  same session as treatment.
+- #32 — attribute before claiming: a cost delta is assigned to context rendering or context indices
+  only after zeroing each.
+- F16's 34% spread — one rep per arm is uninterpretable.
+- F33 — resumed sessions duplicate root segments. Report M1 counting distinct transcripts as well as
+  events, so a duplicate snapshot cannot inflate "evidence".
+- The anchor-definition trap (finding 5) — an M1 near 100% means anchors were counted.
+
+---
+
+## First slice
+
+The smallest change that closes the measured gap safely. It records the relationship correctly,
+fixes F36 on the way, and lets nothing downstream consume context yet:
+
+1. **Schema**: `narrative_events.kind` (no default) and `one_member_link_per_event`, with the
+   generalized pre-DDL refusal and an updated README paragraph.
+2. **Store**: member-only predicates (`linkedSinceLastAction`, both examination predicates,
+   `UnlinkedEventsInRange`), `AllNarrativeEvents` renamed, `ContextEvents` added, kind-aware
+   eligibility for merge, and `moveMember`/`addContext` as `Tx` methods.
+3. **Cluster**: `context_indices` in the prompt and parser; the duplicate-member rule; `assignableEvents`
+   erroring on a repeated event; `ContextEvents` rendered with back-references.
+4. **Persist**: the two operations, member-only windows, context-only extends leaving summary and
+   window alone, compaction over member events, and the commit-time invariant check.
+5. **Triage**: merge and split per §6, with the merge-ordering test first.
+6. **Reporting**: context links and downgrades on `Stats`, in the pass summary when non-zero, and
+   `NarratedNarrative.ContextEvents` read back from the store.
+
+Tests to write first, because each pins a hazard named above: a double assignment persists one member
+home and no empty narrative (F36); a context link does not change either backlog count (§7); merge
+onto a target holding the event as context keeps it a member (§6); split with shared events empties
+and marks the source (§6); an upgraded link is in the delta (§4); a frozen member is never numbered
+(§5); a context-only `NEW` is rejected (§4). Then the drills: drop `kind = 'member'` from
+`linkedSinceLastAction` and confirm the reconcile-level test fails; restore last-writer-wins and
+confirm the F36 test fails.
+
+Docs in the same PR: `docs/architecture.md` §1 (the cluster stage now produces two link kinds), this
+spec's status, F36 deleted, F6 narrowed.
+
+## What follows, and what gates it
+
+- **Slice 2 — let the model see lineage, and share frozen events.** Render each subagent event's parent
+  and dispatching root segment in the cluster prompt. The subagent's `session_id` matches its parent's
+  root segments, and its `started_at` falls inside the dispatching segment's
+  `[started_at, ended_at]` — a pure join. This is where F6's subagent artifacts (`session_id`,
+  `parent_session_id`, `agent_id`, `parent_agent_id`, `dispatch_tool_use_id`,
+  `subagent_description`, `spawn_depth`, and the root segments' `started_at`/`ended_at`) get their
+  reader. Add the `context_refs` index space (§5). **Gate:** the first slice's M1 still shows PR
+  narratives missing root context that the lineage would supply, or the daily-pass scenario shows
+  sharing lost to freezing.
+- **Slice 3 — drafting reads context as labeled background.** **Gate:** M6b passes on the first slice,
+  and passes again with context rendered. This is the slice where the user sees richer comments, and
+  the one with the highest stakes; it does not land on a prompt rule alone.
+- **Not to build:** context links feeding `gatherCandidates` at any tier (§3 — recommended never, not
+  deferred); deterministic auto-linking from lineage (§1); a fan-out cap knob until M4 shows a fan-out
+  that needs one.
+
+## Open questions
+
+1. **Duplicate member assignment: deterministic downgrade, or a re-ask?** §4 recommends the downgrade
+   because it is strictly better than today and costs nothing. The re-ask branch may make a targeted
+   re-ask cheap enough to prefer — "event N is the work of clusters X and Y; which?" Decide once its
+   shape is visible; I could not inspect it, because it has not been pushed.
+2. **Inline `context_indices`, or a separate relevance call?** §1 recommends inline and names the
+   separate call as the fallback. M2, M3 and M5's cluster and `NEW` counts decide.
+3. **Does the summary leak (§2) defeat slice 3 outright?** If M6b finds duplication carried by
+   summaries, drafting may need the summary rewritten without context, or context withheld from
+   `Cluster`'s summary-writing entirely. Unknown until measured.
+4. **Should matching's classifier see context events?** Possibly useful for telling implements from
+   mentions; unmeasured (§3).
+5. **Is sharing frozen events needed in steady state?** That depends on how often a root segment's
+   member home commits before the PRs it fed arrive. Unmeasured, and slice 2's gate.
+6. **Does context accumulation between compactions need its own bound?** §7 relies on the compaction
+   boundary. A narrative with little member history and much context may never trip it.
+7. **Did the 12–15 baseline exclude anchors?** Finding 5 says it must have. Confirm with whoever ran
+   it, or re-derive it under §9's definition and say so.
+8. **Should triage show a reviewer the context links** behind an action? They explain a draft without
+   being in it — and in slice 1 they are not in it. Probably yes once slice 3 lands; harmless before.
+9. **When does unjira need a migration mechanism?** §1 refuses old stores on F30's precedent and
+   shares F21's trigger: the first non-disposable store.
+
+## Non-goals
+
+- No new action type, write path or gate. Context links never reach `gate.Applier`.
+- No change to collectors. Every artifact this design (or slice 2) reads is already written.
+- No discovery links (§8), no estimation, no `emergent` tag.
+- No change to `refs` or `fanout` (F1). Env-mirror fan-out is many PRs being one piece of work; this is
+  one event being background to many pieces of work. Opposite shapes.
