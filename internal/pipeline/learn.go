@@ -72,6 +72,11 @@ type LearnResult struct {
 	CorrectionsRead int
 	// Candidates are the drafted rules, whether or not they were written.
 	Candidates []rules.Candidate
+	// ReadThrough is the high-water mark of the corrections this pass read, and so of
+	// what Candidates were drafted from. KeepCandidates advances the watermark to it,
+	// never to a clock reading: a correction ruled after the read is past it, and is
+	// offered next pass (finding F31).
+	ReadThrough store.CorrectionsCursor
 	// Written are the names actually persisted, so a caller can report what changed on
 	// disk rather than what was offered.
 	Written []string
@@ -100,11 +105,12 @@ func RunLearn(
 		return LearnResult{}, err
 	}
 
-	corrections, err := s.CorrectionsSince(since)
+	corrections, readThrough, err := s.CorrectionsSince(since)
 	if err != nil {
 		return LearnResult{}, fmt.Errorf("reading corrections since %s: %w", since, err)
 	}
 	result.CorrectionsRead = len(corrections)
+	result.ReadThrough = readThrough
 
 	if len(corrections) == 0 {
 		return result, nil
@@ -126,7 +132,7 @@ func RunLearn(
 		return result, nil
 	}
 
-	written, advanced, err := KeepCandidates(s, cfg, candidates, opts.Keep)
+	written, advanced, err := KeepCandidates(s, cfg, result, opts.Keep)
 	result.Written = written
 	result.WatermarkAdvanced = advanced
 
@@ -142,21 +148,41 @@ func RunLearn(
 // offered "comment-must-add-information", and failed with "no drafted rule named ...". The
 // names were both fine; the assumption that they would be stable was not.
 //
-// So the CLI holds the candidates from its one draft and hands them back here. That also
-// halves the cost of keeping, and removes any chance of a reviewer approving prose they did
-// not see.
+// So the CLI holds the draft and hands it back here: its candidates, and the high-water mark
+// of the corrections they were drafted from. That also halves the cost of keeping, and
+// removes any chance of a reviewer approving prose they did not see.
+//
+// The watermark moves to draft.ReadThrough, not to "now" (finding F31). A clock reading
+// taken here would cover corrections ruled while the draft was with the model, which no
+// candidate was drafted from, and they would never be offered. It never moves backwards
+// either: if another pass has already kept past this draft's read, that position stands.
 func KeepCandidates(
-	s *store.Store, cfg config.Config, candidates []rules.Candidate, keep []string,
+	s *store.Store, cfg config.Config, draft LearnResult, keep []string,
 ) (written []string, advanced bool, err error) {
-	written, err = writeKept(cfg.RulesDir(), candidates, keep)
+	// Checked before writing anything, so a refusal leaves no rule on disk that the
+	// watermark does not account for.
+	if draft.ReadThrough.IsZero() {
+		return nil, false, errors.New(
+			"this draft read no corrections, so there is nothing to keep and no position " +
+				"to advance the learn watermark to")
+	}
+	stored, err := readLearnWatermark(s)
+	if err != nil {
+		return nil, false, err
+	}
+	position, err := stored.Later(draft.ReadThrough).Encode()
+	if err != nil {
+		return nil, false, fmt.Errorf("advancing the learn watermark: %w", err)
+	}
+
+	written, err = writeKept(cfg.RulesDir(), draft.Candidates, keep)
 	if err != nil {
 		return written, false, err
 	}
 
 	// Only after every kept rule is on disk. Advancing first and failing to write would
 	// lose the corrections entirely.
-	if err := s.SetCursor(learnCursorCollector, learnCursorResource,
-		time.Now().UTC().Format("2006-01-02T15:04:05Z")); err != nil {
+	if err := s.SetCursor(learnCursorCollector, learnCursorResource, position); err != nil {
 		return written, false, fmt.Errorf("advancing the learn watermark: %w", err)
 	}
 
@@ -168,23 +194,40 @@ func KeepCandidates(
 // A malformed stored value is an error rather than a silent reset to zero: resetting would
 // re-distil every correction ever made and offer a reviewer rules they already ruled on,
 // which reads as the tool having forgotten their decisions.
-func readLearnWatermark(s *store.Store) (time.Time, error) {
+//
+// A pre-F31 watermark, a whole-second timestamp, gets its own error naming the fix. Reading
+// it as a cursor is not possible without guessing what it covered, which was exactly its
+// defect.
+func readLearnWatermark(s *store.Store) (store.CorrectionsCursor, error) {
 	raw, err := s.GetCursor(learnCursorCollector, learnCursorResource)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("reading the learn watermark: %w", err)
-	}
-	if raw == "" {
-		return time.Time{}, nil
+		return store.CorrectionsCursor{}, fmt.Errorf("reading the learn watermark: %w", err)
 	}
 
-	parsed, err := time.Parse("2006-01-02T15:04:05Z", raw)
-	if err != nil {
-		return time.Time{}, fmt.Errorf(
-			"the learn watermark %q is not a timestamp: refusing to reset it, which would "+
-				"re-offer every correction a reviewer has already ruled on: %w", raw, err)
+	cursor, err := store.ParseCorrectionsCursor(raw)
+	if err == nil {
+		return cursor, nil
 	}
 
-	return parsed, nil
+	if old, oldErr := time.Parse(time.RFC3339, raw); oldErr == nil {
+		converted := store.CorrectionsCursor{
+			DecidedAt: old.UTC().Truncate(time.Second).Format("2006-01-02T15:04:05.000Z"),
+		}
+
+		return store.CorrectionsCursor{}, fmt.Errorf(
+			"the learn watermark %q is a pre-F31 whole-second timestamp, which this build "+
+				"does not read: it was a clock reading, so it cannot say which corrections were "+
+				"actually drafted. Refusing to reset it, which would re-offer every correction a "+
+				"reviewer has already ruled on. To continue from the same point, re-offering only "+
+				"corrections ruled within that second (where F31 could have hidden one), run: "+
+				`sqlite3 <db_path> "UPDATE cursors SET position = '%s' WHERE collector = '%s' AND `+
+				`resource = '%s'"`,
+			raw, converted, learnCursorCollector, learnCursorResource)
+	}
+
+	return store.CorrectionsCursor{}, fmt.Errorf(
+		"the learn watermark %q is not a corrections cursor: refusing to reset it, which would "+
+			"re-offer every correction a reviewer has already ruled on: %w", raw, err)
 }
 
 // toRulesCorrections maps the store's shape to the rules package's.

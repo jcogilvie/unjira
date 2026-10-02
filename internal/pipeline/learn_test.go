@@ -254,7 +254,7 @@ func TestKeepCandidates_PersistsWhatWasAlreadyDrafted(t *testing.T) {
 	require.Len(t, drafted.Candidates, 1)
 
 	// No client, no second distillation: the candidates in hand are what gets written.
-	written, advanced, err := pipeline.KeepCandidates(s, cfg, drafted.Candidates,
+	written, advanced, err := pipeline.KeepCandidates(s, cfg, drafted,
 		[]string{drafted.Candidates[0].Name})
 	require.NoError(t, err)
 
@@ -280,7 +280,7 @@ func TestKeepCandidates_DoesNotAdvanceOnAWriteFailure(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(cfg.RulesDir(), "say-what-changed.md"), []byte("existing"), 0o600))
 
-	_, advanced, err := pipeline.KeepCandidates(s, cfg, drafted.Candidates,
+	_, advanced, err := pipeline.KeepCandidates(s, cfg, drafted,
 		[]string{"say-what-changed"})
 	require.Error(t, err)
 	assert.False(t, advanced, "a failed write must not advance the watermark")
@@ -290,4 +290,131 @@ func TestKeepCandidates_DoesNotAdvanceOnAWriteFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, again.CorrectionsRead,
 		"the correction must still be offered, or the feedback is lost to a name collision")
+}
+
+// rule inserts one more action and rules on it with feedback, which is what makes it a
+// correction.
+func rule(t *testing.T, s *store.Store, feedback string) int64 {
+	t.Helper()
+
+	nid, err := s.InsertNarrative(time.Now().Add(-time.Hour), time.Now(), "more work", "s")
+	require.NoError(t, err)
+	id, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "DEVSBX-2",
+		Payload: `{"body":"other prose"}`, Status: store.StatusProposed,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatusAndFeedback(id, store.StatusRejected, feedback))
+
+	return id
+}
+
+// TestKeepCandidates_ACorrectionDecidedAfterTheDraftIsOfferedNextPass is F31's second
+// half. `unjira learn` drafts, which includes the model call, and keeps afterwards. A
+// ruling made in between was never drafted from, so the watermark must not cover it — it
+// must be the high-water mark of what the draft READ, not the clock at keep.
+func TestKeepCandidates_ACorrectionDecidedAfterTheDraftIsOfferedNextPass(t *testing.T) {
+	s, cfg, _ := learnFixture(t)
+
+	drafted, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: oneCandidate}, cfg,
+		pipeline.LearnOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 1, drafted.CorrectionsRead)
+
+	rule(t, s, "ruled while the draft was with the model")
+
+	// Production HAS this gap, which is what makes the sleep honest rather than a mask
+	// (design-notes #40): between the ruling and the keep sits the rest of the draft's
+	// model call and a reviewer reading candidates. Without it, a regression to a
+	// millisecond clock reading at keep passes whenever the ruling and the keep share a
+	// millisecond — measured: the drill passed until this was added.
+	time.Sleep(5 * time.Millisecond)
+
+	_, advanced, err := pipeline.KeepCandidates(s, cfg, drafted, []string{"say-what-changed"})
+	require.NoError(t, err)
+	require.True(t, advanced)
+
+	next, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: `[]`}, cfg,
+		pipeline.LearnOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, next.CorrectionsRead,
+		"the late correction was never drafted from, so it must be offered now")
+}
+
+// TestKeepCandidates_NeverMovesTheWatermarkBackwards covers a two-draft interleaving: a
+// later draft kept first, then an earlier one. Moving the cursor back to the earlier
+// draft's read would re-offer corrections already distilled.
+func TestKeepCandidates_NeverMovesTheWatermarkBackwards(t *testing.T) {
+	s, cfg, _ := learnFixture(t)
+
+	early, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: oneCandidate}, cfg,
+		pipeline.LearnOptions{})
+	require.NoError(t, err)
+
+	rule(t, s, "a second correction")
+	late, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: `[
+		{"name":"second-rule","scope":"reconciler","body":"second norm"}
+	]`}, cfg, pipeline.LearnOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 2, late.CorrectionsRead)
+
+	_, _, err = pipeline.KeepCandidates(s, cfg, late, []string{"second-rule"})
+	require.NoError(t, err)
+	_, advanced, err := pipeline.KeepCandidates(s, cfg, early, []string{"say-what-changed"})
+	require.NoError(t, err)
+	assert.True(t, advanced, "keeping still counts as advancing, even when the stored position stands")
+
+	after, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: `[]`}, cfg,
+		pipeline.LearnOptions{})
+	require.NoError(t, err)
+	assert.Zero(t, after.CorrectionsRead, "both corrections were distilled and kept")
+}
+
+// TestKeepCandidates_RefusesADraftThatReadNothing guards the cursor rather than the files:
+// a draft with no read position has nothing to advance to, and writing to "" would reset
+// the watermark and re-offer everything.
+func TestKeepCandidates_RefusesADraftThatReadNothing(t *testing.T) {
+	s, cfg, _ := learnFixture(t)
+
+	_, advanced, err := pipeline.KeepCandidates(s, cfg, pipeline.LearnResult{
+		Candidates: []rules.Candidate{{Name: "orphan", Scope: rules.ScopeReconciler, Body: "b"}},
+	}, []string{"orphan"})
+	require.ErrorContains(t, err, "read no corrections")
+	assert.False(t, advanced)
+
+	entries, readErr := os.ReadDir(cfg.RulesDir())
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "refused before any rule reached disk")
+}
+
+// TestRunLearn_RefusesAMalformedWatermark keeps a corrupt cursor from reading as "never
+// learned", which would re-offer every correction a reviewer has already ruled on.
+func TestRunLearn_RefusesAMalformedWatermark(t *testing.T) {
+	s, cfg, _ := learnFixture(t)
+	require.NoError(t, s.SetCursor("learn", "corrections", "garbage"))
+
+	client := &learnLLM{response: oneCandidate}
+	_, err := pipeline.RunLearn(t.Context(), s, client, cfg, pipeline.LearnOptions{})
+	require.ErrorContains(t, err, `"garbage"`)
+	require.ErrorContains(t, err, "refusing to reset it")
+	assert.Zero(t, client.calls, "and it fails before spending a model call")
+}
+
+// TestRunLearn_RefusesAPreF31WatermarkAndNamesTheFix is the format change's compatibility
+// story. A store written before F31 holds a whole-second timestamp; this build must not
+// misread it, and the error must say how to continue without re-offering everything.
+func TestRunLearn_RefusesAPreF31WatermarkAndNamesTheFix(t *testing.T) {
+	s, cfg, _ := learnFixture(t)
+	require.NoError(t, s.SetCursor("learn", "corrections", "2026-01-01T12:00:05Z"))
+
+	_, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: oneCandidate}, cfg,
+		pipeline.LearnOptions{})
+	require.ErrorContains(t, err, "pre-F31")
+	require.ErrorContains(t, err,
+		`UPDATE cursors SET position = '{"decided_at":"2026-01-01T12:00:05.000Z","ids":[]}'`)
+
+	// The suggested fix is itself a cursor this build reads.
+	fixed, err := store.ParseCorrectionsCursor(`{"decided_at":"2026-01-01T12:00:05.000Z","ids":[]}`)
+	require.NoError(t, err)
+	assert.Equal(t, "2026-01-01T12:00:05.000Z", fixed.DecidedAt)
 }
