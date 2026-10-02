@@ -25,7 +25,18 @@ const StatusOpen = "open"
 // shown an empty narrative as context is being asked to reason about nothing, and
 // it also shows up in status output as a story with no substance.
 func (s *Store) SetNarrativeStatus(id int64, status string) error {
-	res, err := s.db.Exec(`UPDATE narratives SET status = ? WHERE id = ?`, status, id)
+	return setNarrativeStatusImpl(s.db, id, status)
+}
+
+// SetNarrativeStatus is the *Tx-scoped variant of (*Store).SetNarrativeStatus. A split
+// that empties its source uses it so marking the source split and deleting its context
+// links land together.
+func (t *Tx) SetNarrativeStatus(id int64, status string) error {
+	return setNarrativeStatusImpl(t.tx, id, status)
+}
+
+func setNarrativeStatusImpl(c dbConn, id int64, status string) error {
+	res, err := c.Exec(`UPDATE narratives SET status = ? WHERE id = ?`, status, id)
 	if err != nil {
 		return fmt.Errorf("setting narrative %d status to %q: %w", id, status, err)
 	}

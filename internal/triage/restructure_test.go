@@ -81,7 +81,7 @@ func TestStoreHandler_MergeMovesOnlyEligibleEvents(t *testing.T) {
 	moved, err := h.MergeNarratives(target, source)
 
 	require.NoError(t, err)
-	assert.ElementsMatch(t, sourceEvents, moved, "all of the source's uncommitted events moved")
+	assert.ElementsMatch(t, sourceEvents, moved.Members, "all of the source's uncommitted events moved")
 
 	targetCount, err := s.NarrativeEventCount(target)
 	require.NoError(t, err)
@@ -92,7 +92,7 @@ func TestStoreHandler_MergeMovesOnlyEligibleEvents(t *testing.T) {
 	assert.Equal(t, 0, sourceCount, "source is emptied, not double-linked")
 
 	// The target's committed events are STILL frozen: nothing laundered them.
-	stillEligible, err := s.EligibleEventIDs(target)
+	stillEligible, err := s.EligibleMemberEventIDs(target)
 	require.NoError(t, err)
 	for _, id := range targetEvents {
 		assert.NotContains(t, stillEligible, id, "a committed event must remain frozen after a merge")
@@ -142,7 +142,7 @@ func seedHandlerNarrative(
 
 		eid, err := s.EventIDByExternalID("claude_code", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 		ids = append(ids, eid)
 	}
 

@@ -210,5 +210,5 @@ func linkEventToNarrative(t *testing.T, s *store.Store, narrativeID int64, evt e
 
 	id, err := s.EventIDByExternalID(evt.Source, evt.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(narrativeID, []int64{id}))
+	require.NoError(t, s.LinkMembers(narrativeID, []int64{id}, 1))
 }

@@ -82,7 +82,7 @@ func TestReconcile_DropsSelfAuthoredFromTheRealJiraCollectorsEvent(t *testing.T)
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID(selfEvt.Source, selfEvt.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 		return tx.AddNarrativeIssues(nid, []store.NarrativeIssue{{

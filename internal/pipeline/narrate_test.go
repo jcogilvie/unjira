@@ -75,7 +75,7 @@ func TestRunNarrate_PersistsNewNarrative(t *testing.T) {
 	seedNarrateEvent(t, s, "e2", "finished the work", base.Add(time.Minute))
 
 	client := &narrateLLM{
-		responses:    []string{`[{"kind":"new","title":"Did work","summary":"start to finish","event_indices":[0,1]}]`},
+		responses:    []string{`[{"kind":"new","title":"Did work","summary":"start to finish","confidence":0.9,"event_indices":[0,1]}]`},
 		usagePerCall: llm.Usage{PromptTokens: 120, CompletionTokens: 30},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
@@ -115,7 +115,7 @@ Sentinel narrate-time rule body.
 `), 0o600))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"Did work","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"Did work","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -136,7 +136,7 @@ func TestRunNarrate_MissingRulesDirIsANoOpNotAnError(t *testing.T) {
 	seedNarrateEvent(t, s, "e1", "started the work", base)
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"Did work","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"Did work","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -155,7 +155,7 @@ func TestRunNarrate_DryRunPersistsNothingButReportsWhatItWould(t *testing.T) {
 	seedNarrateEvent(t, s, "e1", "some work", base)
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"Work","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"Work","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -217,12 +217,12 @@ func TestRunNarrate_HydratesOverlappingNarrativeEventsAsContext(t *testing.T) {
 	require.NoError(t, err)
 	nid, err := s.InsertNarrative(base.Add(-2*time.Hour), base, "Cache rework", "reworking the cache")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{oldID}))
+	require.NoError(t, s.LinkMembers(nid, []int64{oldID}, 1))
 
 	seedNarrateEvent(t, s, "new", "fixed the cache eviction bug", base.Add(time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0,1]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -259,13 +259,13 @@ func TestRunNarrate_BoundsContextNarrativesAndReportsWhatWasExcluded(t *testing.
 		require.NoError(t, err)
 		nid, err := s.InsertNarrative(windowEnd.Add(-time.Hour), windowEnd, label, label+" summary")
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	seedNarrateEvent(t, s, "new", "new work", base.Add(30*time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1,2]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0,1,2]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -299,12 +299,12 @@ func TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited(t *testing.T) {
 		require.NoError(t, err)
 		nid, err := s.InsertNarrative(windowEnd.Add(-time.Hour), windowEnd, label, label+" summary")
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 	seedNarrateEvent(t, s, "new", "new work", base.Add(30*time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1,2,3]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0,1,2,3]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -320,7 +320,7 @@ func TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited(t *testing.T) {
 // the narrative's cumulative fold count across every compaction it has ever
 // had. That distinction only shows up on a *second* compaction of the same
 // narrative: narrative_events rows are never deleted (see
-// store.NarrativeEventsForContext), so a naive
+// store.MemberEventsAfterBoundary), so a naive
 // "total linked minus currently visible" subtraction would double-count the
 // events an earlier pass already folded.
 //
@@ -347,7 +347,7 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	seedNarrateEvent(t, s, "e1", "started the work", base)
 	seedNarrateEvent(t, s, "e2", "kept going", base.Add(time.Minute))
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s0","event_indices":[0,1]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s0","confidence":0.9,"event_indices":[0,1]}]`},
 	}
 	window1 := correlator.TimeRange{Start: base, End: base.Add(2 * time.Minute)}
 
@@ -369,7 +369,7 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	// Re-listing them leaves the compaction arithmetic unchanged, because
 	// mergePostBoundaryEvents dedupes them against the narrative's linked tail.
 	client.responses = append(client.responses,
-		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s1","event_indices":[0,1,2,3,4]}]`, narrativeID),
+		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s1","confidence":0.9,"event_indices":[0,1,2,3,4]}]`, narrativeID),
 		"recap of e1-e3",
 	)
 	window2 := correlator.TimeRange{Start: base.Add(time.Minute), End: base.Add(5 * time.Minute)}
@@ -380,7 +380,7 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	assert.Equal(t, narrativeID, got2.Compactions[0].NarrativeID)
 	assert.Equal(t, 3, got2.Compactions[0].EventsFolded, "folds e1, e2, e3; keeps e4, e5")
 
-	visibleAfterPass2, err := s.NarrativeEventsForContext(narrativeID)
+	visibleAfterPass2, err := s.MemberEventsAfterBoundary(narrativeID)
 	require.NoError(t, err)
 	assert.Len(t, visibleAfterPass2, 2, "e4 and e5 remain visible after the first compaction")
 
@@ -392,7 +392,7 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 	seedNarrateEvent(t, s, "e7", "seventh thing", base.Add(6*time.Minute))
 	// Indices 0-1 are e6-e7; 2-3 are e4-e5, the still-eligible visible tail.
 	client.responses = append(client.responses,
-		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s2","event_indices":[0,1,2,3]}]`, narrativeID),
+		fmt.Sprintf(`[{"kind":"extends","narrative_id":%d,"title":"T","summary":"s2","confidence":0.9,"event_indices":[0,1,2,3]}]`, narrativeID),
 		"recap of e4-e5",
 	)
 	window3 := correlator.TimeRange{Start: base.Add(4 * time.Minute), End: base.Add(7 * time.Minute)}
@@ -424,7 +424,7 @@ func TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal(t *testing.T)
 // this design exists to avoid.
 //
 // What may NOT move is work a tracker mutation already describes. That is the
-// only line, and store.EligibleEventIDs draws it.
+// only line, and store.EligibleMemberEventIDs draws it.
 //
 // Written first as its own inverse ("watch must never reshuffle priors") on the
 // theory that autonomous re-clustering was unsafe. It is not: the failing test
@@ -438,7 +438,7 @@ func TestHydrateContextNarratives_UncommittedPriorEventsAreAssignable(t *testing
 
 	seedNarrateEvent(t, s, "h1", "prior work", base)
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 	}
 	window1 := correlator.TimeRange{Start: base, End: base.Add(time.Minute)}
 
@@ -446,7 +446,7 @@ func TestHydrateContextNarratives_UncommittedPriorEventsAreAssignable(t *testing
 	require.NoError(t, err)
 
 	seedNarrateEvent(t, s, "h2", "new work", base.Add(2*time.Minute))
-	client.responses = append(client.responses, `[{"kind":"new","title":"T2","summary":"s2","event_indices":[0,1]}]`)
+	client.responses = append(client.responses, `[{"kind":"new","title":"T2","summary":"s2","confidence":0.9,"event_indices":[0,1]}]`)
 	// window2 starts at base so it OVERLAPS narrative 1's window — otherwise
 	// NarrativesOverlapping excludes it and there is no prior narrative in the
 	// prompt to be assignable or not, which would make this test vacuous.

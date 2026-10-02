@@ -30,7 +30,7 @@ func seedUntracked(t *testing.T, s *store.Store, evts ...events.Event) int64 {
 		ids = append(ids, eid)
 	}
 	if len(ids) > 0 {
-		require.NoError(t, s.AddNarrativeEvents(id, ids))
+		require.NoError(t, s.LinkMembers(id, ids, 1))
 	}
 
 	return id
@@ -387,7 +387,7 @@ func TestProposeCreates_ADeclineIsReconsideredWhenNewWorkArrives(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "dc:2")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	// Pass 2: the work changed, so ask again.
 	got, _, err = ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)

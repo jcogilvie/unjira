@@ -75,10 +75,22 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   the only party that can know). The exclusion at clustering does *not* replace the reconciler's exit
   filters — `AnyWorkEvidence`, `suppressTrackerEcho`, `dropSelfAuthored` all stay, because narratives
   linked before the filter existed still hold tracker records — `narrative_events` rows are never
-  garbage-collected. They ARE deleted when a link moves (`UnlinkEventFromOtherNarratives` inside a
-  relink, `UnlinkNarrativeEvents` for a triage merge/split), which is why `link_seq` is
-  `AUTOINCREMENT`: a plain rowid would reissue a deleted newest number and make an old position
-  look new. Entrance stops the pipeline *paying*; exit stops it *speaking*.
+  garbage-collected. They ARE deleted when a member link moves or a context link is upgraded to a
+  member (`Tx.MoveMember`), and by `UnlinkNarrativeEvents` in a triage merge/split. That is why
+  `link_seq` is `AUTOINCREMENT`: a plain rowid would reissue a deleted newest number and make an
+  old position look new. Entrance stops the pipeline *paying*; exit stops it *speaking*.
+- **Every linked event has exactly one member home, and only member links reach a tracker path.**
+  A `narrative_events` link is a `member` (the event is this narrative's work, and the unit of token
+  attribution) or `context` (relevant background, some other narrative's work). At most one member
+  per event is the partial unique index `one_member_link_per_event`; at least one is `Persist`'s
+  commit check. Every reader that feeds the reconciler, matching or a watermark filters on
+  `kind = 'member'`, and the ones whose meaning narrowed were renamed so their callers could not
+  keep the old meaning by accident. Do not let context reach a delta, a drafting or create prompt,
+  `gatherCandidates`, or a backlog count. A shared investigation drafted onto three tickets is the
+  failure that rule prevents, and `suppressDuplicates`, keyed on the issue, cannot catch it. An event
+  two clusters both claim as work is resolved by the dispute re-ask. It is never resolved by response
+  order, because member links drive attribution (see
+  `docs/superpowers/specs/2026-10-02-shared-context-design.md`).
 - **`internal/correlator/refs` and `internal/correlator/fanout` have no callers yet, and that is
   deliberate.** They are pure, tested implementations of two GitHub-PR-shaped problems: env-mirror
   fan-out (one infra change becoming ~12 near-identical per-region PRs — see

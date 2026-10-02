@@ -45,24 +45,35 @@ const splitInstruction = `A reviewer has judged that the events below do NOT bel
 //
 // Returns the narratives the split produced. The source is marked
 // store.StatusSplit when it ends up empty — see markSourceIfEmptied.
+//
+// MEMBER events only (shared-context spec §6). The split re-clusters the source's
+// work; its Cluster call gets no context narratives, so everything numbered is the
+// source's, and Persist's MoveMember deletes only the source's member links.
+// context_indices between the halves are allowed — one half's investigation may
+// genuinely be background for the other. The source's OWN context links are not
+// redistributed (more model judgment inside a reviewer-attended command, for
+// background nobody asked about) nor copied to every half (over-sharing): they stay
+// if the source keeps any member, and are deleted if the split empties it, which
+// loses nothing because each such event keeps its member home elsewhere. Both are
+// counted in the result.
 func (h *StoreHandler) SplitNarrative(
 	ctx context.Context, narrativeID int64,
-) ([]correlator.Narrative, error) {
+) (SplitResult, error) {
 	if h.client == nil {
-		return nil, fmt.Errorf(
+		return SplitResult{}, fmt.Errorf(
 			"split is unavailable: this session has no LLM client")
 	}
 
-	eligible, err := h.store.EligibleEvents(narrativeID)
+	eligible, err := h.store.EligibleMemberEvents(narrativeID)
 	if err != nil {
-		return nil, err
+		return SplitResult{}, err
 	}
 
 	if len(eligible) < 2 {
 		// One event cannot be two stories, and zero means everything is frozen.
 		// Both are refusals a reviewer can act on, unlike a "split" that silently
 		// returns the narrative unchanged.
-		return nil, fmt.Errorf(
+		return SplitResult{}, fmt.Errorf(
 			"narrative %d has %d uncommitted event(s), so there is nothing to split: a split needs "+
 				"at least two events that no tracker mutation already describes",
 			narrativeID, len(eligible))
@@ -75,14 +86,14 @@ func (h *StoreHandler) SplitNarrative(
 		correlator.WithInstruction(splitInstruction),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("re-clustering narrative %d for a split: %w", narrativeID, err)
+		return SplitResult{}, fmt.Errorf("re-clustering narrative %d for a split: %w", narrativeID, err)
 	}
 
 	if len(results) < 2 {
 		// The model was told to produce at least two and did not. Reported rather
 		// than forced: the reviewer may be wrong, and a seam invented to satisfy
 		// the instruction would be worse than saying so.
-		return nil, fmt.Errorf(
+		return SplitResult{}, fmt.Errorf(
 			"the model kept narrative %d as one story despite the split instruction; "+
 				"nothing was changed", narrativeID)
 	}
@@ -100,39 +111,68 @@ func (h *StoreHandler) SplitNarrative(
 	touched, _, err := correlator.Persist(
 		ctx, h.store, h.client, results, h.correlator)
 	if err != nil {
-		return nil, fmt.Errorf("persisting the split of narrative %d: %w", narrativeID, err)
+		return SplitResult{}, fmt.Errorf("persisting the split of narrative %d: %w", narrativeID, err)
 	}
 
-	if err := h.markSourceIfEmptied(narrativeID); err != nil {
-		return nil, err
+	out := SplitResult{Narratives: touched}
+	if out.SourceContextLinks, out.SourceContextLinksDeleted, err = h.markSourceIfEmptied(narrativeID); err != nil {
+		return SplitResult{}, err
 	}
 
-	return touched, nil
+	return out, nil
 }
 
-// markSourceIfEmptied sets the source narrative to StatusSplit once every event
-// has moved off it.
+// SplitResult is what a split produced, and what became of the source's own
+// context links.
+type SplitResult struct {
+	Narratives []correlator.Narrative
+	// SourceContextLinks is how many context links the source held after the split
+	// moved its members. They were deleted when SourceContextLinksDeleted is true
+	// (the split emptied the source of members) and kept otherwise.
+	SourceContextLinks        int
+	SourceContextLinksDeleted bool
+}
+
+// markSourceIfEmptied sets the source narrative to StatusSplit once every MEMBER
+// event has moved off it, deleting its context links in that case, and reports how
+// many context links it held and whether they went.
+//
+// Members, not links of any kind: a source left holding only background holds no
+// work, and if it were not marked split it would sit in every later prompt as a
+// narrative with no work (shared-context spec §6). Its context links are deleted
+// rather than left on a split narrative nothing reads; no data is lost, since every
+// linked event keeps its member home elsewhere.
 //
 // Conditional, not unconditional: a narrative that kept its committed events is
 // still a live story with a tracker mutation describing it, and marking it split
-// would hide it from future clustering while its issue is still being worked.
-// Verified by probe that Persist's relinkEvents empties the source when every
-// event moves — 2 events before, 0 after — so this is the only remaining step.
-func (h *StoreHandler) markSourceIfEmptied(narrativeID int64) error {
-	remaining, err := h.store.NarrativeEventCount(narrativeID)
+// would hide it from future clustering while its issue is still being worked. Its
+// context links stay with it.
+func (h *StoreHandler) markSourceIfEmptied(narrativeID int64) (contextLinks int, deleted bool, err error) {
+	remaining, err := h.store.MemberEventCount(narrativeID)
 	if err != nil {
-		return fmt.Errorf("counting events left on narrative %d after a split: %w", narrativeID, err)
+		return 0, false, fmt.Errorf("counting member events left on narrative %d after a split: %w", narrativeID, err)
+	}
+
+	background, err := h.store.ContextEventIDs(narrativeID)
+	if err != nil {
+		return 0, false, fmt.Errorf("reading context links left on narrative %d after a split: %w", narrativeID, err)
 	}
 
 	if remaining > 0 {
-		return nil
+		return len(background), false, nil
 	}
 
-	if err := h.store.SetNarrativeStatus(narrativeID, store.StatusSplit); err != nil {
-		return err
+	if err := h.store.WithTx(func(tx *store.Tx) error {
+		if err := tx.UnlinkNarrativeEvents(narrativeID, background); err != nil {
+			return err
+		}
+
+		return tx.SetNarrativeStatus(narrativeID, store.StatusSplit)
+	}); err != nil {
+		return 0, false, fmt.Errorf("marking emptied narrative %d split: %w", narrativeID, err)
 	}
 
-	return nil
+	return len(background), true, nil
 }
 
 // windowSpanning returns the smallest TimeRange covering evts.

@@ -48,13 +48,18 @@ CREATE TABLE IF NOT EXISTS reconcile_examinations (
 // might not be self-authored — dropSelfAuthored runs per-pass on whatever DeltaEvents
 // returns, so a fresh non-unjira event reopens the narrative exactly as a fresh
 // candidate key reopens one in match_examinations.
+//
+// MEMBER links only (shared-context spec §2): DeltaEvents never returns a context
+// event, so a context link cannot change what the reconciler would find, and
+// re-admitting on one would spend a model call on a delta that is unchanged.
 const reconcileExaminationPredicate = `
 		 AND NOT EXISTS (
 		     SELECT 1 FROM reconcile_examinations re
 		     WHERE re.narrative_id = n.id
 		       AND NOT EXISTS (
 		           SELECT 1 FROM narrative_events ne
-		           WHERE ne.narrative_id = n.id AND ne.link_seq > re.examined_link_seq
+		           WHERE ne.narrative_id = n.id AND ` + memberLink + `
+		             AND ne.link_seq > re.examined_link_seq
 		       )
 		 )`
 

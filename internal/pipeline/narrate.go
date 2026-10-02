@@ -71,7 +71,14 @@ type NarratedNarrative struct {
 	WindowEnd      time.Time
 	Title          string
 	Summary        string
-	Events         []correlator.Event
+	// Events are this pass's MEMBER events for the narrative and ContextEvents its
+	// context links. On a persisted pass both are READ BACK FROM THE STORE — this
+	// pass's placements as the store holds them, not as the cluster result stated
+	// them — because the printout disagreeing with the store is how a double
+	// assignment once read as sharing that never persisted (F37's instrument trap).
+	// Under DryRun nothing persisted, so they are the cluster result's.
+	Events        []correlator.Event
+	ContextEvents []correlator.Event
 }
 
 // Compaction records one tail-summarization, so the lossy step is visible in
@@ -80,7 +87,7 @@ type Compaction struct {
 	NarrativeID int64
 	// EventsFolded is how many events this pass's compaction folded into the
 	// recap — not the narrative's lifetime total. narrative_events rows are
-	// never deleted (see store.NarrativeEventsForContext), so a narrative
+	// never deleted (see store.MemberEventsAfterBoundary), so a narrative
 	// compacted more than once accumulates events that are linked but not
 	// "visible" from any earlier pass too; EventsFolded must not include
 	// those. See collectCompactions for the arithmetic and why a naive
@@ -165,7 +172,7 @@ func RunNarrate(
 	}
 
 	if opts.DryRun {
-		result.Narratives = describeUnpersisted(clustered)
+		result.Narratives = describeUnpersisted(clustered, existing)
 
 		return result, nil
 	}
@@ -197,7 +204,10 @@ func finishNarrate(
 		return NarrateResult{}, fmt.Errorf("persisting narratives: %w", err)
 	}
 
-	result.Narratives = describePersisted(clustered, persisted, priorEnds)
+	result.Narratives, err = describePersisted(s, clustered, persisted, priorEnds)
+	if err != nil {
+		return NarrateResult{}, err
+	}
 
 	result.Compactions, err = collectCompactions(s, existing, clustered, persisted, persistStats)
 	if err != nil {
@@ -207,17 +217,29 @@ func finishNarrate(
 	return result, nil
 }
 
-// requireNonEmptyClusters rejects any ClusterResult with no member events.
+// requireNonEmptyClusters rejects a NEW cluster with no member events, and an
+// EXTENDS with neither a member nor a context event.
 // parseClusterResponse (internal/correlator) does not itself reject an empty
 // event_indices array — a model could return one — and an empty cluster
 // would otherwise reach eventWindow (dry-run path) or prepareOneResult
 // (persist path) and silently produce a zero-width, zero-time window rather
 // than a loud failure. Per this repo's "never silently drop data" invariant,
 // that must be an error, not a quietly wrong narrative.
+//
+// The two kinds differ (shared-context spec §4). A new narrative IS its member
+// work, so context alone cannot make one — it would be an empty narrative whose
+// title describes somebody else's events (F37). An extend may legitimately add only
+// background to a narrative that already exists, which leaves its summary and window
+// untouched.
 func requireNonEmptyClusters(clustered []correlator.ClusterResult) error {
 	for _, r := range clustered {
-		if len(r.Events) == 0 {
-			return fmt.Errorf("clustering produced narrative %q with no member events", r.Title)
+		switch {
+		case r.Kind == correlator.ClusterNew && len(r.Events) == 0:
+			return fmt.Errorf("clustering produced new narrative %q with no member events (%d context event(s)); "+
+				"a new narrative must hold at least one event as its own work", r.Title, len(r.ContextEvents))
+		case r.Kind == correlator.ClusterExtends && len(r.Events) == 0 && len(r.ContextEvents) == 0:
+			return fmt.Errorf("clustering produced an extend of narrative %d with no member and no context events",
+				r.NarrativeID)
 		}
 	}
 
@@ -253,9 +275,17 @@ func hydrateContextNarratives(
 
 	out := make([]correlator.Narrative, 0, len(rows))
 	for _, row := range rows {
-		contextEvents, err := s.NarrativeEventsForContext(row.ID)
+		memberEvents, err := s.MemberEventsAfterBoundary(row.ID)
 		if err != nil {
-			return nil, 0, fmt.Errorf("hydrating context events for narrative %d: %w", row.ID, err)
+			return nil, 0, fmt.Errorf("hydrating member events for narrative %d: %w", row.ID, err)
+		}
+
+		// Context links are a third slice, never numbered (shared-context spec §5): a
+		// context link is not a member to move. Bounded by the same compaction
+		// boundary as members, so accumulated background is not re-sent forever.
+		background, err := s.ContextEventsAfterBoundary(row.ID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("hydrating context links for narrative %d: %w", row.ID, err)
 		}
 
 		// Partition by the commit watermark: uncommitted events stay eligible
@@ -266,11 +296,11 @@ func hydrateContextNarratives(
 		// change where a boundary belongs, and refusing to revise would make
 		// every early mis-clustering permanent until a human fixed it by hand.
 		// What cannot move is work a tracker mutation already describes; that is
-		// what store.EligibleEventIDs draws the line at.
+		// what store.EligibleMemberEventIDs draws the line at.
 		//
 		// An event must land in exactly one slice. In both would list it twice
 		// in one prompt and invite assigning a frozen event by index.
-		eligibleIDs, err := s.EligibleEventIDs(row.ID)
+		eligibleIDs, err := s.EligibleMemberEventIDs(row.ID)
 		if err != nil {
 			return nil, 0, fmt.Errorf("resolving eligible events for narrative %d: %w", row.ID, err)
 		}
@@ -281,7 +311,7 @@ func hydrateContextNarratives(
 		}
 
 		var frozen, assignable []correlator.Event
-		for _, e := range contextEvents {
+		for _, e := range memberEvents {
 			id, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 			if err != nil {
 				return nil, 0, fmt.Errorf("resolving event id for %s/%s: %w", e.Source, e.ExternalID, err)
@@ -303,6 +333,7 @@ func hydrateContextNarratives(
 			Status:         row.Status,
 			Events:         frozen,
 			EligibleEvents: assignable,
+			ContextEvents:  background,
 		})
 	}
 
@@ -339,18 +370,30 @@ func boundContextNarratives(
 // describeUnpersisted renders dry-run results, which have no ids because
 // nothing was written. Window bounds come from the clustered events
 // themselves, matching what Persist would have computed.
-func describeUnpersisted(clustered []correlator.ClusterResult) []NarratedNarrative {
+//
+// A context-only extend moves no window (Persist leaves it alone), so it reports the
+// narrative's existing one rather than a zero window computed from no members.
+func describeUnpersisted(clustered []correlator.ClusterResult, existing []correlator.Narrative) []NarratedNarrative {
+	windows := make(map[int64]correlator.Narrative, len(existing))
+	for _, n := range existing {
+		windows[n.ID] = n
+	}
+
 	out := make([]NarratedNarrative, 0, len(clustered))
 	for _, r := range clustered {
 		lo, hi := eventWindow(r.Events)
+		if n, ok := windows[r.NarrativeID]; ok && r.Kind == correlator.ClusterExtends && len(r.Events) == 0 {
+			lo, hi = n.WindowStart, n.WindowEnd
+		}
 		out = append(out, NarratedNarrative{
-			Kind:        r.Kind,
-			ID:          0,
-			WindowStart: lo,
-			WindowEnd:   hi,
-			Title:       r.Title,
-			Summary:     r.Summary,
-			Events:      r.Events,
+			Kind:          r.Kind,
+			ID:            0,
+			WindowStart:   lo,
+			WindowEnd:     hi,
+			Title:         r.Title,
+			Summary:       r.Summary,
+			Events:        r.Events,
+			ContextEvents: r.ContextEvents,
 		})
 	}
 
@@ -358,9 +401,16 @@ func describeUnpersisted(clustered []correlator.ClusterResult) []NarratedNarrati
 }
 
 // describePersisted pairs each persisted narrative with the clustered result
-// that produced it, so the output can show member events (which Persist's
-// return does not carry) alongside real ids and window bounds (which the
-// cluster result does not carry).
+// that produced it, so the output can show this pass's member and context events
+// (which Persist's return does not carry) alongside real ids and window bounds
+// (which the cluster result does not carry).
+//
+// The events are READ BACK FROM THE STORE: the narrative's member links and context
+// links, restricted to the ones this result named. A printout built from the cluster
+// result alone once showed an event under two narratives while the store held it
+// under one (F37), so any measurement read off the output counted sharing that never
+// persisted. Restricting to this result's events keeps the output about this pass
+// rather than the narrative's whole history; reading from the store keeps it true.
 //
 // The pairing is by index: clustered[i] <-> persisted[i]. This is verified,
 // not assumed, against Persist's implementation (internal/correlator/
@@ -372,10 +422,11 @@ func describeUnpersisted(clustered []correlator.ClusterResult) []NarratedNarrati
 // guards the bound rather than trusting it blindly, in case that invariant
 // ever slips.
 func describePersisted(
+	s *store.Store,
 	clustered []correlator.ClusterResult,
 	persisted []correlator.Narrative,
 	priorEnds map[int64]time.Time,
-) []NarratedNarrative {
+) ([]NarratedNarrative, error) {
 	out := make([]NarratedNarrative, 0, len(persisted))
 	for i, n := range persisted {
 		narrated := NarratedNarrative{
@@ -387,12 +438,38 @@ func describePersisted(
 			Summary:     n.Summary,
 		}
 		if i < len(clustered) {
-			narrated.Events = clustered[i].Events
+			members, err := s.AllMemberEvents(n.ID)
+			if err != nil {
+				return nil, fmt.Errorf("reading back member events of narrative %d: %w", n.ID, err)
+			}
+			background, err := s.ContextEvents(n.ID)
+			if err != nil {
+				return nil, fmt.Errorf("reading back context links of narrative %d: %w", n.ID, err)
+			}
+			narrated.Events = restrictTo(members, clustered[i].Events)
+			narrated.ContextEvents = restrictTo(background, clustered[i].ContextEvents)
 		}
 		if narrated.Kind == correlator.ClusterExtends {
 			narrated.PriorWindowEnd = priorEnds[n.ID]
 		}
 		out = append(out, narrated)
+	}
+
+	return out, nil
+}
+
+// restrictTo returns the events of stored that named also holds, in stored's order.
+func restrictTo(stored, named []correlator.Event) []correlator.Event {
+	want := make(map[string]bool, len(named))
+	for _, e := range named {
+		want[correlator.EventKey(e)] = true
+	}
+
+	var out []correlator.Event
+	for _, e := range stored {
+		if want[correlator.EventKey(e)] {
+			out = append(out, e)
+		}
 	}
 
 	return out
@@ -432,7 +509,7 @@ func eventWindow(evts []correlator.Event) (lo, hi time.Time) {
 // just wrote.
 //
 // EventsFolded is deliberately not "total linked minus currently visible":
-// narrative_events rows are never deleted (store.NarrativeEventsForContext),
+// narrative_events rows are never deleted (store.MemberEventsAfterBoundary),
 // so a narrative already compacted once, then extended and compacted again,
 // would have that subtraction count every event ever folded across every
 // past compaction, not just this pass's. Instead this computes, per
@@ -509,7 +586,7 @@ func collectCompactions(
 			continue
 		}
 
-		visible, err := s.NarrativeEventsForContext(n.ID)
+		visible, err := s.MemberEventsAfterBoundary(n.ID)
 		if err != nil {
 			return nil, fmt.Errorf("counting context events for narrative %d: %w", n.ID, err)
 		}

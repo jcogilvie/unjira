@@ -36,7 +36,7 @@ type commitState struct {
 // is an org-level decision, not one a review loop should make silently.
 //
 // This is also what keeps the per-narrative watermark sound under
-// restructuring. EligibleEventIDs compares against the narrative's OWN last
+// restructuring. EligibleMemberEventIDs compares against the narrative's OWN last
 // commit (its max actions.executed_link_seq), so relinking a frozen event onto a
 // never-committed narrative would make it eligible again — probed directly while designing
 // this: frozen on A, eligible on B. Because the committed narrative is always
@@ -143,40 +143,71 @@ func NewStoreHandler(
 	}
 }
 
-// MergeNarratives moves the source narrative's eligible events onto the target,
-// unlinking them from the source so nothing is double-linked.
+// MergeResult is what a merge moved: the source's eligible member events, now the
+// target's members, and the source's eligible context links, now the target's.
+type MergeResult struct {
+	Members []int64
+	Context []int64
+}
+
+// MergeNarratives moves the source narrative's eligible links onto the target,
+// removing them from the source so nothing is double-linked.
 //
 // Direction is resolved by commitment, never by argument order — see
-// resolveMergeTarget. Only ELIGIBLE events move: a frozen event stays on the
+// resolveMergeTarget. Only ELIGIBLE links move: a frozen link stays on the
 // narrative whose tracker mutation already describes it, which is what makes the
 // per-narrative watermark sound under restructuring.
 //
-// Runs in one transaction. A crash between the link and the unlink would leave
-// events attached to both narratives, which is the exact double-link this
-// function exists to avoid.
-func (h *StoreHandler) MergeNarratives(targetID, sourceID int64) (moved []int64, err error) {
-	eligible, err := h.store.EligibleEventIDs(sourceID)
+// By kind (shared-context spec §6). An eligible MEMBER moves with Tx.MoveMember,
+// which deletes the source's member link before inserting the target's — the only
+// order one_member_link_per_event permits — and upgrades the row when the target
+// already held the event as context. The old order, add through INSERT OR IGNORE and
+// then unlink, would now fail that index on the ordinary case and, where the target
+// held the event as context, keep the context row, delete the source's member link,
+// and leave the event with no home at all, silently. An eligible CONTEXT link is
+// re-homed with Tx.AddContext (a no-op where the target already holds the event) and
+// then deleted from the source.
+//
+// A moved member's confidence becomes store.ReviewerMemberConfidence: the reviewer has
+// ruled that the source's work is the target's, which is a human attribution, not the
+// model's original guess about a different narrative.
+//
+// Runs in one transaction. A crash part-way would leave links on both narratives or
+// on neither.
+func (h *StoreHandler) MergeNarratives(targetID, sourceID int64) (MergeResult, error) {
+	members, err := h.store.EligibleMemberEventIDs(sourceID)
 	if err != nil {
-		return nil, err
+		return MergeResult{}, err
+	}
+	background, err := h.store.EligibleContextEventIDs(sourceID)
+	if err != nil {
+		return MergeResult{}, err
 	}
 
-	if len(eligible) == 0 {
-		return nil, fmt.Errorf(
+	if len(members) == 0 && len(background) == 0 {
+		return MergeResult{}, fmt.Errorf(
 			"narrative %d has no uncommitted events to merge: every event it holds is already "+
 				"described by a tracker mutation and cannot be reattributed", sourceID)
 	}
 
 	if err := h.store.WithTx(func(tx *store.Tx) error {
-		if err := tx.AddNarrativeEvents(targetID, eligible); err != nil {
-			return err
+		for _, eid := range members {
+			if err := tx.MoveMember(targetID, eid, store.ReviewerMemberConfidence); err != nil {
+				return err
+			}
+		}
+		for _, eid := range background {
+			if _, err := tx.AddContext(targetID, eid); err != nil {
+				return err
+			}
 		}
 
-		return tx.UnlinkNarrativeEvents(sourceID, eligible)
+		return tx.UnlinkNarrativeEvents(sourceID, background)
 	}); err != nil {
-		return nil, fmt.Errorf("merging narrative %d into %d: %w", sourceID, targetID, err)
+		return MergeResult{}, fmt.Errorf("merging narrative %d into %d: %w", sourceID, targetID, err)
 	}
 
-	return eligible, nil
+	return MergeResult{Members: members, Context: background}, nil
 }
 
 // ResolveMergeTarget reads both narratives' commit state and returns which
@@ -309,6 +340,10 @@ func (h *StoreHandler) persistReplacement(
 // A miss is not an error the reviewer needs to hear about — Session swallows it
 // and shows an empty title — so a deleted or not-yet-persisted narrative degrades
 // to no context rather than to a failed review.
+//
+// It also carries the narrative's member links below correlator.member_confidence_floor,
+// as attributions to confirm (shared-context spec §1): member links are the unit of
+// token attribution, and the floor is how a doubtful one reaches a human.
 func (h *StoreHandler) NarrativeContext(narrativeID int64) (NarrativeContext, error) {
 	row, err := h.store.GetNarrative(narrativeID)
 	if err != nil {
@@ -316,7 +351,20 @@ func (h *StoreHandler) NarrativeContext(narrativeID int64) (NarrativeContext, er
 			narrativeID, err)
 	}
 
-	return NarrativeContext{Title: row.Title, Summary: row.Summary}, nil
+	doubtful, err := h.store.MembersBelowConfidence(narrativeID, h.correlator.MemberConfidenceFloor)
+	if err != nil {
+		return NarrativeContext{}, fmt.Errorf("reading narrative %d's attributions to confirm: %w",
+			narrativeID, err)
+	}
+
+	out := NarrativeContext{Title: row.Title, Summary: row.Summary}
+	for _, a := range doubtful {
+		out.ToConfirm = append(out.ToConfirm, Attribution{
+			Source: a.Event.Source, Summary: a.Event.Summary, Confidence: a.Confidence,
+		})
+	}
+
+	return out, nil
 }
 
 // IssueContext returns the LIVE issue an action targets, for display.

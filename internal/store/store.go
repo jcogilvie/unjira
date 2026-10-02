@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS narratives (
     compaction_boundary TEXT,
     -- Paired with compaction_boundary to break ties: occurred_at alone
     -- cannot uniquely order events (it's stored via time.RFC3339, whole
-    -- seconds only), so NarrativeEventsForContext compares the
+    -- seconds only), so MemberEventsAfterBoundary compares the
     -- (occurred_at, event_id) pair — events.id is a monotonic
     -- INTEGER PRIMARY KEY, an exact tiebreaker for events sharing a second.
     compaction_boundary_event_id INTEGER,
@@ -74,13 +74,17 @@ CREATE TABLE IF NOT EXISTS narrative_events (
     -- reconciler's delta) and actions.executed_link_seq (the freeze rule).
     --
     -- AUTOINCREMENT, not a plain INTEGER PRIMARY KEY, because links are deleted
-    -- (restructures unlink; relinking an event elsewhere deletes its old row) and a
+    -- (restructures unlink; moving a member elsewhere, or upgrading a context link to a
+    -- member, deletes the old row) and a
     -- plain rowid reissues a deleted newest number — which would then compare
     -- equal to a high-water mark taken while that row existed.
     --
-    -- A re-link of an event to the narrative it is already on is INSERT OR IGNORE
-    -- against the UNIQUE below, so it keeps this row and this position: a
-    -- re-linked frozen event stays frozen.
+    -- A member re-link of an event to the narrative it is already a member of keeps
+    -- this row and this position (Tx.MoveMember): a re-linked frozen event stays
+    -- frozen. A context link UPGRADED to a member is a new row with a new position,
+    -- because link_seq means "when the link acquired its current kind" — the
+    -- reconciler's delta asks whether this is new WORK, and background that became
+    -- work today is new work today.
     link_seq     INTEGER PRIMARY KEY AUTOINCREMENT,
     narrative_id INTEGER NOT NULL REFERENCES narratives (id),
     event_id     INTEGER NOT NULL REFERENCES events (id),
@@ -93,8 +97,36 @@ CREATE TABLE IF NOT EXISTS narrative_events (
     -- tick (F30). Compare link_seq instead. (The format is still %f, matching the
     -- other display timestamps, so they sort together when read by eye.)
     linked_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- What this link says about the event (docs/superpowers/specs/2026-10-02-shared-context-design.md
+    -- §1). 'member': the event is part of this narrative's WORK — the unit of token attribution, and
+    -- the only kind any delta, watermark, matching or drafting path reads. 'context': the event is
+    -- relevant background for this narrative and belongs to some other narrative's work.
+    --
+    -- NOT NULL with NO default, on the precedent actions.created_link_seq set: a default would be a
+    -- guess about what the link means, and an INSERT that forgets to say should fail loudly.
+    kind         TEXT NOT NULL CHECK (kind IN ('member', 'context')),
+    -- The model's stated confidence in a MEMBER placement: its cluster's confidence, or the dispute
+    -- re-ask's per-event confidence when two clusters claimed the event. A context link carries
+    -- none, because it attributes nothing. Read against correlator.member_confidence_floor, which
+    -- surfaces a below-floor attribution in triage.
+    --
+    -- The IS NOT NULL is not redundant with BETWEEN: a CHECK passes when its expression
+    -- is NULL, and NULL BETWEEN 0 AND 1 is NULL, so without it a member with no
+    -- confidence would be accepted.
+    member_confidence REAL CHECK (
+        (kind = 'member' AND member_confidence IS NOT NULL AND member_confidence BETWEEN 0 AND 1)
+        OR (kind = 'context' AND member_confidence IS NULL)),
     UNIQUE (narrative_id, event_id)
 );
+
+-- Every linked event has AT MOST one member home, enforced by the database rather than by
+-- convention — the same shape as one_primary_per_narrative below. "Whose work is this event"
+-- must have one answer, because member links are what a reconcile pass drafts from and what
+-- token attribution charges. AT LEAST one is the other half of the invariant, checked when
+-- correlator.Persist commits (an event given a context link must hold a member link when the
+-- transaction closes), because a partial index cannot express "exists".
+CREATE UNIQUE INDEX IF NOT EXISTS one_member_link_per_event
+    ON narrative_events (event_id) WHERE kind = 'member';
 
 CREATE TABLE IF NOT EXISTS narrative_issues (
     narrative_id INTEGER NOT NULL REFERENCES narratives (id),
@@ -298,7 +330,7 @@ func Open(dbPath string) (*Store, error) {
 	// store came back from a refused open with a new-shaped reconcile_examinations,
 	// which the old build cannot use, breaking the README's "run learn on the old
 	// build first" escape hatch.
-	if err := checkLinkSeqSchema(db, dbPath); err != nil {
+	if err := checkRequiredColumns(db, dbPath); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

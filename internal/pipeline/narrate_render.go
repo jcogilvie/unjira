@@ -100,6 +100,8 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 			r.Stats.OmittedEvents, r.Stats.RecoveredEvents)
 	}
 
+	writeSharingLines(b, r.Stats)
+
 	for _, c := range r.Compactions {
 		fmt.Fprintf(b, "compact  narrative %d: folded %d event(s) up to %s\n",
 			c.NarrativeID, c.EventsFolded, c.Boundary.Format(time.RFC3339))
@@ -124,13 +126,60 @@ func writeNarratedNarrative(b *strings.Builder, n NarratedNarrative) {
 	fmt.Fprintf(b, "  %q\n", n.Title)
 	fmt.Fprintf(b, "  %s\n", n.Summary)
 
-	if len(n.Events) == 0 {
-		return
+	if len(n.Events) > 0 {
+		fmt.Fprintf(b, "  events (%d):\n", len(n.Events))
+		for _, e := range n.Events {
+			fmt.Fprintf(b, "    - [%s] %s  %s\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+		}
 	}
-	fmt.Fprintf(b, "  events (%d):\n", len(n.Events))
-	for _, e := range n.Events {
-		fmt.Fprintf(b, "    - [%s] %s  %s\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+
+	// Under its own heading, never mixed into events: a context link is another
+	// narrative's work, and a reader judging this grouping must not count it as this
+	// narrative's.
+	if len(n.ContextEvents) > 0 {
+		fmt.Fprintf(b, "  context (%d) — another narrative's work, linked as background:\n", len(n.ContextEvents))
+		for _, e := range n.ContextEvents {
+			fmt.Fprintf(b, "    - [%s] %s  %s\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+		}
 	}
+}
+
+// writeSharingLines reports the shared-context counters, each only when non-zero —
+// silent on a pass that shared nothing, but never silent about a dispute, since the
+// dispute re-ask is all that stands between a double placement and a failed pass.
+// These are the numbers the shared-context spec's M4 reads; the store remains the
+// source of truth for the measurement itself.
+func writeSharingLines(b *strings.Builder, s correlator.Stats) {
+	if s.ContextLinks > 0 {
+		fmt.Fprintf(b, "context  %d context link(s) across %d shared event(s); largest fan-out %d\n",
+			s.ContextLinks, s.SharedEvents, s.MaxContextFanOut)
+	}
+
+	if s.DisputedEvents > 0 {
+		fmt.Fprintf(b, "dispute  %d event(s) placed in more than one cluster; resolved %d by one re-ask\n",
+			s.DisputedEvents, len(s.Disputes))
+		for _, d := range s.Disputes {
+			fmt.Fprintf(b, "         %s: %s chosen over %s (confidence %.2f)\n",
+				d.Event, d.Chosen, strings.Join(otherClaimants(d), ", "), d.Confidence)
+		}
+	}
+
+	if s.MembersBelowFloor > 0 {
+		fmt.Fprintf(b, "confirm  %d member placement(s) below correlator.member_confidence_floor — "+
+			"surfaced in triage as attributions to confirm\n", s.MembersBelowFloor)
+	}
+}
+
+// otherClaimants is every claimant but the chosen one.
+func otherClaimants(d correlator.DisputeResolution) []string {
+	var out []string
+	for _, c := range d.Claimants {
+		if c != d.Chosen {
+			out = append(out, c)
+		}
+	}
+
+	return out
 }
 
 // narrativeKindLabel renders a cluster kind for the output's leading tag.

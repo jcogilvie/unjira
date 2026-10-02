@@ -8,7 +8,7 @@ package main
 // files are deliberately independent per runWatchPass's own doc comment.
 //
 // Every test here seeds its narrative(s) directly (InsertNarrative +
-// AddNarrativeEvents + AddNarrativeIssues) rather than driving narrate/match
+// LinkMembers + AddNarrativeIssues) rather than driving narrate/match
 // through a real clustering pass: with no unlinked events in the collect
 // window, RunNarrate short-circuits before any LLM call (nothing to
 // cluster), and with no ticket-key-shaped artifacts on the seeded events,
@@ -120,7 +120,7 @@ func seedReconcilableNarrative(
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", extID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 		return tx.AddNarrativeIssues(nid, []store.NarrativeIssue{{

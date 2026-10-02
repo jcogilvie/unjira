@@ -358,6 +358,41 @@ func TestLoad_MaxContextNarrativesDefaultsToZeroUnlimited(t *testing.T) {
 		"the bound ships inert until an operator opts in, matching MaxEventSummaryChars/MaxOutputTokens")
 }
 
+func TestLoad_MemberConfidenceFloorParsesAndDefaultsToZeroOff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"correlator": {"tail_summarize_threshold_tokens": 6000, "recent_events_kept": 20}}`), 0o600))
+
+	cfg, err := config.Load(path)
+	require.NoError(t, err)
+	assert.Zero(t, cfg.Correlator.MemberConfidenceFloor, "ships off: a model's stated confidence is uncalibrated")
+
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"correlator": {"tail_summarize_threshold_tokens": 6000, "recent_events_kept": 20, `+
+			`"member_confidence_floor": 0.6}}`), 0o600))
+
+	cfg, err = config.Load(path)
+	require.NoError(t, err)
+	assert.InDelta(t, 0.6, cfg.Correlator.MemberConfidenceFloor, 1e-9)
+}
+
+func TestCorrelatorConfig_ValidatesMemberConfidenceFloor(t *testing.T) {
+	valid := config.CorrelatorConfig{TailSummarizeThresholdTokens: 6000, RecentEventsKept: 20}
+
+	for _, floor := range []float64{0, 0.5, 1} {
+		c := valid
+		c.MemberConfidenceFloor = floor
+		require.NoError(t, c.Validate(), "floor %v", floor)
+	}
+
+	for _, floor := range []float64{-0.1, 1.5} {
+		c := valid
+		c.MemberConfidenceFloor = floor
+		require.ErrorContains(t, c.Validate(), "correlator.member_confidence_floor", "floor %v", floor)
+	}
+}
+
 func TestMatchConfig_Validate(t *testing.T) {
 	tests := []struct {
 		name    string

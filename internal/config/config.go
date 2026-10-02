@@ -365,6 +365,22 @@ type CorrelatorConfig struct {
 	// was left out", and here the count is how an operator sees how much context
 	// they traded away.
 	MaxContextNarratives int `json:"max_context_narratives"`
+	// MemberConfidenceFloor is the confidence below which a MEMBER link — the model's
+	// claim that an event is a narrative's work — is surfaced in triage as an
+	// attribution for a reviewer to confirm, and counted in the pass summary. Zero
+	// means off, and zero is the default.
+	//
+	// Off by default because a model's stated confidence is not calibrated. The floor
+	// is meant to be set from reviewer rulings (the labeled data `learn` already
+	// reads), not guessed up front — the same pattern as match.confidence_floor and
+	// auto_commit.<type>.confidence_floor, which gate on a model-stated confidence
+	// too. Member links matter beyond filing: they are the unit of token attribution,
+	// so a wrong one is wrong estimation data. See
+	// docs/superpowers/specs/2026-10-02-shared-context-design.md §1.
+	//
+	// A plain 0..1 number, in the max_output_tokens mould: the confidence it compares
+	// against is a 0..1 score, so anything above 1 would flag every attribution.
+	MemberConfidenceFloor float64 `json:"member_confidence_floor"`
 }
 
 // Validate reports whether both correlator limits are set to usable values.
@@ -387,6 +403,14 @@ func (c CorrelatorConfig) Validate() error {
 	if c.MaxContextNarratives < 0 {
 		return fmt.Errorf(
 			"correlator.max_context_narratives must be zero (unlimited) or a positive count")
+	}
+	// Zero is the documented "off" default. Negative is a mistake, and above 1 would
+	// surface every member link, since member confidence is a 0..1 score — the same
+	// bound match.confidence_floor enforces.
+	if c.MemberConfidenceFloor < 0 || c.MemberConfidenceFloor > 1 {
+		return fmt.Errorf(
+			"correlator.member_confidence_floor is %v: must be within [0, 1] — 0 is off, and member "+
+				"confidence is a 0..1 score", c.MemberConfidenceFloor)
 	}
 
 	return nil

@@ -45,7 +45,7 @@ func TestRunNarrate_DoesNotClusterTrackerRecords(t *testing.T) {
 	seedTrackerRecord(t, s, "PAAS-1:status:2", "PAAS-1 status: In Progress → In Review", base.Add(2*time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"Built the thing","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"Built the thing","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -104,7 +104,7 @@ func TestRunNarrate_ExcludedRecordsAreNotLinkedAndThatIsFine(t *testing.T) {
 	seedTrackerRecord(t, s, "PAAS-3:status:1", "PAAS-3 status: Discovery → In Progress", base.Add(time.Minute))
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"Built","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"Built","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 
@@ -141,7 +141,7 @@ func TestRunNarrate_UnmarkedJiraEventsStillCluster(t *testing.T) {
 	require.NoError(t, err)
 
 	client := &narrateLLM{
-		responses: []string{`[{"kind":"new","title":"Observed","summary":"s","event_indices":[0]}]`},
+		responses: []string{`[{"kind":"new","title":"Observed","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 	}
 	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
 

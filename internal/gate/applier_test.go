@@ -560,7 +560,7 @@ func TestApplier_Create_ASecondPassFindsTheNarrativeTracked(t *testing.T) {
 	require.NoError(t, err)
 	eventID, err := s.EventIDByExternalID("claude_code", "create:1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(action.NarrativeID, []int64{eventID}))
+	require.NoError(t, s.LinkMembers(action.NarrativeID, []int64{eventID}, 1))
 
 	before, err := s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)

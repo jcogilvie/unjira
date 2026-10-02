@@ -1464,6 +1464,34 @@ it" is INFRASTRUCTURE. The decision table is a pure function with its own tests
 - **Count failures by attempt.** `gh run list` reports each run's latest attempt, so a flake that a
   re-run turned green disappears from the count. The rate was believed to be 1 in 40 until it was
   counted properly.
+## 44. A CHECK constraint passes when its expression is NULL
+
+Found while landing the shared-context slice's schema. `narrative_events.member_confidence` must be
+present on a member link and absent on a context link. The first CHECK said so directly:
+
+```sql
+CHECK ((kind = 'member' AND member_confidence BETWEEN 0 AND 1)
+       OR (kind = 'context' AND member_confidence IS NULL))
+```
+
+For a member with no confidence, `NULL BETWEEN 0 AND 1` is NULL, `'member' = 'member' AND NULL` is
+NULL, the context arm is false, and `NULL OR FALSE` is NULL. SQL rejects a row only when a CHECK
+evaluates to **false**. NULL is not false, so the row was accepted. The constraint that existed to make
+"a member link with no confidence" impossible accepted exactly that row, with no error. Nothing
+downstream would have noticed: the floor and the triage surfacing compare `member_confidence < ?`, and
+NULL compares as neither below nor above, so the link would have been silently exempt from the
+confirmation it most needed.
+
+It was caught only because `TestSchema_EnforcesOneMemberHomeAndKindShape` tried to WRITE each forbidden
+row, one statement per case, rather than reading the constraint and agreeing with it. The fix is
+explicit: `member_confidence IS NOT NULL AND member_confidence BETWEEN 0 AND 1`.
+
+> A constraint is a claim about which rows cannot exist. Test it by inserting each of them. In SQL's
+> three-valued logic, any CHECK over a nullable column needs an explicit IS NOT NULL, or NULL passes.
+
+This is the schema-level case of a pattern already here twice (#20's drills, F30's tests that write
+deliberately inverted timestamps): a rule is checked by a test that tries to break it, not by reading it.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract

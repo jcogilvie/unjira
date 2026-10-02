@@ -317,7 +317,7 @@ func TestSetCompactionBoundary_PersistsBoundaryAndRecap(t *testing.T) {
 	assert.Equal(t, "recap: earlier work", row.Summary)
 }
 
-func TestAddNarrativeEvents_IsIdempotent(t *testing.T) {
+func TestLinkMembers_IsIdempotent(t *testing.T) {
 	s := openStore(t)
 	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	seedEvent(t, s, "e1", "first", ws)
@@ -326,10 +326,10 @@ func TestAddNarrativeEvents_IsIdempotent(t *testing.T) {
 	eid, err := s.EventIDByExternalID("claude_code", "e1")
 	require.NoError(t, err)
 
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid})) // re-link: no error
+	require.NoError(t, s.LinkMembers(id, []int64{eid}, 1))
+	require.NoError(t, s.LinkMembers(id, []int64{eid}, 1)) // re-link: no error
 
-	evs, err := s.NarrativeEventsForContext(id)
+	evs, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	require.Len(t, evs, 1)
 	assert.Equal(t, "e1", evs[0].ExternalID)
@@ -341,7 +341,7 @@ func TestEventIDByExternalID_MissingReturnsErrEventNotFound(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrEventNotFound)
 }
 
-func TestNarrativeEventsForContext_ExcludesAtOrBeforeBoundary(t *testing.T) {
+func TestMemberEventsAfterBoundary_ExcludesAtOrBeforeBoundary(t *testing.T) {
 	s := openStore(t)
 	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	seedEvent(t, s, "old", "old event", ws)
@@ -352,24 +352,24 @@ func TestNarrativeEventsForContext_ExcludesAtOrBeforeBoundary(t *testing.T) {
 	require.NoError(t, err)
 	newID, err := s.EventIDByExternalID("claude_code", "new")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{oldID, newID}))
+	require.NoError(t, s.LinkMembers(id, []int64{oldID, newID}, 1))
 
 	// Boundary at the old event's (time, id): strictly-after filter excludes
 	// it, keeps the newer one.
 	require.NoError(t, s.SetCompactionBoundary(id, ws, oldID, "recap"))
 
-	evs, err := s.NarrativeEventsForContext(id)
+	evs, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	require.Len(t, evs, 1)
 	assert.Equal(t, "new", evs[0].ExternalID)
 }
 
 // TestNarrativeEventCount_IgnoresCompactionBoundary is what proves
-// NarrativeEventCount is not just NarrativeEventsForContext under another
+// NarrativeEventCount is not just MemberEventsAfterBoundary under another
 // name: it must count a narrative's linked events regardless of the
 // compaction boundary, since it exists specifically to let a caller verify
 // that narrative_events rows survive compaction (which only shrinks what
-// NarrativeEventsForContext returns, never the underlying links).
+// MemberEventsAfterBoundary returns, never the underlying links).
 func TestNarrativeEventCount_IgnoresCompactionBoundary(t *testing.T) {
 	s := openStore(t)
 	ws := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
@@ -381,18 +381,18 @@ func TestNarrativeEventCount_IgnoresCompactionBoundary(t *testing.T) {
 	require.NoError(t, err)
 	newID, err := s.EventIDByExternalID("claude_code", "new")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{oldID, newID}))
+	require.NoError(t, s.LinkMembers(id, []int64{oldID, newID}, 1))
 
 	count, err := s.NarrativeEventCount(id)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count, "both links counted before any compaction")
 
-	// Set a boundary that makes NarrativeEventsForContext exclude "old" —
+	// Set a boundary that makes MemberEventsAfterBoundary exclude "old" —
 	// NarrativeEventCount must be unaffected, since the link itself is not
 	// deleted by compaction.
 	require.NoError(t, s.SetCompactionBoundary(id, ws, oldID, "recap"))
 
-	ctxEvents, err := s.NarrativeEventsForContext(id)
+	ctxEvents, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	require.Len(t, ctxEvents, 1, "sanity: boundary really does filter context")
 
@@ -608,7 +608,7 @@ func TestUnlinkedEventsInRange_ExcludesLinkedEvents(t *testing.T) {
 	require.NoError(t, err)
 	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "T", "s")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{linkedID}))
+	require.NoError(t, s.LinkMembers(nid, []int64{linkedID}, 1))
 
 	got, err := s.UnlinkedEventsInRange(base, base.Add(time.Hour))
 
@@ -754,7 +754,7 @@ func withUnexaminedEvent(t *testing.T, s *store.Store, narrativeID int64, extID 
 
 	eventID, err := s.EventIDByExternalID("claude_code", extID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(narrativeID, []int64{eventID}))
+	require.NoError(t, s.LinkMembers(narrativeID, []int64{eventID}, 1))
 
 	return narrativeID
 }
@@ -991,14 +991,14 @@ func TestNarrativesWithActionableLinks_EmptyRolesReturnsEmpty(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-func TestAllNarrativeEvents_IncludesPreCompactionBoundaryEvents(t *testing.T) {
-	// THE most important test in this task. NarrativeEventsForContext
+func TestAllMemberEvents_IncludesPreCompactionBoundaryEvents(t *testing.T) {
+	// THE most important test in this task. MemberEventsAfterBoundary
 	// deliberately excludes events at or before the compaction boundary;
 	// matching must see every event ever linked, or a compacted narrative
 	// loses the git_branch artifact carrying its strongest signal.
 	//
 	// The fixture MUST set a compaction boundary — without one, this test
-	// passes against NarrativeEventsForContext too and proves nothing. That is
+	// passes against MemberEventsAfterBoundary too and proves nothing. That is
 	// what the `context` length assertion below guards.
 	s := openStore(t)
 	id := insertNarrativeForTest(t, s, "compacted work")
@@ -1019,15 +1019,15 @@ func TestAllNarrativeEvents_IncludesPreCompactionBoundaryEvents(t *testing.T) {
 	require.NoError(t, err)
 	lateID, err := s.EventIDByExternalID(late.Source, late.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{earlyID, lateID}))
+	require.NoError(t, s.LinkMembers(id, []int64{earlyID, lateID}, 1))
 
 	require.NoError(t, s.SetCompactionBoundary(id, early.OccurredAt, earlyID, "recap"))
 
-	ctxEvents, err := s.NarrativeEventsForContext(id)
+	ctxEvents, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	require.Len(t, ctxEvents, 1, "fixture sanity: the boundary must actually hide the early event")
 
-	all, err := s.AllNarrativeEvents(id)
+	all, err := s.AllMemberEvents(id)
 
 	require.NoError(t, err)
 	require.Len(t, all, 2, "matching must see pre-boundary events")
@@ -1052,7 +1052,7 @@ func TestDeltaEventsIsEmptyWhenAnActionAlreadyCoversEveryEvent(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "e1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	// No action yet: the whole narrative is the delta.
 	delta, err := s.DeltaEvents(nid)
@@ -1096,7 +1096,7 @@ func TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction(t *testing.T) {
 	require.NoError(t, err)
 	old, err := s.EventIDByExternalID("claude_code", "old")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{old}))
+	require.NoError(t, s.LinkMembers(nid, []int64{old}, 1))
 
 	_, err = s.InsertAction(store.ActionRow{
 		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
@@ -1110,7 +1110,7 @@ func TestDeltaEventsFindsAnEventLinkedInTheSameSecondAsTheAction(t *testing.T) {
 	require.NoError(t, err)
 	fresh, err := s.EventIDByExternalID("claude_code", "fresh")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{fresh}))
+	require.NoError(t, s.LinkMembers(nid, []int64{fresh}, 1))
 
 	delta, err := s.DeltaEvents(nid)
 	require.NoError(t, err)
@@ -1144,7 +1144,7 @@ func TestLinkedAtAndActionCreatedAtUseTheSameFormat(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "e1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	_, err = s.InsertAction(store.ActionRow{
 		NarrativeID: nid, Type: "comment", IssueKey: "PROJ-1",
 		Payload: `{"body":"x"}`, Status: "proposed",

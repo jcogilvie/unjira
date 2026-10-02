@@ -170,7 +170,7 @@ func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, er
 // every timestamp in this table reads consistently. Terminal-state semantics:
 // any human ruling sets decided_at; only a write that actually reached the
 // tracker sets executed_at — and, in the same statement, executed_link_seq,
-// which is what the freeze rule compares (EligibleEventIDs). executed_at itself
+// which is what the freeze rule compares (EligibleMemberEventIDs, EligibleContextEventIDs). executed_at itself
 // decides nothing (finding F30).
 func (s *Store) UpdateActionStatus(id int64, status string) error {
 	return updateActionStatusImpl(s.db, id, status, nil, nil)

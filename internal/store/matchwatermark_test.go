@@ -99,7 +99,7 @@ func TestNarrativesWithoutPrimaryLink_ExaminedIsAWatermarkNotATombstone(t *testi
 	require.NoError(t, err)
 	evtID, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{evtID}))
+	require.NoError(t, s.LinkMembers(id, []int64{evtID}, 1))
 
 	got, err = s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)

@@ -10,8 +10,9 @@ import (
 // this link made after the narrative's most recent APPLIED action? A link that was
 // not is frozen — a posted comment already describes it.
 //
-// Shared verbatim by EligibleEventIDs (what a restructure may move) and
-// EligibleEvents (what a redraft describes), so the two cannot disagree about which
+// Shared verbatim by EligibleMemberEventIDs/EligibleContextEventIDs (what a restructure
+// may move), MoveMember (what Persist may move) and EligibleMemberEvents (what a
+// redraft describes), so they cannot disagree about which
 // events are still in play. Correlated on ne.narrative_id and free of bound
 // parameters, so it drops into either query unchanged.
 //
@@ -33,7 +34,7 @@ const linkedSinceLastCommit = `ne.link_seq > COALESCE(
 	(SELECT MAX(a.executed_link_seq) FROM actions a
 	  WHERE a.narrative_id = ne.narrative_id AND a.status = '` + StatusApplied + `'), 0)`
 
-// EligibleEventIDs returns the narrative's event links that may still be
+// EligibleMemberEventIDs returns the narrative's MEMBER links that may still be
 // reshuffled by a reviewer-driven re-cluster: those linked AFTER the
 // narrative's most recent committed action.
 //
@@ -50,7 +51,7 @@ const linkedSinceLastCommit = `ne.link_seq > COALESCE(
 // comment can be redrafted, a posted one cannot be unposted. The watermark for
 // "the past" is therefore the last commit, not the narrative's existence.
 //
-// The predicate is linkedSinceLastCommit, shared with EligibleEvents, and it
+// The predicate is linkedSinceLastCommit, shared with EligibleMemberEvents, and it
 // compares link SEQUENCE positions rather than timestamps — see that const for
 // why (finding F30).
 //
@@ -66,17 +67,48 @@ const linkedSinceLastCommit = `ne.link_seq > COALESCE(
 // A narrative with no committed action has no watermark, so every link is
 // eligible — expressed inside the one predicate rather than as a separate
 // query, so there is one code path rather than two that could disagree.
-func (s *Store) EligibleEventIDs(narrativeID int64) ([]int64, error) {
-	rows, err := s.db.Query(
+//
+// KIND-AWARE (shared-context spec §6): the freeze rule itself is per link and
+// kind-agnostic, but what a caller may DO with an eligible link depends on its kind —
+// a merge moves an eligible member with Tx.MoveMember and re-homes an eligible context
+// link with Tx.AddContext — so the two kinds are separate accessors rather than one
+// list a caller would have to partition. Renamed from EligibleEventIDs, which returned
+// both kinds mixed, so each caller was revisited.
+func (s *Store) EligibleMemberEventIDs(narrativeID int64) ([]int64, error) {
+	return eligibleLinkIDs(s.db, narrativeID, LinkMember)
+}
+
+// EligibleContextEventIDs is EligibleMemberEventIDs for context links: the context
+// links a merge re-homes onto its target. A frozen context link stays where it is, like
+// any frozen link (spec §4's table).
+func (s *Store) EligibleContextEventIDs(narrativeID int64) ([]int64, error) {
+	return eligibleLinkIDs(s.db, narrativeID, LinkContext)
+}
+
+// ContextEventIDs returns the event id of every context link narrativeID holds,
+// eligible or frozen, ascending. For triage's split, which deletes all of an emptied
+// source's context links and reports how many there were.
+func (s *Store) ContextEventIDs(narrativeID int64) ([]int64, error) {
+	return linkIDs(s.db, narrativeID, LinkContext, "1 = 1")
+}
+
+func eligibleLinkIDs(c dbConn, narrativeID int64, kind LinkKind) ([]int64, error) {
+	return linkIDs(c, narrativeID, kind, linkedSinceLastCommit)
+}
+
+// linkIDs returns narrativeID's event ids of one kind whose link satisfies predicate
+// (over `ne`, with no bound parameters), ascending.
+func linkIDs(c dbConn, narrativeID int64, kind LinkKind, predicate string) ([]int64, error) {
+	rows, err := c.Query(
 		`SELECT ne.event_id
 		 FROM narrative_events ne
-		 WHERE ne.narrative_id = ?
-		   AND `+linkedSinceLastCommit+`
+		 WHERE ne.narrative_id = ? AND ne.kind = ?
+		   AND `+predicate+`
 		 ORDER BY ne.event_id`,
-		narrativeID,
+		narrativeID, string(kind),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("querying eligible event links for narrative %d: %w", narrativeID, err)
+		return nil, fmt.Errorf("querying %s links for narrative %d: %w", kind, narrativeID, err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -84,7 +116,7 @@ func (s *Store) EligibleEventIDs(narrativeID int64) ([]int64, error) {
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scanning eligible event id for narrative %d: %w", narrativeID, err)
+			return nil, fmt.Errorf("scanning %s link event id for narrative %d: %w", kind, narrativeID, err)
 		}
 		out = append(out, id)
 	}
@@ -131,34 +163,14 @@ func unlinkNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) er
 	return nil
 }
 
-// UnlinkEventFromOtherNarratives removes this event's links to every narrative
-// except keepNarrativeID.
+// EligibleMemberEvents returns the same links EligibleMemberEventIDs selects,
+// hydrated into full events and ordered for reading (occurred_at, then id).
 //
-// Exists because correlator.Persist assigns events with AddNarrativeEvents
-// (INSERT OR IGNORE), which adds a link and never removes one. That is right for
-// a first assignment and wrong for a REASSIGNMENT — and reassignment is
-// reachable now that uncommitted events stay eligible for re-clustering as later
-// passes learn more. Without this, a re-clustered event is linked to two
-// narratives at once: the source narrative looks alive, keeps being fed to future
-// Cluster calls as context, and its post-boundary history double-counts the
-// event, so compaction folds the wrong number.
-//
-// Silent when there is nothing to remove, unlike UnlinkNarrativeEvents: a first
-// assignment legitimately has no prior link, and this runs on every assignment.
-func (t *Tx) UnlinkEventFromOtherNarratives(keepNarrativeID, eventID int64) error {
-	if _, err := t.tx.Exec(
-		`DELETE FROM narrative_events WHERE event_id = ? AND narrative_id != ?`,
-		eventID, keepNarrativeID,
-	); err != nil {
-		return fmt.Errorf("unlinking event %d from narratives other than %d: %w",
-			eventID, keepNarrativeID, err)
-	}
-
-	return nil
-}
-
-// EligibleEvents returns the same links EligibleEventIDs selects, hydrated into
-// full events and ordered for reading (occurred_at, then id).
+// Members only, and renamed from EligibleEvents so each caller was revisited: its
+// two callers are redraft's delta (reconciler.ReworkOne) and triage's split, and
+// neither may see context. A redraft describing a context event would draft another
+// ticket's work onto this one (shared-context spec §2); a split re-clusters the
+// source's WORK, and its context links are handled separately (§6).
 //
 // This is the redraft delta, and it is deliberately NOT DeltaEvents. DeltaEvents
 // is bounded by the narrative's latest action of any status, so once ANY action
@@ -173,29 +185,7 @@ func (t *Tx) UnlinkEventFromOtherNarratives(keepNarrativeID, eventID int64) erro
 // has claimed yet, which is what "linked after the last applied action" means.
 // It is the same invariant triage's restructures already run on, so an edit and
 // a merge agree about which events are still in play.
-func (s *Store) EligibleEvents(narrativeID int64) ([]events.Event, error) {
-	rows, err := s.db.Query(
-		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
-		 FROM narrative_events ne
-		 JOIN events e ON e.id = ne.event_id
-		 WHERE ne.narrative_id = ?
-		   AND `+linkedSinceLastCommit+`
-		 ORDER BY e.occurred_at, e.id`,
-		narrativeID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying eligible events for narrative %d: %w", narrativeID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []events.Event
-	for rows.Next() {
-		e, err := scanEvent(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scanning eligible event for narrative %d: %w", narrativeID, err)
-		}
-		out = append(out, e)
-	}
-
-	return out, rows.Err()
+func (s *Store) EligibleMemberEvents(narrativeID int64) ([]events.Event, error) {
+	return queryLinkedEvents(s.db, "eligible member events", narrativeID,
+		memberLink+` AND `+linkedSinceLastCommit)
 }

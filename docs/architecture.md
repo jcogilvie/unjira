@@ -63,8 +63,9 @@ flowchart TB
     SPLIT["PartitionByTrackerRecord<br/>deterministic · work evidence<br/>vs tracker state"]
 
     subgraph correlate["internal/correlator"]
-        CLUSTER["Cluster<br/>LLM · groups events<br/>into narratives"]
-        PERSIST["Persist<br/>deterministic · new /<br/>extend / compact"]
+        CLUSTER["Cluster<br/>LLM · groups events into narratives:<br/>one member home per event,<br/>context links elsewhere"]
+        DISPUTE["dispute re-ask<br/>LLM · one home for an event<br/>two clusters claimed"]
+        PERSIST["Persist<br/>deterministic · new / extend / compact<br/>MoveMember · AddContext"]
         CAND["gatherCandidates<br/>deterministic · pre-filter<br/>ranks on IssueActivity"]
         MATCH["Match<br/>LLM · narrative to issue"]
     end
@@ -85,7 +86,7 @@ flowchart TB
     CC --> CCC --> STORE
     JIRA --> JC --> STORE
     GH --> GHC --> STORE
-    STORE --> SPLIT -->|"work evidence"| CLUSTER --> PERSIST --> STORE
+    STORE --> SPLIT -->|"work evidence"| CLUSTER --> DISPUTE --> PERSIST --> STORE
     SPLIT -->|"tracker state · never clustered"| STORE
     STORE --> CAND --> MATCH --> STORE
     STORE --> VERIFY --> DRAFT --> FILTERS --> STORE
@@ -95,7 +96,7 @@ flowchart TB
     classDef llm fill:#f9e79f,stroke:#b7950b,color:#1a1a1a
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
-    class CLUSTER,MATCH,DRAFT llm
+    class CLUSTER,DISPUTE,MATCH,DRAFT llm
     class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT det
     class APPLY danger
 ```
@@ -114,12 +115,36 @@ event shapes: one per branch run, and one *anchor* per tool call that created a 
 (`gh pr create` or the GitHub MCP), keyed on the immutable `tool_use` id. When the call's own result
 names exactly one PR, the anchor carries `events.ArtifactPullRequest` (`<owner>/<repo>#<N>`) — the same
 value `collector/github` sets on every PR event — and both summaries name it, so clustering sees the
-two sides of one fact under the same identifier. Nothing joins on the artifact yet; anchors feed no
-provenance tier, so `gatherCandidates` and matching read exactly what they did before.
+two sides of one fact under the same identifier. Nothing joins on the artifact; its one reader is the
+dispute re-ask (below), which shows it to the model as evidence. Anchors feed no provenance tier, so
+`gatherCandidates` and matching read exactly what they did before.
 
-**Seven LLM call sites**, all in two packages — `correlator/correlator.go:229`, `:618`, `:1020`,
-`correlator/match.go:574`, `reconciler/draft.go:90`, `:337`, `reconciler/create.go:240`. Nothing
-else in the tree calls a model.
+**Clustering produces two kinds of link** (`narrative_events.kind`,
+`docs/superpowers/specs/2026-10-02-shared-context-design.md`). A **member** link says the event is the
+narrative's work; a **context** link says it is relevant background that is some other narrative's
+work — one root-session investigation feeding several fixes is one narrative's member and the others'
+context. Every linked event has exactly one member home: at most one by the partial unique index
+`one_member_link_per_event`, at least one by a check when `Persist` commits. The model places each
+numbered event in exactly one cluster's `event_indices` and may also list it in other clusters'
+`context_indices`, with a confidence per cluster stored on each member link. An event the model puts in
+two clusters' `event_indices` is not resolved by response order: `Cluster` makes one **dispute re-ask**
+per pass, after any bisection has merged its halves, asking which claimant the event is primarily the
+work of (rationale first, per-event confidence, PR and branch evidence presented but not applied). The
+others keep it as context. `Persist` writes members with `Tx.MoveMember` (moves the one home, refuses a
+frozen one, upgrades a context row to a member with a new `link_seq`), then context with
+`Tx.AddContext` (never deletes). Windows, summaries and compaction come from members only.
+
+**Nothing downstream of clustering reads a context link.** The reconciler's delta, the create and
+redraft inputs, matching's candidates, and both examination watermarks read member links only, so a
+context link re-admits no narrative and reaches no prompt that drafts or matches. Context is read by
+the next clustering prompt (rendered under each context narrative as background, a numbered event as
+`-> #N`), by the pass summary, and by nothing else.
+
+**Ten LLM call sites**, in three packages — `correlator/correlator.go:481` (cluster), `:1085` (same-story
+check at a bisection seam), `:1698` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
+`correlator/cluster_dispute.go:129` (dispute re-ask), `correlator/match.go:627`,
+`reconciler/draft.go:92`, `:339`, `reconciler/create.go:244`, and `rules/distill.go:126` (`learn`).
+Nothing else in the tree calls a model.
 
 Store-mediation is what makes a failed pass cost a retry and nothing else: a stage that dies has
 committed either everything or nothing, and the next pass picks up from the persisted state rather
@@ -418,6 +443,12 @@ change to unjira's architecture, not a refactor — treat it accordingly.
   isolation work.
 - **Deterministic filters run before and after the model** in the reconciler, in an order asserted by
   a test rather than implied by statement sequence.
+- **Every linked event has exactly one member home, and only member links reach a tracker path.** The
+  database enforces at most one (`one_member_link_per_event`), `Persist`'s commit enforces at least
+  one, and every reader feeding the reconciler, matching or a watermark filters on `kind = 'member'`.
+  The readers whose meaning narrowed were renamed (`AllMemberEvents`, `MemberEventsAfterBoundary`,
+  `EligibleMemberEvents`), so reading context from a drafting path means calling `ContextEvents`, which
+  nothing there does.
 
 Where the current shape falls short of these, or of good practice generally, is
 `docs/architecture-findings.md`.

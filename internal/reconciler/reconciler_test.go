@@ -151,7 +151,7 @@ func seedLinkedNarrative(t *testing.T, s *store.Store, issueKey string, role sto
 		require.NoError(t, err)
 		ids = append(ids, eid)
 	}
-	require.NoError(t, s.AddNarrativeEvents(id, ids))
+	require.NoError(t, s.LinkMembers(id, ids, 1))
 
 	if issueKey != "" {
 		require.NoError(t, s.WithTx(func(tx *store.Tx) error {
@@ -421,7 +421,7 @@ func TestReconcileDropsSelfAuthoredEventsBeforeComputingTheDelta(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID(unjiraEvt.Source, unjiraEvt.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	llmClient := &fakeLLM{}
 	results, _, err := Reconcile(t.Context(), s, tracker, llmClient, testConfig())
@@ -466,7 +466,7 @@ func TestReconcile_SelfAuthoredOnlyNarrativeYieldsToTheOneBehindIt(t *testing.T)
 	require.NoError(t, err)
 	unjiraEID, err := s.EventIDByExternalID(unjiraEvt.Source, unjiraEvt.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(selfAuthoredOnly, []int64{unjiraEID}))
+	require.NoError(t, s.LinkMembers(selfAuthoredOnly, []int64{unjiraEID}, 1))
 
 	// real is younger, sits BEHIND selfAuthoredOnly in the order, and has real
 	// work in its delta.
@@ -480,7 +480,7 @@ func TestReconcile_SelfAuthoredOnlyNarrativeYieldsToTheOneBehindIt(t *testing.T)
 	require.NoError(t, err)
 	codeEID, err := s.EventIDByExternalID(codeEvt.Source, codeEvt.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(realWork, []int64{codeEID}))
+	require.NoError(t, s.LinkMembers(realWork, []int64{codeEID}, 1))
 
 	cfg := config.ReconcilerConfig{MaxNarrativesPerPass: 1, MinConfidenceToPropose: 0.5}
 	llmClient := &fakeLLM{responses: []string{
