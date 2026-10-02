@@ -85,28 +85,37 @@ Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is clea
 (F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
 `transcriptAnchors` reads every line independently of segmentation.
 
-### F37 — an event placed in two clusters persists in one, and can leave an empty narrative behind
+### F40 — a reshuffle can empty a context narrative of its members, leaving it open
 
-`clusterSystemPrompt` tells the model to put each numbered event in exactly one cluster
-(`internal/correlator/correlator.go:437`), but `parseClusterResponse` (`:465`) never checks, and the model
-does it unprompted: on 2026-10-01 it put the F16 investigation's subagent transcript in both #70's and
-#73's narratives. `Persist` then resolves it by order. Each result's window and summary are computed from
-its events in `prepareOneResult` (`:826`), then `relinkEvents` (`:943`) deletes the event's link to every
-narrative but the last one written. For `[NEW{E}, EXTENDS 5{E, F}]` that leaves the new narrative **open,
-with zero events**, and a title, summary and window describing `E` (read from the code, not executed).
-Nothing excludes an empty `open` narrative from `NarrativesOverlapping`, so it rides along as context in
-every later pass.
+A context narrative's eligible members are numbered in the clustering prompt, so the model may place
+every one of them in other clusters. `Persist` then moves each away (`Tx.MoveMember`,
+`internal/store/linkkind.go:66`, via `moveMembers`, `internal/correlator/correlator.go:1522`). Nothing
+then checks whether the narrative they left still holds any work. It stays `open`, with a title and
+summary describing events it no longer holds, and `NarrativesOverlapping`
+(`internal/store/narratives.go:291`) keeps returning it, so it rides into every later prompt as context.
+Only triage's split marks an emptied source `split`. This is F37's empty-narrative shape, reached by a
+reshuffle instead of a double assignment.
 
-A second consequence is an instrument trap. `describePersisted` (`internal/pipeline/narrate.go`) renders
-member events from the cluster result rather than the store, so even a persisted `dev narrate` prints `E`
-under both narratives while the store holds it under one. A measurement read off that output counts
-sharing that never persisted.
+It predates the shared-context slice: `relinkEvents` emptied narratives the same way. The slice's
+acceptance probe reports such narratives as violations (`loadWorklessNarratives`), so M4 will show
+whether it happens on real data. Not fixed here because the remedy is a lifecycle decision the spec does
+not make. A narrative whose work all moved could be marked `split` like triage's source, or kept open
+for its context links, or have those context links re-homed. Frequency is unmeasured.
 
-Fixed by the first slice of `docs/superpowers/specs/2026-10-02-shared-context-design.md` (§4): one member
-home per event. A multiply-placed member is resolved by a dispute re-ask that asks the model which
-workstream the event is primarily the work of (rationale first, with a per-event confidence); the other
-claimants get context links, and the outcome is reported. Not by response order, which has no bearing
-on the right answer.
+### F39 — the dispute re-ask's prompt is unbounded
+
+`buildDisputePrompt` (`internal/correlator/cluster_dispute.go`) renders every claimant of every disputed
+event with ALL of that claimant's other member events (`writeClaimant`, `:192`), at full summary length.
+`max_event_summary_chars` does not apply. If the estimate exceeds the context window, the pass fails
+loudly (`:121`). It never truncates and never sends the prompt over budget. The case that makes this
+likely is the one the re-ask exists for: a bisected pass, which bisected because the window did not fit.
+Its claimants can span both halves, so the dispute prompt can carry more member text than either half's
+prompt did. Slice 1's own F36 test had to shrink its events to fit. **Consequence:** a wide window
+whose halves each fit can still die at the dispute step, without having clustered anything wrong.
+Unmeasured on real data: the disputed-event count and claimant sizes on a real pass are exactly what M4
+and M5 will show. The obvious bounds, capping each listed member summary or listing at most N members
+per claimant, trade the model's view of a claimant for the call fitting. That is the trade F16
+measured for context narratives, and deciding it needs those numbers first.
 
 ### F33 — a resumed session copies its history, so root segment events are counted twice
 
@@ -396,17 +405,20 @@ attaching a root session's shared context to the narratives its subagents and PR
 needs exactly the relationship these record.
 
 **That reader is now designed:** `docs/superpowers/specs/2026-10-02-shared-context-design.md`. Its first
-slice reads none of these. Context links are assigned by the model, and the measured gap is closable
-without lineage. Its second slice is the reader: it renders each subagent's parent and dispatching root
-segment into the clustering prompt, from `session_id`, `parent_session_id`, `agent_id`,
-`parent_agent_id`, `dispatch_tool_use_id`, `subagent_description`, `spawn_depth`, and the root segments'
-`started_at`/`ended_at`. That design reads none of the anchor artifacts, so it leaves their readers
-undecided, except for `events.ArtifactPullRequest`, whose planned reader is the join described next.
+slice, landed, reads none of the artifacts listed above: context links are assigned by the model, and
+the measured gap is closable without lineage. Its second slice is the reader: it renders each subagent's
+parent and dispatching root segment into the clustering prompt, from `session_id`, `parent_session_id`,
+`agent_id`, `parent_agent_id`, `dispatch_tool_use_id`, `subagent_description`, `spawn_depth`, and the
+root segments' `started_at`/`ended_at`. That design reads none of the anchor artifacts, so it leaves
+their readers undecided. (The slice's acceptance probe, `internal/pipeline/shared_probe_*_test.go`,
+reads `anchor_kind`, `pr_create_outcome`, `session_id` and `agent_id` to compute its metrics. Test-only,
+so none of them has a production reader.)
 
-`events.ArtifactPullRequest` has two writers (claudecode anchors, every github PR event) and no reader; its reader is the deterministic anchor↔`:opened` join a
-later measurement decides whether to build. The test that reads it today
-(`TestArtifactKeyContract_PRAnchorAndGitHubOpenedAgreeOnArtifactPullRequest`) pins only that both
-writers agree.
+`events.ArtifactPullRequest` is no longer on this list. Its two writers (claudecode anchors, every
+github PR event) gained a reader in the first slice: the dispute re-ask
+(`correlator/cluster_dispute.go`, `writeEvidence`) tells the model when a disputed event carries the
+same pull request as one claimant's PR event. That is evidence the model weighs. Code never applies it.
+The deterministic anchor↔`:opened` join is still a later measurement's decision.
 
 **Re-verified 2026-09-16**, because F15/F20/F25 all added artifacts and it was worth checking whether
 any of these had since gained a reader. None had. One near-miss worth naming: `segmentSummary` renders
@@ -586,25 +598,6 @@ Nor by the back door. `docs/superpowers/specs/2026-10-02-shared-context-design.m
 out of matching entirely, so linking a subagent's narrative to its parent's root segment as context does
 not hand it the parent's branch as provenance.
 
-### F36 — a bisected window numbers a spanning narrative's eligible events in BOTH halves
-
-`clusterWithSplit` recurses with the full `existing` slice (`internal/correlator/correlator.go:612`,
-`:618`), and each half re-filters it with `filterAdjacentOrOverlapping` (`:262`). A context narrative
-whose window overlaps or touches both halves therefore contributes its `EligibleEvents` to both
-halves' `assignableEvents` (`:274`). The model sees the same eligible event numbered in two separate
-calls and can place it differently in each. A probe confirmed this: one eligible event spanning a
-split came back in narrative 9's extend from the first half and in a new cluster from the second.
-`mergeSplitResults` unions the halves without deduplicating by event.
-
-**Consequence:** a cross-half double assignment that no single response contains, so it is invisible
-to anything checking one response. Persist then relinks the event to whichever result it applies
-last (`relinkEvents`). That is a silent, order-dependent choice of narrative. The per-call coverage
-check does NOT make this more likely: it covers only in-window events, and an eligible context event
-either half leaves out simply keeps the link it has. The exposure is only when BOTH halves choose to
-place it. Not fixed alongside that check because the right semantics depend on the pending
-double-assignment design (`docs/superpowers/specs/2026-10-02-shared-context-design.md`): give an
-eligible event to one half only, or dedupe at merge with a stated winner.
-
 ### F41 — the learn cursor still trusts the wall clock not to step back
 
 `store.CorrectionsCursor` is the newest `actions.decided_at` a learn draft read, plus the ids read at
@@ -650,11 +643,13 @@ action). F41's ruling sequence would be the natural place.
 | F1 — refs/fanout await the GitHub collector | resolved: keep, invariant corrected. Not a blocker. |
 | F3 — concrete backend in the correlator | **#183** |
 | F5 — dead schema (estimates, ledger) | **resolved**: both dropped. Only TWO tables, not the three the finding claimed — a miscount nobody had checked. Existing databases keep their orphans, since this package has no migration mechanism, which is harmless because nothing referenced them |
-| F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here |
+| F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here. Narrowed 2026-10-02: `events.ArtifactPullRequest` gained a reader, the dispute re-ask's evidence |
 | F32 — subagent `gitBranch` is the parent's | open, mitigated: never emitted as `ArtifactGitBranch` for a subagent. Not fixable at the source |
 | F33 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
-| F36 — a bisected window numbers a spanning narrative's eligible events in both halves | open. Found with the re-ask (#79), not fixed there: both halves of `clusterWithSplit` get the full context list, so a narrative spanning the split point can have an eligible event placed by both, and Persist keeps whichever it applies last. Not made likelier by #79's coverage check, which covers in-window events only. Semantics settled by the shared-context design: give an eligible event to one half only, or dedupe at merge with a stated winner |
-| F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | open, **designed**: fixed by the first slice of `docs/superpowers/specs/2026-10-02-shared-context-design.md`. Found reading `Persist` against the 2026-10-01 observation, which may itself have been read off `dev narrate` output that disagrees with the store |
+| F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
+| F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
+| F39 — the dispute re-ask's prompt is unbounded | open. Found building slice 1's F36 test |
+| F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |

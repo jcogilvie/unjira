@@ -1,12 +1,94 @@
 # Shared context — one event, several narratives — design
 
-**Status: design**
+## Status: slice 1 landed 2026-10-02, acceptance measurement NOT yet run
+
+Slice 1 (§"First slice", items 1–6) is implemented on branch `correlator/shared-context-slice1`.
+Slices 2 and 3 are not. **Slice 1's gate is unmet until the reviewer runs §9.** M7, and M2/M3, need
+real model calls, and the implementing worktree had no credentials (#37). No measured number is
+claimed here. The harness is `internal/pipeline/shared_probe_test.go`, whose header gives the exact
+commands for a treatment rep, a two-pass M7 rep (`SHARED_CUT`), and the baseline arm. The baseline
+arm runs the same metric code on `main`, which was verified by compiling both probe files against
+`main`'s tree.
+
+Verified offline, in the worktree:
+
+```
+go build ./...                                  exit 0
+go vet ./...                                    exit 0
+go vet -tags=live ./internal/live/              exit 0
+go test ./... -count=1                          26 packages ok, 0 FAIL
+                                                (-v: 1319 PASS incl. subtests, 4 SKIP:
+                                                 the three env-gated F16 probes and
+                                                 TestSharedContext_AcceptanceRep)
+golangci-lint run --build-tags=live ./...       0 issues.
+```
+
+The three drills §"First slice" names, each run against the committed implementation and reverted:
+
+| Drill | Failed |
+|---|---|
+| drop `kind = 'member'` from `linkedSinceLastAction` | `TestReconcile_AContextLinkIsNotNewWork` ("a context link is never delta", then "drafting for narrative 1: parsing draft response"); also `TestContextLink_ChangesNeitherBacklogCount`, `TestMemberReaders_NeverSeeContext` |
+| restore last-writer-wins (no dispute re-ask, and `Persist`'s duplicate-member backstop off, so `MoveMember` applies in result order) | `TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`: `"0" is not positive — narrative 2 must not be left empty (F37)` |
+| replace the dispute re-ask with first-in-response-order | `TestCluster_DisputeWinnerIsTheModelsChoiceNotResponseOrder/the_later_claimant`: `[]string{"github/pr-7-merged"} does not contain "github/pr-7-opened"` (the `the_earlier_claimant` subtest passed, as it should) |
+
+F36 and F37 are closed by this slice (see `docs/architecture-findings.md`). F39 and F40 are new findings
+recorded there.
+
+**Where the implementation deviates from, or had to decide what, this design left open:**
+
+- **The dispute re-ask has its own index space.** §4's example answer is `"event_index":7`, a
+  clustering-prompt number. But the re-ask runs once per pass AFTER a bisection merges its halves, which
+  is what lets it resolve F36. At that point there is no single clustering prompt, and one event has a
+  different number in each half. So each disputed event is numbered in the dispute prompt itself
+  (`event_index=0..K-1`), and that one slice is both rendered and parsed, which is the property
+  `assignableEvents` keeps. `cluster_position` names a position in the pass's merged result list.
+- **"At most one per pass" holds; "reusing #79's machinery" is partial.** The dispute call reuses
+  `withRulesAndInstruction`, the grouping criterion, `estimateTokens` and the loud over-budget refusal.
+  It cannot reuse #79's verbatim-first-prompt trick, which is per call, for the reason above. Its
+  prompt is unbounded (F39).
+- **Evidence: PR and branch only, no lineage.** §4 lists lineage artifacts as possible evidence, but
+  §"What follows" and F6 reserve those artifacts' reader for slice 2. Slice 1 presents only "this event
+  carries a claimant's pull request" and "this event's git branch is the head branch of a claimant's
+  pull request". The first gives `events.ArtifactPullRequest` its reader, and F6 is narrowed.
+- **`confidence` is required only on a cluster with `event_indices`.** A context-only `extends` places no
+  member, so its confidence would attribute nothing. The omission re-ask's items also carry a confidence,
+  and events it joins to an existing cluster keep the re-ask's confidence as a per-event override. Every
+  merge of two results (bisected halves, the same-story check, the omission re-ask) keeps each judgment's
+  own confidence the same way, through one primitive.
+- **The omission re-ask accepts `context_indices`**, with no restriction to the omitted events, since a
+  context link moves nothing. Its system prompt carries the same context and summary rules as the first
+  call.
+- **The CHECK is stricter than §1's.** §1 wrote `kind = 'context' OR member_confidence IS NOT NULL`. The
+  schema also requires NULL on context, `0..1` on members, and an explicit `IS NOT NULL`, without which a
+  CHECK passes on NULL (design-notes #44).
+- **Persist applies every member placement before any context link.** §4 defines the two operations,
+  not their order. Response order would lose a context link whenever an `extends` adding background to
+  narrative A came before the result moving A's member away (`AddContext` is a no-op while A still holds
+  the event as a member). `Persist` also refuses an event two results claim as a member before any write,
+  so last-writer-wins is unreachable even for a caller that bypasses `Cluster`.
+- **Merge's moved members get `store.ReviewerMemberConfidence` (1.0).** §6 does not say. The reviewer has
+  ruled the source's work is the target's, which is a human attribution, and a reviewer-placed link must
+  not resurface as one to confirm.
+- **Triage surfaces below-floor members read-only.** §1 says they are "surfaced in triage as an
+  attribution to confirm" and names no verb. The review header lists them, with confidence, under the
+  action's narrative. A reviewer corrects one with the existing merge or split. There is no confirm verb.
+- **An emptied split source loses ALL its context links, frozen ones included.** §6 says they are deleted
+  when the split empties the source. §4's table says a frozen context link "stays". The two meet only
+  when every member of a committed narrative was linked after its last commit, and §6's rule was applied.
+- **`NarratedNarrative.Events` is read back too**, not only `ContextEvents` (§"First slice" item 6),
+  restricted to this pass's placements, because F37's instrument trap was about members.
+- **`correlator.member_confidence_floor` is validated to `[0, 1]`**, not just non-negative, on
+  `match.confidence_floor`'s precedent: above 1 would flag every member.
+- **§9's M7 baseline is underspecified.** The baseline arm has no context links, so it has no `B ← e` pairs
+  to count attraction for. The probe therefore reports an arm-independent screen (pass-2 member
+  placements whose own PR/branch evidence points at a different pass-1 narrative) on both arms, plus
+  the context-pair subset on treatment. Comparing those is the reviewer's call.
 
 Step 4 of the subagent-collection work: let one event — typically a root session's investigation,
 reused across several fixes — attach to more than one narrative, as **context**, without becoming
 any of them's **work**. This is the reader `docs/architecture-findings.md` F6 names for the subagent
-artifacts written on 2026-10-01. Nothing here is implemented; §"First slice" says what to build
-first and §"What follows" what comes after, with the condition that gates each.
+artifacts written on 2026-10-01. §"First slice" says what to build first (now landed, see Status)
+and §"What follows" what comes after, with the condition that gates each.
 
 ## The problem, restated precisely
 

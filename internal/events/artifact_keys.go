@@ -75,11 +75,12 @@ const (
 	// exactly one PR URL — never from flags, context, or inference, so its presence
 	// means "this transcript's call created this PR".
 	//
-	// No reader yet. The intended reader is a deterministic join between a
-	// transcript's anchor and GitHub's :opened event for the same PR, which a later
-	// measurement decides whether to build: the identifier is also in both events'
-	// summaries, which clustering already reads. Until then it is written for that
-	// join, deliberately, rather than orphaned (see F6).
+	// One reader: the clustering dispute re-ask (correlator/cluster_dispute.go), which
+	// tells the model when an event two clusters both claim carries the same PR as one
+	// claimant's PR event. That is evidence the model weighs, and code never applies it.
+	// A deterministic join between a transcript's anchor and GitHub's :opened event for
+	// the same PR is still a later measurement's decision; the identifier is also in
+	// both events' summaries, which clustering already reads.
 	ArtifactPullRequest = "pull_request"
 )
 

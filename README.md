@@ -17,7 +17,8 @@ Claude Code    Jira    GitHub    (Slack)         (collectors: deterministic, plu
                  |
              event log                          (SQLite, append-only, normalized)
                  |
-             correlator                         (LLM: Cluster = events -> narratives,
+             correlator                         (LLM: Cluster = events -> narratives, each event
+                 |                               one narrative's work, maybe others' context;
                  |                               Match = narratives -> issues)
              reconciler                         (LLM: diffs narrative vs LIVE ticket state,
                  |                               proposes typed actions with confidence.
@@ -137,12 +138,16 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 ./unjira learn --all                 # write all of them
 ```
 
-**The store has no migrations; a schema change needs a fresh one.** Every table is
-`CREATE TABLE IF NOT EXISTS`, so an existing database keeps its old shape. The most recent
-such change orders `narrative_events` links by a monotonic sequence instead of millisecond
-timestamps (finding F30), and a store created before it is refused when opened, naming the
-missing columns and the fix: *delete the database and re-collect* — `rm data/unjira.db`
-(or whatever `db_path` names), then `./unjira collect`. Events re-collect from their
+**The store has no migrations; a schema change needs a fresh one.** There will be none until
+unjira is productionized. Every table is `CREATE TABLE IF NOT EXISTS`, so an existing database
+keeps its old shape. The most recent such change gives every `narrative_events` link a kind
+(`member` or `context`) and every member link a confidence
+(`docs/superpowers/specs/2026-10-02-shared-context-design.md`); the one before ordered links
+by a monotonic sequence instead of millisecond timestamps (finding F30). A store created before
+either is refused when opened, BEFORE any schema statement runs, naming the missing columns, the
+change that added them, and the fix: *rename the database to a backup and re-collect*:
+`mv data/unjira.db data/unjira.db.bak` (or whatever `db_path` names), then `./unjira collect`.
+Events re-collect from their
 sources, as far back as each collector's configuration reaches (a JQL `updated >= -14d`
 reaches two weeks). What does not come back is the review queue, its recorded decisions,
 reviewer feedback `learn` has not yet distilled, and — if the `local` tracker backend is
@@ -305,6 +310,19 @@ data/                   SQLite database lives here (gitignored)
   that already existed but was dropped from context — and completion tokens did not measurably
   improve. Set it only where the alternative is a pass that fails outright on the response ceiling;
   see `docs/architecture-findings.md` F16.
+- **An event is one narrative's work, and may be other narratives' context.** Subagent-first work
+  reuses one investigation for several fixes, so clustering links an event to several narratives,
+  as two kinds of link. A **member** link says the event is this narrative's work. Each event has
+  exactly one, and it is the unit of token attribution. A **context** link says the event is relevant
+  background that is some other narrative's work. When the model claims one event as the work of two
+  clusters, one follow-up call asks which one, rationale first. Response order does not decide it.
+  Only member links reach the reconciler, matching, or any backlog count. So far nothing reads
+  context except the next clustering prompt and the pass summary, which is what keeps one
+  investigation from being drafted onto three tickets.
+  `correlator.member_confidence_floor` (a 0..1 number, default `0` = off) surfaces member links the
+  model placed below it in triage, as attributions for a reviewer to confirm. It starts off because a
+  model's stated confidence is uncalibrated, and is meant to be set from reviewer rulings. See
+  `docs/superpowers/specs/2026-10-02-shared-context-design.md`.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.
