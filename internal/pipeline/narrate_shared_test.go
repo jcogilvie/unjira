@@ -63,9 +63,15 @@ func TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative(t *testin
 	got, err := pipeline.RunNarrate(t.Context(), s, client, narrateConfig(), window, pipeline.NarrateOptions{})
 
 	require.NoError(t, err)
-	require.Len(t, client.prompts, 2, "one clustering call and one dispute re-ask")
 	require.Len(t, got.Narratives, 2)
 	newID := got.Narratives[0].ID
+
+	// F37's harm first, so a regression reports it rather than a call count.
+	for _, n := range []int64{newID, five} {
+		members, err := s.MemberEventCount(n)
+		require.NoError(t, err)
+		assert.Positive(t, members, "narrative %d must not be left empty (F37)", n)
+	}
 
 	e := narrateEventID(t, s, "E")
 	l, err := s.NarrativeEventLink(newID, e)
@@ -79,12 +85,7 @@ func TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative(t *testin
 	l, err = s.NarrativeEventLink(five, narrateEventID(t, s, "F"))
 	require.NoError(t, err)
 	assert.Equal(t, store.LinkMember, l.Kind)
-
-	for _, n := range []int64{newID, five} {
-		members, err := s.MemberEventCount(n)
-		require.NoError(t, err)
-		assert.Positive(t, members, "narrative %d must not be left empty (F37)", n)
-	}
+	assert.Len(t, client.prompts, 2, "one clustering call and one dispute re-ask")
 
 	// The report matches the store, not merely the cluster response.
 	assert.Equal(t, []string{"E"}, narratedIDs(got.Narratives[0].Events))
