@@ -68,7 +68,7 @@ func TestCorrectionsSince_ReturnsRejectedAndEdited(t *testing.T) {
 	insertRuled(t, s, nid, store.StatusRejected, "rejected because X")
 	insertRuled(t, s, nid, store.StatusEdited, "edited because Y")
 
-	got, err := s.CorrectionsSince(time.Time{})
+	got, _, err := s.CorrectionsSince(store.CorrectionsCursor{})
 	require.NoError(t, err)
 
 	require.Len(t, got, 2)
@@ -85,7 +85,7 @@ func TestCorrectionsSince_ExcludesRowsWithNoFeedback(t *testing.T) {
 	insertRuled(t, s, nid, store.StatusRejected, "   ")
 	insertRuled(t, s, nid, store.StatusRejected, "real reasoning")
 
-	got, err := s.CorrectionsSince(time.Time{})
+	got, _, err := s.CorrectionsSince(store.CorrectionsCursor{})
 	require.NoError(t, err)
 
 	require.Len(t, got, 1, "a ruling with no reasoning is not a correction to learn from")
@@ -105,7 +105,7 @@ func TestCorrectionsSince_ExcludesMachineDecisions(t *testing.T) {
 	insertDirect(t, s, nid, store.StatusApplied, "")
 	insertRuled(t, s, nid, store.StatusRejected, "a human wrote this")
 
-	got, err := s.CorrectionsSince(time.Time{})
+	got, _, err := s.CorrectionsSince(store.CorrectionsCursor{})
 	require.NoError(t, err)
 
 	require.Len(t, got, 1,
@@ -120,16 +120,150 @@ func TestCorrectionsSince_HonorsTheWatermark(t *testing.T) {
 	s, nid := correctionsStore(t)
 	insertRuled(t, s, nid, store.StatusRejected, "old correction")
 
-	// Everything so far is before the watermark.
-	cutoff := time.Now().UTC().Add(time.Second)
-
-	got, err := s.CorrectionsSince(cutoff)
+	got, readThrough, err := s.CorrectionsSince(store.CorrectionsCursor{})
 	require.NoError(t, err)
-	assert.Empty(t, got, "corrections older than the watermark must not be re-distilled")
+	assert.Len(t, got, 1, "a zero watermark means everything, for a first run")
 
-	got, err = s.CorrectionsSince(time.Time{})
+	got, again, err := s.CorrectionsSince(readThrough)
 	require.NoError(t, err)
-	assert.Len(t, got, 1, "and a zero watermark means everything, for a first run")
+	assert.Empty(t, got, "corrections at or before the watermark must not be re-distilled")
+	assert.Equal(t, readThrough, again, "and reading nothing leaves the cursor where it was")
+}
+
+// setDecidedAt pins a ruling's decided_at, because the wall clock cannot be relied on to
+// produce a same-millisecond collision on demand: that is the one-in-N flake F30's tests
+// replaced (see export_test.go).
+func setDecidedAt(t *testing.T, s *store.Store, id int64, decidedAt string) {
+	t.Helper()
+	require.NoError(t, s.ExecForTest(`UPDATE actions SET decided_at = ? WHERE id = ?`, decidedAt, id))
+}
+
+// TestCorrectionsSince_ARulingLaterInTheSameSecondIsOffered is F31's format inversion. The
+// watermark used to be stored at whole seconds and compared lexically against decided_at's
+// milliseconds, so '…05.950Z' > '…05Z' was false ('.' sorts before 'Z') and a correction
+// ruled later in the watermark's own second was never offered.
+func TestCorrectionsSince_ARulingLaterInTheSameSecondIsOffered(t *testing.T) {
+	s, nid := correctionsStore(t)
+	first := insertRuled(t, s, nid, store.StatusRejected, "read by the draft")
+	setDecidedAt(t, s, first, "2026-01-01T12:00:05.100Z")
+
+	_, readThrough, err := s.CorrectionsSince(store.CorrectionsCursor{})
+	require.NoError(t, err)
+
+	later := insertRuled(t, s, nid, store.StatusRejected, "ruled later in the same second")
+	setDecidedAt(t, s, later, "2026-01-01T12:00:05.950Z")
+
+	got, _, err := s.CorrectionsSince(readThrough)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, later, got[0].ActionID)
+}
+
+// TestCorrectionsSince_ARulingInTheSameMillisecondIsOffered is design-notes #40 at the
+// learn cursor: a ruling committed in the same millisecond as the newest one read, but
+// after the read, has a byte-identical decided_at. A strict > alone makes that a tombstone;
+// the ids read at that instant tell the two apart.
+//
+// The late ruling has the LOWER id on purpose: an action drafted earlier and ruled later is
+// the ordinary case, and it is why the cursor is not simply "highest id read".
+func TestCorrectionsSince_ARulingInTheSameMillisecondIsOffered(t *testing.T) {
+	s, nid := correctionsStore(t)
+	draftedEarly, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "DEVSBX-3",
+		Payload: `{"body":"drafted first, ruled last"}`, Status: store.StatusProposed,
+	})
+	require.NoError(t, err)
+
+	read := insertRuled(t, s, nid, store.StatusRejected, "read by the draft")
+	setDecidedAt(t, s, read, "2026-01-01T12:00:05.950Z")
+
+	_, readThrough, err := s.CorrectionsSince(store.CorrectionsCursor{})
+	require.NoError(t, err)
+
+	require.NoError(t, s.UpdateActionStatusAndFeedback(draftedEarly, store.StatusRejected,
+		"ruled in the same millisecond, after the read"))
+	setDecidedAt(t, s, draftedEarly, "2026-01-01T12:00:05.950Z")
+
+	got, _, err := s.CorrectionsSince(readThrough)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "the same-millisecond ruling must be offered, and only it")
+	assert.Equal(t, draftedEarly, got[0].ActionID)
+}
+
+// TestCorrectionsSince_ReadThroughCoversEverythingRead is the cursor's arithmetic: the
+// newest decided_at read, and every id read at exactly that instant. Carrying the earlier
+// cursor's ids forward matters when a second read lands on the same instant, or the first
+// read's rows would be re-offered.
+func TestCorrectionsSince_ReadThroughCoversEverythingRead(t *testing.T) {
+	s, nid := correctionsStore(t)
+	older := insertRuled(t, s, nid, store.StatusRejected, "older")
+	setDecidedAt(t, s, older, "2026-01-01T12:00:04.000Z")
+	a := insertRuled(t, s, nid, store.StatusRejected, "a")
+	setDecidedAt(t, s, a, "2026-01-01T12:00:05.950Z")
+
+	_, first, err := s.CorrectionsSince(store.CorrectionsCursor{})
+	require.NoError(t, err)
+	assert.Equal(t, store.CorrectionsCursor{DecidedAt: "2026-01-01T12:00:05.950Z", IDs: []int64{a}}, first)
+
+	b := insertRuled(t, s, nid, store.StatusEdited, "b")
+	setDecidedAt(t, s, b, "2026-01-01T12:00:05.950Z")
+
+	got, second, err := s.CorrectionsSince(first)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, b, got[0].ActionID)
+	assert.Equal(t, store.CorrectionsCursor{DecidedAt: "2026-01-01T12:00:05.950Z", IDs: []int64{a, b}}, second)
+
+	got, _, err = s.CorrectionsSince(second)
+	require.NoError(t, err)
+	assert.Empty(t, got, "neither a nor b may be re-offered")
+}
+
+// TestCorrectionsCursor_RoundTripsAndRejectsWhatItCannotRead pins the stored form. The
+// pre-F31 whole-second timestamp in particular must not parse: read as a cursor it would
+// reintroduce the inversion it is being replaced for.
+func TestCorrectionsCursor_RoundTripsAndRejectsWhatItCannotRead(t *testing.T) {
+	c := store.CorrectionsCursor{DecidedAt: "2026-01-01T12:00:05.950Z", IDs: []int64{3, 7}}
+	parsed, err := store.ParseCorrectionsCursor(c.String())
+	require.NoError(t, err)
+	assert.Equal(t, c, parsed)
+
+	zero, err := store.ParseCorrectionsCursor("")
+	require.NoError(t, err)
+	assert.True(t, zero.IsZero())
+	assert.Empty(t, store.CorrectionsCursor{}.String(), "zero is stored as absence")
+
+	noIDs, err := store.ParseCorrectionsCursor(`{"decided_at":"2026-01-01T12:00:05.000Z","ids":[]}`)
+	require.NoError(t, err, "an empty id set is the hand-converted form, and legal")
+	assert.Equal(t, "2026-01-01T12:00:05.000Z", noIDs.DecidedAt)
+
+	for _, raw := range []string{
+		"2026-01-01T12:00:05Z",                                   // the pre-F31 watermark
+		`{"decided_at":"2026-01-01T12:00:05Z","ids":[]}`,         // whole seconds again
+		`{"decided_at":"2026-01-01T12:00:05.950Z","ids":[0]}`,    // not an action id
+		`{"decided_at":"2026-01-01T12:00:05.950Z","seq":1}`,      // unknown field
+		`{"decided_at":"2026-01-01T12:00:05.950Z","ids":[1]} {}`, // trailing data
+		`{"ids":[1]}`, // no position
+	} {
+		_, err := store.ParseCorrectionsCursor(raw)
+		assert.Error(t, err, "ParseCorrectionsCursor(%q)", raw)
+	}
+}
+
+// TestCorrectionsCursor_LaterNeverMovesBackwards is what lets KeepCandidates merge a
+// draft's position with a stored one without losing either.
+func TestCorrectionsCursor_LaterNeverMovesBackwards(t *testing.T) {
+	early := store.CorrectionsCursor{DecidedAt: "2026-01-01T12:00:04.000Z", IDs: []int64{9}}
+	late := store.CorrectionsCursor{DecidedAt: "2026-01-01T12:00:05.000Z", IDs: []int64{2}}
+
+	assert.Equal(t, late, early.Later(late))
+	assert.Equal(t, late, late.Later(early))
+	assert.Equal(t, late, store.CorrectionsCursor{}.Later(late))
+
+	same := store.CorrectionsCursor{DecidedAt: late.DecidedAt, IDs: []int64{1, 2}}
+	assert.Equal(t,
+		store.CorrectionsCursor{DecidedAt: late.DecidedAt, IDs: []int64{1, 2}},
+		late.Later(same), "at one instant, both id sets were read")
 }
 
 // TestCorrectionsSince_CarriesTheActionType because a norm about comments is not a norm
@@ -144,7 +278,7 @@ func TestCorrectionsSince_CarriesTheActionType(t *testing.T) {
 	require.NoError(t, s.UpdateActionStatusAndFeedback(id, store.StatusRejected,
 		"do not close on a merge alone"))
 
-	got, err := s.CorrectionsSince(time.Time{})
+	got, _, err := s.CorrectionsSince(store.CorrectionsCursor{})
 	require.NoError(t, err)
 
 	require.Len(t, got, 1)

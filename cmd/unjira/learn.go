@@ -66,8 +66,7 @@ func (c *learnCmd) Run(app *appContext) error {
 	// the same rule names twice, so --all named "skip-no-op-progress-comments" from the
 	// first draft and the second offered "comment-must-add-information" instead. It also
 	// means a reviewer can only ever keep prose they actually read.
-	written, advanced, err := pipeline.KeepCandidates(
-		app.store, app.config, drafted.Candidates, keep)
+	written, advanced, err := pipeline.KeepCandidates(app.store, app.config, drafted, keep)
 	for _, name := range written {
 		fmt.Printf("  wrote %s/%s.md\n", app.config.RulesDir(), name)
 	}

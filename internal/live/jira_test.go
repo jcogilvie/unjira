@@ -157,7 +157,8 @@ func TestAuthAndProjectVisible(t *testing.T) {
 }
 
 // TestIssueLifecycleRoundtrip exercises create -> transition -> comment ->
-// changelog -> delete, asserting each hop.
+// changelog -> delete, asserting each hop but the last: the delete is this test's
+// cleanup, so a failure there is reported rather than asserted (cleanup_test.go).
 func TestIssueLifecycleRoundtrip(t *testing.T) {
 	client := testClient(t)
 	project := testProject()
@@ -170,9 +171,7 @@ func TestIssueLifecycleRoundtrip(t *testing.T) {
 		[]string{jira.SeedLabel},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = client.DeleteIssue(key)
-	})
+	deleteIssueOnCleanup(t, client, key)
 
 	transitions, err := client.GetTransitions(key)
 	require.NoError(t, err)
@@ -581,7 +580,7 @@ func TestLiveMatchingSignalIsAvailable(t *testing.T) {
 		[]string{jira.SeedLabel},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	deleteIssueOnCleanup(t, client, key)
 
 	issue, err := tracker.GetIssue(key)
 
@@ -621,7 +620,7 @@ func TestLiveGetIssueUsesAStringDescriptionAPI(t *testing.T) {
 		[]string{jira.SeedLabel},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	deleteIssueOnCleanup(t, client, key)
 
 	raw, err := client.GetIssue(key, "")
 	require.NoError(t, err)
@@ -684,7 +683,7 @@ func TestLiveAvailableTransitionsReflectsTheRealWorkflow(t *testing.T) {
 	// Deletes exactly the key this test created. Never query-driven cleanup
 	// against the shared sandbox — a JQL sweep can delete issues this test did
 	// not create.
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	deleteIssueOnCleanup(t, client, key)
 
 	transitions, err := tracker.AvailableTransitions(key)
 	require.NoError(t, err)
@@ -757,7 +756,7 @@ func TestLiveSetStatusMovesToTheNamedStatus(t *testing.T) {
 		[]string{jira.SeedLabel},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	deleteIssueOnCleanup(t, client, key)
 
 	transitions, err := tracker.AvailableTransitions(key)
 	require.NoError(t, err)
@@ -791,7 +790,7 @@ func TestLiveSetStatusRefusesAnUnofferedName(t *testing.T) {
 		[]string{jira.SeedLabel},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	deleteIssueOnCleanup(t, client, key)
 
 	before, err := tracker.GetIssue(key)
 	require.NoError(t, err)

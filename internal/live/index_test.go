@@ -270,7 +270,7 @@ func awaitIndexed(t *testing.T, client *jira.Client, scopedJQL string) searchOut
 func failWithVerdict(t *testing.T, v verdict, detail string) {
 	t.Helper()
 
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
+	if inGitHubActions() {
 		// Straight to stdout rather than t.Log: workflow commands must start the
 		// line, and t.Log indents.
 		fmt.Println(githubAnnotation(v, detail))
@@ -282,8 +282,7 @@ func failWithVerdict(t *testing.T, v verdict, detail string) {
 // githubAnnotation renders v as a GitHub Actions ::error workflow command,
 // escaped per the runner's rules (data: % CR LF; properties additionally : ,).
 func githubAnnotation(v verdict, detail string) string {
-	data := strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A").
-		Replace(v.reason + "\n\n" + detail)
+	data := escapeWorkflowData(v.reason + "\n\n" + detail)
 	title := strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A", ":", "%3A", ",", "%2C").
 		Replace("Live Jira verdict: " + string(v.class))
 
@@ -485,14 +484,6 @@ func deleteCollectorFixture() {
 		return
 	}
 
-	if err := fixtureClient.DeleteIssue(fixture.key); err != nil {
-		msg := fmt.Sprintf("could not delete the shared collector issue %s: %v — delete it by hand",
-			fixture.key, err)
-		fmt.Fprintln(os.Stderr, msg)
-
-		if os.Getenv("GITHUB_ACTIONS") == "true" {
-			fmt.Println("::warning title=Live Jira cleanup::" +
-				strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A").Replace(msg))
-		}
-	}
+	reportCleanupFailure(os.Stderr, os.Stdout, inGitHubActions(),
+		"the shared collector issue", fixture.key, fixtureClient.DeleteIssue(fixture.key))
 }

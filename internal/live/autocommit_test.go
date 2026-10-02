@@ -63,7 +63,7 @@ func liveThrowawayIssue(t *testing.T, client *jira.Client, purpose string) strin
 		[]string{jira.SeedLabel},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	deleteIssueOnCleanup(t, client, key)
 
 	return key
 }
