@@ -49,8 +49,25 @@ and are reported. The artifact became host-qualified (`<host>/<owner>/<repo>#<N>
 the baseline arm's stored values are host-less and the treatment arm's are not. M3 keys on the raw
 value, so each arm is self-consistent. The probe now prints, per pass, what identity placed and every
 fallback (`printPRIdentity`), and M3 counts identity placements. M4's confidence distribution counts
-only the model's placements. The two-pass M3 re-measurement (expected 26/26) needs a credentialed run
-and has not been made. See `docs/architecture-findings.md` F45 and F46 for what the join leaves open.
+only the model's placements. Re-measured on real data: a fresh snapshot collected with this build
+(116 in-window events, as before), three two-pass reps with the same `SHARED_START`/`SHARED_END`/
+`SHARED_CUT` as above. Identical in all three:
+
+```
+M2  anchor↔PR coalescing: 21/21
+M3  PR integrity: 26/26 (4 member link(s) placed by pull-request identity)
+pass 1: F43 0 event(s) pre-assigned by pull-request identity; 60 fallback(s), 60 of them nothing-holds-it-yet
+pass 2: F43 4 event(s) pre-assigned by pull-request identity; 29 fallback(s), 29 of them nothing-holds-it-yet
+      placed github/jcogilvie/unjira#72:merged:31547281638 -> narrative 16 (github.com/jcogilvie/unjira#72)
+      placed github/jcogilvie/unjira#72:closed:31547281720 -> narrative 16 (github.com/jcogilvie/unjira#72)
+      placed github/jcogilvie/unjira#73:merged:31551672886 -> narrative 17 (github.com/jcogilvie/unjira#73)
+      placed github/jcogilvie/unjira#73:closed:31551672987 -> narrative 17 (github.com/jcogilvie/unjira#73)
+M7  screen: 0 pass-2 member placement(s) whose evidence points at another pass-1 narrative; 0 into …
+```
+
+Two-pass M3 went from 24/26 to 26/26, and the four placements are exactly the merged/closed events of
+#72 and #73, the two PRs that split before. No several-holders or not-open fallbacks occurred, and no
+rep showed F45's reshuffle. See `docs/architecture-findings.md` F45 and F46 for what the join leaves open.
 
 Verified offline, in the worktree:
 
