@@ -69,13 +69,18 @@ func liveConnectionName() string {
 //
 // Load walks up to the repository root, which `go test ./internal/live/` needs:
 // the test binary runs with CWD set to the package directory, not the repo root.
+//
+// It also deletes the collector tests' shared issue (sharedCollectorIssue), which
+// outlives any single test and so cannot use t.Cleanup.
 func TestMain(m *testing.M) {
 	if err := envfile.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "loading .env: %v\n", err)
 		os.Exit(1)
 	}
 
-	os.Exit(m.Run())
+	code := m.Run()
+	deleteCollectorFixture()
+	os.Exit(code)
 }
 
 // testCredential resolves this tier's credential from UNJIRA_JIRA_CREDENTIALS.
@@ -213,39 +218,48 @@ func TestWorkflowMiningProducesAGraph(t *testing.T) {
 	assert.NotEmpty(t, categories, "project should report at least one status")
 }
 
-// liveCollectContext builds a CollectContext pointing at the dev instance,
+// probeConnection is the connection every collector test runs: the dev instance,
 // scoped to a single issue key so the test cannot be perturbed by unrelated
-// activity in the project.
+// activity in the project. It is shared by liveCollectContext and the index probes
+// (index_test.go). The probes judge "the collector's own query", and that only
+// holds while both are built from this one definition.
+func probeConnection(issueKey string) config.JiraConnection {
+	site := os.Getenv("UNJIRA_JIRA_SITE")
+	if site == "" {
+		site = "https://unjira.atlassian.net"
+	}
+
+	return config.JiraConnection{
+		Name:        liveConnectionName(),
+		Site:        site,
+		ProjectKeys: []string{testProject()},
+		Queries:     []config.JiraQuery{probeQuery(issueKey)},
+	}
+}
+
+func probeQuery(issueKey string) config.JiraQuery {
+	return config.JiraQuery{Name: "probe", JQL: fmt.Sprintf("key = %s", issueKey)}
+}
+
+// liveCollectContext builds a CollectContext for probeConnection.
 //
 // The store is a fresh temp-file SQLite DB per call so a cursor from a previous
 // run cannot make a pass look incremental when it should be a full scan.
 func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 	t.Helper()
 
-	site := os.Getenv("UNJIRA_JIRA_SITE")
-	if site == "" {
-		site = "https://unjira.atlassian.net"
-	}
-
 	s, err := store.Open(filepath.Join(t.TempDir(), "unjira.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 
-	connectionName := liveConnectionName()
+	conn := probeConnection(issueKey)
 	cred := testCredential(t)
 
 	return pipeline.CollectContext{
-		Store: s,
-		Config: config.Config{Jira: []config.JiraConnection{{
-			Name:        connectionName,
-			Site:        site,
-			ProjectKeys: []string{testProject()},
-			Queries: []config.JiraQuery{
-				{Name: "probe", JQL: fmt.Sprintf("key = %s", issueKey)},
-			},
-		}}},
+		Store:  s,
+		Config: config.Config{Jira: []config.JiraConnection{conn}},
 		Credentials: credentials.NewSet(map[string]credentials.Credential{
-			connectionName: cred,
+			conn.Name: cred,
 		}),
 		Options: map[string]any{},
 	}
@@ -258,15 +272,25 @@ func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 // FETCH-BY-KEY is not. See docs/design-notes.md incident 26.
 //
 // collectUntilMatched runs collector until its query actually matches something,
-// then returns every event it emitted on that successful pass.
+// then returns every event it emitted on that successful pass. key is the issue
+// the collector's query targets, and the verdict on failure is about it.
 //
-// Jira's search index is eventually consistent — measured on this instance at a
-// ~3s MEDIAN but a 24s tail (samples: 1, 2, 3, 4, 9, 12, 24) — AND non-monotonic:
-// a document can become findable and then
-// transiently stop being findable while replicas converge. That second property
-// is why a one-shot readiness probe before collecting is not enough, and why
-// this retries the collector itself rather than pre-checking. A probe can only
-// ever report that the index WAS ready.
+// Jira's search index is eventually consistent AND non-monotonic. Atlassian
+// documents the lag as "from a few seconds to minutes". It is measured here at a
+// ~3s median with a tail past 80s (incidents 26 and 42). A document can also
+// become findable and then transiently stop being findable while replicas
+// converge. So there are TWO waits, sized separately:
+//
+//   - for the index to have the issue at all: sharedCollectorIssue's awaitIndexed,
+//     long (minutes) and cheap. Callers obtain key from it, so this helper starts
+//     only once the index has returned the issue at least once.
+//   - for a transient flap after that: this helper's retry around the collector
+//     ITSELF, short. A probe cannot replace it, since a probe only reports that
+//     the index WAS ready (incident 26).
+//
+// Keeping the waits apart lets lag tolerance and bug-detection latency be sized
+// independently. A real watermark bug fails every attempt identically, so it is
+// reported after THIS budget (~46s), never after the minutes-long readiness wait.
 //
 // Only the create-then-search seam is retried. Assertions are not: they still
 // fail on the first wrong answer, because this tier exists to catch collector
@@ -280,47 +304,46 @@ func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 // self-authored event arriving late is the desired outcome either way. A pass
 // that matches nothing simply leaves the watermark alone and retries next pass,
 // which is correct behaviour, not a failure.
-// client is taken so a failure can DISCRIMINATE rather than merely report: the
-// unbounded form of the collector's own query is the one check that separates
-// "our bug" from "Jira's convergence". It is passed in rather than rebuilt from
-// cc.Credentials because every caller already has one, and reconstructing it
-// would add a second way for this helper to fail.
+// client is taken so a failure can DISCRIMINATE rather than merely report (see
+// classifyIndexMiss). It is passed in rather than rebuilt from cc.Credentials
+// because every caller already has one, and reconstructing it would add a second
+// way for this helper to fail.
 func collectUntilMatched(
 	t *testing.T, client *jira.Client, collector pipeline.Collector, cc pipeline.CollectContext,
-	opts ...backoff.RetryOption,
+	key string, opts ...backoff.RetryOption,
 ) []events.Event {
 	t.Helper()
 
-	// Exponential with jitter, from the library rather than hand-rolled: its
-	// defaults are 500ms initial, 1.5x, RandomizationFactor 0.5.
+	// Exponential with jitter, from the library's defaults: 500ms initial, 1.5x,
+	// RandomizationFactor 0.5.
 	//
-	// THE BUDGET IS SIZED FOR THE TAIL, NOT THE MEDIAN, and that distinction is the
-	// whole reason this test was flaky. Measured on this instance (seven samples,
-	// create-then-poll-until-findable): 1, 2, 3, 4, 9, 12, 24 seconds. The median
-	// really is ~3s — the figure this tier was originally built on — but the tail
-	// reaches 24s, and a budget sized for the median fails whenever the tail is
-	// drawn. The original 20x1s linear poll gave exactly 20s and failed ~1 run in
-	// 3; an 8-try exponential budget exhausts at ~24.6s, landing ON the worst
-	// observed value, which is why it improved the rate without fixing it.
+	// N tries is N-1 WAITS. 10 tries sleeps 0.5 x (1.5^9 - 1)/0.5 = ~37s on
+	// average. Add ~1s per collector pass (Myself, search, changelog, comments) and
+	// the whole budget is ~46s, give or take jitter. The three captured CI failures
+	// took 36s to 46s per test, seeding included. An earlier version of this comment
+	// put the budget at "~57s" by counting tries as waits. That overstated the
+	// margin past the 24s tail by half.
 	//
-	// 10 tries is ~57s cumulative, comfortably past the observed tail. If this
-	// starts failing again, RE-MEASURE THE LAG before enlarging the budget: a
-	// steadily-growing tail is a fact about the instance worth knowing, not just a
-	// number to raise.
+	// This budget is for FLAPS, not lag. Callers reach it only after the index has
+	// returned the issue (awaitIndexed). It is also the latency of a REAL BUG
+	// verdict for a watermark bug, which fails every attempt identically. Keep it
+	// short. Lag tolerance belongs to indexReadinessBound.
 	//
-	// Try count and elapsed time are bounded INDEPENDENTLY on purpose. Tries bound
-	// how much this costs; elapsed time bounds how long a human or CI waits. Note
-	// which one actually binds: at 10 tries the try count would allow ~57s, so the
-	// 90s ceiling is the backstop for a pathologically slow Jira rather than the
-	// normal limit.
+	// Try count and elapsed time are bounded INDEPENDENTLY. Tries bound cost and are
+	// what normally binds (~46s). 90s elapsed is the backstop for a pathologically
+	// slow Jira.
+	started := time.Now()
+
+	var attempts int
+
 	settings := append([]backoff.RetryOption{
 		backoff.WithMaxTries(10),
 		backoff.WithMaxElapsedTime(90 * time.Second),
+		backoff.WithNotify(func(err error, next time.Duration) {
+			t.Logf("collector: attempt %d at %s: %v; next attempt in %s",
+				attempts, time.Since(started).Round(time.Millisecond), err, next.Round(time.Millisecond))
+		}),
 	}, opts...)
-
-	// Captured across attempts so the failure message can distinguish "never
-	// matched" from "matched but emitted nothing".
-	var attempts int
 
 	got, err := backoff.Retry(t.Context(), func() ([]events.Event, error) {
 		attempts++
@@ -336,76 +359,54 @@ func collectUntilMatched(
 		}
 
 		if len(collected) == 0 {
-			return nil, errors.New("collector matched nothing")
+			return nil, errCollectorMatchedNothing
 		}
 
 		return collected, nil
 	}, settings...)
-	if err != nil {
-		// Re-search WITHOUT the watermark, using the collector's own scoped query.
-		// If the issue is invisible even unbounded, nothing the collector rendered
-		// could have excluded it — the index has transiently lost the row. If it IS
-		// visible unbounded, the collector's own scoping or watermark is at fault,
-		// and that is a real bug this tier exists to catch.
-		//
-		// Captured from a real failure: stored watermark
-		// 2026-09-09T12:46:49.711-07:00 against a live updated of exactly
-		// 2026-09-09T12:46:49.711-0700, so the minute-floored bound provably
-		// included the issue. Without this verdict that evidence still reads as
-		// ambiguous, and an OSS contributor cannot tell whether their PR broke
-		// something.
-		conn := cc.Config.Jira[0]
-		unbounded, jqlErr := conn.EffectiveJQL(conn.Queries[0])
+	if err == nil {
+		t.Logf("collector: matched on attempt %d after %s", attempts, time.Since(started).Round(time.Millisecond))
 
-		// A check that could not RUN must never resolve to a confident verdict — an
-		// earlier version of this defaulted to "infrastructure, re-run", and when a
-		// deliberately-broken watermarkClause (a real bug, exactly what this test
-		// exists to catch) made the re-search return nothing, it reported "not caused
-		// by your change". Confidently wrong is worse than ambiguous, especially for a
-		// contributor deciding whether their PR is at fault.
-		//
-		// So every path below assigns verdict explicitly, and both paths where the
-		// discriminating check did not complete (jqlErr, searchErr) say UNDETERMINED.
-		// There is deliberately no default value: an initial "UNDETERMINED" here was
-		// overwritten on every branch and never read (ineffassign), so it protected
-		// nothing — the explicit branches are what carry the rule.
-		var verdict string
-
-		if jqlErr != nil {
-			verdict = "UNDETERMINED — could not even build the unbounded query, which is " +
-				"itself suspicious: " + jqlErr.Error()
-		} else {
-			var visible int
-
-			searchErr := client.SearchIssues(unbounded, []string{"key"}, 1,
-				func(map[string]any) { visible++ })
-
-			switch {
-			case searchErr != nil:
-				verdict = "UNDETERMINED — the unbounded re-search itself failed (" +
-					searchErr.Error() + "), so it rules nothing in or out"
-			case visible > 0:
-				verdict = "REAL BUG — the issue IS visible to the unbounded query, so the " +
-					"collector's scoping or its `updated >=` bound excluded it. Jira answers " +
-					"200-with-zero-results for a date literal it cannot use rather than 400, so " +
-					"this is exactly what a wrong watermarkClause looks like, and no offline " +
-					"test can see it"
-			default:
-				verdict = "INFRASTRUCTURE — the issue is invisible even to the unbounded " +
-					"query, so Jira's search index has transiently lost it " +
-					"(docs/design-notes.md incident 26). NOT caused by the change under " +
-					"test; re-run"
-			}
-		}
-
-		t.Fatalf("collector matched nothing across %d attempts.\n"+
-			"  unbounded JQL: %q (err: %v)\n"+
-			"  last error:    %v\n"+
-			"VERDICT: %s.", attempts, unbounded, jqlErr, err, verdict)
+		return got
 	}
 
-	return got
+	// The collector ERRORED rather than matching nothing: that is a failure in its
+	// own right, and the index probes cannot speak to it. Classifying it by issue
+	// visibility, as an earlier version did, could call a collector parse error
+	// "INFRASTRUCTURE" whenever the index happened to be lagging.
+	if !errors.Is(err, errCollectorMatchedNothing) {
+		t.Fatalf("collector FAILED on attempt %d after %s (not an index miss, so no index "+
+			"verdict applies): %v", attempts, time.Since(started).Round(time.Millisecond), err)
+	}
+
+	// Captured from a real failure: stored watermark 2026-09-09T12:46:49.711-07:00
+	// against a live updated of exactly 2026-09-09T12:46:49.711-0700, so the
+	// minute-floored bound provably included the issue. Without a verdict that
+	// evidence reads as ambiguous, and an OSS contributor cannot tell whether their
+	// PR broke something.
+	conn := cc.Config.Jira[0]
+	unbounded, jqlErr := conn.EffectiveJQL(conn.Queries[0])
+
+	ev := indexEvidence{jqlErr: jqlErr}
+	if jqlErr == nil {
+		ev = gatherFreshEvidence(client, unbounded, key)
+		ev.scopedIndexed = probe(client, unbounded, nil)
+	}
+
+	failWithVerdict(t, classifyIndexMiss(ev), fmt.Sprintf(
+		"collector matched nothing across %d attempts in %s.\n"+
+			"  unbounded JQL: %q (err: %v)\n"+
+			"  consistent read of it: matched=%v err=%v; bare-key control: matched=%v err=%v\n"+
+			"  index read of it:      matched=%v err=%v",
+		attempts, time.Since(started).Round(time.Millisecond), unbounded, jqlErr,
+		ev.scopedFresh.matched, ev.scopedFresh.err, ev.keyFresh.matched, ev.keyFresh.err,
+		ev.scopedIndexed.matched, ev.scopedIndexed.err))
+
+	return nil
 }
+
+// errCollectorMatchedNothing is collectUntilMatched's one retryable condition.
+var errCollectorMatchedNothing = errors.New("collector matched nothing")
 
 // TestLiveCollectorSeesSeededCommentAndTransition is the first real check that
 // this collector's JSON-shape assumptions match Jira's actual responses. The
@@ -418,40 +419,21 @@ func collectUntilMatched(
 func TestLiveCollectorSeesSeededCommentAndTransition(t *testing.T) {
 	client := testClient(t)
 
-	key, err := client.CreateIssue(
-		testProject(),
-		"[seed] live collector test issue",
-		"Task",
-		"Created by internal/live; deleted by this test's cleanup.",
-		[]string{jira.SeedLabel},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	// The run's shared issue: created, transitioned once (so there is a status
+	// changelog entry to collect) and commented once, then waited on until the
+	// search index returns it. See sharedCollectorIssue for why it is shared.
+	key := sharedCollectorIssue(t, client)
+	commentBody := collectorFixtureCommentBody
 
-	// Transition it so there is a status changelog entry to collect.
-	transitions, err := client.GetTransitions(key)
-	require.NoError(t, err)
-	require.NotEmpty(t, transitions)
-	targetID, _ := transitions[0]["id"].(string)
-	require.NoError(t, client.TransitionIssue(key, targetID, nil))
-
-	const commentBody = "live collector probe comment"
-	_, err = client.AddComment(key, commentBody)
-	require.NoError(t, err)
-
-	// The collector finds issues by JQL, and Jira's search index lags issue
-	// creation by a few seconds. Without retrying, Collect matches nothing, `got`
-	// is empty, and the assertion loop below simply never executes — so the
-	// sawComment/sawStatus flags carry the whole test. The require calls after the
-	// loop are what keep an empty collection from reading as success.
-	// collectUntilMatched already fatals if nothing matched, with a message that
-	// distinguishes index lag from a real regression — so the old
-	// require.NotEmpty here could never fire, and keeping it would suggest the
-	// empty case is still guarded HERE when the guard has moved. The
-	// sawComment/sawStatus requires at the end remain load-bearing: they are what
-	// stop a non-empty-but-wrong collection from passing vacuously.
+	// The collector finds issues by JQL, and Jira's search index lags writes.
+	// Without retrying, Collect matches nothing, `got` is empty, and the assertion
+	// loop below simply never executes — so the sawComment/sawStatus flags carry the
+	// whole test. collectUntilMatched fatals if nothing matched, with a verdict that
+	// distinguishes index lag from a real regression, so no require.NotEmpty is
+	// needed here. The sawComment/sawStatus requires at the end remain load-bearing:
+	// they are what stop a non-empty-but-wrong collection from passing vacuously.
 	cc := liveCollectContext(t, key)
-	got := collectUntilMatched(t, client, collectorjira.New(), cc)
+	got := collectUntilMatched(t, client, collectorjira.New(), cc, key)
 
 	var sawComment, sawStatus bool
 	for _, e := range got {
@@ -489,19 +471,14 @@ func TestLiveCollectorSeesSeededCommentAndTransition(t *testing.T) {
 func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 	client := testClient(t)
 
-	key, err := client.CreateIssue(
-		testProject(),
-		"[seed] live collector watermark test issue",
-		"Task",
-		"Created by internal/live; deleted by this test's cleanup.",
-		[]string{jira.SeedLabel},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.DeleteIssue(key) })
+	// The run's shared, already-indexed issue (sharedCollectorIssue). This test
+	// needs only that the issue was updated recently and carries something to
+	// collect, which the shared seed provides. It does not write to the issue: the
+	// fixture's immutability is what keeps the two tests independent.
+	key := sharedCollectorIssue(t, client)
 
-	_, err = client.AddComment(key, "watermark probe")
-	require.NoError(t, err)
-
+	// A fresh store, so this test's first pass is unbounded regardless of what the
+	// sibling test's collection stored in ITS store.
 	cc := liveCollectContext(t, key)
 	collector := collectorjira.New()
 
@@ -510,12 +487,11 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 	//
 	// Retried rather than run once, because the collector storing a watermark is
 	// this test's PRECONDITION, not its subject. Jira's index is eventually
-	// consistent AND non-monotonic (median ~3s, tail to 24s; observed to flap), so a
-	// single pass can match nothing, store no watermark, and leave the second pass
-	// silently degraded into another unbounded query — the assertion below would
-	// then fail for a reason that has nothing to do with the JQL quoting this test
-	// exists to prove. That is exactly how this test failed intermittently in CI.
-	collectUntilMatched(t, client, collector, cc)
+	// consistent AND non-monotonic (incidents 26, 42), so a single pass can match
+	// nothing, store no watermark, and leave the second pass silently degraded into
+	// another unbounded query — the assertion below would then fail for a reason
+	// that has nothing to do with the JQL quoting this test exists to prove.
+	collectUntilMatched(t, client, collector, cc, key)
 
 	position, err := cc.Store.GetCursor("jira", collectorjira.CursorResource(liveConnectionName(), "probe"))
 	require.NoError(t, err)
@@ -550,7 +526,7 @@ func TestLiveCollectorSecondPassWatermarkJQLIsAccepted(t *testing.T) {
 	// every attempt identically (Jira is deterministic about a bound it cannot
 	// use), so the watermarkClause bug this exists to catch still fails loudly —
 	// only the convergence race is absorbed.
-	secondPass := collectUntilMatched(t, client, collector, cc)
+	secondPass := collectUntilMatched(t, client, collector, cc, key)
 
 	// collectUntilMatched already fatals on an empty collection, so this asserts
 	// the stronger property: the watermarked query matched THIS issue, not merely

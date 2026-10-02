@@ -139,6 +139,17 @@ jobs:
         run: |
           printf 'UNJIRA_GITHUB_CREDENTIALS=%s\n' \
             "$(jq -cn '{"github.com": {token: $ENV.GH_TOKEN}}')" >> "$GITHUB_ENV"
-      - run: UNJIRA_LIVE=1 go test -tags=live ./internal/live/...
+      # -v so a run that PASSES slowly still says why. The Jira collector tests
+      # log every index-readiness poll and collector attempt, plus how long the
+      # search index took to return the run's seeded issue. Over time that line
+      # is the measurement of Jira's index lag (docs/design-notes.md #43). Without
+      # -v, go test drops a passing package's output.
+      #
+      # -timeout 15m: the worst case is bounded but can exceed go test's 10m
+      # default if every wait runs out (3m index readiness, then up to 90s per
+      # collector retry budget, three of them). A timeout panic would replace the
+      # VERDICT line with a goroutine dump, and that line is the most useful
+      # output this job produces.
+      - run: UNJIRA_LIVE=1 go test -tags=live -v -timeout 15m ./internal/live/...
         env:
           UNJIRA_JIRA_SITE: https://unjira.atlassian.net

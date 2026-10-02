@@ -99,6 +99,69 @@ func TestSearchIssues_RespectsLimit(t *testing.T) {
 	assert.Equal(t, []string{"P-1", "P-2"}, keys)
 }
 
+// The production path must not change shape: SearchIssues is what every collector
+// pass sends, and it has never carried reconcileIssues.
+func TestSearchIssues_SendsNoReconcileIssues(t *testing.T) {
+	var query map[string][]string
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		writeJSON(t, w, http.StatusOK, map[string]any{"issues": []map[string]any{}})
+	})
+
+	require.NoError(t, client.SearchIssues("project = P", nil, 10, func(map[string]any) {}))
+
+	assert.NotContains(t, query, "reconcileIssues")
+}
+
+// Atlassian requires the reconcile list to be repeated, identically, on every page
+// ("should be consistent with each paginated request across different pages"), and
+// the OpenAPI spec declares it an exploded array: one reconcileIssues param per id.
+func TestSearchIssuesReconciled_RepeatsIDsOnEveryPage(t *testing.T) {
+	var perPage [][]string
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		perPage = append(perPage, r.URL.Query()["reconcileIssues"])
+		if r.URL.Query().Get("nextPageToken") == "" {
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"issues":        []map[string]any{{"key": "P-1"}},
+				"nextPageToken": "t2",
+			})
+			return
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{"issues": []map[string]any{{"key": "P-2"}}})
+	})
+
+	var keys []string
+	err := client.SearchIssuesReconciled("project = P", []string{"key"}, 10, []int64{10001, 10002},
+		func(issue map[string]any) { keys = append(keys, issue["key"].(string)) })
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"P-1", "P-2"}, keys)
+	assert.Equal(t, [][]string{{"10001", "10002"}, {"10001", "10002"}}, perPage)
+}
+
+// Jira caps the list at 50. Over the cap is refused before any request rather than
+// truncated, since a silently-dropped id is a consistency guarantee quietly not given.
+func TestSearchIssuesReconciled_RefusesMoreThanFiftyIDs(t *testing.T) {
+	var requests int
+
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		writeJSON(t, w, http.StatusOK, map[string]any{"issues": []map[string]any{}})
+	})
+
+	ids := make([]int64, 51)
+	for i := range ids {
+		ids[i] = int64(10000 + i)
+	}
+
+	err := client.SearchIssuesReconciled("project = P", nil, 10, ids, func(map[string]any) {})
+
+	require.ErrorContains(t, err, "51 issue ids")
+	assert.Zero(t, requests, "an over-cap request must be refused before it is sent")
+}
+
 func TestChangelog_PaginatesUntilIsLast(t *testing.T) {
 	var calls int
 
