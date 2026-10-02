@@ -16,6 +16,7 @@ package pipeline_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,7 +49,15 @@ func (f *learnLLM) Complete(_ context.Context, _, _ string) (string, llm.Usage, 
 func learnFixture(t *testing.T) (*store.Store, config.Config, int64) {
 	t.Helper()
 
-	s, err := store.Open(filepath.Join(t.TempDir(), "learn.db"))
+	return learnFixtureAt(t, filepath.Join(t.TempDir(), "learn.db"))
+}
+
+// learnFixtureAt is learnFixture at a known path, for a test that must reach the
+// database directly to set a timestamp the store API stamps itself.
+func learnFixtureAt(t *testing.T, path string) (*store.Store, config.Config, int64) {
+	t.Helper()
+
+	s, err := store.Open(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 
@@ -314,21 +323,30 @@ func rule(t *testing.T, s *store.Store, feedback string) int64 {
 // ruling made in between was never drafted from, so the watermark must not cover it — it
 // must be the high-water mark of what the draft READ, not the clock at keep.
 func TestKeepCandidates_ACorrectionDecidedAfterTheDraftIsOfferedNextPass(t *testing.T) {
-	s, cfg, _ := learnFixture(t)
+	path := filepath.Join(t.TempDir(), "learn.db")
+	s, cfg, readID := learnFixtureAt(t, path)
 
 	drafted, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: oneCandidate}, cfg,
 		pipeline.LearnOptions{})
 	require.NoError(t, err)
 	require.Equal(t, 1, drafted.CorrectionsRead)
 
-	rule(t, s, "ruled while the draft was with the model")
+	lateID := rule(t, s, "ruled while the draft was with the model")
 
-	// Production HAS this gap, which is what makes the sleep honest rather than a mask
-	// (design-notes #40): between the ruling and the keep sits the rest of the draft's
-	// model call and a reviewer reading candidates. Without it, a regression to a
-	// millisecond clock reading at keep passes whenever the ruling and the keep share a
-	// millisecond — measured: the drill passed until this was added.
-	time.Sleep(5 * time.Millisecond)
+	// The late ruling is given EXACTLY the decided_at of the correction the draft read,
+	// written directly because the store API stamps decided_at itself. That makes this
+	// test discriminate deterministically, with no sleep (design-notes #40 is about
+	// exactly that trap):
+	//   - the read-through cursor offers it: same instant, but its id was not read;
+	//   - a clock reading taken at keep cannot be earlier than that instant, so a
+	//     regression to "watermark = now at keep" skips it, every run, not only when
+	//     the ruling and the keep happen to share a millisecond.
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`UPDATE actions SET decided_at = (SELECT decided_at FROM actions WHERE id = ?)
+		WHERE id = ?`, readID, lateID)
+	require.NoError(t, err)
 
 	_, advanced, err := pipeline.KeepCandidates(s, cfg, drafted, []string{"say-what-changed"})
 	require.NoError(t, err)
