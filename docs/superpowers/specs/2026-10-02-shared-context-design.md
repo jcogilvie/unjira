@@ -145,16 +145,44 @@ its own, or membership of the narrative it most belongs to. The cost of forcing 
 ticket hears about the investigation as work and the others see it as context — which is today's
 behaviour for the one ticket and strictly better for the others.
 
-**Who assigns kinds: the model, in `Cluster`'s output.** Each cluster gains an optional
-`context_indices` beside `event_indices`, resolved against the same numbered slice:
+**Who assigns kinds: the model, in `Cluster`'s output** (decided with the user, 2026-10-02). Each
+cluster gains an optional `context_indices` beside `event_indices`, resolved against the same numbered
+slice, and a required `confidence`:
 
 ```json
-[{"kind":"new","title":"…","summary":"…","event_indices":[3,4],"context_indices":[0]}]
+[{"kind":"new","title":"…","summary":"…","confidence":0.85,"event_indices":[3,4],"context_indices":[0]}]
 ```
 
 The prompt's contract becomes: every numbered event appears in **exactly one** cluster's
-`event_indices`; it may additionally appear in any number of other clusters' `context_indices`, when
-it is genuinely the background for that cluster's work.
+`event_indices` — that placement IS its member home — and may additionally appear in any number of
+other clusters' `context_indices`, when it is genuinely the background for that cluster's work.
+Membership is therefore an explicit answer, never inferred from response order. An event in two
+clusters' `event_indices` is a contract violation, resolved by the dispute re-ask in §4.
+
+**Why membership has to be right, not just consistent: token attribution.** Member links are the unit
+of attribution — a session's tokens are charged to the workstream the event is a member of, and
+context links carry **no** attribution. Phase 2's estimation ensemble takes "observed effort" as an
+evidence framing, so a wrong member link is wrong estimation data, not merely a mis-filed event.
+
+**`confidence` on every cluster, applying to its member placements.** One number per cluster (~5
+tokens × ~25 clusters a pass), stored on each member link it produced as
+`narrative_events.member_confidence` (`REAL`, `CHECK (kind = 'context' OR member_confidence IS NOT
+NULL)`; context links carry none). Per-cluster rather than per-event deliberately: per-event would turn
+`event_indices` from `[3,4]` into objects and cost ~5 tokens per event (~116 a pass) in the response F16
+already measured against the 32k ceiling. Whether one doubtful member inside a confident cluster
+actually occurs is measured (§9, M4) before paying for per-event; the dispute re-ask already yields
+per-event confidence for the contested cases.
+
+A **threshold** acts on it: `correlator.member_confidence_floor`, a plain number, default `0` (off), in
+the `max_output_tokens` mould. Below it, the member link is surfaced in triage as an attribution to
+confirm. The floor starts off because a model's stated confidence is not calibrated: it is set from
+reviewer rulings — the same labeled data `learn` reads — not guessed up front. This mirrors the repo's
+existing pattern (matching emits a confidence; `auto_commit.<type>.confidence_floor` gates on it).
+
+**No `rationale` field in the main clustering response.** F16's sixth falsified candidate was exactly
+that: a rationale ahead of every cluster produced *more* clusters (38/38/36 vs 36) and ~20% more
+completion. Rationale belongs in the dispute re-ask (§4), which is small, conditional, and exists for
+the reasoning.
 
 Rejected alternatives:
 
@@ -169,9 +197,12 @@ Rejected alternatives:
   for which?"). This genuinely protects clustering from the prompt change — F16 measured that
   clustering is sensitive to small schema changes (reasoning-first key order made it *worse*, 38/38/36
   clusters) — and it is separable and skippable. It also re-sends the whole prompt (~100k prompt
-  tokens in F16's attribution table) for a judgment the model already made inline, unprompted. **Recommended as the
-  fallback**, not the default: if §9 shows the inline change damages clustering (anchor coalescing
-  below 100%, or `NEW` counts outside the noise band), switch to it. Listed as an open question.
+  tokens in F16's attribution table) for a judgment the model already made inline, unprompted. **Kept as the
+  fallback**, not the default, **by decision (user, 2026-10-02): inline first.** The switch is
+  pre-committed rather than left to judgment: if §9 shows the inline change damages clustering — anchor
+  coalescing below 100% (M2), PR integrity below 100% (M3), or cluster/`NEW` counts outside the noise
+  band (M5) — switch to the separate call. Storage, persist and every reader are identical either way;
+  only the producer of `context_indices` changes, so the switch is contained.
 
 **Names: `member`/`context`, not `primary`/`supporting`.** `narrative_issues.role` already has
 `primary`, guarded by `one_primary_per_narrative`, and code reads "the primary link" constantly. Two
@@ -232,16 +263,33 @@ Why every one of those, rather than "show context, tell the model not to describ
 Self-authored filtering (`dropSelfAuthored`) is unchanged; it runs over a member-only delta. The gate
 is untouched: this design adds no write path and no action type.
 
-**The residual leak is the narrative summary, and the design does not pretend to close it.** `Cluster`
-writes each cluster's `summary` after seeing its `context_indices`, and the drafting prompt opens with
-that summary (`draft.go:251`). A summary that narrates the shared investigation carries it onto every
-ticket whose narrative holds it as context. Three mitigations, only two of them structural:
+**The narrative summary may mention context, and that is desirable — but only as a reference.**
+Workstreams genuinely touch: "found while debugging the cache-eviction work" is accurate, and is
+exactly what Jira's issue links express (§8: it is the discovery link in prose). The design does not
+try to keep context out of summaries. It guards the two places where context in a summary does harm:
+
+- **Context never justifies a state-bearing action.** A comment on B may say B was found while working
+  on A. A transition or create on B justified by A's evidence ("A's PR merged, so move B to Done") may
+  not — CLAUDE.md already forbids state-bearing actions from transcript *intent*, and context is weaker
+  than intent: it is somebody else's work. In slice 1 the reconciler reads no context links at all; the
+  rule binds whatever reads the summary, and slice 3.
+- **A summary is the retrieval key for future clustering, so it must not attract the other stream's
+  work.** Each pass shows the model existing narratives' summaries and asks whether new events extend
+  one. If B's summary *re-tells* A's investigation, next week's cache-eviction events have two
+  plausible homes, and some land as **members of B** — misattribution of A's future work, and a token
+  attribution error. Hence the summary rule below, and §9's M7, which measures exactly this.
+
+`Cluster` writes each cluster's `summary` after seeing its `context_indices`, and the drafting prompt
+opens with that summary (`draft.go:251`). Three mitigations, two of them structural:
 
 1. Compaction folds **member** events only, so a recap never absorbs context.
 2. An `EXTENDS` that carries only `context_indices` **does not overwrite the summary** (nor
    `window_end`) — there is no new work to summarize.
-3. The cluster prompt says a summary describes the cluster's member events. This is a phrasing rule
-   and is expected to leak; §9's reconcile-level check exists to measure how much.
+3. The cluster prompt says a summary describes the cluster's **member** work and refers to context
+   **by reference, not by re-telling** — e.g. *"Fixed log flooding in the logger (discovered while
+   debugging the cache-eviction narrative)."* The link survives; the other stream's substance does not.
+   This is a phrasing rule and is expected to leak; M7 measures whether the leak attracts work, and M6b
+   whether it carries content onto another ticket.
 
 ### 3. Matching: context links do not feed it at all
 
@@ -285,13 +333,29 @@ names, so no caller can express one while meaning the other:
   context link. **Never deletes anything.** Context links held by other narratives are untouched by
   both operations.
 
-So last-writer-wins does not survive for intentional sharing, and the unintentional case — one event
-in two clusters' `event_indices` — gets a deterministic rule in the parser instead of a silent
-collapse in the transaction: **the first cluster in response order keeps it as a member; every later
-`event_indices` occurrence becomes a context link there**, counted on `Stats` and printed in the pass
-summary when non-zero. If that rule would leave a `NEW` cluster with no member events, the response
-is malformed and the pass fails loudly, naming both clusters. Whether a re-ask should resolve these
-instead is an open question.
+So last-writer-wins does not survive for intentional sharing. The unintentional case — one event in
+two or more clusters' `event_indices` — is resolved by **asking the model which workstream it is
+primarily the work of**, not by a positional rule. An earlier draft kept the first cluster in response
+order as the member; that was rejected because response order has no logical bearing on which
+workstream an event belongs to, and membership drives token attribution.
+
+**The dispute re-ask.** After parsing, every event with more than one member placement is collected.
+If any exist, **one** follow-up call (reusing #79's re-ask machinery; at most one per pass) presents, per
+disputed event: the event, the clusters claiming it (title, summary, member events), and any
+**deterministic evidence** the store holds — e.g. the event carries the PR anchor or pushed the branch
+of one claimant's PR, or the subagent lineage artifacts (F6) connect it to one claimant's dispatch.
+Evidence is presented to the model, never applied by code: relevance stays the model's call, per
+CLAUDE.md. The model answers per event, **rationale first** so the decision follows the reasoning:
+
+```json
+[{"rationale":"…","event_index":7,"member":{"cluster_position":2},"confidence":0.9}]
+```
+
+The chosen cluster keeps the member link, with the dispute's per-event `confidence` as its
+`member_confidence`; every other claimant gets a **context** link. Loud errors, never best-effort: an
+event left unresolved, a `member` naming a non-claimant, malformed JSON. If the resolution would leave a
+`NEW` cluster with no member events, the response is malformed and the pass fails loudly, naming both
+clusters (F37). Disputes and their outcomes are counted on `Stats` and printed when non-zero.
 
 **Why the upgrade issues a new sequence number.** A link's `link_seq` must mean *when it acquired its
 current kind*. The delta asks "is this new **work** for this narrative", and an event that has been
@@ -430,8 +494,10 @@ records.
 
 But this design produces most of what a discovery-link pass would need, by derivation: B holds a
 context link to `E`, `E`'s member home is A, and A's window opens before B's. That is a candidate
-"B was discovered while working on A", computable from rows this design writes — so **record nothing
-new now**:
+"B was discovered while working on A", computable from rows this design writes — and §2's summary rule
+already states it in prose ("discovered while debugging …"). Deriving it structurally later is what
+lets it become a real tracker link (Jira's "relates to" / "found while") instead of a sentence. So
+**record nothing new now**:
 
 - Rejected: a `narrative_relations` table now. It would be written with no reader (F6's shape), and
   incident 28 records what a denormalization with no reader costs. Derive, don't store.
@@ -479,10 +545,11 @@ collector off. **Window: `[2026-09-16T00:00:00Z, 2026-10-02T00:00:00Z)`**, which
 | M1 | PR narratives with transcript evidence: narratives holding a GitHub PR event in the window **and** at least one `claude_code` segment event that is not an anchor (no `anchor_kind`). Reported twice: by member links only, and by member or context. | 12–15 of 20–21 (re-measured, per #36) | member-or-context rises, with ranges not overlapping baseline's; **member-only does not fall**, or the gain is reshuffling rather than sharing |
 | M2 | Anchor↔PR coalescing: every anchor with `pr_create_outcome=created` has the same member home as the `:opened` event carrying its `ArtifactPullRequest` | 100% (20/20, 21/21, 21/21) | 100% in every rep |
 | M3 | PR integrity: each PR's GitHub events share one member home | 100% | 100% in every rep |
-| M4 | Sharing structure: context links, distinct events shared, maximum fan-out, duplicate-member downgrades, invariant violations | — | violations = 0; the rest reported |
+| M4 | Sharing structure: context links, distinct events shared, maximum fan-out, disputed member placements and how the re-ask resolved them, the `confidence` distribution, and how often a confident cluster holds a member the dispute re-ask or a reviewer later moves (the per-event-confidence question in §1), invariant violations | — | violations = 0; the rest reported |
 | M5 | Cost: prompt tokens, completion tokens, completion per cluster, cluster count, `NEW` count | measured | completion range overlaps baseline's or the excess is attributed (#32: zero the context rendering and the context indices one at a time); cluster count inside noise — #39's damage column, not only the cost column |
 | M6a | Delta exclusivity, deterministic, no model: for every event with ≥2 links, how many narratives' `DeltaEvents` / `AllMemberEvents` / redraft delta contain it | — | exactly 1, for every such event |
 | M6b | Cross-ticket content, model in the loop: below | — | 0 confirmed duplications |
+| M7 | **Attraction across passes** — does a context link pull the other stream's future work in? Below | — | **0** of A's later events become members of B; **gates slice 1** |
 
 **M6b in detail.** Reconcile drafts only against linked issues, and this repo's work has no Jira keys.
 So on each treatment rep's store, with `tracker.backend: local`: seed one local issue per PR narrative
@@ -497,6 +564,18 @@ other. Then a human reads every pair above threshold, and a sample below it, ask
 work?* The automated overlap is a screen; the reading is the verdict. A confirmed duplication — most
 likely via the summary leak named in §2 — fails acceptance and goes to slice 3's question, not into a
 prompt patch.
+
+**M7 in detail — the merge-the-workstreams failure.** §2's second hazard: B's summary mentions A, and
+because summaries are what clustering matches new events against, A's *later* work lands as members of
+B. M6b cannot see this; it looks within one pass. M7 needs two. Split the acceptance window at a cut
+point inside it: run pass 1 over the events before the cut, persisting (not `--dry-run` — pass 2 must
+see pass 1's narratives as context), then pass 2 over the events after it. For every pass-1 context
+link `B ← e` (where `e`'s member home is A), take pass-2 events that a reviewer — or, as a screen, the
+deterministic evidence of §4 (anchor, branch, lineage) — attributes to A's stream, and count how many
+pass 2 placed as **members of B**. The baseline arm (no `context_indices`) gives the background rate
+of such misplacements, since misclustering exists without this feature; acceptance is no rise over
+baseline, with ranges across ≥3 reps. A rise fails slice 1 and is fixed in the summary rule (§2), not
+tuned around.
 
 **Traps, collected.**
 
@@ -520,26 +599,37 @@ prompt patch.
 The smallest change that closes the measured gap safely. It records the relationship correctly,
 fixes F37 on the way, and lets nothing downstream consume context yet:
 
-1. **Schema**: `narrative_events.kind` (no default) and `one_member_link_per_event`, with the
-   generalized pre-DDL refusal and an updated README paragraph.
+1. **Schema**: `narrative_events.kind` (no default), `narrative_events.member_confidence` with its
+   CHECK, and `one_member_link_per_event`, with the generalized pre-DDL refusal and an updated README
+   paragraph. Config: `correlator.member_confidence_floor`, default 0 (off).
 2. **Store**: member-only predicates (`linkedSinceLastAction`, both examination predicates,
    `UnlinkedEventsInRange`), `AllNarrativeEvents` renamed, `ContextEvents` added, kind-aware
    eligibility for merge, and `moveMember`/`addContext` as `Tx` methods.
-3. **Cluster**: `context_indices` in the prompt and parser; the duplicate-member rule; `assignableEvents`
-   erroring on a repeated event; `ContextEvents` rendered with back-references.
+3. **Cluster**: `context_indices` and per-cluster `confidence` in the prompt and parser; the summary
+   rule (member work, context by reference); the dispute re-ask for multiply-placed members (rationale
+   first, per-event confidence); `assignableEvents` erroring on a repeated event; `ContextEvents`
+   rendered with back-references.
 4. **Persist**: the two operations, member-only windows, context-only extends leaving summary and
    window alone, compaction over member events, and the commit-time invariant check.
 5. **Triage**: merge and split per §6, with the merge-ordering test first.
-6. **Reporting**: context links and downgrades on `Stats`, in the pass summary when non-zero, and
-   `NarratedNarrative.ContextEvents` read back from the store.
+6. **Reporting**: context links, disputes and their resolutions, and members below the confidence
+   floor on `Stats`, in the pass summary when non-zero; `NarratedNarrative.ContextEvents` read back from
+   the store; below-floor member links surfaced in triage as attributions to confirm.
 
-Tests to write first, because each pins a hazard named above: a double assignment persists one member
-home and no empty narrative (F37); a context link does not change either backlog count (§7); merge
+Tests to write first, because each pins a hazard named above: a double assignment is resolved by the
+dispute re-ask into one member home and context links elsewhere, and never leaves an empty narrative
+(F37); the dispute re-ask's member choice is not response order (script the model to pick the *later*
+claimant and assert it wins); a context link does not change either backlog count (§7); merge
 onto a target holding the event as context keeps it a member (§6); split with shared events empties
 and marks the source (§6); an upgraded link is in the delta (§4); a frozen member is never numbered
 (§5); a context-only `NEW` is rejected (§4). Then the drills: drop `kind = 'member'` from
 `linkedSinceLastAction` and confirm the reconcile-level test fails; restore last-writer-wins and
-confirm the F37 test fails.
+confirm the F37 test fails; replace the dispute re-ask with first-in-response-order and confirm the
+"not response order" test fails.
+
+**Slice 1 is gated by M7** (no rise in cross-stream attraction over baseline) as well as M2/M3 (no
+regression in coalescing) — not only on its unit tests, because the attraction failure is invisible
+below a two-pass measurement on real data.
 
 Docs in the same PR: `docs/architecture.md` §1 (the cluster stage now produces two link kinds), this
 spec's status, F37 deleted, F6 narrowed.
@@ -568,11 +658,22 @@ spec's status, F37 deleted, F6 narrowed.
    because it is strictly better than today and costs nothing. The re-ask branch may make a targeted
    re-ask cheap enough to prefer — "event N is the work of clusters X and Y; which?" Decide once its
    shape is visible; I could not inspect it, because it has not been pushed.
+   **Answered (2026-10-02, with the user): the re-ask**, with rationale first and a per-event
+   confidence. Response order has no logical bearing on which workstream an event belongs to, and
+   membership drives token attribution, so the choice must be the correct one rather than a consistent
+   one. §4 now specifies it.
 2. **Inline `context_indices`, or a separate relevance call?** §1 recommends inline and names the
    separate call as the fallback. M2, M3 and M5's cluster and `NEW` counts decide.
+   **Answered (2026-10-02, by the user): inline first.** Not both: the separate call is built only if
+   the pre-committed trigger in §1 fires.
 3. **Does the summary leak (§2) defeat slice 3 outright?** If M6b finds duplication carried by
    summaries, drafting may need the summary rewritten without context, or context withheld from
    `Cluster`'s summary-writing entirely. Unknown until measured.
+   **Reframed (2026-10-02, with the user):** a summary that *mentions* context is accurate and
+   desirable — workstreams touch, and Jira links tickets the same way. The harms are narrower: context
+   justifying a state-bearing action, and a summary that re-tells another stream's work attracting that
+   stream's future events (§2). The second is measured by M7, which now gates slice 1; M6b stays the
+   gate for slice 3.
 4. **Should matching's classifier see context events?** Possibly useful for telling implements from
    mentions; unmeasured (§3).
 5. **Is sharing frozen events needed in steady state?** That depends on how often a root segment's

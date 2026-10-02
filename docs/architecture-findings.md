@@ -103,8 +103,10 @@ under both narratives while the store holds it under one. A measurement read off
 sharing that never persisted.
 
 Fixed by the first slice of `docs/superpowers/specs/2026-10-02-shared-context-design.md` (§4): one member
-home per event, decided in the parser, with every later placement downgraded to a context link and
-reported.
+home per event. A multiply-placed member is resolved by a dispute re-ask that asks the model which
+workstream the event is primarily the work of (rationale first, with a per-event confidence); the other
+claimants get context links, and the outcome is reported. Not by response order, which has no bearing
+on the right answer.
 
 ### F33 — a resumed session copies its history, so root segment events are counted twice
 
