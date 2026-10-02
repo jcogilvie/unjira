@@ -410,6 +410,12 @@ func seedCollectorIssue(t *testing.T, client *jira.Client) collectorIssue {
 		}
 
 		t.Logf("index pre-check UNAVAILABLE, continuing without it: %s", v.reason)
+	} else {
+		// Logged on success too, deliberately. Silence on the happy path would make a
+		// run where the pre-check worked indistinguishable from one where it never
+		// ran — and this is the only positive evidence that reconcileIssues behaves as
+		// Atlassian documents, which nothing offline can check (design-notes #37).
+		t.Logf("index pre-check OK: consistent read matches %s under %q, before any waiting", key, scopedJQL)
 	}
 
 	if last := awaitIndexed(t, client, scopedJQL); !last.matched {
