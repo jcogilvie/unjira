@@ -320,7 +320,14 @@ func Cluster(
 	// and rebuilding one for the whole window would be the very prompt that was
 	// too big to send. Each half recurses through this function, so each half's
 	// call is checked here; mergeSplitResults only unions events, never drops one.
-	omitted := unassignedIndices(indices, len(assignable))
+	// Only IN-WINDOW events (the first len(filtered) of assignable) must be placed.
+	// An eligible context event the model leaves out keeps the link it already
+	// has, because Persist only touches events a cluster names, so nothing is
+	// lost; an in-window event left out stays unlinked, and watch's rolling
+	// window can move past it permanently. Eligible events also dominate the index
+	// space (242 of 246 in the F16 measurements), so covering them would spend a
+	// model call on omissions that lose nothing.
+	omitted := unassignedIndices(indices, len(filtered))
 	if len(omitted) == 0 {
 		return results, stats, nil
 	}

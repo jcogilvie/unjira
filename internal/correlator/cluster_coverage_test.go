@@ -331,26 +331,31 @@ func TestCluster_DoubleAssignmentIsUnchanged(t *testing.T) {
 	assert.Zero(t, stats.OmittedEvents)
 }
 
-// An eligible narrative event shares the assignable index space, so leaving it
-// out is an omission like any other.
-func TestCluster_OmittedEligibleEventIsReasked(t *testing.T) {
+// An eligible event (a context narrative's uncommitted link) that the model
+// leaves in no cluster is NOT re-asked for, and that is deliberate. Persist only
+// touches events a cluster names, so an omitted eligible event simply keeps the
+// link it already has — nothing is lost, and its narrative is unchanged. The
+// re-ask exists for IN-WINDOW events, which have no link: left out, they stay
+// unlinked, and `watch`'s rolling window can move past them for good.
+//
+// Re-asking for eligible events too would spend a model call on omissions that
+// lose nothing, and they dominate the index space — 242 of 246 assignable events
+// in the F16 measurements were eligible context events.
+func TestCluster_OmittedEligibleEventIsNotReasked(t *testing.T) {
 	f := newCoverageFixture(t)
 	f.existing[0].EligibleEvents = []correlator.Event{
 		mustEvent(t, "github", "pr-500", "ELIGIBLE uncommitted work", f.window.Start.Add(-30*time.Minute)),
 	}
 	client := &fakeLLM{responses: []string{
 		`[{"kind":"new","title":"all","summary":"s","event_indices":[0,1,2,3]}]`,
-		`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[4]}]`,
 	}}
 
 	results, stats, err := f.cluster(t, client)
 
 	require.NoError(t, err)
-	require.Len(t, client.prompts, 2)
-	assert.Contains(t, client.prompts[1], "[4]")
-	assert.Equal(t, "ELIGIBLE uncommitted work", results[1].Events[0].Summary,
-		"the re-ask resolves indices against the same slice the first prompt numbered")
-	assert.Equal(t, 1, stats.RecoveredEvents)
+	assert.Len(t, client.prompts, 1, "an omitted eligible event keeps its link, so no re-ask")
+	assert.Len(t, results, 1)
+	assert.Zero(t, stats.OmittedEvents, "only in-window omissions are counted")
 }
 
 // Each bisected half is its own model call with its own index space, so each

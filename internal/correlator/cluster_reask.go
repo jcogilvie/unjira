@@ -56,11 +56,19 @@ type reaskRequest struct {
 // cluster's event_indices. An index in several clusters counts as assigned:
 // double assignment is not omission, and its contract is not this check's to
 // change.
+//
+// n is the number of indices that MUST be placed — the in-window events, which
+// assignableEvents numbers first — not the size of the whole index space. Indices
+// at or beyond n are eligible context events: valid in a response
+// (parseClusterResponse range-checked them against the full slice) and simply not
+// subject to coverage, so they are skipped rather than indexed.
 func unassignedIndices(indices [][]int, n int) []int {
 	assigned := make([]bool, n)
 	for _, cluster := range indices {
 		for _, idx := range cluster {
-			assigned[idx] = true // parseClusterResponse already range-checked idx
+			if idx < n {
+				assigned[idx] = true
+			}
 		}
 	}
 
