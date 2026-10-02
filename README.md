@@ -49,7 +49,8 @@ clustering two of them into one.
 
 `unjira learn` is the invocation, chosen over triage's learn-interval or a `watch` tick
 because it makes the watermark's owner obvious: one command, one watermark, advanced only
-when a rule is written. It drafts and prints by default; `--keep <name>` (repeatable) or
+when a rule is written, and only past the corrections that draft actually read. A ruling
+made while the draft was with the model is offered next time. It drafts and prints by default; `--keep <name>` (repeatable) or
 `--all` writes. Verified end to end — 3 corrections produced 2 rules, `rules.Load` read
 them back, and `Render` put 869 characters of learned norms into the reconciler's prompt.
 
