@@ -588,6 +588,9 @@ spec's status, F37 deleted, F6 narrowed.
    being in it — and in slice 1 they are not in it. Probably yes once slice 3 lands; harmless before.
 9. **When does unjira need a migration mechanism?** §1 refuses old stores on F30's precedent and
    shares F21's trigger: the first non-disposable store.
+   **Answered (2026-10-02, by the user):** not until unjira is productionized — after every slice and
+   phase ships. Until then the store is disposable: refuse an old one before any DDL, rename it to a
+   backup, and re-collect. No ALTER-based upgrade, and no migration framework.
 
 ## Non-goals
 
