@@ -85,6 +85,33 @@ Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is clea
 (F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
 `transcriptAnchors` reads every line independently of segmentation.
 
+### F43 — a PR whose lifecycle events land in different passes splits into two narratives
+
+Measured during slice 1's acceptance run, on BOTH arms, so it is pre-existing. With the window cut at
+2026-09-21, #72's and #73's `:opened` events were clustered in pass 1, and their `:merged`/`:closed`
+events — collected after the cut — were placed in pass 2 into a NEW narrative instead of extending the
+one holding the same PR's `:opened`. All six two-pass reps, treatment and baseline alike; M3 drops from
+26/26 to 24/26.
+
+**Consequence: this is the common case in production, not an edge.** `watch` runs on a short window,
+and a PR is opened in one pass and merged hours or days later in another, so its two halves meet the
+model in different prompts, one of them only as context-narrative text. The events already share a
+deterministic key, `events.ArtifactPullRequest` (`owner/repo#N`), written by both collectors and read
+today only by the dispute re-ask's evidence. A deterministic pre-filter — an event whose
+`ArtifactPullRequest` matches an existing narrative's member is offered as extending it, or the
+narrative is surfaced to the model as the obvious home — would close it without moving judgment out
+of the model. Unbuilt; the shape is a judgment call (hint versus pre-assignment).
+
+### F44 — one malformed model response kills the whole pass
+
+A baseline rep died with `parsing cluster response …: invalid character '}' looking for beginning of
+object key string`: the model emitted invalid JSON, and `parseClusterResponse` fails the pass loudly.
+Failing loudly is right — a best-effort parse is how events get silently misattributed — but nothing
+retries, so one bad response costs the whole multi-minute pass, and under `watch` the window may move
+on. #79's re-ask recovers *omitted* events, not an unparseable response. The same targeted-follow-up
+machinery could ask for a corrected response once, then fail loudly. Rate unmeasured: 1 death in 11
+passes here, on the arm without `confidence`, so not attributable to slice 1's larger schema.
+
 ### F40 — a reshuffle can empty a context narrative of its members, leaving it open
 
 A context narrative's eligible members are numbered in the clustering prompt, so the model may place
@@ -649,6 +676,8 @@ action). F41's ruling sequence would be the natural place.
 | F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
 | F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
 | F39 — the dispute re-ask's prompt is unbounded | open. Found building slice 1's F36 test |
+| F43 — cross-pass PR split | open. #72/#73 split in all 6 two-pass acceptance reps, both arms; `ArtifactPullRequest` is the deterministic key with no reader for this yet |
+| F44 — a malformed model response kills the pass | open. 1 death in 11 passes; re-ask-once-then-fail is the likely shape |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |

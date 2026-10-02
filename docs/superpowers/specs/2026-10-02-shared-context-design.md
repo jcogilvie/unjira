@@ -1,11 +1,41 @@
 # Shared context — one event, several narratives — design
 
-## Status: slice 1 landed 2026-10-02, acceptance measurement NOT yet run
+## Status: slice 1 landed 2026-10-02 — gate passed, but the feature is not yet USED
 
-Slice 1 (§"First slice", items 1–6) is implemented on branch `correlator/shared-context-slice1`.
-Slices 2 and 3 are not. **Slice 1's gate is unmet until the reviewer runs §9.** M7, and M2/M3, need
-real model calls, and the implementing worktree had no credentials (#37). No measured number is
-claimed here. The harness is `internal/pipeline/shared_probe_test.go`, whose header gives the exact
+Slice 1 (§"First slice", items 1–6) is implemented. Slices 2 and 3 are not.
+
+**§9 measured on review, 2026-10-02.** Both arms used one frozen copy of this repo's transcripts and
+GitHub repos (exclusions off), collected once per build into identical event sets (116 events in the
+window `[2026-09-16, 2026-10-02)`; the event lists were diffed). Six reps per arm: three single-pass,
+three two-pass with `SHARED_CUT=2026-09-21T00:00:00Z`, each on a fresh copy of its arm's snapshot.
+
+| | treatment (slice 1) | baseline (`main`) | verdict |
+|---|---|---|---|
+| M2 anchor↔PR coalescing | 21/21 in all 6 | 21/21 in all 5 | no regression |
+| M3 PR integrity | 26/26 single, 24/26 two-pass | identical | no regression (see F43) |
+| M4 context links written | **0, 0, 0** single; 18, 0, 4 two-pass | — | **the model rarely uses `context_indices`** |
+| M4 disputes | 0 in every rep | — | never triggered |
+| M5 completion (single) | 12,595 / 12,812 / 13,911 | 10,681 / 27,725 / 32,000† | steady; inside baseline's range |
+| M6a delta exclusivity | 0 violations (18 and 4 multiply-linked events checked) | — | holds |
+| M7 attraction | **0** into a narrative holding the other's work as background, all 3 | 0, all 3 | **gate passes**, non-vacuously in the 2 reps with links |
+| member confidence | median 0.85–0.90, min 0.30–0.55 | — | recorded; floor stays 0 until calibrated |
+
+† The 32,000-completion baseline rep died: the model emitted malformed JSON (`invalid character '}'`)
+and the pass failed loudly, as designed — see F44.
+
+**Verdict: safe, and inert.** Every invariant held and nothing regressed. But M1 — the whole point —
+did not move: member-or-context coverage equalled member-only in every rep (e.g. 13/22 = 13/22),
+because the model almost never attaches context. **The cause is the evidence, not the prompt.** The
+root segment that did the work behind #69–#74 summarizes itself as *"Opened with: 'i think the
+failsafe impl is kind of orthogonal…' Did: committed, created a branch, opened a PR, updated a PR, ran
+tests."* — nothing in it says which work it touched. The store knows deterministically that the same
+session opened #67–#75 during that segment's span (the PR anchors carry `session_id`), but that never
+reaches the prompt. No model can judge relevance it cannot see. That is slice 2's job (lineage), and a
+cheaper first step is to name, in a root segment's own summary, the PRs its session opened during it.
+
+Two pre-existing problems surfaced, identical on both arms, and are filed rather than fixed: **F43**
+(a PR whose lifecycle events land in different passes splits into two narratives — #72 and #73 in all
+six two-pass reps) and **F44** (one malformed model response kills the whole pass). The harness is `internal/pipeline/shared_probe_test.go`, whose header gives the exact
 commands for a treatment rep, a two-pass M7 rep (`SHARED_CUT`), and the baseline arm. The baseline
 arm runs the same metric code on `main`, which was verified by compiling both probe files against
 `main`'s tree.
