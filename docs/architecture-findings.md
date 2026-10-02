@@ -85,7 +85,7 @@ Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is clea
 (F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
 `transcriptAnchors` reads every line independently of segmentation.
 
-### F36 — an event placed in two clusters persists in one, and can leave an empty narrative behind
+### F37 — an event placed in two clusters persists in one, and can leave an empty narrative behind
 
 `clusterSystemPrompt` tells the model to put each numbered event in exactly one cluster
 (`internal/correlator/correlator.go:437`), but `parseClusterResponse` (`:465`) never checks, and the model
@@ -647,7 +647,7 @@ eligible event to one half only, or dedupe at merge with a stated winner.
 | F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here |
 | F32 — subagent `gitBranch` is the parent's | open, mitigated: never emitted as `ArtifactGitBranch` for a subagent. Not fixable at the source |
 | F33 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
-| F36 — a double-assigned event persists in one narrative, possibly leaving an empty one | open, **designed**: fixed by the first slice of `docs/superpowers/specs/2026-10-02-shared-context-design.md`. Found reading `Persist` against the 2026-10-01 observation, which may itself have been read off `dev narrate` output that disagrees with the store |
+| F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | open, **designed**: fixed by the first slice of `docs/superpowers/specs/2026-10-02-shared-context-design.md`. Found reading `Persist` against the 2026-10-01 observation, which may itself have been read off `dev narrate` output that disagrees with the store |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |

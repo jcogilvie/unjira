@@ -73,7 +73,7 @@ spec-only change. For a response `[NEW{E}, EXTENDS 5{E, F}]`: the NEW narrative'
 are computed from `E` and written; then `relinkEvents(5, [E, F])` deletes the NEW narrative's only
 link. The result is an **empty open narrative** whose title and summary describe an event it does not
 hold — the dead weight `NarrativesOverlapping` already excludes `split` narratives to avoid, but with
-status `open`, so nothing excludes it. Recorded as finding **F36**.
+status `open`, so nothing excludes it. Recorded as finding **F37**.
 
 **3. The run's printed output disagrees with its store.** `describePersisted`
 (`pipeline/narrate.go`) renders each narrative's member events from the *cluster result*, not from
@@ -90,7 +90,9 @@ defense has to be structural and upstream (§2), not a filter.
 `claude_code` events and coalesced with their PR 100% of the time, so a PR narrative containing its
 anchor "has transcript evidence" by construction. The 12–15 figure must have meant segment events
 (branch runs), not anchors; §9 defines it that way and lists confirming the baseline's definition as
-an open question.
+an open question. **Confirmed on review:** the scorer that produced 12–15 matched anchor lines (`opened
+pull request`) in a branch evaluated *before* the generic `[claude_code]` branch, so anchors were never
+counted as transcript segments. The baseline already uses §9's definition.
 
 ### Two numbers checked against a real store
 
@@ -516,7 +518,7 @@ prompt patch.
 ## First slice
 
 The smallest change that closes the measured gap safely. It records the relationship correctly,
-fixes F36 on the way, and lets nothing downstream consume context yet:
+fixes F37 on the way, and lets nothing downstream consume context yet:
 
 1. **Schema**: `narrative_events.kind` (no default) and `one_member_link_per_event`, with the
    generalized pre-DDL refusal and an updated README paragraph.
@@ -532,15 +534,15 @@ fixes F36 on the way, and lets nothing downstream consume context yet:
    `NarratedNarrative.ContextEvents` read back from the store.
 
 Tests to write first, because each pins a hazard named above: a double assignment persists one member
-home and no empty narrative (F36); a context link does not change either backlog count (§7); merge
+home and no empty narrative (F37); a context link does not change either backlog count (§7); merge
 onto a target holding the event as context keeps it a member (§6); split with shared events empties
 and marks the source (§6); an upgraded link is in the delta (§4); a frozen member is never numbered
 (§5); a context-only `NEW` is rejected (§4). Then the drills: drop `kind = 'member'` from
 `linkedSinceLastAction` and confirm the reconcile-level test fails; restore last-writer-wins and
-confirm the F36 test fails.
+confirm the F37 test fails.
 
 Docs in the same PR: `docs/architecture.md` §1 (the cluster stage now produces two link kinds), this
-spec's status, F36 deleted, F6 narrowed.
+spec's status, F37 deleted, F6 narrowed.
 
 ## What follows, and what gates it
 
@@ -579,6 +581,9 @@ spec's status, F36 deleted, F6 narrowed.
    boundary. A narrative with little member history and much context may never trip it.
 7. **Did the 12–15 baseline exclude anchors?** Finding 5 says it must have. Confirm with whoever ran
    it, or re-derive it under §9's definition and say so.
+   **Answered (2026-10-02):** yes. The scoring script classified anchor lines (`opened pull request …`)
+   before the branch that counted `[claude_code]` segment lines, so anchors were excluded. Left here
+   rather than deleted, so the record shows it was open.
 8. **Should triage show a reviewer the context links** behind an action? They explain a draft without
    being in it — and in slice 1 they are not in it. Probably yes once slice 3 lands; harmless before.
 9. **When does unjira need a migration mechanism?** §1 refuses old stores on F30's precedent and
