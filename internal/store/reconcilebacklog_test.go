@@ -51,7 +51,7 @@ func seedLinkedWithEvent(t *testing.T, s *store.Store, key, extID string) int64 
 
 	eventID, err := s.EventIDByExternalID("claude_code", extID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eventID}))
+	require.NoError(t, s.LinkMembers(id, []int64{eventID}, 1))
 
 	return id
 }
@@ -139,7 +139,7 @@ func TestCountNarrativesWithDelta_CountsANarrativeWithEventsNewerThanItsAction(t
 
 	newerID, err := s.EventIDByExternalID("claude_code", "evt-new")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{newerID}))
+	require.NoError(t, s.LinkMembers(id, []int64{newerID}, 1))
 
 	counted, err := s.CountNarrativesWithDelta(reconcileRoles)
 	require.NoError(t, err)
@@ -165,7 +165,7 @@ func TestCountNarrativesWithDelta_IgnoresAnUnlinkedNarrative(t *testing.T) {
 
 	eventID, err := s.EventIDByExternalID("claude_code", "evt-unlinked")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eventID}))
+	require.NoError(t, s.LinkMembers(id, []int64{eventID}, 1))
 
 	counted, err := s.CountNarrativesWithDelta(reconcileRoles)
 	require.NoError(t, err)

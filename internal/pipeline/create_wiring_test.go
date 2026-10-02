@@ -29,7 +29,7 @@ func seedUntrackedForPipeline(t *testing.T, s *store.Store) int64 {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "pw:1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	return nid
 }

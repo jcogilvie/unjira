@@ -46,7 +46,7 @@ func seedActionableLinked(t *testing.T, s *store.Store, key, extID string, at ti
 
 	eventID, err := s.EventIDByExternalID("jira", extID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eventID}))
+	require.NoError(t, s.LinkMembers(id, []int64{eventID}, 1))
 
 	return id
 }
@@ -101,7 +101,7 @@ func TestNarrativesWithActionableLinks_ReconcileExaminedIsAWatermarkNotATombston
 	require.NoError(t, err)
 	evtID, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{evtID}))
+	require.NoError(t, s.LinkMembers(id, []int64{evtID}, 1))
 
 	got, err = s.NarrativesWithActionableLinks(10, reconcileRoles)
 	require.NoError(t, err)

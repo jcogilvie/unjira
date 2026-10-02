@@ -27,7 +27,7 @@ type NarrativeRow struct {
 	CompactionBoundary *time.Time
 	// CompactionBoundaryEventID pairs with CompactionBoundary to break ties:
 	// occurred_at alone cannot uniquely order events (stored via
-	// time.RFC3339 — whole seconds only), so NarrativeEventsForContext
+	// time.RFC3339 — whole seconds only), so MemberEventsAfterBoundary
 	// filters on the (occurred_at, event_id) pair rather than occurred_at
 	// alone. nil iff CompactionBoundary is nil (never compacted).
 	CompactionBoundaryEventID *int64
@@ -158,8 +158,8 @@ func extendNarrativeImpl(c dbConn, id int64, windowEnd time.Time, summary string
 // compacted event and stores the recap-prefixed summary. boundaryEventID is
 // required alongside boundary: occurred_at alone cannot uniquely order
 // events sharing a stored second (time.RFC3339 truncates to whole seconds —
-// see the comment on NarrativeEventsForContext), so the pair is what
-// NarrativeEventsForContext's row-value comparison uses to avoid dropping a
+// see the comment on MemberEventsAfterBoundary), so the pair is what
+// MemberEventsAfterBoundary's row-value comparison uses to avoid dropping a
 // tied event from future context.
 func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
 	return setCompactionBoundaryImpl(s.db, id, boundary, boundaryEventID, recapSummary)
@@ -183,36 +183,16 @@ func setCompactionBoundaryImpl(c dbConn, id int64, boundary time.Time, boundaryE
 	return nil
 }
 
-// AddNarrativeEvents links events to a narrative (INSERT OR IGNORE, so
-// re-linking an already-linked event is a harmless no-op).
-func (s *Store) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
-	return addNarrativeEventsImpl(s.db, narrativeID, eventIDs)
-}
-
-// AddNarrativeEvents is the *Tx-scoped variant of
-// (*Store).AddNarrativeEvents.
-func (t *Tx) AddNarrativeEvents(narrativeID int64, eventIDs []int64) error {
-	return addNarrativeEventsImpl(t.tx, narrativeID, eventIDs)
-}
-
-func addNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) error {
-	for _, eid := range eventIDs {
-		if _, err := c.Exec(
-			`INSERT OR IGNORE INTO narrative_events (narrative_id, event_id) VALUES (?, ?)`,
-			narrativeID, eid,
-		); err != nil {
-			return fmt.Errorf("linking event %d to narrative %d: %w", eid, narrativeID, err)
-		}
-	}
-
-	return nil
-}
-
-// NarrativeEventsForContext returns a narrative's events strictly after its
+// MemberEventsAfterBoundary returns a narrative's MEMBER events strictly after its
 // compaction boundary (all of them when the boundary is NULL), ordered by
 // (occurred_at, event id) — the events the caller hydrates into
-// correlator.Narrative.Events. The recap of anything at/before the boundary
-// already lives in the summary.
+// correlator.Narrative.Events and EligibleEvents, and what compaction folds. The
+// recap of anything at/before the boundary already lives in the summary.
+//
+// Members only, and renamed to say so: compaction folds member events only, so a
+// recap never absorbs another stream's work (shared-context spec §2). Context links
+// have their own accessor, ContextEventsAfterBoundary. (Links are written by
+// Tx.MoveMember and Tx.AddContext, in linkkind.go.)
 //
 // The boundary comparison is on the pair (compaction_boundary,
 // compaction_boundary_event_id), not occurred_at alone: occurred_at is
@@ -233,52 +213,25 @@ func addNarrativeEventsImpl(c dbConn, narrativeID int64, eventIDs []int64) error
 // equivalent ("a > x OR (a = x AND b > y)") is the documented fallback if a
 // future driver swap ever regresses this.
 //
-// A narrative id with no matching row (or one with no linked events)
+// A narrative id with no matching row (or one with no member events)
 // returns (nil, nil), not an error — callers only invoke this with an id
 // they already obtained from the store.
-func (s *Store) NarrativeEventsForContext(narrativeID int64) ([]events.Event, error) {
-	rows, err := s.db.Query(
-		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
-		 FROM events e
-		 JOIN narrative_events ne ON ne.event_id = e.id
-		 WHERE ne.narrative_id = ?
-		   AND (
-		     (SELECT compaction_boundary FROM narratives WHERE id = ?) IS NULL
-		     OR (e.occurred_at, e.id) > (
-		       (SELECT compaction_boundary FROM narratives WHERE id = ?),
-		       (SELECT compaction_boundary_event_id FROM narratives WHERE id = ?)
-		     )
-		   )
-		 ORDER BY e.occurred_at, e.id`,
-		narrativeID, narrativeID, narrativeID, narrativeID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying context events for narrative %d: %w", narrativeID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []events.Event
-	for rows.Next() {
-		e, err := scanEvent(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scanning context event row: %w", err)
-		}
-		out = append(out, e)
-	}
-
-	return out, rows.Err()
+func (s *Store) MemberEventsAfterBoundary(narrativeID int64) ([]events.Event, error) {
+	return queryLinkedEvents(s.db, "post-boundary member events", narrativeID,
+		memberLink+` AND `+afterCompactionBoundary)
 }
 
-// UnlinkedEventsInRange returns events in [start, end) that are not yet
-// linked to any narrative, ordered by (occurred_at, id) — the clustering
-// candidates a narration pass considers.
+// UnlinkedEventsInRange returns events in [start, end) that have no MEMBER link,
+// ordered by (occurred_at, id) — the clustering candidates a narration pass
+// considers.
 //
-// "Unlinked" means no narrative_events row at all, not "linked to a narrative
-// outside this range": an event belongs to exactly one narrative, so once
-// linked it is never a candidate again. Such an event can still reach a
-// prompt as context via its narrative's hydration
-// (NarrativeEventsForContext), which is why excluding it here does not starve
-// the model.
+// "No member link", not "no link at all", because that is the question a candidate
+// answers — does this event have a home yet (design-notes #28: ask the question you
+// mean). Every linked event has exactly one member home, so once placed an event is
+// never a candidate again, and a context link elsewhere does not give it one. A
+// placed event can still reach a prompt via its member narrative's hydration
+// (MemberEventsAfterBoundary), which is why excluding it here does not starve the
+// model.
 //
 // Ordering is composite because occurred_at is stored via time.RFC3339
 // (whole seconds — see InsertEvent) and cannot uniquely order events.
@@ -287,7 +240,7 @@ func (s *Store) UnlinkedEventsInRange(start, end time.Time) ([]events.Event, err
 		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
 		 FROM events e
 		 WHERE e.occurred_at >= ? AND e.occurred_at < ?
-		   AND NOT EXISTS (SELECT 1 FROM narrative_events ne WHERE ne.event_id = e.id)
+		   AND NOT EXISTS (SELECT 1 FROM narrative_events ne WHERE ne.event_id = e.id AND `+memberLink+`)
 		 ORDER BY e.occurred_at, e.id`,
 		start.Format(time.RFC3339), end.Format(time.RFC3339),
 	)
@@ -363,39 +316,25 @@ func (s *Store) NarrativesOverlapping(start, end time.Time) ([]NarrativeRow, err
 	return out, rows.Err()
 }
 
-// AllNarrativeEvents returns every event ever linked to a narrative,
-// ignoring the compaction boundary — deliberately NOT
-// NarrativeEventsForContext, which exists to hide pre-boundary events from
-// the model once their content is captured in the recap summary. Matching
-// candidate keys come from event artifacts, and the git_branch artifact
-// carrying the strongest provenance signal typically sits on a narrative's
-// oldest events — exactly the ones compaction hides. A matching pass that
-// used NarrativeEventsForContext would silently lose that signal for any
-// narrative old enough to have been compacted.
-func (s *Store) AllNarrativeEvents(narrativeID int64) ([]events.Event, error) {
-	rows, err := s.db.Query(
-		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
-		 FROM events e
-		 JOIN narrative_events ne ON ne.event_id = e.id
-		 WHERE ne.narrative_id = ?
-		 ORDER BY e.occurred_at, e.id`,
-		narrativeID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying all events for narrative %d: %w", narrativeID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []events.Event
-	for rows.Next() {
-		e, err := scanEvent(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scanning narrative event row: %w", err)
-		}
-		out = append(out, e)
-	}
-
-	return out, rows.Err()
+// AllMemberEvents returns every MEMBER event of a narrative, ignoring the
+// compaction boundary — deliberately NOT MemberEventsAfterBoundary, which
+// exists to hide pre-boundary events from the model once their content is
+// captured in the recap summary. Matching candidate keys come from event
+// artifacts, and the git_branch artifact carrying the strongest provenance
+// signal typically sits on a narrative's oldest events — exactly the ones
+// compaction hides. A matching pass that used MemberEventsAfterBoundary would
+// silently lose that signal for any narrative old enough to have been
+// compacted.
+//
+// Members only, and RENAMED from AllNarrativeEvents rather than quietly
+// re-scoped, so each caller failed to compile and was revisited (shared-context
+// spec §2, incident 13). Its two callers are matching's gatherCandidates and the
+// create path, and both must never see context: a shared root segment carries up
+// to 37 scm_command keys, which would outrank jira_event for every narrative it
+// supports, and a create must describe this narrative's work, not another's.
+// Context events have their own accessor, ContextEvents, which neither calls.
+func (s *Store) AllMemberEvents(narrativeID int64) ([]events.Event, error) {
+	return queryLinkedEvents(s.db, "member events", narrativeID, memberLink)
 }
 
 // linkedSinceLastAction is the reconciler's delta test for one narrative_events row
@@ -418,7 +357,15 @@ func (s *Store) AllNarrativeEvents(narrativeID int64) ([]events.Event, error) {
 //
 // With no prior action the COALESCE gives 0, below every link_seq, so every link is
 // delta.
-const linkedSinceLastAction = `ne.link_seq > COALESCE(
+//
+// MEMBER links only (shared-context spec §2): the delta is "new work for this
+// narrative", and a context link is somebody else's work. Admitting one would let
+// suppressTrackerEcho be satisfied by another ticket's work evidence and
+// suppressStaleTransitions date this ticket's work by another's — and, since this const
+// is also hasUnexaminedDelta's, every context link would re-admit its narrative to the
+// reconcile backlog at model cost. In this const and not at its two call sites, so the
+// selector, the count and the delta cannot drift on it either.
+const linkedSinceLastAction = memberLink + ` AND ne.link_seq > COALESCE(
 	(SELECT MAX(a.created_link_seq) FROM actions a WHERE a.narrative_id = ne.narrative_id), 0)`
 
 // DeltaEvents returns the events linked to narrativeID since the most recent
@@ -479,9 +426,10 @@ func (s *Store) NarrativeEventLinkedAt(narrativeID, eventID int64) (string, erro
 	return linkedAt, nil
 }
 
-// NarrativeEventCount returns how many events are linked to a narrative,
-// ignoring its compaction boundary — unlike NarrativeEventsForContext, which
-// returns only the post-boundary tail. This is a test-support introspection
+// NarrativeEventCount returns how many events are linked to a narrative, of
+// EITHER kind, ignoring its compaction boundary — unlike
+// MemberEventsAfterBoundary, which returns only the post-boundary member tail.
+// MemberEventCount counts members alone. This is a test-support introspection
 // accessor: it's what lets a test prove the "narrative_events rows are never
 // deleted" invariant, since compaction shrinks the assembled context, never
 // the links.

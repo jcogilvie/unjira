@@ -293,11 +293,16 @@ func matchOne(
 ) (MatchResult, Stats, error) {
 	result := MatchResult{NarrativeID: narrative.ID}
 
-	// AllNarrativeEvents, not NarrativeEventsForContext: candidate keys live
+	// AllMemberEvents, not MemberEventsAfterBoundary: candidate keys live
 	// in event artifacts, and the git_branch artifact carrying the
 	// strongest provenance sits on a narrative's oldest events — exactly
 	// the ones a compaction boundary hides from context-only readers.
-	evts, err := s.AllNarrativeEvents(narrative.ID)
+	//
+	// MEMBER events only, at every tier (shared-context spec §3). A shared root segment
+	// routinely carries 17+ prose keys and up to 37 scm_command keys; fed in as context,
+	// every narrative it supports would inherit them, and a lone verified one would
+	// become primary at confidence 1.0 with no model call (resolveVerified).
+	evts, err := s.AllMemberEvents(narrative.ID)
 	if err != nil {
 		return result, Stats{}, fmt.Errorf("loading events for narrative %d: %w", narrative.ID, err)
 	}

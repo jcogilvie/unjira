@@ -92,7 +92,7 @@ func wireStore(t *testing.T) (*store.Store, int64, store.ActionRow) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "wire:1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 		return tx.AddNarrativeIssues(nid, []store.NarrativeIssue{{

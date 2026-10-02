@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -53,7 +54,7 @@ type Narrative struct {
 	Summary     string
 	Status      string
 	// Events is the narrative's context events, hydrated by the caller
-	// (see store.NarrativeEventsForContext) before Cluster is called —
+	// (see store.MemberEventsAfterBoundary) before Cluster is called —
 	// everything newer than the narrative's compaction boundary; the recap
 	// of older events lives in Summary. Cluster reads these for context
 	// only and never fetches them itself, keeping Cluster pure compute.
@@ -61,7 +62,7 @@ type Narrative struct {
 
 	// EligibleEvents are this narrative's events that a reviewer-driven
 	// re-cluster may reassign: those linked after the narrative's last
-	// committed action (see store.EligibleEventIDs). They render in the
+	// committed action (see store.EligibleMemberEventIDs). They render in the
 	// NUMBERED section alongside in-window events, so the model can move them;
 	// Events above stay context-only and cannot be reassigned.
 	//
@@ -75,6 +76,15 @@ type Narrative struct {
 	// it twice in one prompt and invite the model to assign a frozen event by
 	// index — see pipeline.hydrateContextNarratives, which partitions.
 	EligibleEvents []Event
+
+	// ContextEvents are events this narrative holds as CONTEXT links: relevant
+	// background that is some other narrative's work (see store.LinkContext and
+	// docs/superpowers/specs/2026-10-02-shared-context-design.md). Hydrated by the
+	// caller from store.ContextEventsAfterBoundary. Never numbered: a context link
+	// is not a member to move. One that is ALSO in the numbered slice (it is
+	// another context narrative's eligible member) renders as a back-reference to
+	// its number rather than a second copy.
+	ContextEvents []Event
 }
 
 // ClusterKind distinguishes a brand-new narrative from one extending an
@@ -95,7 +105,84 @@ type ClusterResult struct {
 	NarrativeID int64
 	Title       string
 	Summary     string
-	Events      []Event
+	// Events are the cluster's MEMBER events: its work. After Cluster returns, an
+	// event is a member of at most one result — a multiply-placed event is resolved
+	// by the dispute re-ask (cluster_dispute.go) before Cluster returns.
+	Events []Event
+	// ContextEvents are events that are relevant background for this cluster's work
+	// and some other narrative's work. Persist gives each a context link, which
+	// nothing downstream of clustering reads in this slice.
+	ContextEvents []Event
+	// Confidence is the model's stated confidence that every member event is this
+	// cluster's work, 0..1. Persist stores it on each member link it writes, unless
+	// MemberConfidence overrides it for that event.
+	Confidence float64
+	// MemberConfidence overrides Confidence for individual member events, keyed by
+	// EventKey. Set when a separate judgment placed the event: the dispute re-ask's
+	// per-event confidence, an omission re-ask joining events to an existing cluster,
+	// or a bisected half's events merged into the other half's cluster.
+	MemberConfidence map[string]float64
+}
+
+// ConfidenceOf is the confidence e was placed in this cluster with: its override
+// when one exists, the cluster's otherwise.
+func (r ClusterResult) ConfidenceOf(e Event) float64 {
+	if c, ok := r.MemberConfidence[EventKey(e)]; ok {
+		return c
+	}
+
+	return r.Confidence
+}
+
+// EventKey is an event's identity within one pass: (Source, ExternalID), the
+// store's dedup key. Exported because internal/pipeline matches cluster results
+// against what the store read back.
+func EventKey(e Event) string {
+	return e.Source + "\x00" + e.ExternalID
+}
+
+// absorb adds src's member and context events to dst, deduplicating by EventKey.
+// A member src carries at a confidence other than dst's is recorded as an override,
+// so a merge never restates a judgment it did not make. A context event dst already
+// holds as a member is dropped from context (member wins, as in store.Tx.AddContext).
+//
+// The one merge primitive for every path that combines two results — bisected
+// halves extending one narrative, the same-story check, the omission re-ask — so
+// none of them can double a member event or lose its confidence.
+func absorb(dst *ClusterResult, srcEvents []Event, srcContext []Event, confidenceOf func(Event) float64) {
+	members := make(map[string]bool, len(dst.Events)+len(srcEvents))
+	for _, e := range dst.Events {
+		members[EventKey(e)] = true
+	}
+
+	events := slices.Clone(dst.Events)
+	for _, e := range srcEvents {
+		k := EventKey(e)
+		if members[k] {
+			continue
+		}
+		members[k] = true
+		events = append(events, e)
+		if c := confidenceOf(e); c != dst.Confidence {
+			if dst.MemberConfidence == nil {
+				dst.MemberConfidence = make(map[string]float64)
+			}
+			dst.MemberConfidence[k] = c
+		}
+	}
+	dst.Events = events
+
+	seen := make(map[string]bool, len(dst.ContextEvents)+len(srcContext))
+	var context []Event
+	for _, e := range slices.Concat(dst.ContextEvents, srcContext) {
+		k := EventKey(e)
+		if members[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		context = append(context, e)
+	}
+	dst.ContextEvents = context
 }
 
 // Stats is what one Cluster or Persist call spent, and why. Splits and
@@ -126,11 +213,43 @@ type Stats struct {
 	// failed, because an event still unassigned after the re-ask is a loud error;
 	// on a pass that returned, a non-zero OmittedEvents says the model needed a
 	// second call to account for everything, which an operator should see.
-	OmittedEvents    int
-	RecoveredEvents  int
-	PromptTokens     int64
-	CompletionTokens int64
-	EstimatedTokens  int
+	OmittedEvents   int
+	RecoveredEvents int
+	// DisputedEvents counts events two or more clusters placed in event_indices,
+	// which the one dispute re-ask then gave a single member home; Disputes says how
+	// each was resolved. On a pass that returned, every disputed event was resolved,
+	// because an unresolved one is a loud error. Reported so the acceptance
+	// measurement (shared-context spec §9, M4) can read how often the model claims
+	// one event twice and what it decided, without re-deriving it from a prompt.
+	DisputedEvents int
+	Disputes       []DisputeResolution
+	// ContextLinks is how many context links Persist wrote, SharedEvents how many
+	// distinct events received at least one, and MaxContextFanOut the most context
+	// links one event received in this call. The distribution the spec reports in
+	// place of a fan-out cap (§7): no cap exists until a number says one is needed.
+	ContextLinks     int
+	SharedEvents     int
+	MaxContextFanOut int
+	// MembersBelowFloor counts member placements Persist wrote at a confidence below
+	// correlator.member_confidence_floor — the attributions triage asks a reviewer
+	// to confirm. Always zero while the floor is 0 (off, the default).
+	MembersBelowFloor int
+	PromptTokens      int64
+	CompletionTokens  int64
+	EstimatedTokens   int
+}
+
+// DisputeResolution is how the dispute re-ask resolved one multiply-placed event.
+type DisputeResolution struct {
+	// Event is "<source>/<external_id>".
+	Event string
+	// Claimants describes every cluster that placed the event in event_indices, in
+	// response order; Chosen is the one the model made its member home. Each is a
+	// cluster label: "narrative <id>" for an extend, "new <title>" for a new one.
+	Claimants  []string
+	Chosen     string
+	Confidence float64
+	Rationale  string
 }
 
 // Add folds other into s, so a recursive Cluster call's cost rolls up into its
@@ -156,6 +275,12 @@ func (s *Stats) Add(other Stats) {
 	}
 	s.OmittedEvents += other.OmittedEvents
 	s.RecoveredEvents += other.RecoveredEvents
+	s.DisputedEvents += other.DisputedEvents
+	s.Disputes = append(s.Disputes, other.Disputes...)
+	s.ContextLinks += other.ContextLinks
+	s.SharedEvents += other.SharedEvents
+	s.MaxContextFanOut = max(s.MaxContextFanOut, other.MaxContextFanOut)
+	s.MembersBelowFloor += other.MembersBelowFloor
 	s.PromptTokens += other.PromptTokens
 	s.CompletionTokens += other.CompletionTokens
 	s.EstimatedTokens += other.EstimatedTokens
@@ -244,7 +369,55 @@ func WithInstruction(instruction string) ClusterOption {
 // Cluster groups evts (filtered to window) plus any Narrative in existing
 // whose window overlaps or is adjacent to window, into narratives — each
 // tagged new or extending an existing row. Pure compute: no store access.
+//
+// On return every event is a member of at most one result. An event the model
+// placed in two or more clusters' event_indices is resolved by ONE dispute re-ask
+// over the whole pass (resolveDisputes) — after any bisection has merged its
+// halves, so a double placement no single response contains (finding F36, one
+// eligible event numbered in both halves) is resolved by the same call as one a
+// single response made. Not by response order: membership drives token attribution,
+// and which cluster the model happened to write first says nothing about whose work
+// an event is.
 func Cluster(
+	ctx context.Context,
+	evts []Event,
+	existing []Narrative,
+	client llm.Client,
+	window TimeRange,
+	contextWindowTokens int,
+	opts ...ClusterOption,
+) ([]ClusterResult, Stats, error) {
+	var o clusterOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	results, stats, err := clusterWindow(ctx, evts, existing, client, window, contextWindowTokens, opts...)
+	if err != nil {
+		return nil, stats, err
+	}
+
+	resolved, disputeStats, err := resolveDisputes(ctx, client, disputeRequest{
+		window:              window,
+		results:             results,
+		rules:               o.rules,
+		instruction:         o.instruction,
+		contextWindowTokens: contextWindowTokens,
+		log:                 o.log,
+	})
+	stats.Add(disputeStats)
+	if err != nil {
+		return nil, stats, err
+	}
+
+	return resolved, stats, nil
+}
+
+// clusterWindow is Cluster without the dispute pass: one window's clustering call
+// (or, over budget, its bisection), with the per-call coverage re-ask. Recursive
+// through clusterWithSplit, so it must not resolve disputes itself — a dispute that
+// spans two halves only exists once they are merged.
+func clusterWindow(
 	ctx context.Context,
 	evts []Event,
 	existing []Narrative,
@@ -271,10 +444,13 @@ func Cluster(
 	// resolves event_indices against it. Passing `filtered` to the parser while
 	// the prompt numbered a longer slice would make an eligible event's index
 	// resolve to the wrong event, silently.
-	assignable := assignableEvents(filtered, relevant)
+	var stats Stats
+	assignable, err := assignableEvents(filtered, relevant)
+	if err != nil {
+		return nil, stats, fmt.Errorf("clustering events in window [%s, %s): %w", window.Start, window.End, err)
+	}
 	systemPrompt, userPrompt := buildClusterPrompt(assignable, relevant, o.rules, o.instruction)
 
-	var stats Stats
 	stats.Truncation = truncation
 	estimated := estimateTokens(systemPrompt + userPrompt)
 	stats.EstimatedTokens = estimated
@@ -320,6 +496,9 @@ func Cluster(
 	// and rebuilding one for the whole window would be the very prompt that was
 	// too big to send. Each half recurses through this function, so each half's
 	// call is checked here; mergeSplitResults only unions events, never drops one.
+	// indices are MEMBER placements only (event_indices): an event named only in
+	// context_indices has no home, which is the context-only case the store forbids,
+	// so it counts as omitted and is re-asked for (shared-context spec §4).
 	// Only IN-WINDOW events (the first len(filtered) of assignable) must be placed.
 	// An eligible context event the model leaves out keeps the link it already
 	// has, because Persist only touches events a cluster names, so nothing is
@@ -426,14 +605,33 @@ func estimateTokens(text string) int {
 // before eligible narrative events became assignable, and keeping them separate
 // would have meant an eligible event's index resolving to a DIFFERENT event —
 // silent misattribution rather than a loud error.
-func assignableEvents(inWindow []Event, existing []Narrative) []Event {
+//
+// No event may appear twice, and a repeat is an ERROR, not something to
+// deduplicate. The slice is collision-free by construction: an in-window event has
+// no member link (store.UnlinkedEventsInRange), each event has at most one member
+// link (one_member_link_per_event), so it is eligible on at most one narrative, and
+// context links are never numbered. A repeat therefore means that invariant broke
+// upstream, and deduplicating would hide it — the shape of every assignableEvents
+// incident so far, prompt and parser numbering different slices, silently.
+func assignableEvents(inWindow []Event, existing []Narrative) ([]Event, error) {
 	out := make([]Event, 0, len(inWindow))
 	out = append(out, inWindow...)
 	for _, n := range existing {
 		out = append(out, n.EligibleEvents...)
 	}
 
-	return out
+	seen := make(map[string]int, len(out))
+	for i, e := range out {
+		if first, ok := seen[EventKey(e)]; ok {
+			return nil, fmt.Errorf(
+				"event %s/%s would be numbered twice in one clustering prompt (as %d and %d): an event "+
+					"must have at most one member home, so it can be in-window or one narrative's eligible "+
+					"member, never both or two", e.Source, e.ExternalID, first, i)
+		}
+		seen[EventKey(e)] = i
+	}
+
+	return out, nil
 }
 
 func buildClusterPrompt(
@@ -441,9 +639,14 @@ func buildClusterPrompt(
 ) (systemPrompt, userPrompt string) {
 	systemPrompt = withRulesAndInstruction(clusterSystemPrompt, learnedRules, instruction)
 
+	// Built off the SAME slice the events are numbered from, so a context event's
+	// back-reference and its numbered entry cannot disagree (shared-context spec §5).
+	number := make(map[string]int, len(evts))
+
 	var b strings.Builder
 	b.WriteString("Events to cluster:\n")
 	for i, e := range evts {
+		number[EventKey(e)] = i
 		// %q on Summary (not %s): event summaries come from arbitrary
 		// upstream session/commit text, so an embedded newline or a
 		// fabricated "N. [source] ..." line could otherwise inject a
@@ -467,9 +670,30 @@ func buildClusterPrompt(
 				fmt.Fprintf(&b, "    - [%s] %q (occurred_at=%s)\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
 			}
 		}
+		writeContextSection(&b, n.ContextEvents, number)
 	}
 
 	return systemPrompt, b.String()
+}
+
+// writeContextSection renders a context narrative's context links under their own
+// heading. An event that is also numbered renders as "-> #N", a back-reference to its
+// entry: it ties the two renderings deterministically and costs a few tokens instead
+// of a repeated summary.
+func writeContextSection(b *strings.Builder, contextEvents []Event, number map[string]int) {
+	if len(contextEvents) == 0 {
+		return
+	}
+
+	b.WriteString("  background (another narrative's work, linked here as context):\n")
+	for _, e := range contextEvents {
+		if i, ok := number[EventKey(e)]; ok {
+			fmt.Fprintf(b, "    - -> #%d\n", i)
+
+			continue
+		}
+		fmt.Fprintf(b, "    - [%s] %q (occurred_at=%s)\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+	}
 }
 
 // withRulesAndInstruction appends the rendered learned rules and then the
@@ -491,14 +715,33 @@ func withRulesAndInstruction(base string, learnedRules []rules.Rule, instruction
 	return systemPrompt
 }
 
-const clusterSystemPrompt = `Cluster the given events into narratives. "Events to cluster" are numbered; assign each to exactly one cluster via event_indices. "Existing narratives" are CONTEXT ONLY — never put their events in event_indices; use them only to decide whether a numbered event extends one of them. Tag each cluster "new" or "extends" (include narrative_id when extending). Return ONLY a JSON array matching this shape, no prose, no markdown fences:
-[{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"..., only if new","summary":"...","event_indices":[0,2,5]}]
+const clusterSystemPrompt = `Cluster the given events into narratives. "Events to cluster" are numbered. Put every numbered event in exactly one cluster's event_indices: that placement is the event's home, the one narrative whose work it is. "Existing narratives" are CONTEXT ONLY — never put their events in event_indices; use them only to decide whether a numbered event extends one of them. Tag each cluster "new" or "extends" (include narrative_id when extending). Return ONLY a JSON array matching this shape, no prose, no markdown fences:
+[{"kind":"new"|"extends","narrative_id":<int, only if extends>,"title":"..., only if new","summary":"...","confidence":<0.0-1.0>,"event_indices":[0,2,5],"context_indices":[3]}]
 
 Omit title when extending: an extended narrative keeps the title it already has, so a title supplied there is discarded unread.
+
+confidence is how sure you are that every event in this cluster's event_indices is this cluster's work, from 0 to 1.
+
+` + clusterContextRule + `
+
+` + clusterSummaryRule + `
 
 ` + clusterGroupingCriterion + `
 
 Default to the coarsest grouping that is still accurate. Do not create a separate cluster for every event: a numbered list of N events should very rarely produce N clusters. Before emitting a cluster tagged "new", check the clusters you have ALREADY emitted in this response: if one covers the same ticket/branch/PR/topic, put these events there instead of opening a new one. You cannot revise a cluster once emitted. Only leave two events in separate clusters when they are genuinely unrelated work.`
+
+// clusterContextRule is what context_indices means. Its own constant, like
+// clusterGroupingCriterion, because the omission re-ask accepts context_indices too
+// and must mean the same thing by them.
+const clusterContextRule = `context_indices is optional. A numbered event may ALSO appear in other clusters' context_indices when it is genuinely relevant background for that cluster's work without being that cluster's work — for example, one investigation that led to several separate fixes is the work of one cluster and background for the others. context_indices never replaces a home: the event must still be in exactly one cluster's event_indices. Do not list an event in both lists of one cluster. An "extends" cluster may carry only context_indices, adding background to an existing narrative without new work; omit its summary, because the narrative's summary stays as it is.`
+
+// clusterSummaryRule is the shared-context spec's summary rule (§2): a summary is the
+// retrieval key later passes match new events against, so one that RE-TELLS another
+// stream's work would attract that stream's future events as members — misattributed
+// work, and a token-attribution error. A phrasing rule, expected to leak; the spec's
+// two-pass measurement M7 measures whether it does, and gates this slice on it. Shared
+// with the omission re-ask, which writes summaries too.
+const clusterSummaryRule = `A summary describes the cluster's OWN work, the events in its event_indices. Refer to background by reference, never by re-telling it: write "Fixed log flooding in the logger (discovered while debugging the cache-eviction work)", naming the other work, not describing what that work did.`
 
 // clusterGroupingCriterion is what makes events one narrative. Its own constant
 // because the re-ask (clusterReaskSystemPrompt) must judge by the same criterion
@@ -514,13 +757,77 @@ const (
 )
 
 // clusterResponseItem is the wire shape of one element in the model's JSON
-// array response.
+// array response. Confidence is a pointer so an omitted one is an error rather
+// than a silent zero.
 type clusterResponseItem struct {
-	Kind         string `json:"kind"`
-	NarrativeID  int64  `json:"narrative_id"`
-	Title        string `json:"title"`
-	Summary      string `json:"summary"`
-	EventIndices []int  `json:"event_indices"`
+	Kind           string   `json:"kind"`
+	NarrativeID    int64    `json:"narrative_id"`
+	Title          string   `json:"title"`
+	Summary        string   `json:"summary"`
+	Confidence     *float64 `json:"confidence"`
+	EventIndices   []int    `json:"event_indices"`
+	ContextIndices []int    `json:"context_indices"`
+}
+
+// resolvedPlacement is one response item's indices resolved against the numbered
+// slice: its member events (deduplicated, in first-mention order) and their indices,
+// its context events (deduplicated, minus any that are also members of THIS
+// cluster — member wins), and its confidence.
+type resolvedPlacement struct {
+	members       []Event
+	memberIndices []int
+	context       []Event
+	confidence    float64
+}
+
+// resolvePlacement range-checks and resolves one item's event_indices and
+// context_indices against evts, and validates its confidence. what names the
+// response in errors ("cluster response", "cluster re-ask response"), and raw is the
+// response body, quoted in every error as parseClusterResponse always has.
+//
+// A repeated index within one list, or an index in both lists of one cluster, is
+// normalized rather than rejected: neither loses or misplaces anything (the event
+// keeps one placement in this cluster, as a member when it was named as one), and
+// failing a pass for it would be brittle for no protection.
+func resolvePlacement(what, raw string, eventIndices, contextIndices []int, confidence *float64, evts []Event) (resolvedPlacement, error) {
+	var p resolvedPlacement
+
+	if len(eventIndices) > 0 {
+		if confidence == nil {
+			return p, fmt.Errorf("parsing %s %q: a cluster with event_indices %v has no confidence", what, raw, eventIndices)
+		}
+		if *confidence < 0 || *confidence > 1 {
+			return p, fmt.Errorf("parsing %s %q: confidence %v outside [0, 1]", what, raw, *confidence)
+		}
+		p.confidence = *confidence
+	}
+
+	memberSet := make(map[int]bool, len(eventIndices))
+	for _, idx := range eventIndices {
+		if idx < 0 || idx >= len(evts) {
+			return p, fmt.Errorf("parsing %s %q: event_indices value %d out of range [0,%d)", what, raw, idx, len(evts))
+		}
+		if memberSet[idx] {
+			continue
+		}
+		memberSet[idx] = true
+		p.members = append(p.members, evts[idx])
+		p.memberIndices = append(p.memberIndices, idx)
+	}
+
+	contextSet := make(map[int]bool, len(contextIndices))
+	for _, idx := range contextIndices {
+		if idx < 0 || idx >= len(evts) {
+			return p, fmt.Errorf("parsing %s %q: context_indices value %d out of range [0,%d)", what, raw, idx, len(evts))
+		}
+		if memberSet[idx] || contextSet[idx] {
+			continue
+		}
+		contextSet[idx] = true
+		p.context = append(p.context, evts[idx])
+	}
+
+	return p, nil
 }
 
 // parseClusterResponse unmarshals raw (the model's response body) against
@@ -529,12 +836,17 @@ type clusterResponseItem struct {
 // kind — is a loud error including the raw response, never a partial or
 // best-effort result.
 //
-// It also returns each result's event_indices as the model wrote them, aligned
-// with the results. Well-formed is not the same as complete: a response can
-// leave a numbered event in no cluster, and only the indices can show that, so
+// It also returns each result's member indices (event_indices, deduplicated),
+// aligned with the results. Well-formed is not the same as complete: a response
+// can leave a numbered event in no cluster, and only the indices can show that, so
 // Cluster checks coverage on them (unassignedIndices) and the re-ask lists them
-// back to the model. An index in two clusters is accepted here, unchanged:
-// double assignment is a contract a separate design is about to revise.
+// back to the model. context_indices are deliberately not returned there: a
+// context mention is not a home, so it must not satisfy coverage.
+//
+// An index in two clusters' event_indices is accepted HERE and resolved later, by
+// the dispute re-ask over the whole pass (resolveDisputes): a parser sees one
+// response, and the same event can be placed twice across two bisected halves
+// (F36), which no single response contains.
 //
 // raw is run through llm.JSONArrayPayload first, which strips a markdown fence
 // and wraps a lone object into a one-element array — see that function for why
@@ -558,22 +870,21 @@ func parseClusterResponse(raw string, evts []Event) ([]ClusterResult, [][]int, e
 			return nil, nil, fmt.Errorf("parsing cluster response %q: unknown kind %q", raw, item.Kind)
 		}
 
-		clusterEvents := make([]Event, 0, len(item.EventIndices))
-		for _, idx := range item.EventIndices {
-			if idx < 0 || idx >= len(evts) {
-				return nil, nil, fmt.Errorf("parsing cluster response %q: event_indices value %d out of range [0,%d)", raw, idx, len(evts))
-			}
-			clusterEvents = append(clusterEvents, evts[idx])
+		p, err := resolvePlacement("cluster response", raw, item.EventIndices, item.ContextIndices, item.Confidence, evts)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		results = append(results, ClusterResult{
-			Kind:        kind,
-			NarrativeID: item.NarrativeID,
-			Title:       item.Title,
-			Summary:     item.Summary,
-			Events:      clusterEvents,
+			Kind:          kind,
+			NarrativeID:   item.NarrativeID,
+			Title:         item.Title,
+			Summary:       item.Summary,
+			Events:        p.members,
+			ContextEvents: p.context,
+			Confidence:    p.confidence,
 		})
-		indices = append(indices, item.EventIndices)
+		indices = append(indices, p.memberIndices)
 	}
 
 	return results, indices, nil
@@ -616,13 +927,16 @@ func clusterWithSplit(
 
 	stats.Splits++
 
-	firstResults, firstStats, err := Cluster(ctx, evts, existing, client, firstHalf, contextWindowTokens, opts...)
+	// clusterWindow, not Cluster: disputes are resolved once, by the top-level call,
+	// over the merged halves. Resolving per half would miss an eligible event both
+	// halves numbered and placed differently (F36), and spend a call per level.
+	firstResults, firstStats, err := clusterWindow(ctx, evts, existing, client, firstHalf, contextWindowTokens, opts...)
 	stats.Add(firstStats)
 	if err != nil {
 		return nil, stats, err
 	}
 
-	secondResults, secondStats, err := Cluster(ctx, evts, existing, client, secondHalf, contextWindowTokens, opts...)
+	secondResults, secondStats, err := clusterWindow(ctx, evts, existing, client, secondHalf, contextWindowTokens, opts...)
 	stats.Add(secondStats)
 	if err != nil {
 		return nil, stats, err
@@ -660,6 +974,11 @@ func irreducibleUnitError(window TimeRange, filtered []Event) error {
 // ClusterNew results (the last of first, the first of second) gets one
 // extra LLM call asking whether they're the same emerging story, merging
 // on yes.
+//
+// Unions go through absorb, which deduplicates by event and keeps each half's
+// stated confidence for the members it placed. An event the two halves placed in
+// two DIFFERENT clusters stays in both here; the top-level Cluster's dispute re-ask
+// resolves it (F36).
 func mergeSplitResults(ctx context.Context, client llm.Client, first, second []ClusterResult) ([]ClusterResult, Stats, error) {
 	var stats Stats
 	merged := make([]ClusterResult, 0, len(first)+len(second))
@@ -676,13 +995,10 @@ func mergeSplitResults(ctx context.Context, client llm.Client, first, second []C
 			if usedFromSecond[j] || s.Kind != ClusterExtends || s.NarrativeID != f.NarrativeID {
 				continue
 			}
-			merged = append(merged, ClusterResult{
-				Kind:        ClusterExtends,
-				NarrativeID: f.NarrativeID,
-				Title:       f.Title,
-				Summary:     f.Summary,
-				Events:      append(append([]Event{}, f.Events...), s.Events...),
-			})
+			combined := f
+			combined.MemberConfidence = maps.Clone(f.MemberConfidence)
+			absorb(&combined, s.Events, s.ContextEvents, s.ConfidenceOf)
+			merged = append(merged, combined)
 			usedFromSecond[j] = true
 			mergedWithSecond = true
 			break
@@ -781,12 +1097,20 @@ func checkSameStory(ctx context.Context, client llm.Client, a, b ClusterResult) 
 		return false, ClusterResult{}, stats, nil
 	}
 
-	return true, ClusterResult{
-		Kind:    ClusterNew,
-		Title:   resp.Title,
-		Summary: resp.Summary,
-		Events:  append(append([]Event{}, a.Events...), b.Events...),
-	}, stats, nil
+	// a's events, context and confidence carry over; b's members keep the
+	// confidence b's half stated for them (absorb records the override).
+	merged := ClusterResult{
+		Kind:             ClusterNew,
+		Title:            resp.Title,
+		Summary:          resp.Summary,
+		Events:           slices.Clone(a.Events),
+		ContextEvents:    slices.Clone(a.ContextEvents),
+		Confidence:       a.Confidence,
+		MemberConfidence: maps.Clone(a.MemberConfidence),
+	}
+	absorb(&merged, b.Events, b.ContextEvents, b.ConfidenceOf)
+
+	return true, merged, stats, nil
 }
 
 // preparedResult is one ClusterResult after phase-1 (pre-transaction)
@@ -794,9 +1118,17 @@ func checkSameStory(ctx context.Context, client llm.Client, a, b ClusterResult) 
 // computed, and — for an extending result whose post-boundary history
 // crosses the compaction threshold — the compaction recap/boundary already
 // computed via the (at most one) LLM call this result needs. See Persist.
+//
+// eventIDs/confidences are the MEMBER events, aligned; contextIDs the context
+// events. The window is computed from members only (shared-context spec §4): a
+// context event dated weeks earlier would otherwise widen every narrative it
+// supports, NarrativesOverlapping would return them for more windows, and context
+// hydration — F16's cost — would grow with sharing.
 type preparedResult struct {
 	result          ClusterResult
 	eventIDs        []int64
+	confidences     []float64
+	contextIDs      []int64
 	windowLo        time.Time
 	windowHi        time.Time
 	doCompact       bool
@@ -804,6 +1136,11 @@ type preparedResult struct {
 	boundary        time.Time
 	boundaryEventID int64
 }
+
+// hasMembers reports whether p places any member event. An EXTENDS without one only
+// adds context, and must leave the narrative's summary and window as they are: there
+// is no new work to summarize.
+func (p preparedResult) hasMembers() bool { return len(p.eventIDs) > 0 }
 
 // Persist writes Cluster's results to the narratives/narrative_events
 // tables: ClusterNew inserts a fresh narrative row, ClusterExtends updates
@@ -817,6 +1154,15 @@ type preparedResult struct {
 // comes back from Cluster itself). All-or-nothing per call: any failure
 // aborts the whole pass with a loud error and, via a transaction, persists
 // nothing.
+//
+// Two kinds of link (docs/superpowers/specs/2026-10-02-shared-context-design.md
+// §4). A result's Events become MEMBER links via store.Tx.MoveMember — the event's
+// one home moves here — and its ContextEvents become context links via
+// store.Tx.AddContext, which never deletes anything. Windows, summaries and
+// compaction come from members only; an EXTENDS carrying only context leaves the
+// narrative's summary and window_end untouched. Before the transaction commits,
+// every event given a context link must hold a member link somewhere, or the pass
+// fails (requireMemberHomes).
 //
 // Every result's compaction recap (the only LLM calls Persist makes) is
 // computed before the write transaction opens — read current state, decide,
@@ -848,9 +1194,20 @@ func Persist(
 		return nil, stats, err
 	}
 
-	var touched []Narrative
+	var (
+		touched   []Narrative
+		linkStats Stats
+	)
 	err = s.WithTx(func(tx *store.Tx) error {
 		touched = nil // WithTx may retry fn in principle; keep this idempotent.
+		linkStats = Stats{}
+
+		// Every member placement first, every context link after. The order is what
+		// makes the outcome independent of response order: a context link added to A
+		// for an event that is still A's member is a no-op (member wins), so if A's
+		// member were moved elsewhere LATER in the transaction, A would end up holding
+		// nothing. Moving members first means each AddContext sees the event's final
+		// home.
 		for _, p := range preps {
 			n, err := applyPrepared(tx, p)
 			if err != nil {
@@ -858,13 +1215,110 @@ func Persist(
 			}
 			touched = append(touched, n)
 		}
-		return nil
+
+		linkStats, err = applyContextLinks(tx, preps, touched)
+		if err != nil {
+			return err
+		}
+
+		return requireMemberHomes(tx, preps)
 	})
 	if err != nil {
 		return nil, stats, err
 	}
 
+	stats.Add(linkStats)
+	stats.MembersBelowFloor = countBelowFloor(results, cfg.MemberConfidenceFloor)
+
 	return touched, stats, nil
+}
+
+// applyContextLinks writes every result's context links, onto the narrative
+// applyPrepared wrote for it (touched is aligned with preps), and reports the
+// sharing distribution on Stats.
+func applyContextLinks(tx *store.Tx, preps []preparedResult, touched []Narrative) (Stats, error) {
+	var stats Stats
+	fanOut := make(map[int64]int)
+
+	for i, p := range preps {
+		for _, eid := range p.contextIDs {
+			inserted, err := tx.AddContext(touched[i].ID, eid)
+			if err != nil {
+				return Stats{}, err
+			}
+			if inserted {
+				stats.ContextLinks++
+				fanOut[eid]++
+			}
+		}
+	}
+
+	stats.SharedEvents = len(fanOut)
+	for _, n := range fanOut {
+		stats.MaxContextFanOut = max(stats.MaxContextFanOut, n)
+	}
+
+	return stats, nil
+}
+
+// requireMemberHomes is the commit-time half of the one-member-home invariant: every
+// event this pass gave a context link must hold a member link as the transaction
+// closes. The partial unique index enforces "at most one"; nothing else can enforce
+// "at least one". A context-only event would never be in any narrative's delta, so
+// the work it records would never be reconciled, and the create path could never
+// propose it as untracked work — a silent drop.
+func requireMemberHomes(tx *store.Tx, preps []preparedResult) error {
+	var (
+		ids   []int64
+		label = make(map[int64]string)
+	)
+	for _, p := range preps {
+		for i, eid := range p.contextIDs {
+			if _, seen := label[eid]; seen {
+				continue
+			}
+			e := p.result.ContextEvents[i]
+			label[eid] = e.Source + "/" + e.ExternalID
+			ids = append(ids, eid)
+		}
+	}
+
+	homeless, err := tx.EventsWithoutMemberHome(ids)
+	if err != nil {
+		return err
+	}
+	if len(homeless) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(homeless))
+	for _, id := range homeless {
+		names = append(names, label[id])
+	}
+
+	return fmt.Errorf(
+		"persisting narratives: %d event(s) were linked only as context, with no member home: %s. Every linked "+
+			"event must be exactly one narrative's work; a context-only event would never reach any delta",
+		len(homeless), strings.Join(names, ", "))
+}
+
+// countBelowFloor counts member placements stated at a confidence below floor. Zero
+// while the floor is off.
+func countBelowFloor(results []ClusterResult, floor float64) int {
+	if floor <= 0 {
+		return 0
+	}
+
+	n := 0
+	for _, r := range results {
+		for _, e := range r.Events {
+			if r.ConfidenceOf(e) < floor {
+				n++
+			}
+		}
+	}
+
+	return n
 }
 
 // prepareResults is Persist's pre-transaction phase: resolve each result's
@@ -884,6 +1338,24 @@ func prepareResults(
 ) ([]preparedResult, Stats, error) {
 	var stats Stats
 	preps := make([]preparedResult, 0, len(results))
+
+	// One member home per event, checked before any spend. Cluster's dispute re-ask
+	// guarantees it for its own output; this is the backstop for every caller, because
+	// without it two results naming one member would be resolved by MoveMember in
+	// result order — last writer wins, the order-dependent rule F37 came from.
+	claimedBy := make(map[string]string)
+	for _, r := range results {
+		for _, e := range r.Events {
+			k := EventKey(e)
+			if prior, ok := claimedBy[k]; ok {
+				return nil, stats, fmt.Errorf(
+					"persisting narratives: event %s/%s is a member of two results (%s and %s); every event "+
+						"must have exactly one member home, and Cluster's dispute re-ask resolves a double "+
+						"placement before Persist", e.Source, e.ExternalID, prior, clusterLabel(r))
+			}
+			claimedBy[k] = clusterLabel(r)
+		}
+	}
 
 	for _, r := range results {
 		p, oneStats, err := prepareOneResult(ctx, s, client, r, cfg, log)
@@ -918,6 +1390,7 @@ func prepareOneResult(
 			return preparedResult{}, Stats{}, fmt.Errorf("resolving event %s/%s for narrative %q: %w", e.Source, e.ExternalID, r.Title, err)
 		}
 		p.eventIDs = append(p.eventIDs, eid)
+		p.confidences = append(p.confidences, r.ConfidenceOf(e))
 		if i == 0 || e.OccurredAt.Before(p.windowLo) {
 			p.windowLo = e.OccurredAt
 		}
@@ -926,12 +1399,36 @@ func prepareOneResult(
 		}
 	}
 
+	for _, e := range r.ContextEvents {
+		eid, err := s.EventIDByExternalID(e.Source, e.ExternalID)
+		if err != nil {
+			return preparedResult{}, Stats{}, fmt.Errorf("resolving context event %s/%s for narrative %q: %w", e.Source, e.ExternalID, r.Title, err)
+		}
+		p.contextIDs = append(p.contextIDs, eid)
+	}
+
 	switch r.Kind {
 	case ClusterNew:
+		// A NEW narrative is its member work; with none it would be an empty open
+		// narrative whose title and summary describe events it does not hold — F37's
+		// shape, riding along as context in every later pass. Cluster's dispute
+		// re-ask refuses to produce one and pipeline.requireNonEmptyClusters rejects
+		// one; this is the backstop for every other caller (triage's split).
+		if !p.hasMembers() {
+			return preparedResult{}, Stats{}, fmt.Errorf(
+				"persisting new narrative %q: it has no member events (%d context event(s)); a new narrative "+
+					"must hold at least one event as its own work", r.Title, len(r.ContextEvents))
+		}
+
 		// Nothing further to prepare: no existing row to validate, no
 		// compaction possible for a narrative that doesn't exist yet.
 		return p, Stats{}, nil
 	case ClusterExtends:
+		if !p.hasMembers() && len(p.contextIDs) == 0 {
+			return preparedResult{}, Stats{}, fmt.Errorf(
+				"extending narrative %d: the cluster names no member and no context event", r.NarrativeID)
+		}
+
 		return prepareExtend(ctx, s, client, r, cfg, p, log)
 	default:
 		return preparedResult{}, Stats{}, fmt.Errorf("persisting narrative %q: unknown ClusterKind %v", r.Title, r.Kind)
@@ -958,6 +1455,13 @@ func prepareExtend(
 		return preparedResult{}, Stats{}, fmt.Errorf("extending narrative %d: %w", r.NarrativeID, err)
 	}
 
+	// Compaction folds MEMBER history (shared-context spec §2): a context-only extend
+	// adds no work, so it cannot have pushed the narrative's history over threshold,
+	// and its summary is not written anyway.
+	if !p.hasMembers() {
+		return p, Stats{}, nil
+	}
+
 	// Per docs/superpowers/specs/2026-08-12-correlator-persist-design.md
 	// ("Tail-summarization ... compute the narrative's post-boundary
 	// history size (recap prefix already in summary, plus the raw events
@@ -972,9 +1476,9 @@ func prepareExtend(
 	// entirely, and using the stale pre-extend summary. That undercounts a
 	// narrative whose bulk is many small raw events rather than one large
 	// summary, exactly the case tail-summarization exists to catch.
-	ctxEvents, err := s.NarrativeEventsForContext(r.NarrativeID)
+	ctxEvents, err := s.MemberEventsAfterBoundary(r.NarrativeID)
 	if err != nil {
-		return preparedResult{}, Stats{}, fmt.Errorf("loading context events for narrative %d: %w", r.NarrativeID, err)
+		return preparedResult{}, Stats{}, fmt.Errorf("loading post-boundary member events for narrative %d: %w", r.NarrativeID, err)
 	}
 	postBoundary := mergePostBoundaryEvents(ctxEvents, r.Events)
 
@@ -1008,25 +1512,21 @@ func prepareExtend(
 // pipeline_lock lease is what actually prevents a concurrent second writer,
 // but re-reading under the transaction costs nothing and avoids relying on
 // that lease being the *only* thing standing between the two reads.
-// relinkEvents moves eventIDs onto narrativeID, removing any link each event
-// has to a DIFFERENT narrative first.
 //
-// AddNarrativeEvents alone is INSERT OR IGNORE: it adds the new link and never
-// removes the old one. That is correct for a first assignment and wrong for a
-// reassignment — and reassignment is now reachable, because uncommitted events
-// stay eligible for re-clustering as later passes learn more (see
-// store.EligibleEventIDs). Without this, a re-clustered event ends up linked to
-// two narratives: the source looks alive, keeps feeding future Cluster calls as
-// context, and post-boundary history double-counts it — which is exactly how
-// compaction folded the wrong number of events before this existed.
-func relinkEvents(tx *store.Tx, narrativeID int64, eventIDs []int64) error {
-	for _, eventID := range eventIDs {
-		if err := tx.UnlinkEventFromOtherNarratives(narrativeID, eventID); err != nil {
+// It writes MEMBER placements only, via store.Tx.MoveMember; Persist adds every
+// result's context links afterwards (applyContextLinks), once every member is in its
+// final home. MoveMember replaced relinkEvents, which deleted an event's link to
+// every other narrative before inserting — last-writer-wins, the order-dependent
+// rule that let a double-assigned event leave an empty narrative behind (F37), and
+// that would delete context links if it survived.
+func moveMembers(tx *store.Tx, narrativeID int64, p preparedResult) error {
+	for i, eventID := range p.eventIDs {
+		if err := tx.MoveMember(narrativeID, eventID, p.confidences[i]); err != nil {
 			return err
 		}
 	}
 
-	return tx.AddNarrativeEvents(narrativeID, eventIDs)
+	return nil
 }
 
 func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
@@ -1038,7 +1538,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 		if err != nil {
 			return Narrative{}, err
 		}
-		if err := relinkEvents(tx, id, p.eventIDs); err != nil {
+		if err := moveMembers(tx, id, p); err != nil {
 			return Narrative{}, err
 		}
 		return Narrative{
@@ -1052,6 +1552,16 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 			return Narrative{}, fmt.Errorf("extending narrative %d: %w", r.NarrativeID, err)
 		}
 
+		// Context only: no new work, so neither the summary nor window_end moves
+		// (shared-context spec §2). Writing the cluster's summary here would let a
+		// narrative's recap be rewritten around another stream's events.
+		if !p.hasMembers() {
+			return Narrative{
+				ID: r.NarrativeID, WindowStart: row.WindowStart, WindowEnd: row.WindowEnd,
+				Title: row.Title, Summary: row.Summary, Status: row.Status,
+			}, nil
+		}
+
 		newEnd := row.WindowEnd
 		if p.windowHi.After(newEnd) {
 			newEnd = p.windowHi
@@ -1059,7 +1569,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 		if err := tx.ExtendNarrative(r.NarrativeID, newEnd, r.Summary); err != nil {
 			return Narrative{}, err
 		}
-		if err := relinkEvents(tx, r.NarrativeID, p.eventIDs); err != nil {
+		if err := moveMembers(tx, r.NarrativeID, p); err != nil {
 			return Narrative{}, err
 		}
 		if p.doCompact {
@@ -1092,7 +1602,7 @@ func applyPrepared(tx *store.Tx, p preparedResult) (Narrative, error) {
 }
 
 // mergePostBoundaryEvents combines a narrative's already-linked
-// post-boundary events (ctxEvents, from store.NarrativeEventsForContext)
+// post-boundary events (ctxEvents, from store.MemberEventsAfterBoundary)
 // with the events this Persist call is about to link (incoming), dedupes by
 // (Source, ExternalID) — incoming may re-list an event ctxEvents already
 // has, e.g. on a retried pass — and returns the union sorted by OccurredAt.
@@ -1135,7 +1645,7 @@ func renderEventsForEstimate(evts []Event) string {
 // recap via one LLM call, and returns the recap plus the new compaction
 // boundary: both the occurred_at of the newest compacted event and that
 // event's store row id. The row id is required alongside the timestamp —
-// see store.NarrativeEventsForContext's doc comment for why a bare
+// see store.MemberEventsAfterBoundary's doc comment for why a bare
 // timestamp cannot uniquely order events (occurred_at is stored at
 // whole-second granularity, so two events in the same second are
 // indistinguishable by timestamp alone, and a cut landing between them

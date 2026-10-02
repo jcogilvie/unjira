@@ -45,6 +45,19 @@ type Decision struct {
 type NarrativeContext struct {
 	Title   string
 	Summary string
+	// ToConfirm are the narrative's member events placed below
+	// correlator.member_confidence_floor: the model's attributions of work to this
+	// narrative that it was least sure of. Surfaced so a reviewer can confirm them,
+	// or correct them with merge or split. Empty while the floor is 0 (off).
+	ToConfirm []Attribution
+}
+
+// Attribution is one member event and the confidence it was placed with, as a
+// reviewer reads it.
+type Attribution struct {
+	Source     string
+	Summary    string
+	Confidence float64
 }
 
 // Item is one action as presented for review, with the context a reviewer needs

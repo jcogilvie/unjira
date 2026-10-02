@@ -12,7 +12,7 @@ package store_test
 //   - match watermark:     NarrativesWithoutPrimaryLink / CountNarrativesWithoutPrimaryLink
 //   - reconcile watermark: NarrativesWithActionableLinks / CountNarrativesWithDelta
 //   - reconcile delta:     DeltaEvents / hasUnexaminedDelta
-//   - freeze rule:         EligibleEventIDs / EligibleEvents
+//   - freeze rule:         EligibleMemberEventIDs / EligibleEvents
 //
 // Every test here writes the timestamps EXPLICITLY — byte-identical, or deliberately
 // inverted — rather than relying on the wall clock to collide. That makes them
@@ -51,7 +51,7 @@ func linkNewEvent(t *testing.T, s *store.Store, narrativeID int64, extID string)
 
 	id, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(narrativeID, []int64{id}))
+	require.NoError(t, s.LinkMembers(narrativeID, []int64{id}, 1))
 
 	return id
 }
@@ -123,7 +123,7 @@ func TestMatchWatermark_TimestampsDoNotDecide(t *testing.T) {
 // INTEGER PRIMARY KEY hands out max(rowid)+1, so deleting the newest link and linking
 // another reissues the deleted number — which equals the examination's high-water mark
 // and so reads as "not newer". Restructures delete links (UnlinkNarrativeEvents,
-// UnlinkEventFromOtherNarratives), so this is reachable, not theoretical.
+// Tx.MoveMember), so this is reachable, not theoretical.
 func TestMatchWatermark_ADeletedLinksSequenceIsNeverReused(t *testing.T) {
 	s := openStore(t)
 	id := seedNarrative(t, s, "no ticket", time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC))
@@ -261,14 +261,14 @@ func TestFreeze_ALinkInTheSameMillisecondAsTheCommitIsEligible(t *testing.T) {
 	require.NoError(t, s.ExecForTest(
 		`UPDATE actions SET executed_at = ? WHERE id = ?`, linkedAt(t, s, nid, after), actionID))
 
-	ids, err := s.EligibleEventIDs(nid)
+	ids, err := s.EligibleMemberEventIDs(nid)
 	require.NoError(t, err)
 	assert.Equal(t, []int64{after}, ids, "linked after the commit: eligible, even inside one millisecond")
 	assert.NotContains(t, ids, before[0])
 
-	evts, err := s.EligibleEvents(nid)
+	evts, err := s.EligibleMemberEvents(nid)
 	require.NoError(t, err)
-	require.Len(t, evts, 1, "EligibleEvents must agree with EligibleEventIDs")
+	require.Len(t, evts, 1, "EligibleEvents must agree with EligibleMemberEventIDs")
 	assert.Equal(t, "f30:freeze:after", evts[0].ExternalID)
 }
 
@@ -286,22 +286,21 @@ func TestFreeze_TimestampsDoNotDecide(t *testing.T) {
 	require.NoError(t, s.UpdateActionStatus(actionID, store.StatusApplied))
 	require.NoError(t, s.ExecForTest(`UPDATE narrative_events SET linked_at = ? WHERE narrative_id = ?`, farFuture, nid))
 
-	ids, err := s.EligibleEventIDs(nid)
+	ids, err := s.EligibleMemberEventIDs(nid)
 	require.NoError(t, err)
 	assert.Empty(t, ids, "both links predate the commit: frozen, whatever linked_at says")
 
-	evts, err := s.EligibleEvents(nid)
+	evts, err := s.EligibleMemberEvents(nid)
 	require.NoError(t, err)
 	assert.Empty(t, evts)
 }
 
 // -- relink ------------------------------------------------------------------------
 
-// TestRelink_SameNarrativeKeepsTheLinksPosition pins what correlator.relinkEvents does
-// to an event already linked to the narrative it is being linked to:
-// UnlinkEventFromOtherNarratives deletes nothing (it spares keepNarrativeID), and
-// AddNarrativeEvents is INSERT OR IGNORE, so the existing row — its sequence position
-// AND its display linked_at — survives untouched.
+// TestRelink_SameNarrativeKeepsTheLinksPosition pins what Tx.MoveMember does to an
+// event already a member of the narrative it is being made a member of: nothing, so
+// the existing row — its sequence position AND its display linked_at — survives
+// untouched.
 //
 // Load-bearing for the freeze rule. If a re-link replaced the row it would get a new
 // sequence position, read as newly linked, and UN-FREEZE an event a posted comment
@@ -318,18 +317,17 @@ func TestRelink_SameNarrativeKeepsTheLinksPosition(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(actionID, store.StatusApplied))
 
-	// relinkEvents' exact two calls, in its transaction shape.
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
 		for _, id := range ids {
-			if err := tx.UnlinkEventFromOtherNarratives(nid, id); err != nil {
+			if err := tx.MoveMember(nid, id, 0.5); err != nil {
 				return err
 			}
 		}
 
-		return tx.AddNarrativeEvents(nid, ids)
+		return nil
 	}))
 
-	eligible, err := s.EligibleEventIDs(nid)
+	eligible, err := s.EligibleMemberEventIDs(nid)
 	require.NoError(t, err)
 	assert.Empty(t, eligible, "a re-link must not un-freeze a committed event")
 	assert.Equal(t, beforeTS, linkedAt(t, s, nid, ids[0]), "the display timestamp is kept as well")
@@ -348,11 +346,7 @@ func TestRelink_MovingToAnotherNarrativeIsANewLink(t *testing.T) {
 		`UPDATE match_examinations SET examined_at = ? WHERE narrative_id = ?`, farFuture, dest))
 
 	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
-		if err := tx.UnlinkEventFromOtherNarratives(dest, ids[0]); err != nil {
-			return err
-		}
-
-		return tx.AddNarrativeEvents(dest, ids)
+		return tx.MoveMember(dest, ids[0], 0.9)
 	}))
 
 	n, err := s.NarrativeEventCount(source)
@@ -399,7 +393,8 @@ CREATE TABLE narrative_events (
 	require.Error(t, err, "an old store must not open with silently different semantics")
 	require.ErrorContains(t, err, path, "names which database")
 	require.ErrorContains(t, err, "narrative_events.link_seq", "names what is missing")
-	require.ErrorContains(t, err, "delete the database and re-collect", "names the fix")
+	require.ErrorContains(t, err, "rename the database to a backup", "names the fix")
+	require.ErrorContains(t, err, "re-collect", "names the fix")
 }
 
 // TestOpen_RefusingAnOldStoreLeavesItUntouched: the refusal must happen BEFORE any

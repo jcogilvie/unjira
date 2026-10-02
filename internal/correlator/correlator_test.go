@@ -98,7 +98,7 @@ func TestCluster_RulesReachTheSystemPrompt(t *testing.T) {
 		mustEvent(t, "claude_code", "e1", "did a thing", base),
 	}
 	llmFake := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+		`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`,
 	}}
 	learnedRules := []rules.Rule{
 		{Name: "sentinel-rule", Scope: rules.ScopeCorrelator, Confidence: rules.ConfidenceHigh, Body: "Sentinel rule body text."},
@@ -120,7 +120,7 @@ func TestCluster_NoRulesOptionLeavesSystemPromptUnchanged(t *testing.T) {
 		mustEvent(t, "claude_code", "e1", "did a thing", base),
 	}
 	llmFake := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+		`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`,
 	}}
 
 	_, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
@@ -173,7 +173,7 @@ func TestCluster_SingleNewCluster(t *testing.T) {
 		mustEvent(t, "claude_code", "e2", "Found root cause: race condition", base.Add(time.Minute)),
 	}
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"Fix flaky test","summary":"Investigated and found a race condition.","event_indices":[0,1]}]`,
+		`[{"kind":"new","title":"Fix flaky test","summary":"Investigated and found a race condition.","confidence":0.9,"event_indices":[0,1]}]`,
 	}}
 
 	results, _, err := correlator.Cluster(t.Context(), evts, nil, llm, correlator.TimeRange{
@@ -199,7 +199,7 @@ func TestCluster_SingleExtendsCluster(t *testing.T) {
 		{ID: 42, WindowStart: base.Add(-time.Hour), WindowEnd: base, Title: "Fix flaky test", Summary: "prior work"},
 	}
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":42,"title":"Fix flaky test","summary":"Continued and finished the fix.","event_indices":[0]}]`,
+		`[{"kind":"extends","narrative_id":42,"title":"Fix flaky test","summary":"Continued and finished the fix.","confidence":0.9,"event_indices":[0]}]`,
 	}}
 
 	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
@@ -224,8 +224,8 @@ func TestCluster_MixedBatchOfNewAndExtends(t *testing.T) {
 		{ID: 7, WindowStart: base.Add(-time.Hour), WindowEnd: base, Title: "Prior", Summary: "s"},
 	}
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"New thing","summary":"s1","event_indices":[0]},` +
-			`{"kind":"extends","narrative_id":7,"title":"Prior","summary":"s2","event_indices":[1]}]`,
+		`[{"kind":"new","title":"New thing","summary":"s1","confidence":0.9,"event_indices":[0]},` +
+			`{"kind":"extends","narrative_id":7,"title":"Prior","summary":"s2","confidence":0.9,"event_indices":[1]}]`,
 	}}
 
 	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
@@ -263,7 +263,7 @@ func TestCluster_HydratedNarrativeEventsAppearAsContextNotAssignable(t *testing.
 		mustEvent(t, "claude_code", "e1", "debugging cache eviction", base.Add(5*time.Minute)),
 	}
 	// A complete response, so no coverage re-ask adds a second prompt.
-	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0]}]`}}
+	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0]}]`}}
 
 	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 
@@ -299,7 +299,7 @@ func TestCluster_UsesNarrativeContextEventsForExtendsDecision(t *testing.T) {
 	}
 	// Model, having seen narrative 9's events, extends it.
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"title":"Cache rework","summary":"Reworking the shared cache; fixed eviction","event_indices":[0]}]`,
+		`[{"kind":"extends","narrative_id":9,"title":"Cache rework","summary":"Reworking the shared cache; fixed eviction","confidence":0.9,"event_indices":[0]}]`,
 	}}
 
 	results, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
@@ -346,12 +346,12 @@ func TestCluster_ResponseAndCallFailuresErrorLoudly(t *testing.T) {
 		},
 		{
 			name:        "out of range event index",
-			responses:   []string{`[{"kind":"new","title":"t","summary":"s","event_indices":[5]}]`},
+			responses:   []string{`[{"kind":"new","title":"t","summary":"s","confidence":0.9,"event_indices":[5]}]`},
 			wantErrText: "out of range",
 		},
 		{
 			name:        "unknown kind",
-			responses:   []string{`[{"kind":"maybe","title":"t","summary":"s","event_indices":[0]}]`},
+			responses:   []string{`[{"kind":"maybe","title":"t","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 			wantErrText: `unknown kind "maybe"`,
 		},
 		{
@@ -386,8 +386,8 @@ func TestCluster_OversizedWindowSplitsAndCallsLLMPerHalf(t *testing.T) {
 		mustEvent(t, "claude_code", "e2", strings.Repeat("b", 4000), base.Add(time.Hour)),
 	}
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"first","summary":"s1","event_indices":[0]}]`,
-		`[{"kind":"new","title":"second","summary":"s2","event_indices":[0]}]`,
+		`[{"kind":"new","title":"first","summary":"s1","confidence":0.9,"event_indices":[0]}]`,
+		`[{"kind":"new","title":"second","summary":"s2","confidence":0.9,"event_indices":[0]}]`,
 		// Third response: the two split halves each yield an adjacent
 		// ClusterNew result, so mergeSplitResults makes one merge-boundary
 		// same-story check. These are unrelated events, so the model says no.
@@ -433,8 +433,8 @@ func TestCluster_ExtendsResultsSharingNarrativeIDMergeAcrossSplit(t *testing.T) 
 		{ID: 9, Title: "Ongoing", Summary: "s", WindowStart: base.Add(-time.Hour), WindowEnd: base},
 	}
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"title":"Ongoing","summary":"s1","event_indices":[0]}]`,
-		`[{"kind":"extends","narrative_id":9,"title":"Ongoing","summary":"s2","event_indices":[0]}]`,
+		`[{"kind":"extends","narrative_id":9,"title":"Ongoing","summary":"s1","confidence":0.9,"event_indices":[0]}]`,
+		`[{"kind":"extends","narrative_id":9,"title":"Ongoing","summary":"s2","confidence":0.9,"event_indices":[0]}]`,
 	}}
 
 	results, _, err := correlator.Cluster(t.Context(), evts, existing, llm, correlator.TimeRange{
@@ -479,8 +479,8 @@ func TestCluster_AdjacentNewClustersMergeViaLLMWhenSameStory(t *testing.T) {
 				mustEvent(t, "claude_code", "e2", strings.Repeat("b", 4000), base.Add(time.Hour)),
 			}
 			llm := &fakeLLM{responses: []string{
-				`[{"kind":"new","title":"Part 1","summary":"s1","event_indices":[0]}]`,
-				`[{"kind":"new","title":"Part 2","summary":"s2","event_indices":[0]}]`,
+				`[{"kind":"new","title":"Part 1","summary":"s1","confidence":0.9,"event_indices":[0]}]`,
+				`[{"kind":"new","title":"Part 2","summary":"s2","confidence":0.9,"event_indices":[0]}]`,
 				tt.sameStoryReply,
 			}}
 
@@ -525,7 +525,7 @@ func TestCluster_StatsCountsCallsAndAggregatesUsage(t *testing.T) {
 		mustEvent(t, "claude_code", "e1", "did a thing", base),
 	}
 	llmFake := &fakeLLM{
-		responses:    []string{`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`},
+		responses:    []string{`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 		usagePerCall: llm.Usage{PromptTokens: 100, CompletionTokens: 20, Model: "m"},
 	}
 
@@ -555,8 +555,8 @@ func TestCluster_StatsAggregatesAcrossBisection(t *testing.T) {
 		// calls; its response must parse as a sameStoryResponse, not a
 		// cluster-response array.
 		responses: []string{
-			`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
-			`[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`,
+			`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`,
+			`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`,
 			`{"same_story":false}`,
 		},
 		usagePerCall: llm.Usage{PromptTokens: 10, CompletionTokens: 2},
@@ -624,7 +624,7 @@ func TestPersist_NewNarrativeRoundTrips(t *testing.T) {
 	assert.Equal(t, "New story", row.Title)
 	assert.True(t, base.Equal(row.WindowStart))
 	assert.True(t, base.Add(time.Minute).Equal(row.WindowEnd))
-	ctxEvents, err := s.NarrativeEventsForContext(got[0].ID)
+	ctxEvents, err := s.MemberEventsAfterBoundary(got[0].ID)
 	require.NoError(t, err)
 	assert.Len(t, ctxEvents, 2)
 }
@@ -637,7 +637,7 @@ func TestPersist_ExtendUpdatesExistingNarrative(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "e1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+	require.NoError(t, s.LinkMembers(id, []int64{eid}, 1))
 
 	e2 := seedPersistedEvent(t, s, "e2", "continued", base.Add(time.Hour))
 	cfg := config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20}
@@ -652,7 +652,7 @@ func TestPersist_ExtendUpdatesExistingNarrative(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, base.Add(time.Hour).Equal(row.WindowEnd), "window_end advanced")
 	assert.Equal(t, "new cumulative summary", row.Summary)
-	ctxEvents, err := s.NarrativeEventsForContext(id)
+	ctxEvents, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	assert.Len(t, ctxEvents, 2, "both events now linked")
 }
@@ -702,10 +702,9 @@ func TestPersist_ExtendUnknownNarrativeIDErrorsLoudly(t *testing.T) {
 	assert.Contains(t, err.Error(), "999")
 }
 
-// TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen pins relinkEvents' effect on
+// TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen pins MoveMember's effect on
 // the freeze rule (finding F30). An EXTENDS can name an event the narrative already
-// holds; relinkEvents then deletes nothing (UnlinkEventFromOtherNarratives spares the
-// target) and AddNarrativeEvents is INSERT OR IGNORE, so the existing link — and its
+// holds as a member; MoveMember then changes nothing, so the existing link — and its
 // position in the link sequence — survives. Were a re-link to replace the row, the
 // event would read as linked after the narrative's applied action and become movable
 // again, un-freezing work a posted comment already describes.
@@ -717,7 +716,7 @@ func TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "e1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+	require.NoError(t, s.LinkMembers(id, []int64{eid}, 1))
 	linkedBefore, err := s.NarrativeEventLinkedAt(id, eid)
 	require.NoError(t, err)
 
@@ -735,7 +734,7 @@ func TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen(t *testing.T) {
 	}}, cfg)
 	require.NoError(t, err)
 
-	eligible, err := s.EligibleEventIDs(id)
+	eligible, err := s.EligibleMemberEventIDs(id)
 	require.NoError(t, err)
 	assert.Empty(t, eligible, "re-linking a committed event must not make it movable again")
 
@@ -749,7 +748,7 @@ func TestPersist_ExtendRelinkingAFrozenEventKeepsItFrozen(t *testing.T) {
 }
 
 // TestPersist_ExtendMovingAnEventIsANewLinkOnTheTarget pins the other half of
-// relinkEvents: an event reassigned from another narrative is a NEW link on the
+// MoveMember: an event reassigned from another narrative is a NEW link on the
 // target — as it was under linked_at, where the target's row got a fresh timestamp —
 // so it is part of the target's delta even though the target already has an action.
 func TestPersist_ExtendMovingAnEventIsANewLinkOnTheTarget(t *testing.T) {
@@ -760,7 +759,7 @@ func TestPersist_ExtendMovingAnEventIsANewLinkOnTheTarget(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("claude_code", "e1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(source, []int64{eid}))
+	require.NoError(t, s.LinkMembers(source, []int64{eid}, 1))
 
 	target, err := s.InsertNarrative(base, base.Add(time.Minute), "Target", "t")
 	require.NoError(t, err)
@@ -834,7 +833,7 @@ func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
 		require.NoError(t, err)
 		linkIDs = append(linkIDs, eid)
 	}
-	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+	require.NoError(t, s.LinkMembers(id, linkIDs, 1))
 
 	newE := seedPersistedEvent(t, s, "new-1", "newest", base.Add(6*time.Hour))
 	llm := &fakeLLM{responses: []string{"recap: earlier work compacted"}}
@@ -856,7 +855,7 @@ func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
 	// narrative_events rows are never deleted: all 6 events (5 seeded old-*
 	// plus the new one) are still linked in the store even though context
 	// now returns only the recent tail. NarrativeEventCount ignores the
-	// compaction boundary, unlike NarrativeEventsForContext below, so it's
+	// compaction boundary, unlike MemberEventsAfterBoundary below, so it's
 	// what actually proves survival rather than just a bounded context size
 	// (which a destructive compaction that deleted rows down to the kept
 	// tail would satisfy just as well).
@@ -866,7 +865,7 @@ func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
 
 	// Separately: the assembled context (what future Cluster calls see) is
 	// bounded to the post-boundary tail — recent kept + the new one.
-	ctxEvents, err := s.NarrativeEventsForContext(id)
+	ctxEvents, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(ctxEvents), cfg.RecentEventsKept+1) // recent kept + the new one, all post-boundary
 }
@@ -877,7 +876,7 @@ func TestPersist_CompactsWhenHistoryExceedsThreshold(t *testing.T) {
 // share a stored whole-second occurred_at) already linked, extended by a
 // new z@3h, RecentEventsKept=2 — the recent tail should be [d, z]. Because
 // c and d collide on their stored (RFC3339, whole-second) occurred_at,
-// boundary=c's timestamp and NarrativeEventsForContext's strict
+// boundary=c's timestamp and MemberEventsAfterBoundary's strict
 // occurred_at > boundary filter excludes d too (its stored timestamp is not
 // strictly greater than c's — they're equal), even though d was meant to
 // survive as part of the kept tail. Only links (never deleted) protect
@@ -905,7 +904,7 @@ func TestPersist_CompactionBoundaryTieDoesNotLoseVisibleEvent(t *testing.T) {
 		require.NoError(t, err)
 		linkIDs = append(linkIDs, eid)
 	}
-	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+	require.NoError(t, s.LinkMembers(id, linkIDs, 1))
 
 	z := seedPersistedEvent(t, s, "z", "z event", base.Add(3*time.Hour))
 	llm := &fakeLLM{responses: []string{"recap: a and b folded"}}
@@ -925,7 +924,7 @@ func TestPersist_CompactionBoundaryTieDoesNotLoseVisibleEvent(t *testing.T) {
 	// The bug: RecentEventsKept=2 should keep [d, z] visible in context, but
 	// d's stored occurred_at ties with the compaction boundary (c's), so the
 	// strict > filter drops it too.
-	ctxEvents, err := s.NarrativeEventsForContext(id)
+	ctxEvents, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	extIDs := make([]string, len(ctxEvents))
 	for i, e := range ctxEvents {
@@ -965,7 +964,7 @@ func TestPersist_CompactionBoundarySubSecondTieDoesNotLoseVisibleEvent(t *testin
 		require.NoError(t, err)
 		linkIDs = append(linkIDs, eid)
 	}
-	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+	require.NoError(t, s.LinkMembers(id, linkIDs, 1))
 
 	z := seedPersistedEvent(t, s, "z", "z event", base.Add(3*time.Hour))
 	llm := &fakeLLM{responses: []string{"recap: a and b folded"}}
@@ -981,7 +980,7 @@ func TestPersist_CompactionBoundarySubSecondTieDoesNotLoseVisibleEvent(t *testin
 	require.NoError(t, err)
 	require.Equal(t, 5, linkCount, "sanity: no links deleted")
 
-	ctxEvents, err := s.NarrativeEventsForContext(id)
+	ctxEvents, err := s.MemberEventsAfterBoundary(id)
 	require.NoError(t, err)
 	extIDs := make([]string, len(ctxEvents))
 	for i, e := range ctxEvents {
@@ -998,7 +997,7 @@ func TestPersist_NoCompactionBelowThreshold(t *testing.T) {
 	id, err := s.InsertNarrative(base, base.Add(time.Minute), "Small", "tiny")
 	require.NoError(t, err)
 	eid, _ := s.EventIDByExternalID("claude_code", "e1")
-	require.NoError(t, s.AddNarrativeEvents(id, []int64{eid}))
+	require.NoError(t, s.LinkMembers(id, []int64{eid}, 1))
 
 	e2 := seedPersistedEvent(t, s, "e2", "next", base.Add(time.Hour))
 	llm := &fakeLLM{}
@@ -1055,7 +1054,7 @@ func TestPersist_StatsRecordsCompaction(t *testing.T) {
 		require.NoError(t, eerr)
 		linkIDs = append(linkIDs, eid)
 	}
-	require.NoError(t, s.AddNarrativeEvents(id, linkIDs))
+	require.NoError(t, s.LinkMembers(id, linkIDs, 1))
 
 	newE := seedPersistedEvent(t, s, "new-1", "newest", base.Add(6*time.Hour))
 	llmFake := &fakeLLM{
@@ -1083,7 +1082,7 @@ func TestPersist_StatsRecordsCompaction(t *testing.T) {
 func TestCluster_TolerateFencedResponseFromRealModel(t *testing.T) {
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	evts := []correlator.Event{mustEvent(t, "claude_code", "e1", "did a thing", base)}
-	body := `[{"kind":"new","title":"T","summary":"s","event_indices":[0]}]`
+	body := `[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`
 
 	tests := []struct {
 		name string
@@ -1119,8 +1118,8 @@ func TestCluster_TolerateFencedSameStoryResponse(t *testing.T) {
 		mustEvent(t, "claude_code", "e2", strings.Repeat("y", 400), base.Add(50*time.Minute)),
 	}
 	llmFake := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"A","summary":"s","event_indices":[0]}]`,
-		`[{"kind":"new","title":"B","summary":"s","event_indices":[0]}]`,
+		`[{"kind":"new","title":"A","summary":"s","confidence":0.9,"event_indices":[0]}]`,
+		`[{"kind":"new","title":"B","summary":"s","confidence":0.9,"event_indices":[0]}]`,
 		"```json\n{\"same_story\":true,\"title\":\"Merged\",\"summary\":\"m\"}\n```",
 	}}
 
@@ -1162,7 +1161,7 @@ func TestCluster_TokenEstimateIsNotOptimistic(t *testing.T) {
 			base.Add(20*time.Minute)),
 	}
 	llmFake := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"T","summary":"s","event_indices":[0,1]}]`,
+		`[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0,1]}]`,
 	}}
 
 	_, stats, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
@@ -1190,7 +1189,7 @@ func TestCluster_TokenEstimateIsNotOptimistic(t *testing.T) {
 }
 
 // TestCluster_EligibleNarrativeEventsAreAssignable is the prompt-level half of
-// the commit watermark (store.EligibleEventIDs is the data half). A narrative's
+// the commit watermark (store.EligibleMemberEventIDs is the data half). A narrative's
 // eligible events must appear in the NUMBERED section the model may assign
 // from; its frozen events must stay in the context section without indices.
 //
@@ -1216,7 +1215,7 @@ func TestCluster_EligibleNarrativeEventsAreAssignable(t *testing.T) {
 	}
 	// A complete response (in-window index 0, eligible index 1), so no coverage
 	// re-ask adds a second prompt.
-	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0,1]}]`}}
+	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0,1]}]`}}
 
 	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 	require.NoError(t, err)
@@ -1257,7 +1256,7 @@ func TestCluster_NoEligibleEventsMatchesTodaysBehaviour(t *testing.T) {
 	inWindow := []correlator.Event{
 		mustEvent(t, "claude_code", "e1", "debugging cache eviction", base.Add(5*time.Minute)),
 	}
-	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0]}]`}}
+	llm := &fakeLLM{responses: []string{`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0]}]`}}
 
 	_, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)
 	require.NoError(t, err)
@@ -1291,8 +1290,8 @@ func TestCluster_EligibleEventIndexResolvesToTheRightEvent(t *testing.T) {
 	// index 0 = in-window, index 1 = the eligible narrative event. Index 0 gets
 	// a cluster of its own so the response is complete and no re-ask runs.
 	llm := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"title":"t","summary":"s","event_indices":[1]},` +
-			`{"kind":"new","title":"other","summary":"s","event_indices":[0]}]`,
+		`[{"kind":"extends","narrative_id":9,"title":"t","summary":"s","confidence":0.9,"event_indices":[1]},` +
+			`{"kind":"new","title":"other","summary":"s","confidence":0.9,"event_indices":[0]}]`,
 	}}
 
 	got, _, err := correlator.Cluster(t.Context(), inWindow, existing, llm, window, 128000)

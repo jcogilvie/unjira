@@ -31,28 +31,28 @@ func seedNarrativeWithEvents(t *testing.T, s *store.Store, count int) (int64, []
 		eid, err := s.EventIDByExternalID("claude_code", fmt.Sprintf("elig:%d", i))
 		require.NoError(t, err)
 
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 		ids = append(ids, eid)
 	}
 
 	return nid, ids
 }
 
-// TestEligibleEventIDs_NeverCommittedIsFullyEligible: with no applied action,
+// TestEligibleMemberEventIDs_NeverCommittedIsFullyEligible: with no applied action,
 // there is no watermark, so nothing is frozen.
-func TestEligibleEventIDs_NeverCommittedIsFullyEligible(t *testing.T) {
+func TestEligibleMemberEventIDs_NeverCommittedIsFullyEligible(t *testing.T) {
 	s := openStore(t)
 	nid, ids := seedNarrativeWithEvents(t, s, 3)
 
-	got, err := s.EligibleEventIDs(nid)
+	got, err := s.EligibleMemberEventIDs(nid)
 
 	require.NoError(t, err)
 	assert.ElementsMatch(t, ids, got, "with no committed action every link is eligible")
 }
 
-// TestEligibleEventIDs_FullyCommittedIsFullyFrozen: an applied action stamped
+// TestEligibleMemberEventIDs_FullyCommittedIsFullyFrozen: an applied action stamped
 // AFTER every link freezes all of them.
-func TestEligibleEventIDs_FullyCommittedIsFullyFrozen(t *testing.T) {
+func TestEligibleMemberEventIDs_FullyCommittedIsFullyFrozen(t *testing.T) {
 	s := openStore(t)
 	nid, _ := seedNarrativeWithEvents(t, s, 3)
 
@@ -64,19 +64,19 @@ func TestEligibleEventIDs_FullyCommittedIsFullyFrozen(t *testing.T) {
 	// applied stamps executed_at = now(), which is after every linked_at above.
 	require.NoError(t, s.UpdateActionStatus(id, "applied"))
 
-	got, err := s.EligibleEventIDs(nid)
+	got, err := s.EligibleMemberEventIDs(nid)
 
 	require.NoError(t, err)
 	assert.Empty(t, got, "every link predates the commit, so none may move")
 }
 
-// TestEligibleEventIDs_MixedStateFreezesOnlyThePast is the case that drove the
+// TestEligibleMemberEventIDs_MixedStateFreezesOnlyThePast is the case that drove the
 // design. A narrative can hold an applied AND a proposed action: watch applies
 // A, the next tick proposes B for the same narrative. Freezing the whole
 // narrative would refuse a merge — but the reviewer's objection is precisely
 // that the events behind B do not belong with the events behind A. So the unit
 // of freezing is the event link, not the narrative.
-func TestEligibleEventIDs_MixedStateFreezesOnlyThePast(t *testing.T) {
+func TestEligibleMemberEventIDs_MixedStateFreezesOnlyThePast(t *testing.T) {
 	s := openStore(t)
 	nid, before := seedNarrativeWithEvents(t, s, 2)
 
@@ -92,9 +92,9 @@ func TestEligibleEventIDs_MixedStateFreezesOnlyThePast(t *testing.T) {
 	require.NoError(t, err)
 	afterID, err := s.EventIDByExternalID("claude_code", "elig:after")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{afterID}))
+	require.NoError(t, s.LinkMembers(nid, []int64{afterID}, 1))
 
-	got, err := s.EligibleEventIDs(nid)
+	got, err := s.EligibleMemberEventIDs(nid)
 
 	require.NoError(t, err)
 	assert.Equal(t, []int64{afterID}, got,
@@ -102,12 +102,12 @@ func TestEligibleEventIDs_MixedStateFreezesOnlyThePast(t *testing.T) {
 	assert.NotContains(t, got, before[0], "a committed event must never be eligible")
 }
 
-// TestEligibleEventIDs_AFailedWriteDoesNotFreeze: executed_at is stamped for
+// TestEligibleMemberEventIDs_AFailedWriteDoesNotFreeze: executed_at is stamped for
 // both applied AND failed, because a failed attempt still attempted a write.
 // But a failed write changed nothing in the tracker, so it must not freeze
 // events — otherwise a narrative whose only write failed would be
 // unrestructurable forever, for a reason no human could act on.
-func TestEligibleEventIDs_AFailedWriteDoesNotFreeze(t *testing.T) {
+func TestEligibleMemberEventIDs_AFailedWriteDoesNotFreeze(t *testing.T) {
 	s := openStore(t)
 	nid, ids := seedNarrativeWithEvents(t, s, 2)
 
@@ -118,7 +118,7 @@ func TestEligibleEventIDs_AFailedWriteDoesNotFreeze(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(id, "failed"))
 
-	got, err := s.EligibleEventIDs(nid)
+	got, err := s.EligibleMemberEventIDs(nid)
 
 	require.NoError(t, err)
 	assert.ElementsMatch(t, ids, got,
@@ -139,7 +139,7 @@ func TestUnlinkNarrativeEvents_RemovesOnlyTheNamedLinks(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("claude_code", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(a, []int64{eid}))
+		require.NoError(t, s.LinkMembers(a, []int64{eid}, 1))
 		ids = append(ids, eid)
 	}
 
@@ -187,7 +187,7 @@ func TestEligibleEvents_IsTheRedraftDeltaThatDeltaEventsCannotBe(t *testing.T) {
 	assert.Empty(t, delta,
 		"DeltaEvents is bounded by max(created_at), so the action being edited hides its own events")
 
-	eligible, err := s.EligibleEvents(nid)
+	eligible, err := s.EligibleMemberEvents(nid)
 	require.NoError(t, err)
 	assert.Len(t, eligible, len(ids),
 		"EligibleEvents is bounded by the COMMIT watermark, so a proposed action hides nothing")
@@ -212,9 +212,9 @@ func TestEligibleEvents_ExcludesWhatACommitAlreadyDescribed(t *testing.T) {
 	require.NoError(t, err)
 	laterID, err := s.EventIDByExternalID("claude_code", "elig:later")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{laterID}))
+	require.NoError(t, s.LinkMembers(nid, []int64{laterID}, 1))
 
-	got, err := s.EligibleEvents(nid)
+	got, err := s.EligibleMemberEvents(nid)
 
 	require.NoError(t, err)
 	require.Len(t, got, 1, "only the post-commit event is redraftable")
@@ -222,11 +222,11 @@ func TestEligibleEvents_ExcludesWhatACommitAlreadyDescribed(t *testing.T) {
 		"a redraft must not re-describe work an applied comment already covered")
 }
 
-// TestEligibleEvents_AgreesWithEligibleEventIDs: the two accessors run the same
+// TestEligibleEvents_AgreesWithEligibleMemberEventIDs: the two accessors run the same
 // watermark predicate over the same rows. They are separate SQL statements, so a
 // change to one that missed the other would silently let an edit and a merge
 // disagree about eligibility.
-func TestEligibleEvents_AgreesWithEligibleEventIDs(t *testing.T) {
+func TestEligibleEvents_AgreesWithEligibleMemberEventIDs(t *testing.T) {
 	s := openStore(t)
 	nid, _ := seedNarrativeWithEvents(t, s, 3)
 
@@ -243,14 +243,14 @@ func TestEligibleEvents_AgreesWithEligibleEventIDs(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("claude_code", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
-	byID, err := s.EligibleEventIDs(nid)
+	byID, err := s.EligibleMemberEventIDs(nid)
 	require.NoError(t, err)
-	hydrated, err := s.EligibleEvents(nid)
+	hydrated, err := s.EligibleMemberEvents(nid)
 	require.NoError(t, err)
 
 	assert.Len(t, hydrated, len(byID),
-		"EligibleEvents and EligibleEventIDs must select the same links")
+		"EligibleEvents and EligibleMemberEventIDs must select the same links")
 }

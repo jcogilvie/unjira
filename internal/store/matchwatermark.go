@@ -48,13 +48,18 @@ CREATE TABLE IF NOT EXISTS match_examinations (
 // events can carry keys it did not have when examined. Sequence, not timestamp — see
 // the schema comment above for the millisecond collision that made a timestamp
 // comparison a tombstone (F30).
+//
+// MEMBER links only (shared-context spec §3): matching never reads context, so a
+// context link carries no key matching could use, and re-admitting the narrative for
+// one would spend a pass — possibly a model call — on nothing new.
 const matchExaminationPredicate = `
 		 AND NOT EXISTS (
 		     SELECT 1 FROM match_examinations me
 		     WHERE me.narrative_id = n.id
 		       AND NOT EXISTS (
 		           SELECT 1 FROM narrative_events ne
-		           WHERE ne.narrative_id = n.id AND ne.link_seq > me.examined_link_seq
+		           WHERE ne.narrative_id = n.id AND ` + memberLink + `
+		             AND ne.link_seq > me.examined_link_seq
 		       )
 		 )`
 

@@ -159,6 +159,18 @@ func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
 		fmt.Printf("%s\n", indent(item.Narrative.Summary, "             "))
 	}
 
+	// Member placements the model was least sure of (correlator.member_confidence_floor,
+	// off by default). Printed with the work they were attributed to, because member
+	// links are the unit of token attribution: a reviewer who disagrees corrects one
+	// with [m]erge or [s]plit.
+	if len(item.Narrative.ToConfirm) > 0 {
+		fmt.Printf("  confirm:   %d event(s) attributed to this work below the confidence floor:\n",
+			len(item.Narrative.ToConfirm))
+		for _, at := range item.Narrative.ToConfirm {
+			fmt.Printf("             - [%s] %s  (confidence %.2f)\n", at.Source, at.Summary, at.Confidence)
+		}
+	}
+
 	fmt.Println()
 	fmt.Printf("%s\n", indent(bodyOf(a), "  "))
 	if a.Rationale != "" {

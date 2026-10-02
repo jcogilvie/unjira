@@ -66,8 +66,8 @@ func eventIDs(results []correlator.ClusterResult) []string {
 func TestCluster_CompleteResponseMakesExactlyOneCall(t *testing.T) {
 	f := newCoverageFixture(t)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0,1]},` +
-			`{"kind":"new","title":"PR 7","summary":"s","event_indices":[2,3]}]`,
+		`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0,1]},` +
+			`{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[2,3]}]`,
 	}}
 
 	results, stats, err := f.cluster(t, client)
@@ -82,7 +82,7 @@ func TestCluster_CompleteResponseMakesExactlyOneCall(t *testing.T) {
 func TestCluster_OmittedEventsAreRecoveredByOneReask(t *testing.T) {
 	// First response for every case: indices 0 and 1 extend narrative 9 as
 	// cluster position 0, and indices 2 and 3 are omitted.
-	const firstResponse = `[{"kind":"extends","narrative_id":9,"summary":"cache so far","event_indices":[0,1]}]`
+	const firstResponse = `[{"kind":"extends","narrative_id":9,"summary":"cache so far","confidence":0.9,"event_indices":[0,1]}]`
 
 	tests := []struct {
 		name  string
@@ -91,7 +91,7 @@ func TestCluster_OmittedEventsAreRecoveredByOneReask(t *testing.T) {
 	}{
 		{
 			name:  "into a brand-new cluster",
-			reask: `[{"kind":"new","title":"PR 7","summary":"opened and merged","event_indices":[2,3]}]`,
+			reask: `[{"kind":"new","title":"PR 7","summary":"opened and merged","confidence":0.9,"event_indices":[2,3]}]`,
 			check: func(t *testing.T, results []correlator.ClusterResult) {
 				t.Helper()
 				require.Len(t, results, 2)
@@ -106,7 +106,7 @@ func TestCluster_OmittedEventsAreRecoveredByOneReask(t *testing.T) {
 			// produce a second result for the same narrative_id. (A context
 			// narrative the first response left untouched is its own test below.)
 			name:  "into a context narrative the first response already extended",
-			reask: `[{"kind":"extends","narrative_id":9,"summary":"cache incl. PR 7","event_indices":[2,3]}]`,
+			reask: `[{"kind":"extends","narrative_id":9,"summary":"cache incl. PR 7","confidence":0.9,"event_indices":[2,3]}]`,
 			check: func(t *testing.T, results []correlator.ClusterResult) {
 				t.Helper()
 				require.Len(t, results, 1, "a second extends-9 must merge, not duplicate the narrative")
@@ -118,7 +118,7 @@ func TestCluster_OmittedEventsAreRecoveredByOneReask(t *testing.T) {
 		},
 		{
 			name:  "into a cluster from the first response, by position",
-			reask: `[{"kind":"earlier","cluster_position":0,"summary":"cache and PR 7","event_indices":[2,3]}]`,
+			reask: `[{"kind":"earlier","cluster_position":0,"summary":"cache and PR 7","confidence":0.9,"event_indices":[2,3]}]`,
 			check: func(t *testing.T, results []correlator.ClusterResult) {
 				t.Helper()
 				require.Len(t, results, 1)
@@ -132,7 +132,7 @@ func TestCluster_OmittedEventsAreRecoveredByOneReask(t *testing.T) {
 		},
 		{
 			name:  "into a cluster from the first response, keeping its summary when none is given",
-			reask: `[{"kind":"earlier","cluster_position":0,"event_indices":[2,3]}]`,
+			reask: `[{"kind":"earlier","cluster_position":0,"confidence":0.9,"event_indices":[2,3]}]`,
 			check: func(t *testing.T, results []correlator.ClusterResult) {
 				t.Helper()
 				require.Len(t, results, 1)
@@ -165,8 +165,8 @@ func TestCluster_OmittedEventsAreRecoveredByOneReask(t *testing.T) {
 func TestCluster_OmittedEventsCanExtendAnUntouchedContextNarrative(t *testing.T) {
 	f := newCoverageFixture(t)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"PR 7","summary":"s","event_indices":[2,3]}]`,
-		`[{"kind":"extends","narrative_id":9,"summary":"cache continued","event_indices":[0,1]}]`,
+		`[{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[2,3]}]`,
+		`[{"kind":"extends","narrative_id":9,"summary":"cache continued","confidence":0.9,"event_indices":[0,1]}]`,
 	}}
 
 	results, _, err := f.cluster(t, client)
@@ -182,8 +182,8 @@ func TestCluster_OmittedEventsCanExtendAnUntouchedContextNarrative(t *testing.T)
 func TestCluster_ReaskPromptCarriesWhatTheModelNeeds(t *testing.T) {
 	f := newCoverageFixture(t)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"summary":"cache so far","event_indices":[0,1]}]`,
-		`[{"kind":"new","title":"PR 7","summary":"s","event_indices":[2,3]}]`,
+		`[{"kind":"extends","narrative_id":9,"summary":"cache so far","confidence":0.9,"event_indices":[0,1]}]`,
+		`[{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[2,3]}]`,
 	}}
 
 	_, _, err := f.cluster(t, client)
@@ -208,8 +208,8 @@ func TestCluster_ReaskPromptCarriesWhatTheModelNeeds(t *testing.T) {
 func TestCluster_ReaskCarriesRulesAndInstruction(t *testing.T) {
 	f := newCoverageFixture(t)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0,1]}]`,
-		`[{"kind":"new","title":"PR 7","summary":"s","event_indices":[2,3]}]`,
+		`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0,1]}]`,
+		`[{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[2,3]}]`,
 	}}
 
 	_, _, err := correlator.Cluster(t.Context(), f.evts, f.existing, client, f.window, 128000,
@@ -224,8 +224,8 @@ func TestCluster_ReaskCarriesRulesAndInstruction(t *testing.T) {
 func TestCluster_EventsStillOmittedAfterReaskErrorLoudly(t *testing.T) {
 	f := newCoverageFixture(t)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0]}]`,
-		`[{"kind":"new","title":"PR 7","summary":"s","event_indices":[2]}]`,
+		`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0]}]`,
+		`[{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[2]}]`,
 	}}
 
 	results, stats, err := f.cluster(t, client)
@@ -241,7 +241,7 @@ func TestCluster_EventsStillOmittedAfterReaskErrorLoudly(t *testing.T) {
 }
 
 func TestCluster_MalformedReaskErrorsLoudly(t *testing.T) {
-	const firstResponse = `[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0,1]}]`
+	const firstResponse = `[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0,1]}]`
 
 	tests := []struct {
 		name    string
@@ -250,27 +250,27 @@ func TestCluster_MalformedReaskErrorsLoudly(t *testing.T) {
 	}{
 		{
 			name:    "out-of-range index",
-			reask:   `[{"kind":"new","title":"t","summary":"s","event_indices":[2,3,4]}]`,
+			reask:   `[{"kind":"new","title":"t","summary":"s","confidence":0.9,"event_indices":[2,3,4]}]`,
 			wantErr: "event_indices value 4 out of range [0,4)",
 		},
 		{
 			name:    "index that was already assigned",
-			reask:   `[{"kind":"new","title":"t","summary":"s","event_indices":[0,2,3]}]`,
+			reask:   `[{"kind":"new","title":"t","summary":"s","confidence":0.9,"event_indices":[0,2,3]}]`,
 			wantErr: "event_indices value 0 was not one of the omitted indices [2 3]",
 		},
 		{
 			name:    "earlier cluster position out of range",
-			reask:   `[{"kind":"earlier","cluster_position":1,"event_indices":[2,3]}]`,
+			reask:   `[{"kind":"earlier","cluster_position":1,"confidence":0.9,"event_indices":[2,3]}]`,
 			wantErr: "cluster_position 1 out of range [0,1)",
 		},
 		{
 			name:    "earlier without a cluster position",
-			reask:   `[{"kind":"earlier","event_indices":[2,3]}]`,
+			reask:   `[{"kind":"earlier","confidence":0.9,"event_indices":[2,3]}]`,
 			wantErr: `kind "earlier" without cluster_position`,
 		},
 		{
 			name:    "unknown kind",
-			reask:   `[{"kind":"bogus","event_indices":[2,3]}]`,
+			reask:   `[{"kind":"bogus","confidence":0.9,"event_indices":[2,3]}]`,
 			wantErr: `unknown kind "bogus"`,
 		},
 		{
@@ -299,7 +299,7 @@ func TestCluster_MalformedReaskErrorsLoudly(t *testing.T) {
 func TestCluster_EarlierKindIsRejectedInAFirstResponse(t *testing.T) {
 	f := newCoverageFixture(t)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"earlier","cluster_position":0,"event_indices":[0,1,2,3]}]`,
+		`[{"kind":"earlier","cluster_position":0,"confidence":0.9,"event_indices":[0,1,2,3]}]`,
 	}}
 
 	_, _, err := f.cluster(t, client)
@@ -308,27 +308,51 @@ func TestCluster_EarlierKindIsRejectedInAFirstResponse(t *testing.T) {
 	require.ErrorContains(t, err, `unknown kind "earlier"`)
 }
 
-// Double assignment is deliberately left alone: a separate design (shared
-// context attached to several narratives) will change that contract. An event
-// in two clusters must parse exactly as it did before coverage was checked —
-// accepted, present in both, no error and no re-ask.
-func TestCluster_DoubleAssignmentIsUnchanged(t *testing.T) {
+// Double assignment is not omission: an event in two clusters' event_indices is
+// assigned, so the coverage re-ask is not made for it. It is a dispute, resolved by
+// the dispute re-ask (cluster_dispute_test.go), which is the only follow-up here.
+func TestCluster_DoubleAssignmentIsNotAnOmission(t *testing.T) {
 	f := newCoverageFixture(t)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0,1,2]},` +
-			`{"kind":"new","title":"PR 7","summary":"s","event_indices":[2,3]}]`,
+		`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0,1,2]},` +
+			`{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[2,3]}]`,
+		`[{"rationale":"r","event_index":0,"member":{"cluster_position":1},"confidence":0.8}]`,
+	}}
+
+	_, stats, err := f.cluster(t, client)
+
+	require.NoError(t, err)
+	require.Len(t, client.prompts, 2, "one dispute re-ask, and no coverage re-ask")
+	assert.Zero(t, stats.OmittedEvents)
+	assert.Equal(t, 1, stats.DisputedEvents)
+}
+
+// An event named only in context_indices has no home. Counting the mention as
+// assignment would let the coverage guarantee be satisfied by an event with no
+// member link — the context-only case the shared-context design forbids (§4,
+// "Coupling with the re-ask branch").
+func TestCluster_AContextOnlyMentionIsAnOmission(t *testing.T) {
+	f := newCoverageFixture(t)
+	client := &fakeLLM{responses: []string{
+		`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0,1],"context_indices":[2]},` +
+			`{"kind":"new","title":"PR 7","summary":"s","confidence":0.9,"event_indices":[3]}]`,
+		`[{"kind":"earlier","cluster_position":1,"confidence":0.7,"event_indices":[2]}]`,
 	}}
 
 	results, stats, err := f.cluster(t, client)
 
 	require.NoError(t, err)
-	require.Len(t, client.prompts, 1, "double assignment is not omission, so no re-ask")
+	require.Len(t, client.prompts, 2, "the context-only event was re-asked for")
+	assert.Contains(t, client.prompts[1], "Assign each of them: [2]")
+	assert.Equal(t, 1, stats.OmittedEvents)
 	require.Len(t, results, 2)
-	assert.Equal(t, []string{
-		"claude_code/e0", "claude_code/e1", "github/pr-7-opened",
-		"github/pr-7-opened", "github/pr-7-merged",
-	}, eventIDs(results))
-	assert.Zero(t, stats.OmittedEvents)
+	assert.Equal(t, []string{"github/pr-7-merged", "github/pr-7-opened"}, eventIDs(results[1:]),
+		"recovered into the new cluster as a member")
+	assert.InDelta(t, 0.7, results[1].ConfidenceOf(results[1].Events[1]), 1e-9,
+		"the joined member keeps the re-ask's confidence, not the cluster's")
+	assert.InDelta(t, 0.9, results[1].ConfidenceOf(results[1].Events[0]), 1e-9)
+	require.Len(t, results[0].ContextEvents, 1, "and stays background for the extend")
+	assert.Equal(t, "pr-7-opened", results[0].ContextEvents[0].ExternalID)
 }
 
 // An eligible event (a context narrative's uncommitted link) that the model
@@ -347,7 +371,7 @@ func TestCluster_OmittedEligibleEventIsNotReasked(t *testing.T) {
 		mustEvent(t, "github", "pr-500", "ELIGIBLE uncommitted work", f.window.Start.Add(-30*time.Minute)),
 	}
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"all","summary":"s","event_indices":[0,1,2,3]}]`,
+		`[{"kind":"new","title":"all","summary":"s","confidence":0.9,"event_indices":[0,1,2,3]}]`,
 	}}
 
 	results, stats, err := f.cluster(t, client)
@@ -371,11 +395,11 @@ func TestCluster_SplitHalvesEachRecoverTheirOwnOmissions(t *testing.T) {
 	client := &fakeLLM{
 		responses: []string{
 			// First half: omits a2, then recovers it into its own cluster 0.
-			`[{"kind":"new","title":"A","summary":"s","event_indices":[0]}]`,
-			`[{"kind":"earlier","cluster_position":0,"event_indices":[1]}]`,
+			`[{"kind":"new","title":"A","summary":"s","confidence":0.9,"event_indices":[0]}]`,
+			`[{"kind":"earlier","cluster_position":0,"confidence":0.9,"event_indices":[1]}]`,
 			// Second half: omits b1, then recovers it as a new cluster.
-			`[{"kind":"new","title":"B","summary":"s","event_indices":[1]}]`,
-			`[{"kind":"new","title":"B0","summary":"s","event_indices":[0]}]`,
+			`[{"kind":"new","title":"B","summary":"s","confidence":0.9,"event_indices":[1]}]`,
+			`[{"kind":"new","title":"B0","summary":"s","confidence":0.9,"event_indices":[0]}]`,
 			// Merge-boundary same-story check between A and B.
 			`{"same_story":false}`,
 		},
@@ -406,8 +430,8 @@ func TestCluster_SplitHalfStillOmittingErrorsLoudly(t *testing.T) {
 		mustEvent(t, "claude_code", "b2", strings.Repeat("d", 2000), base.Add(time.Hour+time.Minute)),
 	}
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"new","title":"A","summary":"s","event_indices":[0,1]}]`,
-		`[{"kind":"new","title":"B","summary":"s","event_indices":[1]}]`,
+		`[{"kind":"new","title":"A","summary":"s","confidence":0.9,"event_indices":[0,1]}]`,
+		`[{"kind":"new","title":"B","summary":"s","confidence":0.9,"event_indices":[1]}]`,
 		`[]`,
 	}}
 
@@ -440,7 +464,7 @@ func TestCluster_ReaskOverBudgetErrorsLoudly(t *testing.T) {
 	sys, user := correlator.BuildClusterPromptForTest(f.evts, f.existing)
 	exactFit := correlator.EstimateTokensForTest(sys + user)
 	client := &fakeLLM{responses: []string{
-		`[{"kind":"extends","narrative_id":9,"summary":"s","event_indices":[0,1]}]`,
+		`[{"kind":"extends","narrative_id":9,"summary":"s","confidence":0.9,"event_indices":[0,1]}]`,
 	}}
 
 	results, _, err := correlator.Cluster(t.Context(), f.evts, f.existing, client, f.window, exactFit)

@@ -125,7 +125,7 @@ func seedNarrative19(t *testing.T, s *store.Store) int64 {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	return nid
@@ -250,7 +250,7 @@ func TestMatch_SingleCandidateStillSkipsTheClassifier(t *testing.T) {
 	require.NoError(t, err)
 	eid, err := s.EventIDByExternalID("jira", "single:1")
 	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+	require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 
 	tracker := &narrative19Tracker{}
 	client := &promptCapturingLLM{response: "[]"}
@@ -302,7 +302,7 @@ func TestMatch_LoneJiraEventCandidateLinksDeterministically(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID(e.Source, e.ExternalID)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	tracker := &narrative19Tracker{}
@@ -360,7 +360,7 @@ func TestMatch_NarrativeCapIsSeparateFromCandidateCap(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("jira", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	// A tracker that resolves anything, so nothing is lost to verification.
@@ -406,7 +406,7 @@ func TestMatch_NarrativeCapIsHonouredAndLogged(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("jira", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	// The logger is INJECTED rather than captured by redirecting the global log package.
@@ -451,7 +451,7 @@ func TestMatch_ExactlyFullBatchDoesNotWarn(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("jira", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	// Injected, not captured from the global log package — which after the slog

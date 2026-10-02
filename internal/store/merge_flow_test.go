@@ -24,7 +24,7 @@ func seedN(t *testing.T, s *store.Store, title string, extIDs ...string) (int64,
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("claude_code", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 		ids = append(ids, eid)
 	}
 
@@ -53,18 +53,27 @@ func TestMergeFlow_CommittedNarrativeIsTheTarget(t *testing.T) {
 
 	b, bEvents := seedN(t, s, "B uncommitted", "m:b1")
 
-	eligibleOnB, err := s.EligibleEventIDs(b)
+	eligibleOnB, err := s.EligibleMemberEventIDs(b)
 	require.NoError(t, err)
 	require.ElementsMatch(t, bEvents, eligibleOnB, "B never committed: all of B is eligible")
 
-	eligibleOnA, err := s.EligibleEventIDs(a)
+	eligibleOnA, err := s.EligibleMemberEventIDs(a)
 	require.NoError(t, err)
 	require.Empty(t, eligibleOnA, "A's events predate its commit: frozen")
 
 	// Direction: A committed, B not => A is the target. Move only B's ELIGIBLE
-	// events onto A, then unlink them from B so nothing is double-linked.
-	require.NoError(t, s.AddNarrativeEvents(a, eligibleOnB))
-	require.NoError(t, s.UnlinkNarrativeEvents(b, eligibleOnB))
+	// events onto A. MoveMember deletes B's member link before inserting A's, the
+	// only order one_member_link_per_event permits: the old add-then-unlink order
+	// fails that index on exactly this ordinary case.
+	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+		for _, eid := range eligibleOnB {
+			if err := tx.MoveMember(a, eid, store.ReviewerMemberConfidence); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}))
 
 	countA, err := s.NarrativeEventCount(a)
 	require.NoError(t, err)
@@ -75,7 +84,7 @@ func TestMergeFlow_CommittedNarrativeIsTheTarget(t *testing.T) {
 	assert.Equal(t, 0, countB, "B is emptied, not double-linked")
 
 	// Nothing laundered A's committed events into eligibility.
-	stillFrozen, err := s.EligibleEventIDs(a)
+	stillFrozen, err := s.EligibleMemberEventIDs(a)
 	require.NoError(t, err)
 	assert.NotContains(t, stillFrozen, aEvents[0], "A's committed event must remain frozen")
 	assert.NotContains(t, stillFrozen, aEvents[1], "A's committed event must remain frozen")

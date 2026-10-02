@@ -41,8 +41,9 @@ const truncationMarker = "…"
 // something was truncated but not whether raising the cap by 100 or by 10,000 recovers
 // it.
 type TruncationReport struct {
-	// Truncated counts EVENTS, not render sites. An event appears in both Events and
-	// EligibleEvents, so counting sites would double every number.
+	// Truncated counts EVENTS, not render sites. One event can appear at several
+	// (EligibleEvents on one narrative, ContextEvents on others), so counting sites
+	// would multiply every number.
 	Truncated int
 	// OriginalLengths are the pre-truncation character counts, ascending, so the
 	// largest — the one that decides the next cap — reads last.
@@ -102,6 +103,11 @@ func capEventSummaries(in []Narrative, maxChars int) ([]Narrative, TruncationRep
 	for _, n := range in {
 		n.Events = cut(n.Events)
 		n.EligibleEvents = cut(n.EligibleEvents)
+		// The third render site: a context link that is not also numbered renders its
+		// summary in full under its narrative's background heading, so it is bounded
+		// like any other context event. (One that IS numbered renders as "-> #N" and
+		// costs no summary; cutting it here still keeps its copy consistent.)
+		n.ContextEvents = cut(n.ContextEvents)
 		out = append(out, n)
 	}
 

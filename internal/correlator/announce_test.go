@@ -87,7 +87,7 @@ func TestCluster_AnnouncesBeforeTheCall(t *testing.T) {
 	var buf bytes.Buffer
 
 	fake := &announceLLM{
-		response: `[{"kind":"new","title":"t","summary":"s","event_indices":[0,1,2]}]`,
+		response: `[{"kind":"new","title":"t","summary":"s","confidence":0.9,"event_indices":[0,1,2]}]`,
 		buf:      &buf,
 	}
 
@@ -132,7 +132,7 @@ func TestCluster_AnnouncesTheContextCount(t *testing.T) {
 
 	_, _, err := correlator.Cluster(
 		t.Context(), announceEvents(1), existing,
-		&announceLLM{response: `[{"kind":"new","title":"t","summary":"s","event_indices":[0]}]`},
+		&announceLLM{response: `[{"kind":"new","title":"t","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 		announceWindow(),
 		200000,
 		*announceLogger(t, &buf),
@@ -152,7 +152,7 @@ func TestCluster_AnnouncesTheContextCount(t *testing.T) {
 func TestCluster_WithoutALoggerStaysSilent(t *testing.T) {
 	_, _, err := correlator.Cluster(
 		t.Context(), announceEvents(1), nil,
-		&announceLLM{response: `[{"kind":"new","title":"t","summary":"s","event_indices":[0]}]`},
+		&announceLLM{response: `[{"kind":"new","title":"t","summary":"s","confidence":0.9,"event_indices":[0]}]`},
 		announceWindow(),
 		200000,
 	)

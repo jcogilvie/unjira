@@ -117,7 +117,7 @@ func seedNarrative(t *testing.T, s *store.Store, title, summary string, evts ...
 		eventIDs = append(eventIDs, eid)
 	}
 
-	require.NoError(t, s.AddNarrativeEvents(id, eventIDs))
+	require.NoError(t, s.LinkMembers(id, eventIDs, 1))
 
 	return id
 }

@@ -167,10 +167,12 @@ func proposeCreateOne(
 
 	var stats correlator.Stats
 
-	// AllNarrativeEvents, not DeltaEvents: there is no prior action to compute a
+	// AllMemberEvents, not DeltaEvents: there is no prior action to compute a
 	// delta against, and a create must describe the whole body of work rather
 	// than "what's new" — the issue is being opened for all of it at once.
-	evts, err := s.AllNarrativeEvents(narrative.ID)
+	// Member events only: a create opens a ticket for THIS narrative's work, and a
+	// context event is another narrative's (shared-context spec §2).
+	evts, err := s.AllMemberEvents(narrative.ID)
 	if err != nil {
 		return result, stats, fmt.Errorf("loading events for narrative %d: %w", narrative.ID, err)
 	}

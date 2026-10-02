@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,8 +55,12 @@ type reaskRequest struct {
 
 // unassignedIndices returns, ascending, every index in [0, n) that appears in no
 // cluster's event_indices. An index in several clusters counts as assigned:
-// double assignment is not omission, and its contract is not this check's to
-// change.
+// double assignment is not omission, and the dispute re-ask resolves it.
+//
+// indices are MEMBER placements only. An index named only in some cluster's
+// context_indices is unassigned here: "assigned" must mean "has a home", or the
+// guarantee would be satisfied by an event that has none — the context-only case the
+// shared-context design forbids (spec §4, "Coupling with the re-ask branch").
 //
 // n is the number of indices that MUST be placed — the in-window events, which
 // assignableEvents numbers first — not the size of the whole index space. Indices
@@ -174,8 +179,14 @@ Each element of your response places some unassigned events in one of three plac
 - "extends": an existing narrative, by narrative_id, with the narrative's updated summary.
 - "new": a brand-new cluster, with a title and summary.
 
+An event listed only in a cluster's context_indices still has no home: it must be placed in event_indices here. confidence is how sure you are that the events in this element's event_indices are that cluster's work, from 0 to 1.
+
 Return ONLY a JSON array matching this shape, no prose, no markdown fences:
-[{"kind":"earlier"|"extends"|"new","cluster_position":<int, only if earlier>,"narrative_id":<int, only if extends>,"title":"..., only if new","summary":"...","event_indices":[3]}]
+[{"kind":"earlier"|"extends"|"new","cluster_position":<int, only if earlier>,"narrative_id":<int, only if extends>,"title":"..., only if new","summary":"...","confidence":<0.0-1.0>,"event_indices":[3],"context_indices":[1]}]
+
+` + clusterContextRule + `
+
+` + clusterSummaryRule + `
 
 ` + clusterGroupingCriterion + `
 
@@ -185,12 +196,14 @@ Prefer joining a cluster that covers the same ticket/branch/PR/topic over openin
 // clusterResponseItem plus cluster_position, which only "earlier" uses. A pointer
 // so an "earlier" without one is an error, not a silent join to position 0.
 type reaskResponseItem struct {
-	Kind            string `json:"kind"`
-	ClusterPosition *int   `json:"cluster_position"`
-	NarrativeID     int64  `json:"narrative_id"`
-	Title           string `json:"title"`
-	Summary         string `json:"summary"`
-	EventIndices    []int  `json:"event_indices"`
+	Kind            string   `json:"kind"`
+	ClusterPosition *int     `json:"cluster_position"`
+	NarrativeID     int64    `json:"narrative_id"`
+	Title           string   `json:"title"`
+	Summary         string   `json:"summary"`
+	Confidence      *float64 `json:"confidence"`
+	EventIndices    []int    `json:"event_indices"`
+	ContextIndices  []int    `json:"context_indices"`
 }
 
 // mergeReaskResponse parses raw against the same assignable slice the first
@@ -220,12 +233,19 @@ func mergeReaskResponse(raw string, evts []Event, first []ClusterResult, omitted
 	placed := make(map[int]bool, len(omitted))
 
 	for _, item := range items {
-		itemEvents, err := resolveReaskIndices(raw, item.EventIndices, evts, omitted)
+		if err := requireOmitted(raw, item.EventIndices, evts, omitted); err != nil {
+			return nil, nil, err
+		}
+
+		// context_indices are not restricted to the omitted events: a context link
+		// moves nothing, so naming an already-placed event as background revises no
+		// answer the model was told stands.
+		p, err := resolvePlacement("cluster re-ask response", raw, item.EventIndices, item.ContextIndices, item.Confidence, evts)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		merged, err = placeReaskItem(raw, merged, len(first), item, itemEvents)
+		merged, err = placeReaskItem(raw, merged, len(first), item, p)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -245,29 +265,27 @@ func mergeReaskResponse(raw string, evts []Event, first []ClusterResult, omitted
 	return merged, stillMissing, nil
 }
 
-// resolveReaskIndices maps one re-ask item's indices to events, rejecting any
-// index out of range or not among those omitted.
-func resolveReaskIndices(raw string, indices []int, evts []Event, omitted []int) ([]Event, error) {
-	out := make([]Event, 0, len(indices))
+// requireOmitted rejects any re-ask event_indices value out of range or not among
+// those omitted.
+func requireOmitted(raw string, indices []int, evts []Event, omitted []int) error {
 	for _, idx := range indices {
 		if idx < 0 || idx >= len(evts) {
-			return nil, fmt.Errorf("parsing cluster re-ask response %q: event_indices value %d out of range [0,%d)",
+			return fmt.Errorf("parsing cluster re-ask response %q: event_indices value %d out of range [0,%d)",
 				raw, idx, len(evts))
 		}
 		if !slices.Contains(omitted, idx) {
-			return nil, fmt.Errorf("parsing cluster re-ask response %q: event_indices value %d was not one of the omitted indices %v",
+			return fmt.Errorf("parsing cluster re-ask response %q: event_indices value %d was not one of the omitted indices %v",
 				raw, idx, omitted)
 		}
-		out = append(out, evts[idx])
 	}
 
-	return out, nil
+	return nil
 }
 
 // placeReaskItem puts one re-ask item's events where it says, returning the
 // updated results. firstLen bounds cluster_position to the first response: the
 // model was shown those positions and no others.
-func placeReaskItem(raw string, merged []ClusterResult, firstLen int, item reaskResponseItem, itemEvents []Event) ([]ClusterResult, error) {
+func placeReaskItem(raw string, merged []ClusterResult, firstLen int, item reaskResponseItem, p resolvedPlacement) ([]ClusterResult, error) {
 	switch item.Kind {
 	case "earlier":
 		if item.ClusterPosition == nil {
@@ -278,14 +296,14 @@ func placeReaskItem(raw string, merged []ClusterResult, firstLen int, item reask
 			return nil, fmt.Errorf("parsing cluster re-ask response %q: cluster_position %d out of range [0,%d)",
 				raw, pos, firstLen)
 		}
-		joinCluster(&merged[pos], itemEvents, item.Summary)
+		joinCluster(&merged[pos], p, item.Summary)
 
 		return merged, nil
 
 	case wireKindExtends:
 		for i := range merged {
 			if merged[i].Kind == ClusterExtends && merged[i].NarrativeID == item.NarrativeID {
-				joinCluster(&merged[i], itemEvents, item.Summary)
+				joinCluster(&merged[i], p, item.Summary)
 
 				return merged, nil
 			}
@@ -293,12 +311,14 @@ func placeReaskItem(raw string, merged []ClusterResult, firstLen int, item reask
 
 		return append(merged, ClusterResult{
 			Kind: ClusterExtends, NarrativeID: item.NarrativeID,
-			Title: item.Title, Summary: item.Summary, Events: itemEvents,
+			Title: item.Title, Summary: item.Summary, Events: p.members,
+			ContextEvents: p.context, Confidence: p.confidence,
 		}), nil
 
 	case wireKindNew:
 		return append(merged, ClusterResult{
-			Kind: ClusterNew, Title: item.Title, Summary: item.Summary, Events: itemEvents,
+			Kind: ClusterNew, Title: item.Title, Summary: item.Summary, Events: p.members,
+			ContextEvents: p.context, Confidence: p.confidence,
 		}), nil
 
 	default:
@@ -306,11 +326,14 @@ func placeReaskItem(raw string, merged []ClusterResult, firstLen int, item reask
 	}
 }
 
-// joinCluster adds evts to r, replacing its summary only when one was supplied.
-// The events slice is copied rather than appended in place, so a merged result
-// never shares a backing array with the first response's.
-func joinCluster(r *ClusterResult, evts []Event, summary string) {
-	r.Events = slices.Concat(r.Events, evts)
+// joinCluster adds a re-ask item's events to r, replacing r's summary only when one
+// was supplied. The joined members keep the confidence the RE-ASK stated for them,
+// recorded as per-event overrides: it is a separate judgment from the one r's own
+// confidence describes. absorb copies rather than appends in place, so a merged
+// result never shares a backing array with the first response's.
+func joinCluster(r *ClusterResult, p resolvedPlacement, summary string) {
+	r.MemberConfidence = maps.Clone(r.MemberConfidence)
+	absorb(r, p.members, p.context, func(Event) float64 { return p.confidence })
 	if summary != "" {
 		r.Summary = summary
 	}

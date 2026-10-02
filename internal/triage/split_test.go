@@ -15,12 +15,12 @@ import (
 
 // twoClusters is the response a model gives when it agrees the events are two
 // stories. Indices refer to the "Events to cluster" numbering.
-const twoClusters = `[{"kind":"new","title":"story A","summary":"the first thing","event_indices":[0]},` +
-	`{"kind":"new","title":"story B","summary":"the second thing","event_indices":[1]}]`
+const twoClusters = `[{"kind":"new","title":"story A","summary":"the first thing","confidence":0.9,"event_indices":[0]},` +
+	`{"kind":"new","title":"story B","summary":"the second thing","confidence":0.9,"event_indices":[1]}]`
 
 // oneCluster is the response when the model disagrees with the reviewer.
 const oneCluster = `[{"kind":"new","title":"actually one story","summary":"all of it",` +
-	`"event_indices":[0,1]}]`
+	`"confidence":0.9,"event_indices":[0,1]}]`
 
 // splitStore seeds a narrative holding count events, none linked to an issue,
 // returning the narrative id and its event ids in order.
@@ -44,7 +44,7 @@ func splitStore(t *testing.T, count int) (*store.Store, int64, []int64) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("claude_code", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 		ids = append(ids, eid)
 	}
 
@@ -61,7 +61,8 @@ func TestSplitNarrative_ProducesSeparateNarratives(t *testing.T) {
 	s, nid, _ := splitStore(t, 2)
 	client := &wireLLM{responses: []string{twoClusters}}
 
-	got, err := splitHandler(s, client).SplitNarrative(context.Background(), nid)
+	split, err := splitHandler(s, client).SplitNarrative(context.Background(), nid)
+	got := split.Narratives
 
 	require.NoError(t, err)
 	require.Len(t, got, 2, "a split must yield more than one narrative")
@@ -87,7 +88,7 @@ func TestSplitNarrative_MarksTheEmptiedSourceSplit(t *testing.T) {
 
 	count, err := s.NarrativeEventCount(nid)
 	require.NoError(t, err)
-	require.Zero(t, count, "precondition: Persist's relinkEvents emptied the source")
+	require.Zero(t, count, "precondition: Persist's MoveMember emptied the source")
 
 	src, err := s.GetNarrative(nid)
 	require.NoError(t, err)
@@ -125,12 +126,13 @@ func TestSplitNarrative_KeepsCommittedEventsOnTheSource(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("claude_code", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	client := &wireLLM{responses: []string{twoClusters}}
 
-	got, err := splitHandler(s, client).SplitNarrative(context.Background(), nid)
+	split, err := splitHandler(s, client).SplitNarrative(context.Background(), nid)
+	got := split.Narratives
 
 	require.NoError(t, err)
 	require.Len(t, got, 2)
@@ -176,7 +178,7 @@ func TestSplitNarrative_OnlyEligibleEventsAreOffered(t *testing.T) {
 		require.NoError(t, err)
 		eid, err := s.EventIDByExternalID("claude_code", ext)
 		require.NoError(t, err)
-		require.NoError(t, s.AddNarrativeEvents(nid, []int64{eid}))
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
 	}
 
 	client := &wireLLM{responses: []string{twoClusters}}
@@ -288,11 +290,12 @@ func TestSplitNarrative_ForcesResultsToNewEvenIfTheModelSaysExtends(t *testing.T
 
 	client := &wireLLM{responses: []string{
 		`[{"kind":"extends","narrative_id":` + itoa(bystander) + `,"title":"hijacked",` +
-			`"summary":"s","event_indices":[0]},` +
-			`{"kind":"new","title":"story B","summary":"s","event_indices":[1]}]`,
+			`"summary":"s","confidence":0.9,"event_indices":[0]},` +
+			`{"kind":"new","title":"story B","summary":"s","confidence":0.9,"event_indices":[1]}]`,
 	}}
 
-	got, err := splitHandler(s, client).SplitNarrative(context.Background(), nid)
+	split, err := splitHandler(s, client).SplitNarrative(context.Background(), nid)
+	got := split.Narratives
 
 	require.NoError(t, err)
 	require.Len(t, got, 2)
