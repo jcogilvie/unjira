@@ -1376,6 +1376,33 @@ the session directory holds `tool-results/*.jsonl` that a recursive walk would i
 - Read a sample of the real files before designing against a description of them. The description
   this work started from said a subagent's `gitBranch` reads `main`; it reads the parent's branch,
   whatever that is — 27 of 31 checkable cases were not `main` at all.
+
+## 42. A parser that validates every element can still accept an incomplete answer
+
+`parseClusterResponse` rejected invalid JSON, unknown kinds and out-of-range indices, and its doc
+comment promised "never a partial or best-effort result". It never checked that every numbered event
+had been assigned. On three real 116-event clustering passes, one rendered **111**: all five events of
+one PR were in no cluster, and nothing reported it. Under `unjira watch` the loss is permanent. An
+unlinked event is offered to clustering only while it is inside the rolling window, and the window
+moves past it.
+
+The parser checked each element against the contract. It never checked the response as a whole, and
+an answer can be well formed element by element and still incomplete. Every check it ran was about
+something the model *wrote*, and omission is something the model *did not write*, so no per-element
+check can see it. Only a check over the whole set can.
+
+The fix re-asks once for exactly the omitted events and errors loudly on anything still missing
+(`correlator/cluster_reask.go`). The re-ask repeats the original prompt verbatim, so indices keep
+their meaning, and names first-response clusters by position, because a cluster tagged "new" has no
+narrative_id to name it by.
+
+> When a model is asked to partition a set, validate the partition, not just the parts: every input
+> placed, checked over the whole answer.
+
+The same shape applies anywhere a model returns a selection over numbered inputs: the classifier's
+verdicts per candidate, the reconciler's actions per narrative. Each such site should ask what an
+*absent* entry means, and whether anything would notice one.
+
 ## What these validate about the architecture
 
 - **The correlator/reconciler split is the core defense.** The pain came from conflating "extract
