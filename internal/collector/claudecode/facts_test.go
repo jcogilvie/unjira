@@ -156,7 +156,7 @@ func TestSegmentSummary_StatesWhatTheSessionDid(t *testing.T) {
 	}
 
 	segs := segments(lines, 0)
-	got := segmentSummary("helm-charts", transcript{}, segs[0])
+	got := segmentSummary("helm-charts", transcript{}, segs[0], nil)
 
 	assert.Contains(t, got, "committed",
 		"a rationale must not be able to say 'no completion evidence' about a session that committed")
@@ -174,7 +174,7 @@ func TestSegmentSummary_UnchangedWhenNothingWasDone(t *testing.T) {
 	}
 
 	segs := segments(lines, 0)
-	got := segmentSummary("helm-charts", transcript{}, segs[0])
+	got := segmentSummary("helm-charts", transcript{}, segs[0], nil)
 
 	assert.NotContains(t, got, "committed")
 	assert.NotContains(t, got, "Did:",

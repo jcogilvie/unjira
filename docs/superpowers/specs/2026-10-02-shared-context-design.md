@@ -1,6 +1,6 @@
 # Shared context — one event, several narratives — design
 
-## Status: slice 1 landed 2026-10-02 — gate passed, but the feature is not yet USED
+## Status: slice 1 landed 2026-10-02 — gate passed; context links used once segments name their PRs
 
 Slice 1 (§"First slice", items 1–6) is implemented. Slices 2 and 3 are not.
 
@@ -68,6 +68,41 @@ M7  screen: 0 pass-2 member placement(s) whose evidence points at another pass-1
 Two-pass M3 went from 24/26 to 26/26, and the four placements are exactly the merged/closed events of
 #72 and #73, the two PRs that split before. No several-holders or not-open fallbacks occurred, and no
 rep showed F45's reshuffle. See `docs/architecture-findings.md` F45 and F46 for what the join leaves open.
+
+**The cheaper first step, taken: a segment names the PRs its run opened.** The "inert" verdict above
+traced to the evidence. A root segment's summary said "opened a PR" and named none, so the model could
+not judge relevance it could not see. `segmentSummary` now appends `Opened pull requests: <owner>/<repo>#<N>, …`.
+It covers exactly the PRs whose anchor resolved as `created` from a call on the segment's own lines,
+in call order, deduplicated by host-qualified key, spelled as the github collector spells them. No
+artifact is added, because the summary is all clustering renders. The bound is 25, with the rest counted.
+It sits above every measured segment: 126 PR-opening segments across all projects' transcripts, max 19,
+two above 10. Reusing the ambiguous-candidate limit of 10 would have cut #71–#73 from the 13-PR segment
+behind this measurement, which are exactly the PRs the measurement was about. PRs a subagent opened are
+not named in its root's segment (F47). That needs lineage, which is slice 2's job, and here it was 0 of
+70 created-PR anchors.
+
+Re-measured on a fresh snapshot collected with this build: 116 in-window events, the same window, and 3
+single-pass plus 3 two-pass reps (`SHARED_CUT` as above).
+
+| | single-pass | two-pass | slice 1 before (single / two-pass) |
+|---|---|---|---|
+| M1 member-only → member-or-context | 12→13 /15, 13→15 /22, **13→20 /22** | 11→11 /19, 11→12 /17, 10→10 /15 | equal in all 6 |
+| M4 context links written | **18, 2, 13** | 2, 51, 21 | 0, 0, 0 / 18, 0, 4 |
+| M2 anchor↔PR coalescing | 21/21 ×3 | 21/21 ×3 | 21/21 |
+| M3 PR integrity | 26/26 ×3 | 26/26 ×3 (4 by identity) | 26/26 / 26/26 |
+| M6a delta exclusivity | 0 violations ×3 | 0 violations ×3 | 0 |
+| M7 attraction screen | — | **0, 0, 0** | 0 |
+
+**Verdict: the feature is now used, and the gate still passes.** Single-pass M1 rises in every rep, by
+up to 7 narratives. Two-pass gains less, because pass 2 sees only the window after the cut, and the
+13-PR segment ends before it. The attraction risk the summary change could have created, a segment that
+names other work gluing the workstreams together, did not appear. M7 is 0 in all three two-pass reps.
+The narratives holding several PRs repeat groupings slice 1's baseline reps already made (#65/#66/#70/#73/#55,
+#61/#63, #67/#68 in its rep 3). The one new grouping, #58 with #59, is defensible: #59 is #58's docs
+follow-up ("delete the findings #58 fixed"). Read by hand, the shape is the one this design asked for:
+- In single-pass rep 3, the 13-PR segment is a **member** of #61's narrative and **context** to ten
+  others (#64–#73). Every target is a PR it opened.
+- In rep 1, the segment that opened #58–#60 is a member of the #58/#59 narrative and context to #60's.
 
 Verified offline, in the worktree:
 
