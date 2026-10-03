@@ -146,6 +146,14 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 	return nil
 }
 
+// openedPullRequestLimit bounds how many PRs a segment summary names; the rest are
+// counted, never dropped silently. Set above every measured segment — 126 segments that
+// opened PRs, across all projects' transcripts, max 19, two above 10 — so it cuts only
+// a runaway loop. Not summaryCandidateLimit: ambiguous candidates are noise to list, while
+// these are the very PRs a segment's work touched, and cutting #71–#73 from a 13-PR run
+// hid exactly the ones the shared-context measurement was about.
+const openedPullRequestLimit = 25
+
 // segmentSummary renders the one-line human-readable summary for one branch run.
 //
 // The opening line is the segment's OWN first message, not the session's. That
@@ -153,11 +161,12 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 // opening ask, so three unrelated bodies of work were all described as "putting together
 // an architectural vision document" — the summary clustering and the review queue both
 // read.
-func segmentSummary(project string, t transcript, seg segment) string {
-	opening := strings.TrimSpace(strings.ReplaceAll(seg.userTexts[0], "\n", " "))
-	if len(opening) > 160 {
-		opening = opening[:157] + "..."
-	}
+//
+// opened is the PRs this run's own calls created (openedPullRequests), named so the
+// clustering model can see which work a segment touched: a run that orchestrated
+// several PRs otherwise read only "opened a PR", which names none of them.
+func segmentSummary(project string, t transcript, seg segment, opened []string) string {
+	opening := truncate(seg.userTexts[0], 160)
 
 	branchNote := ""
 	if seg.gitBranch != "" {
@@ -176,9 +185,21 @@ func segmentSummary(project string, t transcript, seg segment) string {
 		factsNote = " Did: " + strings.Join(facts, ", ") + "."
 	}
 
+	// Omitted when empty for the reason the facts clause is: no clause is "no record",
+	// an empty one would read as a claim.
+	openedNote := ""
+	if len(opened) > 0 {
+		named, more := opened, ""
+		if len(named) > openedPullRequestLimit {
+			more = fmt.Sprintf(" and %d more", len(named)-openedPullRequestLimit)
+			named = named[:openedPullRequestLimit]
+		}
+		openedNote = " Opened pull requests: " + strings.Join(named, ", ") + more + "."
+	}
+
 	return fmt.Sprintf(
-		`%s in %s%s: %d user messages. Opened with: "%s"%s`,
-		sessionLabel(t), project, branchNote, len(seg.userTexts), opening, factsNote,
+		`%s in %s%s: %d user messages. Opened with: "%s"%s%s`,
+		sessionLabel(t), project, branchNote, len(seg.userTexts), opening, factsNote, openedNote,
 	)
 }
 
@@ -242,6 +263,7 @@ func sessionEvents(
 	}
 
 	out := make([]events.Event, 0, len(segs)+len(resolved))
+	created := createdPullRequests(resolved)
 
 	for i, seg := range segs {
 		if len(seg.userTexts) == 0 {
@@ -269,7 +291,7 @@ func sessionEvents(
 			Name,
 			fmt.Sprintf("%s:%d:%d", t.id, stat.Size(), i),
 			occurredAt,
-			segmentSummary(projectName(t, seg.cwd), t, seg),
+			segmentSummary(projectName(t, seg.cwd), t, seg, openedPullRequests(seg, created)),
 		)
 		setTranscriptArtifacts(evt.Artifacts, t)
 		evt.Artifacts["cwd"] = seg.cwd

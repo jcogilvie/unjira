@@ -85,6 +85,19 @@ Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is clea
 (F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
 `transcriptAnchors` reads every line independently of segmentation.
 
+### F47 — a PR a subagent opened is named only in the subagent's own segment
+
+A segment summary names the PRs its run opened (`openedPullRequests`,
+`internal/collector/claudecode/anchors.go`), and so lets the clustering model see which work a root
+orchestration run touched. It reads only the segment's own transcript. A root session that dispatches a
+subagent, which then opens the PR, gets no such clause, and the dispatch is invisible in the root's
+summary in the same way all of a run's PRs were before. **Consequence:** in subagent-opens-the-PR
+workflows, the root segment behind several PRs reads as having touched none of them, so it can be
+context to none, which is the inertness the shared-context measurement found. Connecting the two needs
+cross-transcript lineage (the subagent's `session_id` is its parent's, and the dispatching `Task` call
+is in the root's lines): the shared-context spec's slice 2. Frequency: 0 of the 70 created-PR anchors
+in this repo's transcripts came from a subagent; unmeasured elsewhere.
+
 ### F45 — the model can still reshuffle a PR's placed members apart
 
 The PR identity join (`internal/pipeline/preassign.go`, `planPRIdentity` at `:76`) places only
@@ -694,6 +707,7 @@ action). F41's ruling sequence would be the natural place.
 | F43 — cross-pass PR split | **resolved**: PR-identity pre-assignment before clustering (`pipeline/preassign.go`). An unplaced event whose host-qualified `ArtifactPullRequest` matches a member of exactly one open narrative joins it, unseen by the model; ambiguity falls back to the model and is reported. Drills: removing the exactly-one, open-status and host guards each fail a named test. Two-pass M3 re-measured 2026-10-02 on real data: 24/26 -> 26/26 in all three reps |
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Unmeasured |
 | F46 — a dry run's clustering context can differ when the PR join fires | open. A dry run does not extend the holder's window, so it may not be context. Unmeasured |
+| F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F44 — a malformed model response kills the pass | open. 1 death in 11 passes; re-ask-once-then-fail is the likely shape |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
