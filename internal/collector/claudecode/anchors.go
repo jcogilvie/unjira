@@ -29,6 +29,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
@@ -439,13 +441,11 @@ func target(args prArgs) string {
 	return " (" + strings.Join(parts, ", ") + ")"
 }
 
+// truncate flattens s to one line and ellipsizes it to limit columns. The ellipsizing is
+// runewidth's, which cuts on grapheme boundaries: a byte cut split multi-byte characters
+// and left summaries invalid UTF-8, and a rune cut would still split an emoji sequence.
 func truncate(s string, limit int) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
-	if len(s) > limit {
-		return s[:limit-3] + "..."
-	}
-
-	return s
+	return runewidth.Truncate(strings.TrimSpace(strings.ReplaceAll(s, "\n", " ")), limit, "...")
 }
 
 // transcriptAnchors finds every PR-creating call in a transcript, resolves the ones
@@ -500,6 +500,44 @@ func marshalStrings(ids []string) []any {
 	out := make([]any, len(ids))
 	for i, id := range ids {
 		out[i] = id
+	}
+
+	return out
+}
+
+// createdPullRequests indexes each anchor whose result named exactly one PR by its
+// tool_use id. The other outcomes are absent, so a segment claims an opened PR exactly
+// when its anchor does.
+func createdPullRequests(resolved []prAnchor) map[string]prAnchor {
+	out := make(map[string]prAnchor, len(resolved))
+	for _, a := range resolved {
+		if a.outcome == outcomeCreated {
+			out[a.call.toolUseID] = a
+		}
+	}
+
+	return out
+}
+
+// openedPullRequests returns the PRs created by calls on the segment's own lines, in call
+// order, each once, in the summary spelling (`<owner>/<repo>#<N>`).
+//
+// Scoped to the run by line, as keys and facts are: a PR opened on one branch is not
+// evidence about another segment's work. The call's line decides, not its result's,
+// because the call is the act; a result that lands after a branch change still belongs
+// to the run that made the call. Repeats are judged by the host-qualified key, the
+// identity pullRequestRefs deduplicates on, not by spelling.
+func openedPullRequests(seg segment, created map[string]prAnchor) []string {
+	var out, seen []string
+	for _, line := range seg.factLines {
+		for _, call := range prCreateCalls(line, "") {
+			a, ok := created[call.toolUseID]
+			if !ok || slices.Contains(seen, a.prKey) {
+				continue
+			}
+			seen = append(seen, a.prKey)
+			out = append(out, a.pr)
+		}
 	}
 
 	return out
