@@ -85,7 +85,12 @@ commands a week. The one real case seen is a test run, `helm unittest` inside `d
 which costs a "ran tests" fact.
 
 The measurement extrapolates a volume, not a behaviour: if commits start being made from inside
-scripts, it moves within a week. Recovery for the shell case is cheap on the parser: when a shell
+scripts, it moves within a week. `TestHiddenAuthoring_Tripwire`
+(`internal/collector/claudecode/hidden_authoring_probe_test.go`) is the guard: it re-measures by ISO
+week over local transcripts and fails when one appears. It judges shell scripts with the collector's
+own recognizers. Python uses a heuristic, a statement-starting process call with a commit or PR verb on
+its line. That heuristic's first two runs both flagged scripts that only quoted such a call inside a
+string, which is why the call must start the statement. Recovery for the shell case is cheap on the parser: when a shell
 program's script is a literal `-c` argument or a literal heredoc, parse it recursively. That is about
 20 lines and stays deterministic. The Python case is not recoverable deterministically, since recognizing
 a subprocess call means reading another language.
@@ -665,7 +670,7 @@ not hand it the parent's branch as provenance.
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Unmeasured |
 | F46 — a dry run's clustering context can differ when the PR join fires | open. A dry run does not extend the holder's window, so it may not be context. Unmeasured |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
-| F48 — a script handed to a shell is read as data | open. 0 hidden commit/PR verbs in 95 shell scripts and 2,082 Python heredocs; a weekly tripwire is the planned guard |
+| F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
