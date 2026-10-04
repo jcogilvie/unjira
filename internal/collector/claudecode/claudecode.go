@@ -252,6 +252,18 @@ func sessionEvents(
 	}
 
 	segs := segments(lines, minSegment)
+	if t.sub != nil {
+		// The branches the subagent itself named, which replace the parent's branch set
+		// the segments no longer have (F32). One is the subagent's branch; several are
+		// recorded as its set and none is chosen.
+		branches := subagentBranches(lines)
+		for i := range segs {
+			segs[i].allBranches = branches
+			if len(branches) == 1 {
+				segs[i].gitBranch = branches[0]
+			}
+		}
+	}
 	resolved, awaiting := transcriptAnchors(lines, excludeCwds)
 	if len(segs) == 0 && len(resolved) == 0 {
 		return nil, nil
@@ -295,9 +307,15 @@ func sessionEvents(
 		)
 		setTranscriptArtifacts(evt.Artifacts, t)
 		evt.Artifacts["cwd"] = seg.cwd
-		if t.sub == nil {
+		switch {
+		case t.sub == nil:
 			evt.Artifacts[events.ArtifactGitBranch] = seg.gitBranch
-		} else {
+		case seg.gitBranch != "":
+			evt.Artifacts[events.ArtifactGitBranch] = seg.gitBranch
+			evt.Artifacts[artifactGitBranchSource] = branchFromToolCalls
+		case len(seg.allBranches) > 1:
+			evt.Artifacts[artifactGitBranchOmitted] = subagentSeveralBranchesReason
+		default:
 			evt.Artifacts[artifactGitBranchOmitted] = subagentBranchOmittedReason
 		}
 		events.SetTicketKeys(&evt, seg.orderedKeys)
