@@ -29,6 +29,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
@@ -439,16 +441,11 @@ func target(args prArgs) string {
 	return " (" + strings.Join(parts, ", ") + ")"
 }
 
-// truncate flattens s to one line and bounds it to limit characters, the last three an
-// ellipsis when it cuts. Characters, not bytes: a byte cut splits a multi-byte character
-// and leaves the summary invalid UTF-8.
+// truncate flattens s to one line and ellipsizes it to limit columns. The ellipsizing is
+// runewidth's, which cuts on grapheme boundaries: a byte cut split multi-byte characters
+// and left summaries invalid UTF-8, and a rune cut would still split an emoji sequence.
 func truncate(s string, limit int) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
-	if r := []rune(s); len(r) > limit {
-		return string(r[:limit-3]) + "..."
-	}
-
-	return s
+	return runewidth.Truncate(strings.TrimSpace(strings.ReplaceAll(s, "\n", " ")), limit, "...")
 }
 
 // transcriptAnchors finds every PR-creating call in a transcript, resolves the ones

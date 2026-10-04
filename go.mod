@@ -7,6 +7,7 @@ require (
 	github.com/andygrunwald/go-jira/v2 v2.0.0-20260614144923-204ada8a4252
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/joho/godotenv v1.5.1
+	github.com/mattn/go-runewidth v0.0.30
 	github.com/openai/openai-go/v3 v3.50.0
 	github.com/stretchr/testify v1.11.1
 	github.com/xhit/go-str2duration/v2 v2.1.0
@@ -15,6 +16,7 @@ require (
 )
 
 require (
+	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/structs v1.1.0 // indirect

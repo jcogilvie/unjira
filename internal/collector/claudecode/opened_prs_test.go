@@ -168,3 +168,19 @@ func TestAnchorSummary_TruncatesTheTitleOnACharacterBoundary(t *testing.T) {
 	a := onlyAnchor(t, got)
 	assert.True(t, utf8.ValidString(a.Summary), "summary must be valid UTF-8: %q", a.Summary)
 }
+
+// TestSegmentSummary_NeverSplitsAGraphemeCluster: valid UTF-8 is not enough. A cut between
+// the runes of a ZWJ sequence leaves valid bytes that render as a different, broken
+// character, so the bound falls on grapheme boundaries.
+func TestSegmentSummary_NeverSplitsAGraphemeCluster(t *testing.T) {
+	root := t.TempDir()
+	family := "👨‍👩‍👧"
+	newTranscript(t).InCwd("/w/unjira").
+		User("2026-09-20T10:00:00Z", strings.Repeat("x", 156)+family+strings.Repeat("y", 20)).
+		WriteRoot(root, slug, parentSession)
+
+	got := onlySegment(t, root, nil)
+
+	assert.Contains(t, got, `x..."`, "the family does not fit before the ellipsis, so it is dropped whole")
+	assert.NotContains(t, got, "👨", "no fragment of the sequence survives the cut")
+}
