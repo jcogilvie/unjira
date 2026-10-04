@@ -20,8 +20,8 @@ comments written, and quitting after an approve does the same.
 
 ### Corrections this slice made to its own design
 
-Recorded rather than smoothed over, because each was found by running code and two were caught by
-the user:
+Recorded rather than smoothed over, because each was found by running code and two were caught in
+review:
 
 1. **`--auto-approve` bypasses more than the prompt.** The spec claimed graduated, writable-project,
    and confidence-floor all still applied. In fact `gate.Applier` enforces only the writable-project
@@ -37,7 +37,7 @@ the user:
 4. **"Watch is unaffected" was wrong, and then wrong in the other direction.** First draft wired
    eligibility into `hydrateContextNarratives` claiming prior narratives normally have committed
    actions — they do not, since `Graduated` ships false. A failing compaction test led me to
-   restrict `watch` entirely; the user pointed out that watch runs are discrete and floating work is
+   restrict `watch` entirely; review pointed out that watch runs are discrete and floating work is
    legitimately reshufflable until something commits. The failing test was reporting a broken
    *mechanism* (`collectCompactions` counted only `n.Events` for V0 after hydration began splitting
    the slices), not a broken policy.

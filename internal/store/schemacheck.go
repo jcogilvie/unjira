@@ -57,7 +57,7 @@ const (
 // naming every missing column, the change that introduced it, and the fix.
 //
 // Refusing is the only safe outcome, and there is deliberately no ALTER-based upgrade:
-// unjira has no migrations until it is productionized (decided with the user, 2026-10-02;
+// unjira has no migrations until it is productionized (decided 2026-10-02;
 // the shared-context spec's open question 9). Each change here has its own reason a
 // backfill would be wrong or premature. F30's: ALTER TABLE could not give pre-existing
 // links a meaningful position, since their order relative to existing examinations and

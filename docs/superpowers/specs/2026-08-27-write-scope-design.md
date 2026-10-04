@@ -2,7 +2,7 @@
 
 Which projects unjira may **write** to, declared independently of which it **reads** from.
 
-Status: design, approved by the user (deny-all default, real config edited in lockstep).
+Status: design, approved (deny-all default, real config edited in lockstep).
 
 ## Why now
 

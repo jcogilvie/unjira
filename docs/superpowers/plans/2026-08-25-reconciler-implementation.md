@@ -855,7 +855,7 @@ func TestLocalAvailableStatusCategoriesReportsEveryCategory(t *testing.T) {
 Adding a method to the interface breaks all implementers. Find them:
 
 ```sh
-cd /Users/jonathan.ogilvie/workspace/unjira/.claude/worktrees/slice4-reconciler
+cd <repo>/.claude/worktrees/slice4-reconciler
 env -u GOROOT go build ./... 2>&1 | head -20
 grep -rn "tasktracker.TaskTracker = " --include="*.go" .
 ```

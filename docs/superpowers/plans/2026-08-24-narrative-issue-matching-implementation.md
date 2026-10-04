@@ -52,7 +52,7 @@ instance. Make them compile and skip; the coordinator runs them.
 **The authoritative gate is `earthly +reviewable`** — lint plus tests in a clean container with its
 own Go toolchain. A local pass with a container failure means something is environment-dependent.
 
-**Work in** `/Users/jonathan.ogilvie/workspace/unjira/.claude/worktrees/slice4-reconciler` on branch
+**Work in** `<repo>/.claude/worktrees/slice4-reconciler` on branch
 `worktree-narrative-matching`. Do not create or switch branches. Do not use `git stash` (the stack is
 shared with other sessions). Do not modify the session task list.
 
@@ -2910,7 +2910,7 @@ cat > unjira.config.json <<'EOF'
   "match": { "max_candidates_per_narrative": 10, "confidence_floor": 0.7 }
 }
 EOF
-cd /Users/jonathan.ogilvie/workspace/unjira/.claude/worktrees/slice4-reconciler
+cd <repo>/.claude/worktrees/slice4-reconciler
 env -u GOROOT -u GOPATH go run ./cmd/unjira dev narrate --help 2>&1 | head -20
 ```
 
