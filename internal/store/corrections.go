@@ -10,9 +10,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
-	"strings"
-	"time"
+	"strconv"
 )
 
 // Correction is one reviewer ruling that carried reasoning.
@@ -31,131 +29,75 @@ type Correction struct {
 	Feedback string
 }
 
-// CorrectionsCursor is the learn pass's position among reviewer rulings: the high-water
-// mark of what a draft actually READ (finding F31).
+// CorrectionsCursor is the learn pass's position among reviewer corrections: the highest
+// correction sequence a draft actually READ (actions.corrected_seq, issued by
+// correction_marks).
 //
-// WHY NOT A CLOCK READING. The watermark used to be time.Now() at keep, at whole seconds,
-// compared lexically against decided_at's milliseconds. That lost corrections two ways. A
-// ruling later in the watermark's own second sorted BELOW it, because '.' sorts before
-// 'Z'. And a ruling made while the draft was with the model, after the read and before the
-// keep, fell below a watermark that recorded when keep ran rather than what was drafted.
-// Design-notes #40 is the same family: a comparison against a clock reading decides
-// everything inside one tick in one direction.
+// WHY A SEQUENCE. Three earlier positions each lost corrections without a word:
 //
-// WHY NOT actions.id. It is monotonic, but it orders CREATION, not ruling. A reviewer rules
-// in whatever order they like, so an action drafted early and rejected late has a lower id
-// than one already distilled, and an id cursor would skip it forever.
+//   - A clock reading at keep (pre-F31). A ruling made while the draft was with the
+//     model fell below a watermark recording when keep ran, not what was drafted.
+//   - The newest decided_at read, plus the ids read at that instant (F31). Correct for
+//     one ruling per action, but decided_at keeps the FIRST ruling's time, so a lesson
+//     added by a later ruling sat below a cursor already past it (F42). And decided_at
+//     is the wall clock, so a clock stepping back hid a ruling (F41).
+//   - actions.id was never a candidate: it orders creation, and a reviewer rules in any
+//     order.
 //
-// SO: the newest decided_at the draft read, plus the ids of every ruling it read at exactly
-// that decided_at. A row is past the cursor if it was decided later, or at the same instant
-// and was not one of those read. That cannot tie: two rulings in one millisecond are told
-// apart by id, so a ruling committed in the same millisecond as the newest one read, but
-// after the read, is still offered. Both sides of every comparison are values of the same
-// column in its fixed-width %f format, so lexical order is chronological. No schema change,
-// because the store has no migrations.
-//
-// What it still trusts is that decided_at does not run backwards between two rulings, that
-// is, that the wall clock does not step back. A sequence stamped at ruling time would not
-// need that, but it needs a new column and a fresh store; see F41.
+// The sequence is stamped when a row BECOMES a correction, which is the event the learn
+// pass consumes, and it comes from an AUTOINCREMENT that never reissues a number. So a
+// correction made after a read always has a higher sequence than everything that read
+// saw, whatever the clock says and however many times the action was ruled before.
 type CorrectionsCursor struct {
-	// DecidedAt is the exact decided_at text of the newest ruling read. Empty means nothing
-	// has been read yet, i.e. "everything".
-	DecidedAt string `json:"decided_at"`
-	// IDs are the actions read whose decided_at equals DecidedAt, ascending. Empty with a
-	// non-empty DecidedAt is legal: it means "everything decided at or after DecidedAt",
-	// which is the form a hand-converted pre-F31 watermark takes.
-	IDs []int64 `json:"ids"`
+	// Seq is the highest correction sequence read. Zero means nothing has been read yet,
+	// i.e. "everything".
+	Seq int64
 }
 
-// decidedAtLayout is decided_at's own format, strftime('%Y-%m-%dT%H:%M:%fZ'), in Go's
-// notation. A cursor whose DecidedAt is not in it would compare unlike-for-like, which is
-// exactly the F31 inversion, so parsing rejects one.
-const decidedAtLayout = "2006-01-02T15:04:05.000Z"
-
 // IsZero reports whether the cursor has read nothing, which means "everything".
-func (c CorrectionsCursor) IsZero() bool { return c.DecidedAt == "" }
+func (c CorrectionsCursor) IsZero() bool { return c.Seq == 0 }
 
-// Encode is the cursor's stored form. JSON, so it cannot be mistaken for the whole-second
-// RFC3339 timestamp the pre-F31 watermark stored. The zero cursor is "", which is what
-// GetCursor returns for an absent row.
-func (c CorrectionsCursor) Encode() (string, error) {
+// Encode is the cursor's stored form: the sequence in decimal. The zero cursor is "", which
+// is what GetCursor returns for an absent row.
+func (c CorrectionsCursor) Encode() string {
 	if c.IsZero() {
-		return "", nil
+		return ""
 	}
 
-	ids := c.IDs
-	if ids == nil {
-		ids = []int64{}
-	}
-
-	out, err := json.Marshal(CorrectionsCursor{DecidedAt: c.DecidedAt, IDs: ids})
-	if err != nil {
-		return "", fmt.Errorf("encoding corrections cursor at %s: %w", c.DecidedAt, err)
-	}
-
-	return string(out), nil
+	return strconv.FormatInt(c.Seq, 10)
 }
 
 // String is Encode for messages and logs.
-func (c CorrectionsCursor) String() string {
-	out, err := c.Encode()
-	if err != nil {
-		return err.Error()
-	}
-
-	return out
-}
+func (c CorrectionsCursor) String() string { return c.Encode() }
 
 // ParseCorrectionsCursor reads a cursor's stored form. "" is the zero cursor.
 //
-// Strict: unknown fields, trailing data, a decided_at not in decided_at's own millisecond
-// format, or a non-positive id is an error rather than a best guess. A misread cursor
-// silently skips or re-offers corrections, and neither shows in the output.
+// Strict: anything but a positive decimal integer with no sign, space or leading zero is an
+// error rather than a best guess. That includes both earlier forms, a whole-second
+// timestamp and the F31 JSON, neither of which can say what it covered in sequence terms.
+// A misread cursor silently skips or re-offers corrections, and neither shows in the output.
 func ParseCorrectionsCursor(raw string) (CorrectionsCursor, error) {
 	if raw == "" {
 		return CorrectionsCursor{}, nil
 	}
 
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.DisallowUnknownFields()
-
-	var c CorrectionsCursor
-	if err := dec.Decode(&c); err != nil {
-		return CorrectionsCursor{}, fmt.Errorf("corrections cursor %q is not cursor JSON: %w", raw, err)
-	}
-	if dec.More() {
-		return CorrectionsCursor{}, fmt.Errorf("corrections cursor %q has trailing data", raw)
-	}
-	if _, err := time.Parse(decidedAtLayout, c.DecidedAt); err != nil {
+	seq, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seq <= 0 || strconv.FormatInt(seq, 10) != raw {
 		return CorrectionsCursor{}, fmt.Errorf(
-			"corrections cursor %q: decided_at must be in decided_at's own format %s: %w",
-			raw, decidedAtLayout, err)
-	}
-	for _, id := range c.IDs {
-		if id <= 0 {
-			return CorrectionsCursor{}, fmt.Errorf(
-				"corrections cursor %q: %d is not an action id", raw, id)
-		}
+			"corrections cursor %q is not a correction sequence (a positive decimal integer)", raw)
 	}
 
-	return c, nil
+	return CorrectionsCursor{Seq: seq}, nil
 }
 
 // Later returns whichever of c and other has read further, so a watermark set from it never
-// moves backwards. At the same DecidedAt the id sets are unioned: each lists rulings read at
-// that instant, and both were read.
+// moves backwards.
 func (c CorrectionsCursor) Later(other CorrectionsCursor) CorrectionsCursor {
-	switch {
-	case other.DecidedAt > c.DecidedAt:
+	if other.Seq > c.Seq {
 		return other
-	case other.DecidedAt < c.DecidedAt:
-		return c
 	}
 
-	ids := slices.Concat(c.IDs, other.IDs)
-	slices.Sort(ids)
-
-	return CorrectionsCursor{DecidedAt: c.DecidedAt, IDs: slices.Compact(ids)}
+	return c
 }
 
 // CorrectionsSince returns reviewer corrections past the cursor, oldest first, together with
@@ -178,39 +120,28 @@ func (c CorrectionsCursor) Later(other CorrectionsCursor) CorrectionsCursor {
 //     cmd/unjira/triage.go's parseDecision: "a reviewer may simply not want the action"),
 //     and a refusal with no reasoning teaches nothing a model can generalise. Including
 //     it would dilute the corpus with rows whose only content is "no".
-//   - decided_at, not created_at, is the cursor column. A correction's age is when the
-//     REVIEWER ruled, not when the reconciler drafted the thing they ruled on — those can
-//     be days apart, and using created_at would re-offer old drafts a reviewer just judged.
+//   - corrected_seq is the cursor column: when the row BECAME a correction. Not created_at,
+//     which is when the reconciler drafted the thing ruled on, days earlier, and would
+//     re-offer old drafts a reviewer just judged. Not decided_at either, which is the first
+//     ruling's clock time (see CorrectionsCursor for both of its defects).
 //
-// Ordered oldest-first so a distillation prompt reads chronologically, which is how a
-// reviewer's thinking developed.
+// Ordered by when each became a correction, so a distillation prompt reads in the order
+// the reviewer's thinking developed. An action whose lesson was revised appears once, with
+// its current feedback, at the position of its latest revision.
 func (s *Store) CorrectionsSince(since CorrectionsCursor) ([]Correction, CorrectionsCursor, error) {
-	readAtSince := since.IDs
-	if readAtSince == nil {
-		readAtSince = []int64{}
-	}
-	readAtSinceJSON, err := json.Marshal(readAtSince)
-	if err != nil {
-		return nil, since, fmt.Errorf("encoding the ids read at %s: %w", since.DecidedAt, err)
-	}
-
-	// decided_at IS NOT NULL is implied by the status filter today (only the status-update
-	// path writes rejected/edited, and it stamps decided_at), but a NULL would make every
-	// comparison below NULL and drop the row from a non-zero cursor's read without a word.
-	// Stated, so a future direct insert in a ruled status cannot hide that way.
+	// corrected_seq IS NOT NULL is implied by the status and feedback filters (the schema's
+	// CHECK refuses a correction without one), and stated so the query does not depend on a
+	// constraint someone could relax.
 	rows, err := s.db.Query(
-		`SELECT a.id, a.type, COALESCE(a.issue_key, ''), a.payload, a.feedback, a.decided_at
+		`SELECT a.id, a.type, COALESCE(a.issue_key, ''), a.payload, a.feedback, a.corrected_seq
 		   FROM actions a
 		  WHERE a.status IN (?, ?)
 		    AND a.feedback IS NOT NULL
 		    AND TRIM(a.feedback) != ''
-		    AND a.decided_at IS NOT NULL
-		    AND (? = ''
-		         OR a.decided_at > ?
-		         OR (a.decided_at = ? AND a.id NOT IN (SELECT value FROM json_each(?))))
-		  ORDER BY a.decided_at, a.id`,
-		StatusRejected, StatusEdited,
-		since.DecidedAt, since.DecidedAt, since.DecidedAt, string(readAtSinceJSON),
+		    AND a.corrected_seq IS NOT NULL
+		    AND a.corrected_seq > ?
+		  ORDER BY a.corrected_seq`,
+		StatusRejected, StatusEdited, since.Seq,
 	)
 	if err != nil {
 		return nil, since, fmt.Errorf("querying corrections since %s: %w", since, err)
@@ -223,12 +154,12 @@ func (s *Store) CorrectionsSince(since CorrectionsCursor) ([]Correction, Correct
 	)
 	for rows.Next() {
 		var (
-			c         Correction
-			payload   string
-			decidedAt string
+			c       Correction
+			payload string
+			seq     int64
 		)
 		if err := rows.Scan(&c.ActionID, &c.ActionType, &c.IssueKey, &payload, &c.Feedback,
-			&decidedAt); err != nil {
+			&seq); err != nil {
 			return nil, since, fmt.Errorf("scanning correction row: %w", err)
 		}
 
@@ -237,7 +168,7 @@ func (s *Store) CorrectionsSince(since CorrectionsCursor) ([]Correction, Correct
 		// to a comment that said "the audit", and unintelligible alone.
 		c.Body = bodyOfPayload(payload)
 		out = append(out, c)
-		cursor = cursor.Later(CorrectionsCursor{DecidedAt: decidedAt, IDs: []int64{c.ActionID}})
+		cursor = cursor.Later(CorrectionsCursor{Seq: seq})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, since, fmt.Errorf("reading correction rows: %w", err)

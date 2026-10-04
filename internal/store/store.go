@@ -219,7 +219,34 @@ CREATE TABLE IF NOT EXISTS actions (
     -- MAX(created_link_seq) over the narrative's actions of any status. NOT NULL
     -- with no DEFAULT on purpose: a default would be a guess about which links
     -- predate the action, and an INSERT that forgets it should fail loudly.
-    created_link_seq INTEGER NOT NULL
+    created_link_seq INTEGER NOT NULL,
+    -- The correction sequence (correction_marks.seq) when this action last
+    -- BECAME a correction: ruled rejected or edited with non-empty feedback, or
+    -- had that feedback changed. The learn cursor reads corrections with
+    -- corrected_seq above it, never decided_at (findings F41, F42). decided_at
+    -- keeps the first ruling's time, so a lesson added by a later ruling sat
+    -- below a cursor that had already passed it; and decided_at is the wall
+    -- clock, which can step back. NULL until the action is first a correction.
+    corrected_seq INTEGER,
+    -- Every correction carries its sequence. A write path that made a row a
+    -- correction without stamping one would hide it from every learn pass,
+    -- so the schema refuses it rather than leaving it unseen.
+    CHECK (status NOT IN ('rejected', 'edited')
+           OR TRIM(COALESCE(feedback, '')) = ''
+           OR corrected_seq IS NOT NULL)
+);
+
+-- correction_marks issues the correction sequence: one row each time an action
+-- becomes a correction (updateActionStatusImpl), never updated or deleted. Its
+-- AUTOINCREMENT seq is why actions.corrected_seq can be trusted to grow: SQLite
+-- never reissues an AUTOINCREMENT value, even after a delete, the property
+-- narrative_events.link_seq relies on too (linkSeqHighWater). It also records
+-- how an action's lessons were revised, though nothing reads that yet.
+CREATE TABLE IF NOT EXISTS correction_marks (
+    seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_id INTEGER NOT NULL REFERENCES actions(id),
+    -- DISPLAY only, like every other timestamp beside a sequence.
+    marked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- The estimates and ledger tables were declared here as phase-2 placeholders, with no Go

@@ -173,7 +173,7 @@ func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, er
 // which is what the freeze rule compares (EligibleMemberEventIDs, EligibleContextEventIDs). executed_at itself
 // decides nothing (finding F30).
 func (s *Store) UpdateActionStatus(id int64, status string) error {
-	return updateActionStatusImpl(s.db, id, status, nil, nil)
+	return s.updateActionStatus(id, status, nil, nil)
 }
 
 // UpdateActionStatusAndFeedback moves an action to a new workflow state
@@ -188,7 +188,7 @@ func (s *Store) UpdateActionStatus(id int64, status string) error {
 // placeholder binding is what actually protects this from SQL injection or
 // truncation, not any transformation of this function's own.
 func (s *Store) UpdateActionStatusAndFeedback(id int64, status, feedback string) error {
-	return updateActionStatusImpl(s.db, id, status, &feedback, nil)
+	return s.updateActionStatus(id, status, &feedback, nil)
 }
 
 // UpdateActionStatusAndError moves an action to a new workflow state while
@@ -208,7 +208,7 @@ func (s *Store) UpdateActionStatusAndFeedback(id int64, status, feedback string)
 // retried-and-fixed action must never keep reporting the reason it failed
 // for last time.
 func (s *Store) UpdateActionStatusAndError(id int64, status string, errText *string) error {
-	return updateActionStatusImpl(s.db, id, status, nil, errText)
+	return s.updateActionStatus(id, status, nil, errText)
 }
 
 // updateActionStatusImpl backs UpdateActionStatus, UpdateActionStatusAndFeedback,
@@ -220,11 +220,23 @@ func (s *Store) UpdateActionStatusAndError(id int64, status string, errText *str
 // correction with a machine-written tracker error (see the actions.error
 // schema comment for why that conflation would be a real problem, not a
 // theoretical one).
-func updateActionStatusImpl(c dbConn, id int64, status string, feedback, errText *string) error {
+//
+// It takes a transaction, not any dbConn, because a ruling that makes the row a correction
+// is two writes (markCorrection's insert, then this update) and they are one fact.
+func updateActionStatusImpl(c *sql.Tx, id int64, status string, feedback, errText *string) error {
 	const ts = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
 
 	query := `UPDATE actions SET status = ?`
 	args := []any{status}
+
+	seq, marked, err := markCorrection(c, id, status, feedback)
+	if err != nil {
+		return err
+	}
+	if marked {
+		query += `, corrected_seq = ?`
+		args = append(args, seq)
+	}
 
 	if feedback != nil {
 		query += `, feedback = ?`
@@ -267,6 +279,65 @@ func updateActionStatusImpl(c dbConn, id int64, status string, feedback, errText
 	}
 
 	return nil
+}
+
+// updateActionStatus runs updateActionStatusImpl in its own transaction, for callers that
+// are not already inside one.
+func (s *Store) updateActionStatus(id int64, status string, feedback, errText *string) error {
+	return s.WithTx(func(tx *Tx) error {
+		return updateActionStatusImpl(tx.tx, id, status, feedback, errText)
+	})
+}
+
+// markCorrection issues the next correction sequence for action id when this ruling makes
+// it a correction, and reports whether it did. A ruling makes a row a correction when its
+// new status is rejected or edited and its feedback (the new text, or the stored text when
+// the caller leaves feedback alone) is non-empty after trimming, UNLESS the row already was
+// one with exactly that feedback. So adding a lesson to a silent rejection marks it (F42),
+// rewording a lesson marks it again, and switching reject to edit with identical words does
+// not, since status is not part of what a correction says.
+//
+// The condition is evaluated in SQL against the row as it is before the update, in the
+// caller's transaction, so no other writer can change the row between the read and the
+// write.
+func markCorrection(c *sql.Tx, id int64, status string, feedback *string) (int64, bool, error) {
+	if status != StatusRejected && status != StatusEdited {
+		return 0, false, nil
+	}
+
+	var newFeedback any
+	if feedback != nil {
+		newFeedback = *feedback
+	}
+
+	res, err := c.Exec(
+		`INSERT INTO correction_marks (action_id)
+		 SELECT id FROM actions
+		  WHERE id = ?
+		    AND TRIM(COALESCE(?, feedback, '')) != ''
+		    AND NOT (status IN (?, ?)
+		             AND corrected_seq IS NOT NULL
+		             AND COALESCE(feedback, '') = COALESCE(?, feedback, ''))`,
+		id, newFeedback, StatusRejected, StatusEdited, newFeedback,
+	)
+	if err != nil {
+		return 0, false, fmt.Errorf("marking action %d as a correction: %w", id, err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, fmt.Errorf("checking whether action %d became a correction: %w", id, err)
+	}
+	if n == 0 {
+		return 0, false, nil
+	}
+
+	seq, err := res.LastInsertId()
+	if err != nil {
+		return 0, false, fmt.Errorf("reading action %d's correction sequence: %w", id, err)
+	}
+
+	return seq, true, nil
 }
 
 // actionSelect is the column list every ActionRow query shares, so a new

@@ -418,21 +418,50 @@ func TestRunLearn_RefusesAMalformedWatermark(t *testing.T) {
 	assert.Zero(t, client.calls, "and it fails before spending a model call")
 }
 
-// TestRunLearn_RefusesAPreF31WatermarkAndNamesTheFix is the format change's compatibility
-// story. A store written before F31 holds a whole-second timestamp; this build must not
-// misread it, and the error must say how to continue without re-offering everything.
-func TestRunLearn_RefusesAPreF31WatermarkAndNamesTheFix(t *testing.T) {
+// TestRunLearn_RefusesAnEarlierCursorForm: a whole-second timestamp (pre-F31) and the F31
+// decided_at JSON can only be in a store old enough for Open to refuse, but a hand-edited
+// cursor could hold one. Neither says what it covered in sequence terms, so both are refused
+// rather than read as "never learned".
+func TestRunLearn_RefusesAnEarlierCursorForm(t *testing.T) {
+	for _, raw := range []string{
+		"2026-01-01T12:00:05Z",
+		`{"decided_at":"2026-01-01T12:00:05.000Z","ids":[]}`,
+	} {
+		s, cfg, _ := learnFixture(t)
+		require.NoError(t, s.SetCursor("learn", "corrections", raw))
+
+		client := &learnLLM{response: oneCandidate}
+		_, err := pipeline.RunLearn(t.Context(), s, client, cfg, pipeline.LearnOptions{})
+		require.ErrorContains(t, err, "refusing to reset it", "cursor %q", raw)
+		assert.Zero(t, client.calls)
+	}
+}
+
+// TestKeepCandidates_ALessonAddedToAnEarlierRejectionIsOfferedNextPass is F42 end to end:
+// a silent rejection, a learn pass that keeps a rule from a different correction, then
+// `actions decide --edit` adds the lesson to the first. The next pass must offer it.
+func TestKeepCandidates_ALessonAddedToAnEarlierRejectionIsOfferedNextPass(t *testing.T) {
 	s, cfg, _ := learnFixture(t)
-	require.NoError(t, s.SetCursor("learn", "corrections", "2026-01-01T12:00:05Z"))
-
-	_, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: oneCandidate}, cfg,
-		pipeline.LearnOptions{})
-	require.ErrorContains(t, err, "pre-F31")
-	require.ErrorContains(t, err,
-		`UPDATE cursors SET position = '{"decided_at":"2026-01-01T12:00:05.000Z","ids":[]}'`)
-
-	// The suggested fix is itself a cursor this build reads.
-	fixed, err := store.ParseCorrectionsCursor(`{"decided_at":"2026-01-01T12:00:05.000Z","ids":[]}`)
+	nid, err := s.InsertNarrative(time.Now().Add(-time.Hour), time.Now(), "other work", "s")
 	require.NoError(t, err)
-	assert.Equal(t, "2026-01-01T12:00:05.000Z", fixed.DecidedAt)
+	silent, err := s.InsertAction(store.ActionRow{
+		NarrativeID: nid, Type: "comment", IssueKey: "DEVSBX-2",
+		Payload: `{"body":"rejected at first without a word"}`, Status: store.StatusProposed,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatusAndFeedback(silent, store.StatusRejected, ""))
+
+	drafted, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: oneCandidate}, cfg,
+		pipeline.LearnOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 1, drafted.CorrectionsRead, "the silent rejection is not a correction yet")
+	_, advanced, err := pipeline.KeepCandidates(s, cfg, drafted, []string{drafted.Candidates[0].Name})
+	require.NoError(t, err)
+	require.True(t, advanced)
+
+	require.NoError(t, s.UpdateActionStatusAndFeedback(silent, store.StatusEdited, "say which tickets"))
+
+	next, err := pipeline.RunLearn(t.Context(), s, &learnLLM{response: "[]"}, cfg, pipeline.LearnOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, next.CorrectionsRead, "the lesson added later must be offered")
 }

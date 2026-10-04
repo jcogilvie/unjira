@@ -21,6 +21,8 @@ const (
 		"sequence rather than by timestamp"
 	changeLinkKinds = "member and context links (docs/superpowers/specs/2026-10-02-shared-context-design.md), " +
 		"which give every narrative_events link a kind and every member link a confidence"
+	changeCorrectionSeq = "the correction sequence (findings F41 and F42), which orders reviewer corrections " +
+		"by when each became a correction rather than by the first ruling's clock time"
 	changeMemberPlacement = "member placement (finding F43's pull-request identity join), which records " +
 		"whether the model, an exact pull-request identity or a reviewer placed each member link"
 )
@@ -36,16 +38,20 @@ const (
 // store without it is refused rather than read as if every link were a member.
 var requiredColumns = []requiredColumn{
 	{tableNarrativeEvents, "link_seq", changeLinkSeq},
-	{"actions", "created_link_seq", changeLinkSeq},
-	{"actions", "executed_link_seq", changeLinkSeq},
+	{tableActions, "created_link_seq", changeLinkSeq},
+	{tableActions, "executed_link_seq", changeLinkSeq},
 	{"match_examinations", "examined_link_seq", changeLinkSeq},
 	{"reconcile_examinations", "examined_link_seq", changeLinkSeq},
 	{tableNarrativeEvents, "kind", changeLinkKinds},
 	{tableNarrativeEvents, "member_confidence", changeLinkKinds},
 	{tableNarrativeEvents, "member_placement", changeMemberPlacement},
+	{tableActions, "corrected_seq", changeCorrectionSeq},
 }
 
-const tableNarrativeEvents = "narrative_events"
+const (
+	tableNarrativeEvents = "narrative_events"
+	tableActions         = "actions"
+)
 
 // checkRequiredColumns refuses a database that predates any change in requiredColumns,
 // naming every missing column, the change that introduced it, and the fix.
@@ -61,6 +67,9 @@ const tableNarrativeEvents = "narrative_events"
 // afford to lose, not inside a feature change against a disposable one. Member
 // placement's: a backfill would be a guess, since an older member link may have been
 // placed by the model or by a reviewer's merge, and the store kept no record of which.
+// The correction sequence's: it records when each action became a correction, and the
+// store kept no record of that either, only the first ruling's clock time, which is the
+// value F42 found wrong.
 //
 // MUST run before any schema statement: see Open.
 func checkRequiredColumns(db *sql.DB, dbPath string) error {
