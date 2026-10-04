@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/tailscale/hujson"
 )
 
 // Client is the narrow capability the correlator needs from any LLM backend:
@@ -104,7 +106,7 @@ func StripJSONFence(raw string) string {
 // response, and turning it into `[42]` would manufacture something that parses
 // while meaning nothing.
 func JSONArrayPayload(raw string) string {
-	unfenced := StripJSONFence(raw)
+	unfenced := withoutTrailingCommas(StripJSONFence(raw))
 
 	trimmed := strings.TrimSpace(unfenced)
 	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
@@ -126,6 +128,38 @@ func JSONArrayPayload(raw string) string {
 	}
 
 	return "[" + trimmed + "]"
+}
+
+// JSONObjectPayload normalizes a model reply that should be one JSON object: it strips a
+// Markdown fence and drops trailing commas before a closer, as JSONArrayPayload does.
+// Anything else is returned unchanged, so a malformed reply still reaches the caller's
+// json.Unmarshal and fails naming the model's own output.
+func JSONObjectPayload(raw string) string {
+	return withoutTrailingCommas(StripJSONFence(raw))
+}
+
+// withoutTrailingCommas drops every comma that sits directly before a `}` or `]`, using
+// hujson's Standardize, the standard implementation of JSON-with-trailing-commas. It
+// also blanks comments, which carry no data either.
+//
+// Observed live (F44): a complete, 11.8k-character clustering response held
+// `"event_indices":[51,56,57,62,63],\n}` and the whole pass died on `invalid character
+// '}' looking for beginning of object key string`. A comma before a closer carries no
+// data, so dropping it cannot change what a response says. This differs from the comma
+// joinConcatenatedObjects refuses, which dangles at the END of the input and means the
+// response stopped mid-list. Standardize rejects that shape and so leaves it alone.
+//
+// Input Standardize cannot read (truncated, prose, several top-level values) comes back
+// unchanged, so the other tolerances and the caller's error see the model's own bytes.
+// It replaces each dropped character with a space, so an error's offset still points
+// into the model's output.
+func withoutTrailingCommas(s string) string {
+	standard, err := hujson.Standardize([]byte(s))
+	if err != nil {
+		return s
+	}
+
+	return string(standard)
 }
 
 // joinConcatenatedObjects turns a run of back-to-back JSON objects into one

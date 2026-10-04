@@ -207,3 +207,52 @@ func TestJSONArrayPayload_DoesNotJoinATrailingComma(t *testing.T) {
 	var items []map[string]any
 	assert.Error(t, json.Unmarshal([]byte(llm.JSONArrayPayload(`{"a":1},`)), &items))
 }
+
+// TestJSONArrayPayload_DropsATrailingCommaBeforeACloser is the regression test for F44:
+// a clustering pass died on
+//
+//	"event_indices":[51,56,57,62,63],
+//	},
+//
+// with `invalid character '}' looking for beginning of object key string`. The response
+// was complete (11.8k characters, closed by its final `]`). A comma before a closer
+// carries no data, so dropping it cannot change what the response says, and the pass
+// was lost over punctuation, the class the other tolerances absorb.
+func TestJSONArrayPayload_DropsATrailingCommaBeforeACloser(t *testing.T) {
+	for _, raw := range []string{
+		"[\n{\"kind\":\"new\",\"event_indices\":[51,56],\n},\n{\"kind\":\"new\",\"event_indices\":[1]}\n]",
+		`[{"kind":"new","event_indices":[1,2,],},]`,
+		"```json\n[{\"kind\":\"new\",},]\n```",
+		`{"kind":"new","event_indices":[0],}`,
+	} {
+		var items []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(llm.JSONArrayPayload(raw)), &items), "raw %q", raw)
+		assert.Equal(t, "new", items[0]["kind"])
+	}
+}
+
+// TestJSONArrayPayload_LeavesACommaInsideAStringAlone: only punctuation is touched, never
+// content.
+func TestJSONArrayPayload_LeavesACommaInsideAStringAlone(t *testing.T) {
+	var items []map[string]string
+	require.NoError(t, json.Unmarshal([]byte(llm.JSONArrayPayload(`[{"summary":"a, }, ]",}]`)), &items))
+	assert.Equal(t, "a, }, ]", items[0]["summary"])
+}
+
+// TestJSONObjectPayload_DropsATrailingCommaBeforeACloser: the object-shaped responses
+// (the same-story check, the reconciler's create) get the same tolerance and the same
+// fence stripping.
+func TestJSONObjectPayload_DropsATrailingCommaBeforeACloser(t *testing.T) {
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(llm.JSONObjectPayload("```json\n{\"same\":true,}\n```")), &got))
+	assert.Equal(t, true, got["same"])
+}
+
+func TestJSONObjectPayload_LeavesMalformedInputAlone(t *testing.T) {
+	for _, raw := range []string{`{"same":true`, `{"same":true},`, `not json`, ``} {
+		var got map[string]any
+		require.Error(t, json.Unmarshal([]byte(llm.JSONObjectPayload(raw)), &got), "raw %q", raw)
+		assert.Equal(t, raw, llm.JSONObjectPayload(raw),
+			"the caller's error must quote the model's own output, not a rewrite")
+	}
+}
