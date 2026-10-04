@@ -17,34 +17,69 @@ package claudecode
 
 import (
 	"encoding/json"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
-// authoringVerbs are the SCM operations that CREATE a reference: the developer is
+// isAuthoring reports whether a simple command CREATES a reference: the developer is
 // naming this ticket for this work.
 //
 // Kept deliberately narrow. The complementary set — `git log --grep=`, `git show`,
-// `gh pr view` — is an agent INVESTIGATING a ticket it may have nothing to do with,
-// and 8 of the keys found in the measurement appeared only in those. Treating a read
-// as authorship would manufacture links from work that never touched the ticket,
-// which is the failure mode CLAUDE.md's "keep the review queue signal-rich" invariant
-// exists to prevent.
+// `gh pr view`, `git branch -a`, `git tag -d` — is an agent INVESTIGATING or tidying a
+// ticket it may have nothing to do with, and 8 of the keys found in the F20 measurement
+// appeared only in those. Treating a read as authorship would manufacture links from
+// work that never touched the ticket, which is the failure mode CLAUDE.md's "keep the
+// review queue signal-rich" invariant exists to prevent.
 //
-// `rtk git commit` matches by containing `git commit`, so the token-proxy wrapper
-// needs no separate pattern.
-var authoringVerbs = regexp.MustCompile(
-	`git commit|git checkout -b|git switch -c|git branch |git tag |` +
-		`gh pr create|gh pr edit|gh issue create|gh release create`)
+// Decided on a parsed command (simpleCommands), never a substring, so a heredoc, echo
+// or grep that only names a verb is not authorship (F34).
+func isAuthoring(words []shellWord) bool {
+	if sub, args, ok := gitSubcommand(words); ok {
+		switch sub {
+		case "commit":
+			return true
+		case "checkout", "switch", "worktree":
+			return createsBranch(sub, args)
+		case "branch":
+			return hasPositional(args) && !hasAnyWord(args, "-d", "-D", "--delete", "-l", "--list")
+		case "tag":
+			return hasPositional(args) && !hasAnyWord(args, "-d", "--delete", "-l", "--list", "-v", "--verify")
+		}
+
+		return false
+	}
+
+	if isProgram(words, "gh") {
+		return hasWords(words, "pr", "create") || hasWords(words, "pr", "edit") ||
+			hasWords(words, "issue", "create") || hasWords(words, "release", "create")
+	}
+
+	return false
+}
+
+// createsBranch reports whether a `git checkout`, `git switch` or `git worktree add`
+// creates the branch it moves to.
+func createsBranch(sub string, args []shellWord) bool {
+	switch sub {
+	case "checkout":
+		return hasAnyWord(args, "-b", "-B")
+	case "switch":
+		return hasAnyWord(args, "-c", "-C", "--create", "--force-create")
+	case "worktree":
+		// -b and -B exist only on `git worktree add`.
+		return hasAnyWord(args, "-b", "-B")
+	}
+
+	return false
+}
 
 // scmToolNames are the non-shell surfaces. The GitHub MCP is real usage rather than
 // hypothetical: 13 create_pull_request and 33 pull_request_read calls were measured
 // in the same corpus.
 //
-// Only the WRITING half is listed, for the same reason authoringVerbs is narrow —
+// Only the WRITING half is listed, for the same reason isAuthoring is narrow —
 // mcp__github__pull_request_read is investigation.
 var scmToolNames = []string{
 	"mcp__github__create_pull_request",
@@ -99,10 +134,10 @@ func scmKeys(line map[string]any) []string {
 // authoringText returns the searchable text of a tool_use block when that block is an
 // SCM authoring call, and reports whether it is one.
 //
-// For a shell call the text is the command itself; an authoring verb ANYWHERE in it
-// qualifies the whole command, because the real shape is compound — `git log
-// --oneline -3 && git commit -m "PAAS-1: …"` inspects and then commits, and the key
-// belongs to the commit.
+// For a shell call the text is each authoring command's own source (simpleCommand.source:
+// its words, including command substitutions, and any heredoc fed to it). The real shape
+// is compound — `git log --grep PAAS-9 && git commit -m "PAAS-1: …"` inspects and then
+// commits — and the key belongs to the commit, not to the read beside it.
 //
 // For an MCP call the whole input is searched: the key may be in a title, a body, or
 // a branch name, and enumerating those field names per tool would break silently
@@ -129,16 +164,16 @@ func authoringText(block map[string]any) (string, bool) {
 	}
 
 	command, _ := input["command"].(string)
-	if command == "" || !authoringVerbs.MatchString(command) {
+
+	var sources []string
+	for _, c := range simpleCommands(command) {
+		if isAuthoring(c.words) {
+			sources = append(sources, c.source)
+		}
+	}
+	if len(sources) == 0 {
 		return "", false
 	}
 
-	// Guard against a bare mention with no SCM at all — `echo "git commit"` in a
-	// comment, say. Requiring the verb AND a git/gh invocation keeps the gate tight
-	// without enumerating shell syntax.
-	if !strings.Contains(command, "git") && !strings.Contains(command, "gh ") {
-		return "", false
-	}
-
-	return command, true
+	return strings.Join(sources, "\n"), true
 }

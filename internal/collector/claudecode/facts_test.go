@@ -180,3 +180,40 @@ func TestSegmentSummary_UnchangedWhenNothingWasDone(t *testing.T) {
 	assert.NotContains(t, got, "Did:",
 		"no facts means no facts clause at all, rather than an empty one that reads as 'did nothing'")
 }
+
+// TestSessionFacts_AMentionLicensesNoFact is F34 for facts: a heredoc that quotes `git
+// commit` licensed "Did: committed". Every rule now needs the command to run.
+func TestSessionFacts_AMentionLicensesNoFact(t *testing.T) {
+	for _, cmd := range []string{
+		"cat >> notes.md <<'EOF'\ngit commit -m x\ngit checkout -b y\ngh pr edit 1\ngo test ./...\nEOF",
+		`echo "then git commit and go test"`,
+		`grep -rn "git switch -c" .`,
+		`git log --grep "git commit"`,
+	} {
+		assert.Empty(t, sessionFacts([]map[string]any{factLine(cmd)}), "command %q only mentions", cmd)
+	}
+}
+
+func TestSessionFacts_DetectsInvocationsInRealShapes(t *testing.T) {
+	for _, tc := range []struct{ cmd, want string }{
+		{`cd /w/u && go test -count=1 ./... 2>&1 | tail -3`, "ran tests"},
+		{`rtk go test ./internal/...`, "ran tests"},
+		{`python -m pytest -q`, "ran tests"},
+		{`git -C /w/u commit -m x`, "committed"},
+		{`git checkout -q -b feature`, "created a branch"},
+		{`git worktree add -b feature ../wt origin/main`, "created a branch"},
+		{`for d in a b; do (cd $d && git commit -am x); done`, "committed"},
+		// Measured: the dominant `go test` shape in this repo's own transcripts.
+		{`env -u GOROOT -u GOPATH go test ./...`, "ran tests"},
+		{`UNJIRA_LIVE=1 env -u GOROOT -C /w/u go test -tags=live ./internal/live/`, "ran tests"},
+		{`env --unset=GOROOT -i PATH=/bin go test ./...`, "ran tests"},
+	} {
+		assert.Contains(t, sessionFacts([]map[string]any{factLine(tc.cmd)}), tc.want, "command %q", tc.cmd)
+	}
+}
+
+// TestSessionFacts_ALookupIsNotARun: `command -v go` asks where go is; it runs nothing. A
+// guard for anyone who makes dropCommandPrefixes skip wrapper options.
+func TestSessionFacts_ALookupIsNotARun(t *testing.T) {
+	assert.Empty(t, sessionFacts([]map[string]any{factLine(`command -v go test >/dev/null || echo missing`)}))
+}

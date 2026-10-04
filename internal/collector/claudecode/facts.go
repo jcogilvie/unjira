@@ -22,7 +22,6 @@ package claudecode
 // for richer distillation, which is a different and larger thing.
 
 import (
-	"regexp"
 	"slices"
 )
 
@@ -38,25 +37,39 @@ import (
 // observation order, so two sessions doing the same things read alike and one
 // session's summary does not churn between passes.
 //
-// "opened a PR" is the one rule decided by an invocation rather than a substring
-// (ghPRCreateInvocations, shell.go): the anchor events use the same recognizer, and a
-// substring fired on heredoc bodies and grep patterns that merely quote the phrase, so
-// the summary claimed a PR nobody opened. The other rules still match substrings; see
-// the finding on authoringVerbs for what that costs.
+// Every rule is decided on a parsed command (simpleCommands, shell.go), not a substring:
+// a substring fired on heredoc bodies, echo and grep strings that merely quote a verb,
+// so the summary claimed a commit or a PR nobody made (F34). "opened a PR" is the same
+// recognizer the anchor events use.
 var factRules = []struct {
 	phrase string
-	match  func(command string) bool
+	match  func(words []shellWord) bool
 }{
-	{"committed", substring(`git commit`)},
-	{"created a branch", substring(`git checkout -b|git switch -c`)},
-	{"opened a PR", func(command string) bool { return len(ghPRCreateInvocations(command)) > 0 }},
-	{"updated a PR", substring(`gh pr edit`)},
-	{"ran tests", substring(`helm unittest|go test|\./test\.sh|pytest|make e2e`)},
+	{"committed", func(w []shellWord) bool { sub, _, ok := gitSubcommand(w); return ok && sub == "commit" }},
+	{"created a branch", func(w []shellWord) bool {
+		sub, args, ok := gitSubcommand(w)
+		return ok && createsBranch(sub, args)
+	}},
+	{"opened a PR", func(w []shellWord) bool { return isProgram(w, "gh") && hasWords(w, "pr", "create") }},
+	{"updated a PR", func(w []shellWord) bool { return isProgram(w, "gh") && hasWords(w, "pr", "edit") }},
+	{"ran tests", runsTests},
 }
 
-// substring is a factRule matcher over a regular expression anywhere in the command.
-func substring(pattern string) func(string) bool {
-	return regexp.MustCompile(pattern).MatchString
+// runsTests reports whether a command runs a test suite, in the forms measured in real
+// transcripts.
+func runsTests(w []shellWord) bool {
+	switch {
+	case isProgram(w, "go"), isProgram(w, "helm"):
+		return hasWords(w, "test") || hasWords(w, "unittest")
+	case isProgram(w, "test.sh"), isProgram(w, "pytest"):
+		return true
+	case isProgram(w, "python"), isProgram(w, "python3"):
+		return hasWords(w, "-m", "pytest")
+	case isProgram(w, "make"):
+		return hasWords(w, "e2e")
+	}
+
+	return false
 }
 
 // sessionFacts returns the phrases a segment's tool calls license, deduplicated and in
@@ -70,9 +83,11 @@ func sessionFacts(lines []map[string]any) []string {
 
 	for _, line := range lines {
 		for _, cmd := range toolCommands(line) {
-			for _, rule := range factRules {
-				if rule.match(cmd) && !slices.Contains(seen, rule.phrase) {
-					seen = append(seen, rule.phrase)
+			for _, c := range simpleCommands(cmd) {
+				for _, rule := range factRules {
+					if rule.match(c.words) && !slices.Contains(seen, rule.phrase) {
+						seen = append(seen, rule.phrase)
+					}
 				}
 			}
 		}

@@ -14,6 +14,7 @@ require (
 	github.com/xhit/go-str2duration/v2 v2.1.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.56.0
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (

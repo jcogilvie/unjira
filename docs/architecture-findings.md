@@ -603,22 +603,6 @@ paths. When it has three consumers in three packages, the resolver living in one
 At one consumer this is not worth moving. `tasktracker` is the obvious home if it grows, and #177 is
 the natural moment to decide.
 
-### F34 — SCM keys and most session facts still match a substring, so a mention reads as authorship
-
-`authoringVerbs` (`internal/collector/claudecode/scm.go`) and every `factRules` entry except "opened a
-PR" (`facts.go`) match their verb anywhere in a command. Measured over the real corpus for the one
-verb checked: **13 of 172** distinct commands containing `gh pr create` only *mentioned* it — a plan
-document appended through a heredoc, `gh pr comment`/`gh pr edit` bodies, python heredocs grepping
-transcripts, an `echo`, a commit message. The ticket keys in such a command become
-`ArtifactSCMKeys` (`ProvenanceSCMCommand`, the tier just below a branch name), and a heredoc that
-quotes `git commit` licenses "Did: committed".
-
-"opened a PR" now uses the anchor recognizer (`ghPRCreateInvocations`, `shell.go`), which removed that
-claim from 2 of 84 real root segments. The rest were left alone on purpose: scmKeys is re-ranking
-evidence F20 measured on its current behaviour, and changing it changes matching, which the anchor
-work explicitly did not. `ghPRCreateInvocations`' lexer is general enough to recognize any verb at
-command position if that is wanted.
-
 ### F32 — a subagent transcript's `gitBranch` is its parent's branch, not its own
 
 Claude Code writes the PARENT session's branch into every line of a subagent transcript. Of 31 subagent
@@ -659,7 +643,6 @@ not hand it the parent's branch as provenance.
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
-| F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
