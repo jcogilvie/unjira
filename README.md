@@ -140,11 +140,13 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 
 **The store has no migrations; a schema change needs a fresh one.** There will be none until
 unjira is productionized. Every table is `CREATE TABLE IF NOT EXISTS`, so an existing database
-keeps its old shape. The most recent such change records who placed every member link
+keeps its old shape. The most recent such change orders reviewer corrections by when each
+became a correction (`actions.corrected_seq`, findings F41 and F42), so the learn cursor no longer
+reads the first ruling's clock time. The one before records who placed every member link
 (`narrative_events.member_placement`: the model, an exact pull-request identity, or a reviewer;
-finding F43's fix). The one before gave every `narrative_events` link a kind (`member` or
+finding F43's fix). The one before that gave every `narrative_events` link a kind (`member` or
 `context`) and every member link a confidence
-(`docs/superpowers/specs/2026-10-02-shared-context-design.md`), and the one before that ordered
+(`docs/superpowers/specs/2026-10-02-shared-context-design.md`), and the earliest ordered
 links by a monotonic sequence instead of millisecond timestamps (finding F30). A store created
 before any of them is refused when opened, BEFORE any schema statement runs, naming the missing columns, the
 change that added them, and the fix: *rename the database to a backup and re-collect*:

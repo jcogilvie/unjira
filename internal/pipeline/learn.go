@@ -30,7 +30,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/llm"
@@ -170,10 +169,7 @@ func KeepCandidates(
 	if err != nil {
 		return nil, false, err
 	}
-	position, err := stored.Later(draft.ReadThrough).Encode()
-	if err != nil {
-		return nil, false, fmt.Errorf("advancing the learn watermark: %w", err)
-	}
+	position := stored.Later(draft.ReadThrough).Encode()
 
 	written, err = writeKept(cfg.RulesDir(), draft.Candidates, keep)
 	if err != nil {
@@ -193,11 +189,9 @@ func KeepCandidates(
 //
 // A malformed stored value is an error rather than a silent reset to zero: resetting would
 // re-distil every correction ever made and offer a reviewer rules they already ruled on,
-// which reads as the tool having forgotten their decisions.
-//
-// A pre-F31 watermark, a whole-second timestamp, gets its own error naming the fix. Reading
-// it as a cursor is not possible without guessing what it covered, which was exactly its
-// defect.
+// which reads as the tool having forgotten their decisions. An earlier cursor form (a
+// whole-second timestamp, or F31's decided_at JSON) can only be in a store that predates
+// the correction sequence, which store.Open refuses before this is reached.
 func readLearnWatermark(s *store.Store) (store.CorrectionsCursor, error) {
 	raw, err := s.GetCursor(learnCursorCollector, learnCursorResource)
 	if err != nil {
@@ -205,29 +199,13 @@ func readLearnWatermark(s *store.Store) (store.CorrectionsCursor, error) {
 	}
 
 	cursor, err := store.ParseCorrectionsCursor(raw)
-	if err == nil {
-		return cursor, nil
-	}
-
-	if old, oldErr := time.Parse(time.RFC3339, raw); oldErr == nil {
-		converted := store.CorrectionsCursor{
-			DecidedAt: old.UTC().Truncate(time.Second).Format("2006-01-02T15:04:05.000Z"),
-		}
-
+	if err != nil {
 		return store.CorrectionsCursor{}, fmt.Errorf(
-			"the learn watermark %q is a pre-F31 whole-second timestamp, which this build "+
-				"does not read: it was a clock reading, so it cannot say which corrections were "+
-				"actually drafted. Refusing to reset it, which would re-offer every correction a "+
-				"reviewer has already ruled on. To continue from the same point, re-offering only "+
-				"corrections ruled within that second (where F31 could have hidden one), run: "+
-				`sqlite3 <db_path> "UPDATE cursors SET position = '%s' WHERE collector = '%s' AND `+
-				`resource = '%s'"`,
-			raw, converted, learnCursorCollector, learnCursorResource)
+			"the learn watermark %q is not a corrections cursor: refusing to reset it, which would "+
+				"re-offer every correction a reviewer has already ruled on: %w", raw, err)
 	}
 
-	return store.CorrectionsCursor{}, fmt.Errorf(
-		"the learn watermark %q is not a corrections cursor: refusing to reset it, which would "+
-			"re-offer every correction a reviewer has already ruled on: %w", raw, err)
+	return cursor, nil
 }
 
 // toRulesCorrections maps the store's shape to the rules package's.

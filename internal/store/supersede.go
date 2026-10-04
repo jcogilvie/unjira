@@ -68,5 +68,5 @@ func (s *Store) SupersedeAction(
 // legitimate here (a reviewer may simply not want the action, with nothing to
 // teach), so unlike reconciler.Redraft this does not reject blank text.
 func (s *Store) RecordRuling(id int64, status, feedback string) error {
-	return updateActionStatusImpl(s.db, id, status, &feedback, nil)
+	return s.updateActionStatus(id, status, &feedback, nil)
 }

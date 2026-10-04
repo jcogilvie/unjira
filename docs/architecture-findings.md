@@ -657,42 +657,6 @@ Nor by the back door. `docs/superpowers/specs/2026-10-02-shared-context-design.m
 out of matching entirely, so linking a subagent's narrative to its parent's root segment as context does
 not hand it the parent's branch as provenance.
 
-### F41 — the learn cursor still trusts the wall clock not to step back
-
-`store.CorrectionsCursor` is the newest `actions.decided_at` a learn draft read, plus the ids read at
-exactly that instant (`internal/store/corrections.go`). Same-millisecond rulings cannot tie, because
-they are told apart by id. But the cursor still orders rulings by `decided_at`, which is
-`strftime('%Y-%m-%dT%H:%M:%fZ','now')`: the host's wall clock. If the clock steps backwards between
-two rulings (an NTP correction, a VM restored from snapshot), the later ruling gets an earlier
-`decided_at`, and if a draft has already read past that point, the ruling is below the cursor and is
-never offered. Nothing reports it.
-
-`actions.id` is not a substitute: it orders *creation*, and a reviewer rules in any order. The fix
-that cannot be fooled is a sequence stamped at ruling time, in the same statement as `decided_at`,
-the way F30 stamps `linkSeqHighWater` at examination. That needs a new column, and with no migration
-mechanism, a fresh store. Not done with the F31 fix, which was scoped to need no schema change.
-Unmeasured: how often the clock on a developer machine steps back by more than the gap between two
-rulings. Probably rarely, since rulings are seconds to days apart.
-
-### F42 — a re-ruling keeps its first `decided_at`, so feedback added later can fall below the learn cursor
-
-`updateActionStatusImpl` stamps `decided_at = COALESCE(decided_at, now)` (`internal/store/actions.go`).
-That is deliberate: it preserves the original ruling time. But `CorrectionsSince` treats `decided_at` as
-the moment a row *became a correction*, and the two differ when a reviewer rules twice.
-`unjira actions decide N --reject` records a rejection with no feedback, which is not a correction.
-A later `actions decide N --edit "<lesson>"` adds feedback, and only from then is the row a correction.
-Neither command checks the current status. The row keeps the first ruling's `decided_at`. If a learn
-pass has kept anything since that first ruling, the cursor is already past it, and the lesson is never
-offered.
-
-Verified with a throwaway store test: reject without feedback at `…:01.000Z`, a cursor read through
-`…:02.000Z`, then `UpdateActionStatusAndFeedback(N, edited, "the lesson")`. `decided_at` stayed
-`…:01.000Z` and `CorrectionsSince` offered 0 rows. Triage's own flow does not do this, since a triage
-ruling moves the row out of `proposed`. Only the `actions decide` CLI, used on an already-ruled action,
-does. How often that happens is unmeasured. The fix is to decide what "became a correction" means
-(stamp a separate time or sequence when feedback first becomes non-empty, or refuse re-ruling a decided
-action). F41's ruling sequence would be the natural place.
-
 ---
 
 ## Task cross-references
@@ -717,13 +681,11 @@ action). F41's ruling sequence would be the natural place.
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
-| F41 — the learn cursor trusts the wall clock | open. A clock stepping back between two rulings can still hide one. Needs a ruling sequence column, so a fresh store |
-| F42 — a re-ruling keeps its first `decided_at` | open. `actions decide --edit` on an already-rejected action adds feedback below the learn cursor; verified with a throwaway test |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |
-| F31 — learn's watermark can skip corrections | **resolved**: the watermark is a `store.CorrectionsCursor`, the newest `decided_at` the draft READ plus the ids read at that instant, advanced by `KeepCandidates` from the draft and never backwards. Not `actions.id`, which orders creation rather than ruling. No schema change; a pre-F31 whole-second value is refused with a one-line fix. Drill: a clock reading at keep fails the between-draft-and-keep test 5/5. Residuals: F41, F42 |
+| F31 — learn's watermark can skip corrections | **resolved**, then superseded: the watermark is a `store.CorrectionsCursor` advanced by `KeepCandidates` from what the draft READ, never from a clock reading at keep, and never backwards. Its position is now `actions.corrected_seq`, a sequence stamped when a row becomes a correction (from `correction_marks`), which also closed F41 (the clock stepping back) and F42 (a lesson added by a later ruling). Drill: a clock reading at keep fails the between-draft-and-keep test 5/5 |
 | F29 — nothing expresses which tracker a narrative's work belongs to | open, **deferred deliberately**. Many-to-many collector↔tracker routing, plus per-tracker write authority. Not reachable with one real tracker; the write-authority half must land BEFORE any tracker that could be public, since a missing gate is discovered by publishing. Decide with F7/**#178** and F28 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
