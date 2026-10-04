@@ -13,6 +13,11 @@ package claudecode
 // body or command substitution. Quoted heredoc bodies, comments and quoted strings are
 // data and never count.
 //
+// That includes a script the shell does go on to run: one handed to another shell
+// (`sh -c '…'`, `bash <<'EOF'`, `docker run … sh -c '…'`), and a Python heredoc that
+// shells out. Its commands are invisible here. Known and measured, not overlooked: see
+// F48 in docs/architecture-findings.md.
+//
 // A command the parser rejects runs nothing here. Measured over every distinct shell
 // command in the local transcripts: 10 of 42,145 (0.02%) fail to parse, all with an
 // unclosed quote or heredoc that bash would reject too, so it ran nothing there either.
