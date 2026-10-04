@@ -62,7 +62,7 @@ shipped default. Anyone graduating an action type before slice 6 lands is accept
 be silent.
 
 ~~Also unproven: **no action has ever actually been applied.**~~ **Resolved 2026-08-27** by
-`internal/live/autocommit_test.go`, on the user's explicit authorization. A graduated `comment`
+`internal/live/autocommit_test.go`, run against the dev instance. A graduated `comment`
 action posted to a real Jira issue in DEVSBX and the comment was read back off the issue; an
 ungraduated one at 0.99 confidence wrote nothing, verified against an issue whose entire comment
 history was known to be empty (a stronger bar than an unchanged `updated` timestamp). The failure
@@ -82,7 +82,7 @@ Unblocked by slice 4 (`internal/reconciler`, PR #15) and by `llm.api_key_helper`
 cannot run unattended against a gateway issuing short-lived tokens, so the credential work was a hard
 prerequisite rather than a nicety.
 
-## Scope, decided with the user
+## Scope, as decided
 
 - **Both `watch` and the gate**, in one slice, matching the spec as written.
 - **`Graduated` defaults to false for every action type**, so nothing auto-applies until a human edits

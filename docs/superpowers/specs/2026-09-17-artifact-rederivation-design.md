@@ -72,9 +72,8 @@ repository, and will continue to have none** unless the underlying transcript fi
 produce new segments (which only appends new rows) or something re-derives the old ones.
 
 This is a real, present-tense demonstration of exactly what F21 describes — not a projection. It is
-also, honestly, still a **disposable dev store**: the presence of thirteen other timestamped
-snapshot copies in this session's temp directory (`before-nuke`, `nuked`, `baseline-preclear`, …)
-confirms this exact database is being rebuilt and discarded repeatedly during ordinary development.
+also, honestly, still a **disposable dev store**: this database is rebuilt and discarded repeatedly
+during ordinary development.
 I could not find, and do not believe there currently exists, a store for which this backfill gap has
 real operational consequences (a review queue someone is actually working, or a narrative history
 someone is relying on). That absence is the load-bearing fact behind this spec's recommendation.

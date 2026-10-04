@@ -186,7 +186,7 @@ and §"What follows" what comes after, with the condition that gates each.
 
 ## The problem, restated precisely
 
-The user develops subagent-first. One problem cascades into several issues and PRs, issues are filed
+The target workflow is subagent-first. One problem cascades into several issues and PRs, issues are filed
 as they are discovered, and the context assembled for one fix is reused for the next. A transcript is
 therefore not a linear, one-issue-at-a-time timeline: the investigation in a root session is
 legitimate evidence for every issue it produced.
@@ -321,7 +321,7 @@ its own, or membership of the narrative it most belongs to. The cost of forcing 
 ticket hears about the investigation as work and the others see it as context — which is today's
 behaviour for the one ticket and strictly better for the others.
 
-**Who assigns kinds: the model, in `Cluster`'s output** (decided with the user, 2026-10-02). Each
+**Who assigns kinds: the model, in `Cluster`'s output** (decided 2026-10-02). Each
 cluster gains an optional `context_indices` beside `event_indices`, resolved against the same numbered
 slice, and a required `confidence`:
 
@@ -834,18 +834,18 @@ spec's status, F37 deleted, F6 narrowed.
    because it is strictly better than today and costs nothing. The re-ask branch may make a targeted
    re-ask cheap enough to prefer — "event N is the work of clusters X and Y; which?" Decide once its
    shape is visible; I could not inspect it, because it has not been pushed.
-   **Answered (2026-10-02, with the user): the re-ask**, with rationale first and a per-event
+   **Answered (2026-10-02): the re-ask**, with rationale first and a per-event
    confidence. Response order has no logical bearing on which workstream an event belongs to, and
    membership drives token attribution, so the choice must be the correct one rather than a consistent
    one. §4 now specifies it.
 2. **Inline `context_indices`, or a separate relevance call?** §1 recommends inline and names the
    separate call as the fallback. M2, M3 and M5's cluster and `NEW` counts decide.
-   **Answered (2026-10-02, by the user): inline first.** Not both: the separate call is built only if
+   **Answered (2026-10-02): inline first.** Not both: the separate call is built only if
    the pre-committed trigger in §1 fires.
 3. **Does the summary leak (§2) defeat slice 3 outright?** If M6b finds duplication carried by
    summaries, drafting may need the summary rewritten without context, or context withheld from
    `Cluster`'s summary-writing entirely. Unknown until measured.
-   **Reframed (2026-10-02, with the user):** a summary that *mentions* context is accurate and
+   **Reframed (2026-10-02):** a summary that *mentions* context is accurate and
    desirable — workstreams touch, and Jira links tickets the same way. The harms are narrower: context
    justifying a state-bearing action, and a summary that re-tells another stream's work attracting that
    stream's future events (§2). The second is measured by M7, which now gates slice 1; M6b stays the
@@ -865,7 +865,7 @@ spec's status, F37 deleted, F6 narrowed.
    being in it — and in slice 1 they are not in it. Probably yes once slice 3 lands; harmless before.
 9. **When does unjira need a migration mechanism?** §1 refuses old stores on F30's precedent and
    shares F21's trigger: the first non-disposable store.
-   **Answered (2026-10-02, by the user):** not until unjira is productionized — after every slice and
+   **Answered (2026-10-02):** not until unjira is productionized — after every slice and
    phase ships. Until then the store is disposable: refuse an old one before any DDL, rename it to a
    backup, and re-collect. No ALTER-based upgrade, and no migration framework.
 

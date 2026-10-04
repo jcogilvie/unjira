@@ -27,7 +27,7 @@ stdlib `database/sql`/`context`/`time`. No new deps.
 This shell has stale `GOROOT`/`GOPATH` env vars. **Every `go`/`gofmt` invocation MUST be prefixed
 with `env -u GOROOT -u GOPATH`**, e.g. `env -u GOROOT -u GOPATH go test ./...`. Without it you get
 spurious `compile: version "X" does not match go tool version "Y"` errors unrelated to your change.
-Work in the worktree at `/Users/jonathan.ogilvie/workspace/unjira/.claude/worktrees/phase1-persist-and-rework`;
+Work in the worktree at `<repo>/.claude/worktrees/phase1-persist-and-rework`;
 run all commands from there. Do not touch the session task list (the coordinator owns it).
 
 ## File structure

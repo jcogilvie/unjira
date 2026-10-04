@@ -25,13 +25,12 @@ between propose and apply — the exact scenario `Applier.Apply` cites as its re
 not exist or you do not have permission to see it.`
 
 One correction to the note below: the migration boundary is a **release**, not the first applied
-action. The user's condition — "we can keep deleting the sqlite db until we make a *release*" —
+action. The condition — the sqlite db may keep being deleted until there is a *release* —
 matches commit `9b54490`'s original wording. The "graduation and migration are now coupled" claim
 below was over-conservative; left in place with this correction rather than rewritten.
 
 Stacked on slice 6's first half (`unjira actions`, PR #20), whose own body flags this as its known
-gap. Prompted by the user directly: *"i do not like unattended failures with no reasons; we should
-figure out how to capture/report the failure reason."*
+gap. The requirement: an unattended failure must record and report its reason.
 
 ## The gap, traced
 
@@ -54,7 +53,7 @@ because "add a column" understates the work — three of the four losses are in 
 Net effect: `unjira actions list --status failed`, the surface built specifically to make failures
 visible, can only ever report "it failed."
 
-## Decisions (settled with the user)
+## Decisions
 
 **A new `actions.error TEXT` column.** Considered and rejected: overloading `feedback`. The
 phase-1 spec scopes `feedback` as "the reviewer's free-text correction," read by `triage`'s rework

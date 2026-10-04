@@ -18,7 +18,7 @@ import (
 
 // The dispute re-ask: what happens when the model places one event in two or more
 // clusters' event_indices (docs/superpowers/specs/2026-10-02-shared-context-design.md
-// §4, decided with the user 2026-10-02).
+// §4, decided 2026-10-02).
 //
 // Every event has exactly one MEMBER home, because member links are what a reconcile
 // pass drafts from and what token attribution charges. Intentional sharing has its

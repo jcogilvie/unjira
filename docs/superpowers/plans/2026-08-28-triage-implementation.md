@@ -186,7 +186,7 @@ func TestEligibleEventIDs_MixedStateFreezesOnlyThePast(t *testing.T) {
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```
-cd /Users/jonathan.ogilvie/workspace/unjira/.claude/worktrees/triage
+cd <repo>/.claude/worktrees/triage
 go test ./internal/store/ -run TestEligibleEventIDs -v 2>&1 | tail -20; echo "exit=$?"
 ```
 
@@ -2392,7 +2392,7 @@ Per `CLAUDE.md`'s "Keep the docs true in the PR that changes the code" — an au
 
 - [ ] **Step 2: The triage design spec**
 
-Move `Status: design, approved by the user 2026-08-28` to `## Status: landed <date>`, with:
+Move `Status: design, approved 2026-08-28` to `## Status: landed <date>`, with:
 - the real test count from Task 10
 - the `--auto-approve` correction (it bypasses `Graduated`, not just the prompt)
 - the merge-needs-an-unlink correction

@@ -52,7 +52,7 @@ No existing file is large enough to need splitting for this change.
 
 - [ ] **Step 1: Add the dependency**
 
-Run (from the repo root, `/Users/jonathan.ogilvie/workspace/unjira`):
+Run (from the repo root, `<repo>`):
 
 ```bash
 env -u GOROOT -u GOPATH go get 'github.com/openai/openai-go/v3@v3.50.0'
@@ -301,14 +301,14 @@ import (
 )
 
 func main() {
-	cfg, err := config.Load("/Users/jonathan.ogilvie/workspace/unjira/config/unjira.example.json")
+	cfg, err := config.Load("<repo>/config/unjira.example.json")
 	if err != nil {
 		panic(err)
 	}
 	fmt.Printf("%+v\n", cfg.LLM)
 }
 EOF
-cd /Users/jonathan.ogilvie/workspace/unjira && env -u GOROOT -u GOPATH go run /tmp/check_example.go
+cd <repo> && env -u GOROOT -u GOPATH go run /tmp/check_example.go
 rm /tmp/check_example.go
 ```
 

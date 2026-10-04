@@ -40,7 +40,7 @@ The binary lives under `1.25.7/bin` (a stale-`GOBIN` artifact) but is genuinely
 `golangci-lint 2.12.2 built with go1.26.0`. **The branch lints `0 issues` today and must stay
 there.** Ignore the `gomodguard is deprecated` warnings — pre-existing config noise.
 
-**Work in the worktree** `/Users/jonathan.ogilvie/workspace/unjira/.claude/worktrees/dev-narrate`
+**Work in the worktree** `<repo>/.claude/worktrees/dev-narrate`
 (branch `worktree-dev-narrate`). Run all commands from there. Do not create or switch branches. Do
 not touch the session task list — the coordinator owns it.
 

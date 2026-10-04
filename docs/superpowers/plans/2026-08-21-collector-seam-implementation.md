@@ -45,7 +45,7 @@ warnings.
 **The authoritative gate is `earthly +reviewable`** — lint plus tests in a clean container with its own
 Go 1.26 toolchain. A local pass with a container failure means something is environment-dependent.
 
-**Work in the worktree** `/Users/jonathan.ogilvie/workspace/unjira/.claude/worktrees/slice4-reconciler`
+**Work in the worktree** `<repo>/.claude/worktrees/slice4-reconciler`
 (branch `worktree-slice4-reconciler`). Run all commands from there. Do not create or switch branches.
 Do not touch the session task list — the coordinator owns it.
 
