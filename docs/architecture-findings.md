@@ -66,25 +66,6 @@ which is why it is recorded now rather than rediscovered then.
 
 ---
 
-### F35 — a branch run with no user message is dropped, taking its SCM keys and branch with it
-
-`sessionEvents` skips any segment with `len(seg.userTexts) == 0`
-(`internal/collector/claudecode/claudecode.go`, the `continue` at the top of its segment loop), and
-`dropBelowFloor` (`segments.go`) keeps a below-floor FIRST run open "so the NEXT run absorbs it" — but
-the absorbing happens only in `coalesceAdjacent`, which merges same-or-unnamed branches. A first run on
-a different branch that only ran tools therefore survives folding as its own segment and is then
-skipped.
-
-Verified with a throwaway test: a `PROJ-7-hotfix` run holding only `git commit -m "PROJ-7: fix"`,
-followed by three user messages on `feature`, segments to `[PROJ-7-hotfix: 0 users, scm=[PROJ-7]]` and
-`[feature: 3 users]`; only the second becomes an event. `PROJ-7` and the branch naming it are lost —
-the SCM-command and branch tiers, the two strongest the correlator has. That is the exact silent loss
-`absorb`'s own comment says folding must never cause. Frequency on real transcripts is **unmeasured**.
-
-Root sessions only. A subagent transcript cannot hit it: its `gitBranch` is cleared before segmenting
-(F32), so it has no branch change to split on and is one run. PR anchors are unaffected too —
-`transcriptAnchors` reads every line independently of segmentation.
-
 ### F47 — a PR a subagent opened is named only in the subagent's own segment
 
 A segment summary names the PRs its run opened (`openedPullRequests`,
@@ -679,7 +660,6 @@ not hand it the parent's branch as provenance.
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
-| F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |
