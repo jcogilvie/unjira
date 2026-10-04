@@ -216,3 +216,48 @@ func TestSegments_EmptyTranscriptYieldsNothing(t *testing.T) {
 	assert.Empty(t, segments([]map[string]any{{"type": "system"}}, 0),
 		"lines with no timestamp and no branch carry nothing to segment on")
 }
+
+// TestSegments_AToolOnlyFirstRunFoldsIntoTheNextBranch is F35. A first run that only ran
+// tools (here a commit naming PROJ-7) on its own branch has no user message, so it cannot
+// become an event. dropBelowFloor kept it open "so the NEXT run absorbs it", but only
+// coalesceAdjacent ever absorbed, and it merges same-or-unnamed branches. So the run
+// survived as its own segment, sessionEvents skipped it for having no messages, and
+// PROJ-7 went with it: the SCM-command tier, the second strongest the correlator has.
+func TestSegments_AToolOnlyFirstRunFoldsIntoTheNextBranch(t *testing.T) {
+	lines := []map[string]any{
+		factLineOn("PROJ-7-hotfix", `git commit -m "PROJ-7: fix"`),
+		line("2026-09-14T10:00:00Z", "feature", "/w/u", "user", "one"),
+		line("2026-09-14T10:01:00Z", "feature", "/w/u", "user", "two"),
+		line("2026-09-14T10:02:00Z", "feature", "/w/u", "user", "three"),
+	}
+
+	got := segments(lines, DefaultMinSegmentMessages)
+
+	require.Len(t, got, 1, "the tool-only run cannot be an event of its own, so it must not be a segment")
+	assert.Equal(t, "feature", got[0].gitBranch, "the run that earned its size names the segment")
+	assert.Equal(t, []string{"PROJ-7"}, got[0].scmKeys, "and the folded run's SCM key survives")
+	assert.Len(t, got[0].userTexts, 3)
+	assert.Contains(t, got[0].allBranches, "PROJ-7-hotfix", "its branch stays visible in the branch set")
+}
+
+// TestSegments_ABelowFloorFirstRunKeepsFoldingUntilItIsBigEnough: when the run that absorbs
+// the first is itself below the floor, the merged run is still pending and the next run
+// absorbs it too, rather than leaving a below-floor segment that sessionEvents would emit
+// as peer of real work or, with no messages, drop.
+func TestSegments_ABelowFloorFirstRunKeepsFoldingUntilItIsBigEnough(t *testing.T) {
+	lines := []map[string]any{
+		factLineOn("a", `git commit -m "PROJ-1: a"`),
+		line("2026-09-14T10:00:00Z", "b", "/w/u", "user", "only one on b"),
+		line("2026-09-14T10:01:00Z", "c", "/w/u", "user", "c one"),
+		line("2026-09-14T10:02:00Z", "c", "/w/u", "user", "c two"),
+		line("2026-09-14T10:03:00Z", "c", "/w/u", "user", "c three"),
+	}
+
+	got := segments(lines, DefaultMinSegmentMessages)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "c", got[0].gitBranch)
+	assert.Equal(t, []string{"PROJ-1"}, got[0].scmKeys)
+	assert.Equal(t, []string{"only one on b", "c one", "c two", "c three"}, got[0].userTexts,
+		"messages stay in transcript order")
+}

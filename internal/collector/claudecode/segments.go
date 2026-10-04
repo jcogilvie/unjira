@@ -194,12 +194,34 @@ func foldShortRuns(runs []segment, minMessages int) []segment {
 	return coalesceAdjacent(runs)
 }
 
-// dropBelowFloor folds every run with too few user messages into the run before it, or
-// after it when it is first.
+// dropBelowFloor folds every run with too few user messages into the run before it, or,
+// for a below-floor FIRST run, into the run after it.
+//
+// The first run cannot fold backwards, so it is held as pending and absorbs what follows,
+// whatever its branch, until it reaches the floor. A following run that reaches the floor
+// on its own names the merged run, since it is what earned the segment its size; a
+// below-floor one is a detour and folds in without renaming, as it would into any
+// previous run. This used to be left to coalesceAdjacent, which only merges same-or-unnamed
+// branches, so a first run on its own branch survived as a segment of its own; with no user
+// message it was then skipped by sessionEvents, taking its SCM keys with it (F35). A
+// session whose runs are all below the floor ends as one pending run, which is kept: there
+// is nothing left to fold it into.
 func dropBelowFloor(runs []segment, minMessages int) []segment {
 	out := make([]segment, 0, len(runs))
+	pending := false
 
 	for _, run := range runs {
+		if pending {
+			held := &out[len(out)-1]
+			if len(run.userTexts) >= minMessages {
+				held.gitBranch = run.gitBranch
+			}
+			absorb(held, run)
+			pending = len(held.userTexts) < minMessages
+
+			continue
+		}
+
 		if len(run.userTexts) >= minMessages || len(runs) == 1 {
 			out = append(out, run)
 
@@ -212,9 +234,8 @@ func dropBelowFloor(runs []segment, minMessages int) []segment {
 			continue
 		}
 
-		// First run is below the floor: keep it open so the NEXT run absorbs it,
-		// which preserves its messages while letting the larger run name the segment.
 		out = append(out, run)
+		pending = true
 	}
 
 	return out
