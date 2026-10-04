@@ -90,7 +90,7 @@ func TestSCMKeys_AuthoringWinsInAMixedCommand(t *testing.T) {
 		`git log --oneline -3 && git commit -m "PAAS-3669: the real change"`))
 
 	assert.Equal(t, []string{"PAAS-3669"}, got,
-		"an authoring verb anywhere in the command makes its keys authorship")
+		"the commit in a compound command is authorship, whatever runs beside it")
 }
 
 // TestSCMKeys_IgnoresNonSCMCommands keeps unrelated Bash out. A kubectl invocation
@@ -211,4 +211,52 @@ func TestSegments_SCMKeysAreScopedToTheirRun(t *testing.T) {
 	assert.Len(t, got, 2)
 	assert.Equal(t, []string{"PROJ-1"}, got[0].scmKeys)
 	assert.Equal(t, []string{"PROJ-2"}, got[1].scmKeys)
+}
+
+// TestSCMKeys_AMentionIsNotAuthorship is F34. Measured: 13 of 172 commands containing
+// `gh pr create` only mentioned it, and the keys in such a command became SCM-command
+// provenance, the tier just below a branch name. Each case names a verb without running it.
+func TestSCMKeys_AMentionIsNotAuthorship(t *testing.T) {
+	for _, tc := range []struct{ name, command string }{
+		{"plan appended through a heredoc", "cat >> docs/plan.md <<'EOF'\ngit commit -m \"PROJ-5: x\"\nEOF"},
+		{"echo", `echo "next: git commit -m PROJ-5"`},
+		{"grep pattern", `grep -rn "gh pr create.*PROJ-5" .`},
+		{"python heredoc", "python3 - <<'PY'\nprint('git commit -m PROJ-5')\nPY"},
+		{"comment body", `gh pr comment 42 --body "please git commit PROJ-5 first"`},
+		{"listing branches", `git branch --list "PROJ-5*"`},
+		{"deleting a tag", `git tag -d PROJ-5-rc1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Empty(t, scmKeys(toolLine("2026-09-01T10:00:00Z", "f", "Bash", tc.command)))
+		})
+	}
+}
+
+// TestSCMKeys_AKeyBelongsToTheCommandThatWroteIt: in a compound command only the authoring
+// command's own text is read, so a key a neighbouring read named is not authorship.
+func TestSCMKeys_AKeyBelongsToTheCommandThatWroteIt(t *testing.T) {
+	got := scmKeys(toolLine("2026-09-01T10:00:00Z", "f", "Bash",
+		`git log --grep PROJ-9 --oneline && git commit -m "PROJ-1: the change"`))
+
+	assert.Equal(t, []string{"PROJ-1"}, got)
+}
+
+// TestSCMKeys_ReadsTheShapesClaudeCodeActuallyCommitsWith: the message in a heredoc fed to
+// the commit, or in a command substitution in its argument, is the commit's own text.
+func TestSCMKeys_ReadsTheShapesClaudeCodeActuallyCommitsWith(t *testing.T) {
+	for _, tc := range []struct{ name, command string }{
+		{"-m with a heredoc substitution", "git commit -m \"$(cat <<'EOF'\nPROJ-1: the change\n\nbody\nEOF\n)\""},
+		{"-F - from a heredoc", "git commit -F - <<'EOF'\nPROJ-1: the change\nEOF"},
+		{"git -C <dir>", `git -C /w/u commit -m "PROJ-1: x"`},
+		{"checkout with -q before -b", `git checkout -q -b PROJ-1-work`},
+		{"creating a branch", `git branch PROJ-1-work`},
+		{"tagging", `git tag -a PROJ-1-rc1 -m "rc"`},
+		{"worktree on a new branch (measured)", `git -C /w/u worktree add -b PROJ-1-audit /w/u-wt origin/main`},
+		{"checkout -B (measured)", `git checkout -B PROJ-1-sweep origin/PROJ-1-sweep`},
+		{"absolute path", `/usr/bin/git commit -m "PROJ-1: x"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, []string{"PROJ-1"}, scmKeys(toolLine("2026-09-01T10:00:00Z", "f", "Bash", tc.command)))
+		})
+	}
 }

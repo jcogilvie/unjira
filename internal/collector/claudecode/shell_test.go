@@ -1,10 +1,10 @@
 package claudecode
 
-// shell_test.go pins the `gh pr create` recognizer against the shapes measured in real
-// transcripts. A substring match on "gh pr create" — what authoringVerbs does for keys —
-// fires on a plan document being appended through a heredoc, a python heredoc that
-// greps transcripts for the phrase, and echo/grep strings. For a KEY that over-match is
-// tolerable; for an event asserting "a pull request was opened" it is a false fact.
+// shell_test.go pins the shell reading every collector recognizer is built on, against the
+// shapes measured in real transcripts. A substring match on "gh pr create" fired on a plan
+// document being appended through a heredoc, a python heredoc that greps transcripts for
+// the phrase, and echo/grep strings, so an event asserted "a pull request was opened" for
+// a PR nobody opened.
 
 import (
 	"testing"
