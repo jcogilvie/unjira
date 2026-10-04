@@ -130,15 +130,19 @@ them differently. **Consequence:** a dry run is a slightly weaker preview exactl
 `watch` case, a PR merging days after it opened. Fixing it means hydrating each planned target as if
 extended. Not done here because no measurement shows the difference matters. Frequency unmeasured.
 
-### F44 — one malformed model response kills the whole pass
+### F44 — a malformed model response that is not a lossless slip still kills the whole pass
 
-A baseline rep died with `parsing cluster response …: invalid character '}' looking for beginning of
-object key string`: the model emitted invalid JSON, and `parseClusterResponse` fails the pass loudly.
-Failing loudly is right — a best-effort parse is how events get silently misattributed — but nothing
-retries, so one bad response costs the whole multi-minute pass, and under `watch` the window may move
-on. #79's re-ask recovers *omitted* events, not an unparseable response. The same targeted-follow-up
-machinery could ask for a corrected response once, then fail loudly. Rate unmeasured: 1 death in 11
-passes here, on the arm without `confidence`, so not attributable to slice 1's larger schema.
+The one observed death was a trailing comma (`"event_indices":[51,56,57,62,63],\n},` in a complete,
+11.8k-character response), and that class is now absorbed: `llm.JSONArrayPayload` and
+`llm.JSONObjectPayload` drop a comma before a closer via `hujson.Standardize`, since it carries no data.
+What remains is every malformation that is NOT lossless: an out-of-range index, an unknown `kind`, a
+missing `confidence`, prose instead of JSON. `parseClusterResponse` still fails the pass on each, which
+is right, because a best-effort reading is how events get silently misattributed. But nothing retries,
+so one such response costs the whole multi-minute pass, and under `watch` the window may move on. #79's
+re-ask machinery could ask once for a corrected response, quoting the parser's reason, then fail loudly.
+Not built, because no such failure has been observed: 0 in the 32 other passes measured on 2026-10-02
+and 2026-10-04 (acceptance reps for slice 1, F43 and the named-PR summaries), and a re-ask costs a
+full-prompt call (~70–110k tokens) each time it fires.
 
 ### F40 — a reshuffle can empty a context narrative of its members, leaving it open
 
@@ -708,7 +712,7 @@ action). F41's ruling sequence would be the natural place.
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Unmeasured |
 | F46 — a dry run's clustering context can differ when the PR join fires | open. A dry run does not extend the holder's window, so it may not be context. Unmeasured |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
-| F44 — a malformed model response kills the pass | open. 1 death in 11 passes; re-ask-once-then-fail is the likely shape |
+| F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F34 — SCM keys and facts match substrings | open. "opened a PR" moved to the invocation recognizer; scmKeys deliberately untouched |
 | F35 — a user-message-less branch run is dropped with its keys | open. Mechanism verified by a throwaway test; real frequency unmeasured |

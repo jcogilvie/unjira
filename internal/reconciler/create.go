@@ -378,10 +378,10 @@ func clampConfidence(c float64) float64 {
 // open a blank ticket, and substituting the title would silently produce an issue
 // whose text no model actually wrote.
 func parseCreateResponse(raw string) (createVerdict, error) {
-	// StripJSONFence, matching correlator.checkSameStory — the repo's other
+	// JSONObjectPayload, matching correlator.checkSameStory — the repo's other
 	// object-shaped response. Deliberately NOT JSONArrayPayload: that wraps a bare
 	// object INTO an array, which is the opposite of what this prompt asks for.
-	cleaned := llm.StripJSONFence(raw)
+	cleaned := llm.JSONObjectPayload(raw)
 
 	var v createVerdict
 	if err := json.Unmarshal([]byte(cleaned), &v); err != nil {

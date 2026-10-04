@@ -1089,7 +1089,7 @@ func checkSameStory(ctx context.Context, client llm.Client, a, b ClusterResult) 
 	stats.AddUsage(usage)
 
 	var resp sameStoryResponse
-	if err := json.Unmarshal([]byte(llm.StripJSONFence(raw)), &resp); err != nil {
+	if err := json.Unmarshal([]byte(llm.JSONObjectPayload(raw)), &resp); err != nil {
 		return false, ClusterResult{}, stats, fmt.Errorf("parsing same-story response %q: %w", raw, err)
 	}
 

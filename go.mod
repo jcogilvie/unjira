@@ -10,6 +10,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.30
 	github.com/openai/openai-go/v3 v3.50.0
 	github.com/stretchr/testify v1.11.1
+	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	github.com/xhit/go-str2duration/v2 v2.1.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.56.0

@@ -1132,6 +1132,30 @@ func TestCluster_TolerateFencedSameStoryResponse(t *testing.T) {
 	assert.Equal(t, "Merged", results[0].Title)
 }
 
+// TestCluster_SurvivesATrailingCommaFromRealModel is F44's regression test at the level
+// the pass died. The live response was complete and closed, with one slip:
+// `"event_indices":[51,56,57,62,63],\n},`. The pass failed on `invalid character '}'
+// looking for beginning of object key string`, losing every cluster the model got right.
+func TestCluster_SurvivesATrailingCommaFromRealModel(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	evts := []correlator.Event{
+		mustEvent(t, "claude_code", "e1", "did a thing", base),
+		mustEvent(t, "claude_code", "e2", "did another", base.Add(time.Minute)),
+	}
+	llmFake := &fakeLLM{responses: []string{"[\n" +
+		`{"kind":"new","title":"A","summary":"s","confidence":0.9,"event_indices":[0],` + "\n},\n" +
+		`{"kind":"new","title":"B","summary":"s","confidence":0.9,"event_indices":[1]}` + "\n]"}}
+
+	results, _, err := correlator.Cluster(t.Context(), evts, nil, llmFake, correlator.TimeRange{
+		Start: base, End: base.Add(time.Hour),
+	}, 128000)
+
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, "A", results[0].Title)
+	assert.Equal(t, "B", results[1].Title)
+}
+
 // TestCluster_TokenEstimateIsNotOptimistic pins the character-per-token ratio
 // behind estimateTokens against real measurements, because that estimate is
 // what decides whether Cluster bisects a window. An optimistic estimate means
