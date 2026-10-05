@@ -106,3 +106,19 @@ func TestParsePRCreateArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestSimpleCommands_NeverPanicsOnAnExpansion: expand.Literal with a nil config panics on
+// a process substitution, because there is no handler to run it. wordOf calls it only
+// for words isLiteral passed, so no expansion reaches it; this pins that for every
+// expansion kind, so a change to isLiteral cannot reopen the panic.
+func TestSimpleCommands_NeverPanicsOnAnExpansion(t *testing.T) {
+	for _, cmd := range []string{
+		`diff <(git log) >(cat) && git commit -m x`,
+		`echo $((1 + 2)) ${HOME} $(date) ` + "`date`",
+		`cd ~/w && git commit -m "~ $x"`,
+		`shopt -s extglob; ls !(foo)`,
+		`echo {a,b} [ab]* "$@"`,
+	} {
+		assert.NotPanics(t, func() { simpleCommands(cmd) }, "command %q", cmd)
+	}
+}

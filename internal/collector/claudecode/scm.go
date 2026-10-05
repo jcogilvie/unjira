@@ -37,11 +37,13 @@ import (
 // or grep that only names a verb is not authorship (F34).
 func isAuthoring(words []shellWord) bool {
 	if sub, args, ok := gitSubcommand(words); ok {
+		if _, ok := branchCreatingFlags[sub]; ok {
+			return createsBranch(sub, args)
+		}
+
 		switch sub {
 		case "commit":
 			return true
-		case "checkout", "switch", "worktree":
-			return createsBranch(sub, args)
 		case "branch":
 			return hasPositional(args) && !hasAnyWord(args, "-d", "-D", "--delete", "-l", "--list")
 		case "tag":
@@ -59,20 +61,20 @@ func isAuthoring(words []shellWord) bool {
 	return false
 }
 
+// branchCreatingFlags are, per git subcommand, the flags that make it create the branch it
+// moves to. -b and -B exist only on `git worktree add`.
+var branchCreatingFlags = map[string][]string{
+	"checkout": {"-b", "-B"},
+	"switch":   {"-c", "-C", "--create", "--force-create"},
+	"worktree": {"-b", "-B"},
+}
+
 // createsBranch reports whether a `git checkout`, `git switch` or `git worktree add`
 // creates the branch it moves to.
 func createsBranch(sub string, args []shellWord) bool {
-	switch sub {
-	case "checkout":
-		return hasAnyWord(args, "-b", "-B")
-	case "switch":
-		return hasAnyWord(args, "-c", "-C", "--create", "--force-create")
-	case "worktree":
-		// -b and -B exist only on `git worktree add`.
-		return hasAnyWord(args, "-b", "-B")
-	}
+	flags, ok := branchCreatingFlags[sub]
 
-	return false
+	return ok && hasAnyWord(args, flags...)
 }
 
 // scmToolNames are the non-shell surfaces. The GitHub MCP is real usage rather than
