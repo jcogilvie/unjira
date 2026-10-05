@@ -122,7 +122,7 @@ in this repo's transcripts came from a subagent; unmeasured elsewhere.
 The PR identity join (`internal/pipeline/preassign.go`, `planPRIdentity` at `:76`) places only
 UNPLACED events. A narrative's eligible members, the PR's `:opened` among them, are still numbered in
 the clustering prompt whenever that narrative is context, and `Persist` moves any the model puts in
-another cluster (`moveMembers`, `internal/correlator/correlator.go:1522`). The join makes this more
+another cluster (`moveMembers`, `internal/correlator/correlator.go:1536`). The join makes this more
 likely to be offered, though not more likely to be taken: placing a merge extends its narrative's
 `window_end` into the current window, so the narrative becomes context in the very pass that placed
 it (`hidePreAssigned`, `preassign.go:235`, hides only the placed event). A reshuffle that moves
@@ -192,7 +192,7 @@ is lost. A NEW cluster holding only context is still refused (F37).
 
 A context narrative's eligible members are numbered in the clustering prompt, so the model may place
 every one of them in other clusters. `Persist` then moves each away (`Tx.MoveMember`,
-`internal/store/linkkind.go:66`, via `moveMembers`, `internal/correlator/correlator.go:1522`). Nothing
+`internal/store/linkkind.go:66`, via `moveMembers`, `internal/correlator/correlator.go:1536`). Nothing
 then checks whether the narrative they left still holds any work. It stays `open`, with a title and
 summary describing events it no longer holds, and `NarrativesOverlapping`
 (`internal/store/narratives.go:291`) keeps returning it, so it rides into every later prompt as context.
@@ -205,20 +205,22 @@ whether it happens on real data. Not fixed here because the remedy is a lifecycl
 not make. A narrative whose work all moved could be marked `split` like triage's source, or kept open
 for its context links, or have those context links re-homed. Frequency is unmeasured.
 
-### F39 — the dispute re-ask's prompt is unbounded
+### F52 — a single dispute too large for the context window fails the pass
 
-`buildDisputePrompt` (`internal/correlator/cluster_dispute.go`) renders every claimant of every disputed
-event with ALL of that claimant's other member events (`writeClaimant`, `:192`), at full summary length.
-`max_event_summary_chars` does not apply. If the estimate exceeds the context window, the pass fails
-loudly (`:121`). It never truncates and never sends the prompt over budget. The case that makes this
-likely is the one the re-ask exists for: a bisected pass, which bisected because the window did not fit.
-Its claimants can span both halves, so the dispute prompt can carry more member text than either half's
-prompt did. Slice 1's own F36 test had to shrink its events to fit. **Consequence:** a wide window
-whose halves each fit can still die at the dispute step, without having clustered anything wrong.
-Unmeasured on real data: the disputed-event count and claimant sizes on a real pass are exactly what M4
-and M5 will show. The obvious bounds, capping each listed member summary or listing at most N members
-per claimant, trade the model's view of a claimant for the call fitting. That is the trade F16
-measured for context narratives, and deciding it needs those numbers first.
+The dispute re-ask describes each claimant of a disputed event by ALL of its other member events, in
+full (`writeClaimant`, `internal/correlator/cluster_dispute.go:326`). A dispute set that does not fit
+one call is split into batches that each fit (`batchDisputes`, `:266`), so the set's size no longer
+matters. One dispute's size still does: if a single disputed event's claimants alone exceed the
+context window, nothing smaller can be asked, and the pass refuses before spending a dispute call
+(`requireDisputeFits`, `:298`). It never truncates and never sends a prompt over budget. The case
+that makes this likely is a bisected pass, which bisected because the window did not fit: each
+claimant can hold a whole half, so one dispute can list more member text than either half's prompt
+did (`TestCluster_ADisputeTooLargeAloneFailsLoudly`). **Consequence:** a wide window whose halves
+each fit can still die at the dispute step, without having clustered anything wrong. Unmeasured on
+real data: claimant sizes on a real disputed pass are what M4 and M5 will show. The remaining bounds,
+capping each listed member summary or listing at most N members per claimant, trade the model's view
+of a claimant for the call fitting. That is the trade F16 measured for context narratives, and
+deciding it needs those numbers first.
 
 ### F16 — the prompt is unbounded in the window, and the response ceiling binds first
 
@@ -704,7 +706,6 @@ yet; noted while writing the template, not found as a live incident.
 | F32 — a subagent that names no branch has none | open, narrowed: a subagent's own calls now supply its branch when they name exactly one (39 of 1,041 segments); several are recorded as a set. The remainder named none |
 | F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
 | F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
-| F39 — the dispute re-ask's prompt is unbounded | open. Found building slice 1's F36 test |
 | F43 — cross-pass PR split | **resolved**: PR-identity pre-assignment before clustering (`pipeline/preassign.go`). An unplaced event whose host-qualified `ArtifactPullRequest` matches a member of exactly one open narrative joins it, unseen by the model; ambiguity falls back to the model and is reported. Drills: removing the exactly-one, open-status and host guards each fail a named test. Two-pass M3 re-measured 2026-10-02 on real data: 24/26 -> 26/26 in all three reps |
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Unmeasured |
 | F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
@@ -715,6 +716,7 @@ yet; noted while writing the template, not found as a live incident.
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
+| F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |

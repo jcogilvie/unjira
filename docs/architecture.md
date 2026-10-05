@@ -157,7 +157,9 @@ numbered event in exactly one cluster's `event_indices` and may also list it in 
 two clusters' `event_indices` is not resolved by response order: `Cluster` makes one **dispute re-ask**
 per pass, after any bisection has merged its halves, asking which claimant the event is primarily the
 work of (rationale first, per-event confidence, PR and branch evidence presented but not applied). The
-others keep it as context. `Persist` writes members with `Tx.MoveMember` (moves the one home, refuses a
+others keep it as context. The re-ask is one call, or, when the disputes together exceed the context
+window, one call per batch that fits; every disputed event is asked about once, and no answer applies
+until every batch has answered. One dispute too large alone fails the pass (F52). `Persist` writes members with `Tx.MoveMember` (moves the one home, refuses a
 frozen one, upgrades a context row to a member with a new `link_seq`), then context with
 `Tx.AddContext` (never deletes). Windows, summaries and compaction come from members only. Every
 member link records who placed it in `member_placement`: `model` (`Persist`, including a triage
@@ -170,9 +172,9 @@ context link re-admits no narrative and reaches no prompt that drafts or matches
 the next clustering prompt (rendered under each context narrative as background, a numbered event as
 `-> #N`), by the pass summary, and by nothing else.
 
-**Ten LLM call sites**, in three packages — `correlator/correlator.go:481` (cluster), `:1085` (same-story
-check at a bisection seam), `:1698` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
-`correlator/cluster_dispute.go:129` (dispute re-ask), `correlator/match.go:627`,
+**Ten LLM call sites**, in three packages — `correlator/correlator.go:488` (cluster), `:1099` (same-story
+check at a bisection seam), `:1712` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
+`correlator/cluster_dispute.go:177` (dispute re-ask), `correlator/match.go:627`,
 `reconciler/draft.go:92`, `:339`, `reconciler/create.go:244`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
 
@@ -446,7 +448,7 @@ no second datastore in prospect, an interface would add indirection without inve
 second store implementation becomes real* — an in-memory store for tests, or a non-SQLite backend.
 
 **`correlator.Stats` as a Visitor.** It is a plain accumulator with `Add`/`AddUsage`
-(`correlator.go:131`, `:144`), and the pattern name would not change the code. *Revisit if traversal
+(`correlator.go:266`, `:297`), and the pattern name would not change the code. *Revisit if traversal
 logic accumulates* — several stats types over one event walk, say, where double-dispatch would earn
 its keep.
 

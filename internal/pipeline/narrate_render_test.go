@@ -110,6 +110,18 @@ func TestRenderNarrateResult(t *testing.T) {
 			"a pass that needed a second call to account for everything says so")
 	})
 
+	t.Run("a dispute pass batched to fit the window says how many calls it took", func(t *testing.T) {
+		disputed := full
+		disputed.Stats.DisputedEvents = 3
+		disputed.Stats.DisputeCalls = 2
+		disputed.Stats.Disputes = make([]correlator.DisputeResolution, 3)
+
+		out := pipeline.RenderNarrateResult(disputed)
+
+		assert.Contains(t, out, "resolved 3 by 2 re-ask calls, batched to fit the context window")
+		assert.NotContains(t, out, "by one re-ask")
+	})
+
 	t.Run("zero omitted events prints nothing extra", func(t *testing.T) {
 		out := pipeline.RenderNarrateResult(full)
 

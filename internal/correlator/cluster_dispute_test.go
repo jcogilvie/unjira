@@ -242,7 +242,8 @@ func TestCluster_MalformedDisputeAnswersErrorLoudly(t *testing.T) {
 func TestCluster_DisputeAcrossBisectedHalvesIsResolved(t *testing.T) {
 	// 600 characters each: large enough that the whole window does not fit the budget
 	// below and bisects, small enough that the dispute prompt — which lists every
-	// claimant's other members, from both halves — does (see F39).
+	// claimant's other members, from both halves — fits in one call (larger, and it
+	// would not: TestCluster_ADisputeTooLargeAloneFailsLoudly).
 	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	evts := []correlator.Event{
 		mustEvent(t, "claude_code", "a1", strings.Repeat("a", 600), base),
