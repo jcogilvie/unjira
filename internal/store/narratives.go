@@ -2,8 +2,10 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/events"
@@ -289,14 +291,56 @@ func (s *Store) UnlinkedEventsInRange(start, end time.Time) ([]events.Event, err
 // has never seen should not silently drop a narrative from clustering. An unknown
 // value is more likely a new lifecycle state than a reason to hide work.
 func (s *Store) NarrativesOverlapping(start, end time.Time) ([]NarrativeRow, error) {
+	return s.NarrativesOverlappingExtended(start, end, nil)
+}
+
+// NarrativesOverlappingExtended is NarrativesOverlapping answered as if each narrative
+// in extendTo already had its window_end moved forward to the time given: never back,
+// as ExtendNarrative's callers move it, and with window_start untouched. Each returned
+// row carries the window_end it would have. It writes nothing, and an id that names no
+// narrative is ignored.
+//
+// It exists so a narration pass decides its clustering context from one query whether
+// or not it has written (F46's fix). The pull-request identity join extends the
+// narratives it places events into before clustering, which can bring a narrative that
+// ended before the window into it. A real pass has written that extension by now; a dry
+// run has not, and passes the same planned ends here so both see the same set. Passing
+// an end the store already holds changes nothing, which is what lets the real pass go
+// through this query too, rather than through a second one that could drift.
+//
+// "Forward" is decided by instant (strftime('%s'), whole seconds, which is what
+// RFC3339 stores), as the join's writer decides it with time.After, and not by
+// comparing the strings, which disagree with the instants when offsets differ. The
+// end that wins is then compared with the window exactly as a stored one would be.
+func (s *Store) NarrativesOverlappingExtended(start, end time.Time, extendTo map[int64]time.Time) ([]NarrativeRow, error) {
+	planned := make(map[string]string, len(extendTo))
+	for id, at := range extendTo {
+		planned[strconv.FormatInt(id, 10)] = at.Format(time.RFC3339)
+	}
+	plannedJSON, err := json.Marshal(planned)
+	if err != nil {
+		return nil, fmt.Errorf("encoding %d planned window end(s): %w", len(planned), err)
+	}
+
 	rows, err := s.db.Query(
-		`SELECT id, window_start, window_end, title, summary, status,
+		`WITH planned(id, window_end) AS (
+		   SELECT CAST(key AS INTEGER), value FROM json_each(?)
+		 ),
+		 effective AS (
+		   SELECT n.id, n.window_start,
+		          CASE WHEN CAST(strftime('%s', p.window_end) AS INTEGER) > CAST(strftime('%s', n.window_end) AS INTEGER)
+		               THEN p.window_end ELSE n.window_end END AS window_end,
+		          n.title, n.summary, n.status,
+		          n.compaction_boundary, n.compaction_boundary_event_id
+		     FROM narratives n LEFT JOIN planned p ON p.id = n.id
+		 )
+		 SELECT id, window_start, window_end, title, summary, status,
 		        compaction_boundary, compaction_boundary_event_id
-		 FROM narratives
+		 FROM effective
 		 WHERE window_end >= ? AND window_start <= ?
 		   AND status != '`+StatusSplit+`'
 		 ORDER BY window_start, id`,
-		start.Format(time.RFC3339), end.Format(time.RFC3339),
+		string(plannedJSON), start.Format(time.RFC3339), end.Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying narratives overlapping [%s, %s): %w",

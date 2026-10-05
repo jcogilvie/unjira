@@ -136,18 +136,37 @@ by `identity` (`narrative_events.member_placement`). If it occurs, the remedy is
 member whose PR an open narrative already holds by identity. That is a prompt-shape decision, and is
 not taken here.
 
-### F46 — a dry run's clustering context can differ from the real pass's when the PR join fires
+### F53 — stored timestamps keep their source's UTC offset, and window queries compare them as strings
 
-`NarrateOptions.DryRun` (`internal/pipeline/narrate.go:18`) promises the reported narratives are
-"exactly what would have been persisted". When the PR identity join places an event, the real pass
-writes first, moving the holder's `window_end` into the window, so `NarrativesOverlapping`
-(`internal/store/narratives.go:291`) returns the holder as clustering context. A dry run writes
-nothing (`preassign.go:157`), so a holder whose stored window ends before the pass's window is not
-context in the dry run's prompt. The dry run reports the placement itself correctly, but it clusters
-the remaining events against one fewer context narrative than the real pass would, and can cluster
-them differently. **Consequence:** a dry run is a slightly weaker preview exactly in the steady-state
-`watch` case, a PR merging days after it opened. Fixing it means hydrating each planned target as if
-extended. Not done here because no measurement shows the difference matters. Frequency unmeasured.
+`store.InsertEvent` writes `event.OccurredAt.Format(time.RFC3339)` (`internal/store/events.go:29`)
+without converting to UTC, so a timestamp keeps the offset its source gave it. Jira's carry the
+account's zone (`2026-08-21T12:00:57.812-0700`, the layout the Jira collector parses), and are stored as
+`…-07:00`. Claude Code and GitHub timestamps are `Z`. The window queries then compare these as text:
+event-range reads bound `occurred_at` with `start.Format(time.RFC3339)`, and `NarrativesOverlapping`
+tests narrative windows the same way. Lexical order equals chronological order only within a single
+offset. **Consequence:** a Jira event can fall on the wrong side of a pass's window, or be missed by an
+overlap test, by up to its offset (7 hours for that account). The F46 fix compares instants
+(`strftime('%s')`) where it decides "forward", and leaves the existing comparisons as they were.
+Unmeasured: every event in the snapshots measured in this period is `Z`, since those windows held no
+Jira events. The likely fix is to store UTC at every writer, which needs a fresh store under the
+no-migrations rule, or to compare instants in the queries.
+
+### F51 — a dry run reports an extend's title and window from the cluster result, not as Persist writes them
+
+`describeUnpersisted` (`internal/pipeline/narrate.go:413`) builds each dry-run narrative from the
+cluster result. For an extend that adds members, it reports `r.Title` (line 430) and a window of
+`eventWindow(r.Events)` (line 421), meaning the earliest and latest of this pass's new members. Persist
+reports something else for the same extend (`internal/correlator/correlator.go:1565`, `:1586`). It keeps
+the stored title, because the prompt asks for a title only on `new` (F27), so `r.Title` is empty. It keeps
+the stored `window_start`, and moves `window_end` only forward. Checked with a throwaway test: a
+narrative `Old` over `[09:00, 14:00]` extended by one event at 12:30 reports `title="Old"
+window=[09:00, 14:00]` from a real pass and `title="" window=[12:30, 12:30]` from a dry run.
+**Consequence:** `NarrateOptions.DryRun` promises the reported narratives are exactly what would have
+been persisted, but every extend-with-members row in a dry run's output has a blank title and a window
+that can be narrower than the narrative's. Only the report is affected. Clustering, placements and the
+prompt are the same as the real pass's. The fix is to report an extend from the existing narrative's
+row, the way the context-only branch already does. Not fixed here because it is a separate defect from
+the clustering context.
 
 ### F44 — a malformed model response that is not a lossless slip still kills the whole pass
 
@@ -688,7 +707,8 @@ yet; noted while writing the template, not found as a live incident.
 | F39 — the dispute re-ask's prompt is unbounded | open. Found building slice 1's F36 test |
 | F43 — cross-pass PR split | **resolved**: PR-identity pre-assignment before clustering (`pipeline/preassign.go`). An unplaced event whose host-qualified `ArtifactPullRequest` matches a member of exactly one open narrative joins it, unseen by the model; ambiguity falls back to the model and is reported. Drills: removing the exactly-one, open-status and host guards each fail a named test. Two-pass M3 re-measured 2026-10-02 on real data: 24/26 -> 26/26 in all three reps |
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Unmeasured |
-| F46 — a dry run's clustering context can differ when the PR join fires | open. A dry run does not extend the holder's window, so it may not be context. Unmeasured |
+| F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
+| F53 — stored timestamps keep their offset; window queries compare strings | open. Jira timestamps are stored with the account's offset, everything else `Z`; unmeasured |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |

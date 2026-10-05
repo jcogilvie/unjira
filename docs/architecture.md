@@ -138,8 +138,13 @@ holders, two or more holders, or a holder that is not `open` (an allowlist) all 
 model unchanged, and the pass summary reports each with its reason. The join keys on exact PR identity
 only, never on issue keys, which are many-to-many with PRs. It does not group in-window events among
 themselves; a PR's first events go to the model together. It writes before clustering rather than
-after `Persist`, so a pass whose model call fails still places what identity settles, and dry runs
-decide without writing.
+after `Persist`, so a pass whose model call fails still places what identity settles. A dry run
+decides the same placements and writes none of them. Clustering context is read in both modes from
+one query, `store.NarrativesOverlappingExtended`, answered as if each placed-into narrative's
+`window_end` already covered its latest placed event. The real pass has written that extension, so
+for it the query is plain `NarrativesOverlapping`. A dry run has not, and the query still returns a
+holder that the join brings into the window. Without that, a dry run would cluster against fewer
+narratives than the real pass.
 
 **Clustering produces two kinds of link** (`narrative_events.kind`,
 `docs/superpowers/specs/2026-10-02-shared-context-design.md`). A **member** link says the event is the

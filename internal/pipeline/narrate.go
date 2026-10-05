@@ -174,7 +174,12 @@ func RunNarrate(
 		return result, nil
 	}
 
-	existing, excludedContext, err := hydrateContextNarratives(s, window, candidates, cfg.Correlator.MaxContextNarratives)
+	// Context is decided as the store stands once the join's extensions land, in both
+	// modes: the real pass has written them, and a dry run passes the same planned ends
+	// so a holder the join brings into the window is context there too (F46). One query,
+	// so the two cannot drift.
+	existing, excludedContext, err := hydrateContextNarratives(
+		s, window, candidates, cfg.Correlator.MaxContextNarratives, plannedWindowEnds(result.PreAssigned))
 	if err != nil {
 		return NarrateResult{}, err
 	}
@@ -311,10 +316,16 @@ func requireNonEmptyClusters(clustered []correlator.ClusterResult) error {
 // tier of selectContextNarratives' ranking. The second return is how many
 // overlapping rows were excluded, which the caller must report (never
 // silently drop data).
+//
+// extendTo is the window_end each narrative the pull-request identity join placed
+// into will hold (plannedWindowEnds). Overlap and the bound's recency ranking are
+// both read against it, so a dry run, which has not written the extension, sees the
+// context the real pass, which has, does (F46).
 func hydrateContextNarratives(
 	s *store.Store, window correlator.TimeRange, candidates []events.Event, maxContext int,
+	extendTo map[int64]time.Time,
 ) ([]correlator.Narrative, int, error) {
-	rows, err := s.NarrativesOverlapping(window.Start, window.End)
+	rows, err := s.NarrativesOverlappingExtended(window.Start, window.End, extendTo)
 	if err != nil {
 		return nil, 0, fmt.Errorf("assembling context narratives: %w", err)
 	}

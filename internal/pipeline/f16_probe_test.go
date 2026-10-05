@@ -82,7 +82,7 @@ func probeInputs(t *testing.T, s *store.Store, days int) (
 	// capping the CONTENTS of the prompt, not about the new context-narrative
 	// COUNT bound this file's own doc comment names as the untried lever — see
 	// TestF16_WhereAreTheTokens's own comment.
-	ctxNarr, _, err := hydrateContextNarratives(s, window, cands, 0)
+	ctxNarr, _, err := hydrateContextNarratives(s, window, cands, 0, nil)
 	require.NoError(t, err)
 
 	return cands, ctxNarr, window

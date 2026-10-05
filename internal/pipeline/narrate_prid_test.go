@@ -14,7 +14,10 @@ package pipeline_test
 // so a writer that stopped emitting the key the join reads fails these tests too.
 
 import (
+	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -340,6 +343,28 @@ func TestRunNarrate_AReopenedPRsSecondCloseJoins(t *testing.T) {
 	assert.Empty(t, client.prompts)
 }
 
+// TestRunNarrate_SeveralPlacementsExtendToTheLatest: two events joining one narrative
+// move its window_end to the later of them, whichever the join met first. Candidates
+// arrive oldest first, so keeping the first placement's time would leave the window
+// short of the second.
+func TestRunNarrate_SeveralPlacementsExtendToTheLatest(t *testing.T) {
+	s := narrateStore(t)
+	ref := pridRef(t, "o/r")
+	holder := pridHolder(t, s, "PR 7", collectorgithub.OpenedEvent(ref, pridPR(7)))
+	closedAt := pridMergedAt.Add(-time.Hour)
+	pridInsert(t, s, pridCompletion(t, ref, pridPR(7), "closed", 8001, closedAt))
+	pridInsert(t, s, pridCompletion(t, ref, pridPR(7), "closed", 8002, pridMergedAt))
+
+	got, err := pipeline.RunNarrate(t.Context(), s, &narrateLLM{responses: []string{`[]`}},
+		narrateConfig(), pridPass2, pipeline.NarrateOptions{})
+
+	require.NoError(t, err)
+	require.Len(t, got.PreAssigned, 2)
+	row, err := s.GetNarrative(holder)
+	require.NoError(t, err)
+	assert.Equal(t, pridMergedAt, row.WindowEnd.UTC(), "window_end covers the later placement")
+}
+
 // TestRunNarrate_AFrozenTargetAcceptsTheMergeAsNewWork: the narrative holding #7 has
 // already posted to the tracker, so its :opened is frozen. The merge is not frozen —
 // no posted mutation describes it — so it joins as a NEW member link, past the posted
@@ -389,6 +414,98 @@ func TestRunNarrate_DryRunReportsThePlacementAndWritesNothing(t *testing.T) {
 	row, err := s.GetNarrative(holder)
 	require.NoError(t, err)
 	assert.Equal(t, pridOpenedAt, row.WindowEnd.UTC())
+}
+
+// TestRunNarrate_DryRunClustersAgainstTheRealPassesContext is F46. The holder of #7
+// ends before pass 2's window, and the join places #7's :merged into it. The real pass
+// writes first, which moves the holder's window_end into the window, so the holder is
+// clustering context. The dry run writes nothing, yet must show the model the same
+// prompt, or "exactly what would have been persisted" previews a different pass.
+//
+// The bounded case is why the planned extension must reach the store's query rather
+// than be patched on after it: with room for one context narrative, the extended holder
+// ends latest and outranks a competitor, but only if the bound ranks its extended
+// window_end.
+func TestRunNarrate_DryRunClustersAgainstTheRealPassesContext(t *testing.T) {
+	ref := pridRef(t, "o/r")
+	merged := pridCompletion(t, ref, pridPR(7), "merged", 9001, pridMergedAt)
+
+	tests := []struct {
+		name string
+		// extra seeds anything beyond the holder, the merge and the unrelated candidate.
+		extra      func(t *testing.T, s *store.Store)
+		maxContext int
+		wantAbsent string
+	}{
+		{name: "the holder ends before the window"},
+		{
+			name:       "the bound ranks the holder by its extended window_end",
+			maxContext: 1,
+			extra: func(t *testing.T, s *store.Store) {
+				t.Helper()
+
+				_, err := s.InsertNarrative(pridCut, pridCut.Add(time.Hour), "Competitor", "overlaps the window")
+				require.NoError(t, err)
+			},
+			wantAbsent: "Competitor",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seed := func(t *testing.T, s *store.Store) {
+				t.Helper()
+
+				pridHolder(t, s, "PR 7", collectorgithub.OpenedEvent(ref, pridPR(7)))
+				pridInsert(t, s, merged)
+				seedNarrateEvent(t, s, "unrelated", "tidied the README", pridMergedAt.Add(time.Hour))
+				if tt.extra != nil {
+					tt.extra(t, s)
+				}
+			}
+			run := func(t *testing.T, s *store.Store, dryRun bool) (string, pipeline.NarrateResult) {
+				t.Helper()
+
+				cfg := narrateConfig()
+				cfg.Correlator.MaxContextNarratives = tt.maxContext
+				client := &narrateLLM{responses: []string{
+					`[{"kind":"new","title":"README","summary":"tidy","confidence":0.8,"event_indices":[0]}]`,
+				}}
+				got, err := pipeline.RunNarrate(t.Context(), s, client, cfg, pridPass2, pipeline.NarrateOptions{DryRun: dryRun})
+				require.NoError(t, err)
+				require.Len(t, client.prompts, 1)
+
+				return client.prompts[0], got
+			}
+
+			realStore := narrateStore(t)
+			seed(t, realStore)
+			realPrompt, persisted := run(t, realStore, false)
+
+			dryPath := filepath.Join(t.TempDir(), "dry.db")
+			dryStore, err := store.Open(dryPath)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = dryStore.Close() })
+			seed(t, dryStore)
+			before, err := os.ReadFile(dryPath)
+			require.NoError(t, err)
+			dryPrompt, dry := run(t, dryStore, true)
+			after, err := os.ReadFile(dryPath)
+			require.NoError(t, err)
+
+			require.Len(t, dry.PreAssigned, 1, "the join fires in the dry run too")
+			assert.Equal(t, realPrompt, dryPrompt, "the dry run shows the model exactly what the real pass does")
+			holderLine := fmt.Sprintf("title=%q window=[%s, %s)", "PR 7",
+				pridOpenedAt.Format(time.RFC3339), pridMergedAt.Format(time.RFC3339))
+			assert.Contains(t, dryPrompt, holderLine, "the holder is context, with the window the join's write gives it")
+			if tt.wantAbsent != "" {
+				assert.NotContains(t, dryPrompt, tt.wantAbsent)
+			}
+			assert.Equal(t, persisted.ContextNarratives, dry.ContextNarratives)
+			assert.Equal(t, persisted.ExcludedContextNarratives, dry.ExcludedContextNarratives)
+			assert.True(t, bytes.Equal(before, after), "a dry run leaves the store file byte-for-byte untouched")
+		})
+	}
 }
 
 // TestRunNarrate_EventsFoldedCountsAPreAssignedMember: a placed event is hidden from
