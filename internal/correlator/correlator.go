@@ -238,9 +238,25 @@ type Stats struct {
 	// correlator.member_confidence_floor — the attributions triage asks a reviewer
 	// to confirm. Always zero while the floor is 0 (off, the default).
 	MembersBelowFloor int
-	PromptTokens      int64
-	CompletionTokens  int64
-	EstimatedTokens   int
+	// Emptied lists the narratives Persist moved every remaining member off — a
+	// context narrative whose eligible members the model placed in other clusters —
+	// and so marked store.StatusSplit (finding F40). Reported because nothing else
+	// would show it: the narrative is in no cluster of this pass, and from the next
+	// pass on it is no longer context.
+	Emptied          []EmptiedNarrative
+	PromptTokens     int64
+	CompletionTokens int64
+	EstimatedTokens  int
+}
+
+// EmptiedNarrative is one narrative a Persist call left holding no member link.
+type EmptiedNarrative struct {
+	NarrativeID int64
+	// Title is the narrative's stored title: the story an operator would recognize.
+	Title string
+	// ContextLinksDeleted is how many context links it held, all deleted when it was
+	// marked split. Each such event keeps its member home elsewhere.
+	ContextLinksDeleted int
 }
 
 // DisputeResolution is how the dispute re-ask resolved one multiply-placed event.
@@ -286,6 +302,7 @@ func (s *Stats) Add(other Stats) {
 	s.SharedEvents += other.SharedEvents
 	s.MaxContextFanOut = max(s.MaxContextFanOut, other.MaxContextFanOut)
 	s.MembersBelowFloor += other.MembersBelowFloor
+	s.Emptied = append(s.Emptied, other.Emptied...)
 	s.PromptTokens += other.PromptTokens
 	s.CompletionTokens += other.CompletionTokens
 	s.EstimatedTokens += other.EstimatedTokens
@@ -1216,6 +1233,13 @@ func Persist(
 		touched = nil // WithTx may retry fn in principle; keep this idempotent.
 		linkStats = Stats{}
 
+		// Read before anything moves: the narratives this pass takes a member from are
+		// the only ones it can empty.
+		holders, err := tx.MemberHolders(memberEventIDs(preps))
+		if err != nil {
+			return err
+		}
+
 		// Every member placement first, every context link after. The order is what
 		// makes the outcome independent of response order: a context link added to A
 		// for an event that is still A's member is a no-op (member wins), so if A's
@@ -1235,10 +1259,23 @@ func Persist(
 			return err
 		}
 
+		// After the context links, so a context-only extend of a narrative this pass
+		// emptied is judged on what the narrative finally holds: background for no
+		// work is still no work.
+		linkStats.Emptied, err = markEmptied(tx, holders, touched)
+		if err != nil {
+			return err
+		}
+
 		return requireMemberHomes(tx, preps)
 	})
 	if err != nil {
 		return nil, stats, err
+	}
+
+	for _, e := range linkStats.Emptied {
+		logging.For(o.log, "correlator").InfoContext(ctx, "narrative emptied: every member moved to another narrative",
+			"narrative_id", e.NarrativeID, "status", store.StatusSplit, "context_links_deleted", e.ContextLinksDeleted)
 	}
 
 	stats.Add(linkStats)
@@ -1273,6 +1310,53 @@ func applyContextLinks(tx *store.Tx, preps []preparedResult, touched []Narrative
 	}
 
 	return stats, nil
+}
+
+// memberEventIDs is every member event id the prepared results place.
+func memberEventIDs(preps []preparedResult) []int64 {
+	var out []int64
+	for _, p := range preps {
+		out = append(out, p.eventIDs...)
+	}
+
+	return out
+}
+
+// markEmptied marks split each of holders — the narratives this pass moved a member
+// off — that no longer holds any member (finding F40), deleting its context links,
+// and reports them. A context narrative's eligible members are numbered in the
+// clustering prompt, so the model may place every one of them elsewhere; left open,
+// the narrative would keep a title and summary describing work it no longer holds and
+// ride into every later prompt as context. touched is updated in place, so a narrative
+// this pass also extended with context only is returned as split, as stored.
+//
+// A narrative with an applied action is not exempt, and need not be: MoveMember never
+// moves a frozen member, so a reshuffle can empty a committed narrative only if it
+// held no member at its last commit. Its actions and issue links stay on the row.
+func markEmptied(tx *store.Tx, holders []int64, touched []Narrative) ([]EmptiedNarrative, error) {
+	var out []EmptiedNarrative
+	for _, id := range holders {
+		contextLinks, emptied, err := tx.MarkSplitIfEmptied(id)
+		if err != nil {
+			return nil, err
+		}
+		if !emptied {
+			continue
+		}
+
+		row, err := tx.GetNarrative(id)
+		if err != nil {
+			return nil, fmt.Errorf("reading emptied narrative %d: %w", id, err)
+		}
+		out = append(out, EmptiedNarrative{NarrativeID: id, Title: row.Title, ContextLinksDeleted: contextLinks})
+		for i := range touched {
+			if touched[i].ID == id {
+				touched[i].Status = store.StatusSplit
+			}
+		}
+	}
+
+	return out, nil
 }
 
 // requireMemberHomes is the commit-time half of the one-member-home invariant: every

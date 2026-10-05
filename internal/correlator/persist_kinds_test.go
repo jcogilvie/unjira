@@ -130,7 +130,8 @@ func TestPersist_AContextOnlyEventFailsTheCommit(t *testing.T) {
 // pass moves it to a new narrative and leaves A holding it as background. A context
 // link added while E is still A's member is a no-op (member wins), so applying the
 // results in response order would lose A's link whenever the extend came first.
-// Every member is placed before any context link is added.
+// Every member is placed before any context link is added. A keeps a member of its
+// own, or it would hold no work and be marked split (F40), its background with it.
 func TestPersist_ContextLinksDoNotDependOnResultOrder(t *testing.T) {
 	for _, extendFirst := range []bool{true, false} {
 		name := "new first"
@@ -141,9 +142,10 @@ func TestPersist_ContextLinksDoNotDependOnResultOrder(t *testing.T) {
 			s := persistStore(t)
 			base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 			e := seedPersistedEvent(t, s, "e", "investigation", base)
+			own := seedPersistedEvent(t, s, "own", "A's own fix", base.Add(time.Minute))
 			a, err := s.InsertNarrative(base, base, "A", "a")
 			require.NoError(t, err)
-			require.NoError(t, s.LinkMembers(a, []int64{eventID(t, s, e)}, 0.9))
+			require.NoError(t, s.LinkMembers(a, []int64{eventID(t, s, e), eventID(t, s, own)}, 0.9))
 
 			extend := correlator.ClusterResult{
 				Kind: correlator.ClusterExtends, NarrativeID: a, ContextEvents: []correlator.Event{e},

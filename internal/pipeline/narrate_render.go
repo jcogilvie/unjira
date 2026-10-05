@@ -229,6 +229,14 @@ func writeSharingLines(b *strings.Builder, s correlator.Stats) {
 		fmt.Fprintf(b, "confirm  %d member placement(s) below correlator.member_confidence_floor — "+
 			"surfaced in triage as attributions to confirm\n", s.MembersBelowFloor)
 	}
+
+	// One line per narrative, because an emptied one is in no cluster of this pass, so
+	// the per-narrative detail below never shows it, and from the next pass on it is no
+	// longer context (F40).
+	for _, e := range s.Emptied {
+		fmt.Fprintf(b, "emptied  narrative %d %q: every member moved to another narrative; "+
+			"marked split, %d context link(s) deleted\n", e.NarrativeID, e.Title, e.ContextLinksDeleted)
+	}
 }
 
 // otherClaimants is every claimant but the chosen one.

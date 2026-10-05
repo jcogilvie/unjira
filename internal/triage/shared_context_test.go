@@ -86,6 +86,76 @@ func TestStoreHandler_MergeRehomesTheSourcesEligibleContextLinks(t *testing.T) {
 	assert.Equal(t, store.LinkMember, kindOf(t, s, elsewhere, bg), "the member home is untouched")
 }
 
+// TestStoreHandler_MergeThatEmptiesTheSourceMarksItSplit: every member of an
+// uncommitted source is eligible, so a merge moves all of them and the source holds no
+// work. Left open it would sit in every later prompt as a titled narrative with
+// nothing in it (F40's shape, reached by a merge), so it is marked split, as a split's
+// emptied source is.
+func TestStoreHandler_MergeThatEmptiesTheSourceMarksItSplit(t *testing.T) {
+	s := handlerTestStore(t)
+	base := time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
+	target, _ := seedHandlerNarrative(t, s, "target", base, "me:t1")
+	source, _ := seedHandlerNarrative(t, s, "source", base.Add(time.Hour), "me:s1", "me:s2")
+
+	got, err := NewStoreHandler(s, nil, nil, nil, testCorrelatorConfig(), 0).MergeNarratives(target, source)
+
+	require.NoError(t, err)
+	assert.True(t, got.SourceEmptied)
+	src, err := s.GetNarrative(source)
+	require.NoError(t, err)
+	assert.Equal(t, store.StatusSplit, src.Status)
+	tgt, err := s.GetNarrative(target)
+	require.NoError(t, err)
+	assert.Equal(t, store.StatusOpen, tgt.Status)
+}
+
+// TestStoreHandler_MergeReportsTheFrozenContextAnEmptiedSourceLoses: the source's
+// only frozen link is background, so the merge moves its one (later, eligible) member
+// and leaves it holding no work. Its frozen context link is deleted with it, as a
+// split's emptied source loses its frozen ones, and the count says so.
+func TestStoreHandler_MergeReportsTheFrozenContextAnEmptiedSourceLoses(t *testing.T) {
+	s := handlerTestStore(t)
+	base := time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
+	target, _ := seedHandlerNarrative(t, s, "target", base, "mf:t1")
+	source, _ := seedHandlerNarrative(t, s, "source", base.Add(time.Hour))
+	home, _ := seedHandlerNarrative(t, s, "home", base, "mf:h1")
+	bg := insertTriageEvent(t, s, "mf:bg", base.Add(3*time.Hour))
+	require.NoError(t, s.LinkMembers(home, []int64{bg}, 0.9))
+	require.NoError(t, s.LinkContext(source, []int64{bg}))
+	commitAgainstNarrative(t, s, source)
+	require.NoError(t, s.LinkMembers(source, []int64{insertTriageEvent(t, s, "mf:later", base.Add(4*time.Hour))}, 0.9))
+
+	got, err := NewStoreHandler(s, nil, nil, nil, testCorrelatorConfig(), 0).MergeNarratives(target, source)
+
+	require.NoError(t, err)
+	assert.Empty(t, got.Context, "the frozen context link was not eligible to move")
+	assert.True(t, got.SourceEmptied)
+	assert.Equal(t, 1, got.DeletedContextLinks)
+	_, err = s.NarrativeEventLink(source, bg)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+	assert.Equal(t, store.LinkMember, kindOf(t, s, home, bg), "the event keeps its member home")
+}
+
+// TestStoreHandler_MergeFromASourceThatKeepsWorkLeavesItOpen: a frozen member cannot
+// move, so the source keeps it and stays a live story.
+func TestStoreHandler_MergeFromASourceThatKeepsWorkLeavesItOpen(t *testing.T) {
+	s := handlerTestStore(t)
+	base := time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
+	target, _ := seedHandlerNarrative(t, s, "target", base, "mk:t1")
+	source, _ := seedHandlerNarrative(t, s, "source", base.Add(time.Hour), "mk:frozen")
+	commitAgainstNarrative(t, s, source)
+	require.NoError(t, s.LinkMembers(source, []int64{insertTriageEvent(t, s, "mk:later", base.Add(2*time.Hour))}, 0.9))
+
+	got, err := NewStoreHandler(s, nil, nil, nil, testCorrelatorConfig(), 0).MergeNarratives(target, source)
+
+	require.NoError(t, err)
+	assert.Len(t, got.Members, 1, "only the eligible member moved")
+	assert.False(t, got.SourceEmptied)
+	src, err := s.GetNarrative(source)
+	require.NoError(t, err)
+	assert.Equal(t, store.StatusOpen, src.Status)
+}
+
 // TestSplitNarrative_WithSharedEventsEmptiesAndMarksTheSource is the spec's split test.
 // The source holds two members and one context link. The split moves both members to
 // the new narratives, so the source holds only background — no work — and must be

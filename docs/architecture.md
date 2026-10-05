@@ -166,14 +166,26 @@ member link records who placed it in `member_placement`: `model` (`Persist`, inc
 split), `identity` (the PR identity join), or `reviewer` (triage merge), because a 1.0
 `member_confidence` alone cannot say which.
 
+**A narrative left holding no member is marked `split`.** A context narrative's eligible members are
+numbered in the clustering prompt, so a pass may place all of them in other clusters, and a triage merge
+or split moves a source's eligible members by design. Every one of those paths ends in
+`Tx.MarkSplitIfEmptied`, inside the transaction that moved the members: `Persist` checks each narrative
+it took a member from (read with `Tx.MemberHolders` before anything moves), and merge checks its source.
+A narrative with no member link holds no work, background or not, so it gets `store.StatusSplit`, which
+`NarrativesOverlapping` excludes from every later prompt's context, and its context links are deleted,
+which loses nothing because each such event keeps its member home elsewhere. The row, its actions and its
+issue links are kept. A frozen member never moves, so a narrative with an applied action keeps the work
+that action described. The pass summary lists each emptied narrative (`Stats.Emptied`), since it is in
+no cluster of that pass.
+
 **Nothing downstream of clustering reads a context link.** The reconciler's delta, the create and
 redraft inputs, matching's candidates, and both examination watermarks read member links only, so a
 context link re-admits no narrative and reaches no prompt that drafts or matches. Context is read by
 the next clustering prompt (rendered under each context narrative as background, a numbered event as
 `-> #N`), by the pass summary, and by nothing else.
 
-**Ten LLM call sites**, in three packages — `correlator/correlator.go:488` (cluster), `:1099` (same-story
-check at a bisection seam), `:1712` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
+**Ten LLM call sites**, in three packages — `correlator/correlator.go:505` (cluster), `:1116` (same-story
+check at a bisection seam), `:1796` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
 `correlator/cluster_dispute.go:177` (dispute re-ask), `correlator/match.go:627`,
 `reconciler/draft.go:92`, `:339`, `reconciler/create.go:244`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
@@ -291,7 +303,7 @@ Reading the transitions, since some distinctions matter more than an edge label 
   slice 7's distiller that unjira's own taste and a reviewer's are the same signal.
 - **`reject / retarget`** are both recorded `rejected`, but only retarget produces a replacement row:
   the old action named the wrong issue, so it was ruled against rather than reworded
-  (`triage/restructure.go:364`).
+  (`triage/restructure.go:478`).
 - **`edit / merge`** supersede with a replacement row and status `edited`.
 - **`failed`** carries `actions.error` recording how far a multi-hop route got. **Retry is simply the
   next reconcile pass** — there is no separate retry path.
