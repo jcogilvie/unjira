@@ -13,6 +13,8 @@ package claudecode_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +32,10 @@ type transcriptBuilder struct {
 	sessionID string
 	agentID   string
 	lines     []map[string]any
+	// uuidPrefix, when set, gives every added line a `uuid` (prefix plus a counter), the
+	// field Claude Code keeps unchanged when a resumed session copies a line (F33).
+	uuidPrefix string
+	uuidCount  int
 }
 
 func newTranscript(t *testing.T) *transcriptBuilder {
@@ -58,8 +64,31 @@ func (b *transcriptBuilder) AsSubagent(parentSession, agentID string) *transcrip
 	return b
 }
 
+// WithUUIDs gives every subsequently added line a uuid starting with prefix.
+func (b *transcriptBuilder) WithUUIDs(prefix string) *transcriptBuilder {
+	b.uuidPrefix = prefix
+
+	return b
+}
+
+// Resumed starts a new transcript holding a copy of every line b has so far, uuids
+// included, the way a resumed Claude Code session begins (F33). Lines added to it get
+// uuids starting with prefix.
+func (b *transcriptBuilder) Resumed(prefix string) *transcriptBuilder {
+	r := &transcriptBuilder{t: b.t, cwd: b.cwd, branch: b.branch, uuidPrefix: prefix}
+	for _, l := range b.lines {
+		r.lines = append(r.lines, maps.Clone(l))
+	}
+
+	return r
+}
+
 func (b *transcriptBuilder) base(ts, kind string) map[string]any {
 	l := map[string]any{"timestamp": ts, "type": kind}
+	if b.uuidPrefix != "" {
+		b.uuidCount++
+		l["uuid"] = fmt.Sprintf("%s-%d", b.uuidPrefix, b.uuidCount)
+	}
 	if b.cwd != "" {
 		l["cwd"] = b.cwd
 	}
