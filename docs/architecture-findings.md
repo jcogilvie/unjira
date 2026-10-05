@@ -66,6 +66,15 @@ which is why it is recorded now rather than rediscovered then.
 
 ---
 
+### F49 — transcript handling has only been tested against macOS-written transcripts
+
+Every transcript the collector has been measured or tested against was written on macOS: 0 of 46,343
+commands contain a carriage return, and every `cwd` is a POSIX path. Nothing has exercised transcripts
+written on Windows or Linux. The parts that touch a platform's text conventions are the shell parser
+(CRLF), `jsonlLines` (line framing), `projectName` and `exclude_cwds` matching (path separators, drive
+letters), and the summary flattening in `truncate`. **Action item:** add fixture transcripts written on
+those platforms and run the collector tests against them. No defect is known.
+
 ### F48 — a script handed to a shell is read as data, so the commands it runs are invisible
 
 `simpleCommands` (`internal/collector/claudecode/shell.go`) parses a tool call's command with
@@ -185,24 +194,6 @@ Unmeasured on real data: the disputed-event count and claimant sizes on a real p
 and M5 will show. The obvious bounds, capping each listed member summary or listing at most N members
 per claimant, trade the model's view of a claimant for the call fitting. That is the trade F16
 measured for context narratives, and deciding it needs those numbers first.
-
-### F33 — a resumed session copies its history, so root segment events are counted twice
-
-A resumed Claude Code session writes earlier history into a NEW transcript file. Measured across
-`~/.claude/projects`: **1,841** `tool_use` ids appear in more than one root transcript, and **3**
-subagent transcripts are byte-identical copies filed under two parent sessions. Segment ExternalIDs
-are `<session-id>:<size>:<index>`, scoped to the file, so the same work is inserted once per copy and
-reaches clustering as distinct evidence.
-
-Two places are already immune, deliberately: PR anchors key on `pr_create:<tool_use_id>` alone (a
-repeated id IS the same call), and subagent segments key on `agent-<agentId>`, so a byte-identical copy
-dedupes. Root segments have no such call-level identity to key on, which is why this is a finding and
-not a one-line fix: deduplicating them means deciding which copy owns a shared prefix, and a resumed
-session's new file also holds new work after it.
-
-`docs/superpowers/specs/2026-10-02-shared-context-design.md` §7 multiplies this: every root-segment
-snapshot can collect its own context links, so links grow as snapshots × narratives. That spec's
-acceptance measurement counts distinct transcripts as well as events so a duplicate cannot inflate it.
 
 ### F16 — the prompt is unbounded in the window, and the response ceiling binds first
 
@@ -670,7 +661,6 @@ not hand it the parent's branch as provenance.
 | F5 — dead schema (estimates, ledger) | **resolved**: both dropped. Only TWO tables, not the three the finding claimed — a miscount nobody had checked. Existing databases keep their orphans, since this package has no migration mechanism, which is harmless because nothing referenced them |
 | F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here. Narrowed 2026-10-02: `events.ArtifactPullRequest` gained readers, the dispute re-ask's evidence and then the PR identity join (F43) |
 | F32 — a subagent that names no branch has none | open, narrowed: a subagent's own calls now supply its branch when they name exactly one (39 of 1,041 segments); several are recorded as a set. The remainder named none |
-| F33 — resumed sessions double-count root segments | open. 1,841 shared `tool_use` ids across root transcripts. Anchors and subagent segments already dedupe |
 | F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
 | F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
 | F39 — the dispute re-ask's prompt is unbounded | open. Found building slice 1's F36 test |
@@ -679,6 +669,7 @@ not hand it the parent's branch as provenance.
 | F46 — a dry run's clustering context can differ when the PR join fires | open. A dry run does not extend the holder's window, so it may not be context. Unmeasured |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
+| F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |

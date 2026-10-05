@@ -105,6 +105,13 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 		return err
 	}
 
+	// Over every root transcript, not only those this pass reads: an unchanged original
+	// still owns the history a new resumed copy holds (F33).
+	owners, err := buildLineOwners(transcripts)
+	if err != nil {
+		return err
+	}
+
 	for _, t := range transcripts {
 		path := t.path
 		stat, err := os.Stat(path)
@@ -129,7 +136,7 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 			continue
 		}
 
-		evts, err := sessionEvents(t, mtime, normalizedExcludes, minSegment)
+		evts, err := sessionEvents(t, mtime, normalizedExcludes, minSegment, owners)
 		if err != nil {
 			return fmt.Errorf("reading session %s: %w", path, err)
 		}
@@ -231,7 +238,7 @@ func sessionLabel(t transcript) string {
 // segment also carries the full branch set (see segment.allBranches): slicing only helps
 // sessions that change branch, and 42 of 79 multi-day sessions never do.
 func sessionEvents(
-	t transcript, mtime time.Time, excludeCwds []string, minSegment int,
+	t transcript, mtime time.Time, excludeCwds []string, minSegment int, owners lineOwners,
 ) ([]events.Event, error) {
 	path := t.path
 
@@ -251,7 +258,16 @@ func sessionEvents(
 		}
 	}
 
-	segs := segments(lines, minSegment)
+	// Segments read only the lines this transcript owns, so history a resumed session
+	// copied is counted once, in its owner (F33). Anchors read every line: see ownership.go.
+	owned := make([]map[string]any, 0, len(lines))
+	for _, l := range lines {
+		if owners.owns(t.path, l) {
+			owned = append(owned, l)
+		}
+	}
+
+	segs := segments(owned, minSegment)
 	if t.sub != nil {
 		// The branches the subagent itself named, which replace the parent's branch set
 		// the segments no longer have (F32). One is the subagent's branch; several are
