@@ -656,6 +656,22 @@ Nor by the back door. `docs/superpowers/specs/2026-10-02-shared-context-design.m
 out of matching entirely, so linking a subagent's narrative to its parent's root segment as context does
 not hand it the parent's branch as provenance.
 
+### F54 — the watch launchd template cannot start before the operator logs in, or at all headless
+
+`ops/com.unjira.watch.plist` is a per-user `LaunchAgent` (installed under
+`~/Library/LaunchAgents`), which launchd only runs inside a logged-in user session. `RunAtLoad` +
+`KeepAlive` keeps `watch` running once that session exists and restarts it after a crash, but
+neither key makes launchd start it at boot before login, or on a headless/shared Mac where nobody
+ever logs in to the GUI session that owns LaunchAgents. A `LaunchDaemon`
+(`/Library/LaunchDaemons`, root-owned, runs system-wide independent of any login) would cover
+that, but changes the credential story: a daemon runs as a different user by default and the
+`internal/envfile` repo-root `.env` convention this template relies on (see the plist's own
+comments) assumes `WorkingDirectory` and the operator's checkout are the same user's. **Consequence:**
+on a machine that reboots unattended, or where the operator is not reliably logged in (a headless
+build box, a shared Mac), `watch` silently stops running until the next login, with nothing short
+of checking `launchctl list com.unjira.watch` to notice. Unmeasured — no deployment has hit this
+yet; noted while writing the template, not found as a live incident.
+
 ---
 
 ## Task cross-references
@@ -676,6 +692,7 @@ not hand it the parent's branch as provenance.
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |
+| F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
