@@ -37,6 +37,9 @@ go run ./cmd/unjira collect | digest | status
 UNJIRA_LIVE=1 go test -tags=live ./internal/live/...   # writes to the dev Jira instance; needs creds
 UNJIRA_LIVE=1 go test -tags=live -run TestLiveGitHub -v ./internal/live/   # reads jcogilvie/unjira-sandbox;
                                # needs UNJIRA_GITHUB_CREDENTIALS (below) and FAILS, not skips, without it
+HIDDEN_AUTHORING_PROBE=1 go test ./internal/collector/claudecode/ -run TestHiddenAuthoring_Tripwire -v
+                               # F48's tripwire over local transcripts: weekly table; FAILS if a commit
+                               # or PR is made from inside a script the collector reads as data
 ```
 
 **Fixture instances, not real ones.** Jira has DEVSBX; GitHub has the private, disposable
