@@ -199,9 +199,9 @@ the next clustering prompt (rendered under each context narrative as background,
 
 **Eleven LLM call sites**, in three packages — `correlator/correlator.go:511` (cluster), `:1122` (same-story
 check at a bisection seam), `:1802` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
-`correlator/cluster_dispute.go:177` (dispute re-ask), `correlator/match.go:627` (match), `:647` (match
+`correlator/cluster_dispute.go:177` (dispute re-ask), `correlator/match.go:534` (match), `:554` (match
 re-ask, once, on an unparseable response),
-`reconciler/draft.go:92`, `:339`, `reconciler/create.go:244`, and `rules/distill.go:126` (`learn`).
+`reconciler/draft.go:92`, `:339`, `reconciler/create.go:254`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
 
 Store-mediation is what makes a failed pass cost a retry and nothing else: a stage that dies has

@@ -31,7 +31,7 @@ func TestMatch_UnparseableResponseIsReaskedOnceWithTheReason(t *testing.T) {
 	id := seedNarrative(t, s, "Feature", "summary", claudeEvent(t, "s1", "feature/PAAS-1", "SUMO-2"))
 	llmFake := &fakeLLM{responses: []string{proseMatchResponse, validMatchResponse}}
 
-	results, stats, err := correlator.Match(t.Context(), s, correlator.SingleTracker(twoCandidateTracker()), llmFake, matchCfg())
+	results, stats, err := correlator.Match(t.Context(), s, twoCandidateTracker(), llmFake, matchCfg())
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -53,7 +53,7 @@ func TestMatch_ResponseUnparseableTwiceFailsLoudlyNamingBoth(t *testing.T) {
 	second := `[{"issue_key":"PAAS-1","role":"owner","confidence":0.9}]`
 	llmFake := &fakeLLM{responses: []string{proseMatchResponse, second}}
 
-	_, stats, err := correlator.Match(t.Context(), s, correlator.SingleTracker(twoCandidateTracker()), llmFake, matchCfg())
+	_, stats, err := correlator.Match(t.Context(), s, twoCandidateTracker(), llmFake, matchCfg())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid character", "the first refusal must survive into the error")
 	assert.Contains(t, err.Error(), `"owner"`, "the second refusal must be in the error")
@@ -67,7 +67,7 @@ func TestMatch_ParseableResponseIsNeverReasked(t *testing.T) {
 	seedNarrative(t, s, "Feature", "summary", claudeEvent(t, "s1", "feature/PAAS-1", "SUMO-2"))
 	llmFake := &fakeLLM{responses: []string{validMatchResponse}}
 
-	_, stats, err := correlator.Match(t.Context(), s, correlator.SingleTracker(twoCandidateTracker()), llmFake, matchCfg())
+	_, stats, err := correlator.Match(t.Context(), s, twoCandidateTracker(), llmFake, matchCfg())
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats.Calls)
 	assert.Zero(t, stats.MatchReasks)
