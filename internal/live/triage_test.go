@@ -50,7 +50,7 @@ func TestLiveTriage_ApprovedActionReachesJira(t *testing.T) {
 	approved := session.Approved()
 	require.Len(t, approved, 1)
 
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveTriageConnections())
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveTriageTrackers())
 	require.NoError(t, applier.Apply(approved[0]))
 
 	bodies := commentBodies(t, client, key)
@@ -66,7 +66,7 @@ func TestLiveTriage_ApprovedActionReachesJira(t *testing.T) {
 
 // TestLiveTriage_UnwritableProjectIsRefusedAgainstLiveJira proves the scope gate
 // against a real instance rather than a fake: the tracker is reachable and the
-// issue exists, so a refusal here can only come from writable_project_keys.
+// issue exists, so a refusal here can only come from writable_scopes.
 func TestLiveTriage_UnwritableProjectIsRefusedAgainstLiveJira(t *testing.T) {
 	client := testClient(t)
 	s := liveTriageStore(t)
@@ -75,10 +75,10 @@ func TestLiveTriage_UnwritableProjectIsRefusedAgainstLiveJira(t *testing.T) {
 	action := seedLiveTriageAction(t, s, key, "this must never be posted")
 
 	// The connection reads the live project but declares NOTHING writable.
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), []config.JiraConnection{{
-		Name:        "live",
-		ProjectKeys: []string{testProject()},
-		// WritableProjectKeys deliberately empty.
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), []config.Tracker{{
+		Name:   "live",
+		Scopes: []string{testProject()},
+		// WritableScopes deliberately empty.
 	}})
 
 	require.Error(t, applier.Apply(action))
@@ -89,7 +89,7 @@ func TestLiveTriage_UnwritableProjectIsRefusedAgainstLiveJira(t *testing.T) {
 	row, err := s.GetAction(action.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "failed", row.Status)
-	assert.Contains(t, row.Error, "writable_project_keys")
+	assert.Contains(t, row.Error, "writable_scopes")
 }
 
 func liveTriageStore(t *testing.T) *store.Store {
@@ -102,13 +102,13 @@ func liveTriageStore(t *testing.T) *store.Store {
 	return s
 }
 
-// liveTriageConnections declares the live project both readable and writable,
+// liveTriageTrackers declares the live project both readable and writable,
 // built in-process so the real config file is never consulted.
-func liveTriageConnections() []config.JiraConnection {
-	return []config.JiraConnection{{
-		Name:                "live",
-		ProjectKeys:         []string{testProject()},
-		WritableProjectKeys: []string{testProject()},
+func liveTriageTrackers() []config.Tracker {
+	return []config.Tracker{{
+		Name:           "live",
+		Scopes:         []string{testProject()},
+		WritableScopes: []string{testProject()},
 	}}
 }
 

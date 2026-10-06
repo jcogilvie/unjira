@@ -104,7 +104,7 @@ type Item struct {
 	Appliable bool
 	// UnappliableReason is operator-facing prose naming the REMEDY, empty when
 	// Appliable. The two refusals differ in what a reviewer should do — edit
-	// writable_project_keys, or retarget an action drafted for work unjira does not
+	// writable_scopes, or retarget an action drafted for work unjira does not
 	// track — which is why this carries config.Writability's message rather than a
 	// bare flag.
 	UnappliableReason string
@@ -494,7 +494,7 @@ func (s *Session) spliceBatch(i int, replacements []store.ActionRow) {
 //
 // Still goes through the same Approved()/Commit path as an interactive session,
 // so the flag skips the PROMPT and nothing else. Note what that does and does
-// not mean: gate.Applier enforces writable_project_keys, but auto_commit's
+// not mean: gate.Applier enforces writable_scopes, but auto_commit's
 // Graduated and ConfidenceFloor live in gate.Decide, which the approve path
 // never consults — deliberately, since that gate governs unattended writes and
 // a human typing this flag is attending.

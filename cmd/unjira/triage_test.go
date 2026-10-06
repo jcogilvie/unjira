@@ -97,7 +97,7 @@ func (w *triageRecordingWriter) CreateIssue(project, _, _, _ string, _ []string)
 // TestTriage_AutoApproveRespectsWriteScope pins what --auto-approve actually
 // protects, and deliberately does NOT claim more.
 //
-// gate.Applier enforces exactly one gate: jira[].writable_project_keys.
+// gate.Applier enforces exactly one gate: trackers[].writable_scopes.
 // Graduated and ConfidenceFloor live in gate.Decide, which the approve path
 // never calls — by design, since the auto-commit gate governs UNATTENDED writes
 // and a human passing this flag is attending. An earlier draft of the design doc
@@ -109,10 +109,10 @@ func TestTriage_AutoApproveRespectsWriteScope(t *testing.T) {
 	devsbx := seedTriageAction(t, s, "DEVSBX-1")
 
 	writer := &triageRecordingWriter{}
-	applier := gate.NewApplier(s, writer, "DEVSBX", []config.JiraConnection{{
-		Name:                "dev",
-		ProjectKeys:         []string{"PAAS", "DEVSBX"},
-		WritableProjectKeys: []string{"DEVSBX"},
+	applier := gate.NewApplier(s, writer, "DEVSBX", []config.Tracker{{
+		Name:           "dev",
+		Scopes:         []string{"PAAS", "DEVSBX"},
+		WritableScopes: []string{"DEVSBX"},
 	}})
 
 	require.Error(t, applier.Apply(paas), "PAAS is not writable")
@@ -124,7 +124,7 @@ func TestTriage_AutoApproveRespectsWriteScope(t *testing.T) {
 	failed, err := s.GetAction(paas.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "failed", failed.Status)
-	assert.Contains(t, failed.Error, "writable_project_keys",
+	assert.Contains(t, failed.Error, "writable_scopes",
 		"the refusal reason must name the config key, so an operator knows what to change")
 }
 

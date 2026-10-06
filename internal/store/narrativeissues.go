@@ -43,7 +43,7 @@ type NarrativeIssue struct {
 	// import, and a value read back from SQLite is untyped text regardless.
 	Provenance string
 	Confidence float64
-	// Connection is the config.JiraConnection.Name that resolved this key,
+	// Connection is the config.Connection.Name that resolved this key,
 	// recorded because a co-representation can live on a different site than
 	// the primary.
 	Connection string

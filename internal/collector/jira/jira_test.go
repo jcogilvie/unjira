@@ -146,16 +146,21 @@ func testStore(t *testing.T) *store.Store {
 	return s
 }
 
-func testContext(t *testing.T, site string, conn config.JiraConnection) pipeline.CollectContext {
+// testContext puts tracker on a jira connection at site. The connection takes the
+// tracker's name, so the credential, cursor and connection artifact all read "corp".
+func testContext(t *testing.T, site string, tracker config.Tracker) pipeline.CollectContext {
 	t.Helper()
 
-	conn.Site = site
+	tracker.Connection = tracker.Name
 
 	return pipeline.CollectContext{
-		Store:  testStore(t),
-		Config: config.Config{Jira: []config.JiraConnection{conn}},
+		Store: testStore(t),
+		Config: config.Config{
+			Connections: []config.Connection{{Name: tracker.Name, Kind: config.KindJira, Endpoint: site}},
+			Trackers:    []config.Tracker{tracker},
+		},
 		Credentials: credentials.NewSet(map[string]credentials.Credential{
-			conn.Name: {Email: "dev@example.com", Token: "token"},
+			tracker.Name: {Email: "dev@example.com", Token: "token"},
 		}),
 		Options: map[string]any{},
 	}
@@ -187,8 +192,8 @@ func TestCollect_EmitsChangelogAndCommentEvents(t *testing.T) {
 			}},
 		},
 	}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 
@@ -203,10 +208,10 @@ func TestCollect_EmitsChangelogAndCommentEvents(t *testing.T) {
 		"the assignee change is not actionable in phase 1 and must not be emitted")
 }
 
-func TestCollect_ScopesJQLToProjectKeysAndAppliesNoWatermarkOnFirstPass(t *testing.T) {
+func TestCollect_ScopesJQLToTrackerScopesAndAppliesNoWatermarkOnFirstPass(t *testing.T) {
 	fake := &fakeJira{accountID: "acct-unjira"}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ", "OPS"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ", "OPS"},
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 
@@ -225,8 +230,8 @@ func TestCollect_SecondPassAppliesStoredWatermark(t *testing.T) {
 		accountID: "acct-unjira",
 		issues:    []map[string]any{searchIssue("PROJ-42", "PROJ", "2026-08-20T16:00:00.000+0000")},
 	}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 
@@ -257,8 +262,8 @@ func TestCollect_EmitsChangelogEntriesOlderThanTheWatermark(t *testing.T) {
 			},
 		},
 	}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 
@@ -294,8 +299,8 @@ func TestCollect_HittingTheIssueLimitIsLogged(t *testing.T) {
 			searchIssue("PROJ-2", "PROJ", "2026-08-20T16:00:00.000+0000"),
 		},
 	}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"}, MaxIssuesPerQuery: 2,
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"}, MaxIssuesPerQuery: 2,
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 	cc.Log = testLog
@@ -316,8 +321,8 @@ func TestCollect_OneQueryFailingDoesNotStopTheOthers(t *testing.T) {
 		issues:           []map[string]any{searchIssue("PROJ-42", "PROJ", "2026-08-20T16:00:00.000+0000")},
 		failChangelogFor: "PROJ-42",
 	}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
 		Queries: []config.JiraQuery{
 			{Name: "broken", JQL: "assignee = currentUser()"},
 			{Name: "alsobroken", JQL: "watcher = currentUser()"},
@@ -338,8 +343,8 @@ func TestCollect_FailedQueryDoesNotAdvanceItsWatermark(t *testing.T) {
 		issues:           []map[string]any{searchIssue("PROJ-42", "PROJ", "2026-08-20T16:00:00.000+0000")},
 		failChangelogFor: "PROJ-42",
 	}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 
@@ -354,8 +359,8 @@ func TestCollect_FailedQueryDoesNotAdvanceItsWatermark(t *testing.T) {
 
 func TestCollect_WriteOnlyConnectionIsSkipped(t *testing.T) {
 	fake := &fakeJira{accountID: "acct-unjira"}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
 		// No Queries: this connection routes project keys for writes only.
 	})
 
@@ -366,9 +371,9 @@ func TestCollect_WriteOnlyConnectionIsSkipped(t *testing.T) {
 	assert.Empty(t, fake.recordedJQLs(), "a connection with no queries must make no requests")
 }
 
-func TestCollect_EmptyProjectKeysErrorsNamingTheConnection(t *testing.T) {
+func TestCollect_EmptyScopesErrorsNamingTheTracker(t *testing.T) {
 	fake := &fakeJira{accountID: "acct-unjira"}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
+	cc := testContext(t, fake.start(t), config.Tracker{
 		Name:    "corp",
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
@@ -377,14 +382,14 @@ func TestCollect_EmptyProjectKeysErrorsNamingTheConnection(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "corp")
-	assert.Contains(t, err.Error(), "project_keys")
+	assert.Contains(t, err.Error(), "scopes")
 	assert.Empty(t, fake.recordedJQLs(), "an unscopeable query must not be sent")
 }
 
 func TestCollect_MissingCredentialErrorsNamingTheConnection(t *testing.T) {
 	fake := &fakeJira{accountID: "acct-unjira"}
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"},
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 	cc.Credentials = credentials.Set{} // zero value: nothing configured
@@ -471,4 +476,27 @@ func TestWatermarkClause_UnknownZoneIsLogged(t *testing.T) {
 
 	assert.Contains(t, logged.String(), "corp", "the operator must be able to see which connection")
 	assert.Contains(t, logged.String(), "timezone")
+}
+
+// TestCollect_TrackersSharingAConnectionEachScopeTheirOwnQueries: two trackers on one
+// Jira site share a client and a credential, but each query is bounded by its own
+// tracker's scopes, so one tracker's view never collects the other's projects.
+func TestCollect_TrackersSharingAConnectionEachScopeTheirOwnQueries(t *testing.T) {
+	fake := &fakeJira{accountID: "acct-unjira"}
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"},
+		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
+	})
+	cc.Config.Trackers = append(cc.Config.Trackers, config.Tracker{
+		Name: "ops", Connection: "corp", Scopes: []string{"OPS"},
+		Queries: []config.JiraQuery{{Name: "oncall", JQL: "labels = oncall"}},
+	})
+
+	_, err := collectAll(t, cc)
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []string{
+		`(assignee = currentUser()) AND project IN ("PROJ")`,
+		`(labels = oncall) AND project IN ("OPS")`,
+	}, fake.recordedJQLs())
 }

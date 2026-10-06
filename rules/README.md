@@ -12,7 +12,7 @@ are parsed and preserved by the loader (so nothing here is rejected ahead of the
 will consume it) but reach no prompt: there is no estimator.
 
 The directory `rules.Load` reads defaults to `rules/` (this directory, relative to the
-working directory) and is configurable via `rules.dir` in `unjira.config.json` — see
+working directory) and is configurable via `rules.dir` in `unjira.config.yaml` — see
 `config.Config.RulesDir`. A missing directory is a no-op, not an error, so a fresh clone
 with no seeded rules still runs.
 

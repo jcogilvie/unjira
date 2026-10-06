@@ -167,5 +167,6 @@ in `docs/go-conventions.md`, not duplicated here. In brief:
 - TDD: write the failing test first, then the implementation.
 - `internal/clients/<system>` is the seam for every remote-system facade (Jira today; future
   litellm/GitHub/Slack). Thin facade, no business logic — that lives one layer up.
-- Credentials come from the environment (`UNJIRA_JIRA_*`), never config files. Config is
-  `unjira.config.json` (gitignored); `config/unjira.example.json` is the template.
+- Credentials come from the environment (`UNJIRA_JIRA_CREDENTIALS`, `UNJIRA_GITHUB_CREDENTIALS`),
+  never config files. Config is `unjira.config.yaml` (gitignored; `.yml` or `.json` also read, but
+  only one may exist), parsed strictly; `config/unjira.example.yaml` is the commented template.

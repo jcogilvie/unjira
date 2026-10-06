@@ -54,7 +54,7 @@ type Credential struct {
 	Token string `json:"token"`
 }
 
-// Set maps a config connection name (config.JiraConnection.Name) to its
+// Set maps a config connection name (config.Connection.Name) to its
 // credential. The zero value is usable and reports every lookup as missing,
 // so a collector needing no credentials can be handed one safely.
 type Set struct {

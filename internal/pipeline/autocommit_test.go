@@ -28,13 +28,13 @@ import (
 // window — RunAutoCommit never reads it, only InsertNarrative requires one.
 var autoCommitFixedTime = time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)
 
-// autoCommitWritableConnections is the test-default write scope for this
+// autoCommitWritableTrackers is the test-default write scope for this
 // file's actions (PROJ-1, PROJ-2, both under project PROJ) — mirroring
 // internal/gate/applier_test.go's own writableConnections helper (unexported
 // there, so not reusable from this package).
-func autoCommitWritableConnections() []config.JiraConnection {
-	return []config.JiraConnection{
-		{Name: "test", ProjectKeys: []string{"PROJ"}, WritableProjectKeys: []string{"PROJ"}},
+func autoCommitWritableTrackers() []config.Tracker {
+	return []config.Tracker{
+		{Name: "test", Scopes: []string{"PROJ"}, WritableScopes: []string{"PROJ"}},
 	}
 }
 
@@ -116,7 +116,7 @@ func insertProposedAction(t *testing.T, s *store.Store, a store.ActionRow) store
 func TestRunAutoCommit_AppliesWhenGraduatedAndAboveFloor(t *testing.T) {
 	s := autoCommitStore(t)
 	writer := &autoCommitFakeWriter{}
-	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableConnections())
+	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableTrackers())
 
 	action := insertProposedAction(t, s, store.ActionRow{
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
@@ -148,7 +148,7 @@ func TestRunAutoCommit_AppliesWhenGraduatedAndAboveFloor(t *testing.T) {
 func TestRunAutoCommit_DefaultRulesQueueEverything(t *testing.T) {
 	s := autoCommitStore(t)
 	writer := &autoCommitFakeWriter{}
-	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableConnections())
+	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableTrackers())
 
 	action := insertProposedAction(t, s, store.ActionRow{
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 1.0,
@@ -183,7 +183,7 @@ func TestRunAutoCommit_OneFailureDoesNotBlockTheRest(t *testing.T) {
 	writer := &autoCommitFakeWriter{errs: map[string]error{
 		"AddComment:PROJ-1:will fail": writeErr,
 	}}
-	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableConnections())
+	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableTrackers())
 
 	failing := insertProposedAction(t, s, store.ActionRow{
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"will fail"}`, Confidence: 0.9,
@@ -238,7 +238,7 @@ func TestRunAutoCommit_TwoFailuresAttributeTheRightReasonToEachID(t *testing.T) 
 		"AddComment:PROJ-1:first will fail":  firstErr,
 		"AddComment:PROJ-2:second will fail": secondErr,
 	}}
-	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableConnections())
+	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableTrackers())
 
 	first := insertProposedAction(t, s, store.ActionRow{
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"first will fail"}`, Confidence: 0.9,
@@ -276,7 +276,7 @@ func TestRunAutoCommit_TwoFailuresAttributeTheRightReasonToEachID(t *testing.T) 
 func TestRunAutoCommit_EmptyActionsIsANoOp(t *testing.T) {
 	s := autoCommitStore(t)
 	writer := &autoCommitFakeWriter{}
-	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableConnections())
+	applier := gate.NewApplier(s, writer, "PROJ", autoCommitWritableTrackers())
 
 	result, err := pipeline.RunAutoCommit(nil, pipeline.AutoCommitOptions{
 		Rules:   map[string]config.AutoCommitRule{"comment": {ConfidenceFloor: 0, Graduated: true}},
@@ -308,8 +308,8 @@ func TestRunAutoCommit_EmptyActionsIsANoOp(t *testing.T) {
 // proving the check lives at the single choke point rather than duplicated
 // (or, worse, present on only one route).
 func TestWriteScope_BothApplyRoutesRefuseIdentically(t *testing.T) {
-	conns := []config.JiraConnection{
-		{Name: "dev", ProjectKeys: []string{"PAAS", "DEVSBX"}, WritableProjectKeys: []string{"DEVSBX"}},
+	conns := []config.Tracker{
+		{Name: "dev", Scopes: []string{"PAAS", "DEVSBX"}, WritableScopes: []string{"DEVSBX"}},
 	}
 	rules := map[string]config.AutoCommitRule{"comment": {ConfidenceFloor: 0.5, Graduated: true}}
 

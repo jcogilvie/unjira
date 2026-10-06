@@ -50,11 +50,8 @@ const (
 	pipelineLeasePoll = 2 * time.Second
 )
 
-// backendJira is the tracker.backend / collector name for Jira. Named because
-// three call sites now compare against it — the registry, taskTracker's switch,
-// and trackerResolver's per-connection path — and a typo in any one of them
-// silently selects the wrong branch.
-const backendJira = "jira"
+// backendJira is the jira collector's registry name.
+const backendJira = string(config.KindJira)
 
 // registry maps collector names to factories, mirroring
 // internal/collectors.REGISTRY in the Python implementation.
@@ -80,15 +77,9 @@ type appContext struct {
 	log *slog.Logger
 }
 
-// jiraClientForProject resolves the Jira connection covering projectKey and
-// constructs a client against it, using the credential registered under
-// that connection's Name in credentials.EnvVar.
-func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, error) {
-	conn, ok := a.config.JiraConnectionForProject(projectKey)
-	if !ok {
-		return nil, fmt.Errorf("no configured jira connection covers project %q", projectKey)
-	}
-
+// jiraClient constructs a client against a jira connection, using the credential
+// registered under the connection's Name in credentials.EnvVar.
+func (a *appContext) jiraClient(conn config.Connection) (*jira.Client, error) {
 	creds, ok := a.jiraCredentials.Set().For(conn.Name)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -96,27 +87,86 @@ func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, erro
 		)
 	}
 
-	return jira.New(conn.Site, creds.Email, creds.Token)
+	client, err := jira.New(conn.Endpoint, creds.Email, creds.Token)
+	if err != nil {
+		return nil, fmt.Errorf("building jira client for connection %q: %w", conn.Name, err)
+	}
+
+	return client, nil
 }
 
-// taskTracker resolves the configured tracker backend for projectKey.
-// devNarrateCmd is its first caller, resolving a single tracker from the
-// default project for its matching pass — see the call site for the
-// multi-connection limitation that implies.
+// trackerConnection resolves the tracker whose scopes cover projectKey, and the
+// connection it sits on.
+func (a *appContext) trackerConnection(projectKey string) (config.Tracker, config.Connection, error) {
+	tracker, ok := a.config.TrackerForScope(projectKey)
+	if !ok {
+		return config.Tracker{}, config.Connection{}, fmt.Errorf(
+			"no configured tracker covers project %q", projectKey)
+	}
+
+	conn, ok := a.config.ConnectionOf(tracker)
+	if !ok {
+		return config.Tracker{}, config.Connection{}, fmt.Errorf(
+			"tracker %q names connection %q, which is not configured", tracker.Name, tracker.Connection)
+	}
+
+	return tracker, conn, nil
+}
+
+// jiraClientForProject resolves the jira connection of the tracker covering
+// projectKey and constructs a client against it. Dev tools use it; they talk to
+// Jira directly, so a non-jira tracker is an error rather than a fallback.
+func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, error) {
+	tracker, conn, err := a.trackerConnection(projectKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if conn.Kind != config.KindJira {
+		return nil, fmt.Errorf("project %q is tracked by %q on a %q connection, not a jira one",
+			projectKey, tracker.Name, conn.Kind)
+	}
+
+	return a.jiraClient(conn)
+}
+
+// taskTracker resolves the backend for the tracker covering projectKey, by its
+// connection's kind. devNarrateCmd and watchCmd resolve a single tracker from the
+// default project for reconciling and applying — see their call sites for the
+// multi-tracker limitation that implies.
 func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, error) {
-	switch a.config.TrackerBackend() {
-	case backendJira:
-		client, err := a.jiraClientForProject(projectKey)
+	tracker, conn, err := a.trackerConnection(projectKey)
+	if err != nil {
+		return nil, err
+	}
+
+	switch conn.Kind {
+	case config.KindJira:
+		client, err := a.jiraClient(conn)
 		if err != nil {
 			return nil, err
 		}
 
 		return jira.NewTracker(client), nil
-	case "local":
+	case config.KindLocal:
 		return local.New(a.store), nil
+	case config.KindGitHub:
+		return nil, fmt.Errorf("tracker %q is on a github connection, which has no backend in this build", tracker.Name)
 	default:
-		return nil, fmt.Errorf("unknown tracker backend %q", a.config.Tracker.Backend)
+		return nil, fmt.Errorf("tracker %q: unknown connection kind %q", tracker.Name, conn.Kind)
 	}
+}
+
+// hasExternalTracker reports whether any tracker sits on a connection someone other
+// than unjira can change — anything but the local backend.
+func (a *appContext) hasExternalTracker() bool {
+	for _, t := range a.config.Trackers {
+		if conn, ok := a.config.ConnectionOf(t); ok && conn.Kind != config.KindLocal {
+			return true
+		}
+	}
+
+	return false
 }
 
 // warnIfNoStatusHistorySource logs, once at startup, when the configured
@@ -131,11 +181,11 @@ func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, er
 // an operator once: nothing in this deployment will EVER clear the guard
 // until a collector like this is enabled.
 //
-// Silent on the local backend: internal/clients/local's own package doc
-// states it has "no real tracker reachable" — nothing external ever moves a
-// local issue behind unjira's back, so the guard's entire premise (someone
-// else moved the ticket via a channel unjira does not observe) does not
-// apply. This is also what keeps the offline test suite quiet, since local
+// Silent when every tracker is on the local backend: internal/clients/local's
+// own package doc states it has "no real tracker reachable" — nothing external
+// ever moves a local issue behind unjira's back, so the guard's entire premise
+// (someone else moved the ticket via a channel unjira does not observe) does
+// not apply. Silent too with no trackers at all, since nothing is reconciled. This is also what keeps the offline test suite quiet, since local
 // is the backend every automated test uses; see this function's own tests
 // in main_test.go for the drill confirming both directions.
 //
@@ -147,7 +197,7 @@ func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, er
 // would never recognize a future GitHub tracker's own status-history
 // collector as qualifying.
 func (a *appContext) warnIfNoStatusHistorySource() {
-	if a.config.TrackerBackend() == "local" {
+	if !a.hasExternalTracker() {
 		return
 	}
 
@@ -211,7 +261,7 @@ func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
 	return graph
 }
 
-// trackerResolver builds a correlator.TrackerResolver over the configured jira
+// trackerResolver builds a correlator.TrackerResolver over the configured
 // connections, so a candidate is verified against the site that actually holds
 // it rather than whichever one the default project happened to select.
 //
@@ -221,29 +271,24 @@ func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
 // ticket that exists, or, if the key collided, silently resolved to an unrelated
 // issue. Both look identical to a genuinely stale key in the output.
 //
-// Non-jira backends get SingleTracker: the local backend ignores connections
-// entirely, and collapsing that into the general case keeps one code path through
-// Match rather than a special one.
+// A default project on a non-jira tracker gets SingleTracker: the local backend
+// ignores connections entirely, and collapsing that into the general case keeps
+// one code path through Match rather than a special one.
 //
 // Trackers are built once and memoized per connection. Each is an HTTP client
 // with its own credentials, and matching resolves per candidate — rebuilding one
 // per candidate would construct the same client dozens of times in a pass.
 func (a *appContext) trackerResolver(defaultProject string) (correlator.TrackerResolver, error) {
-	if a.config.TrackerBackend() != backendJira {
-		tracker, err := a.taskTracker(defaultProject)
-		if err != nil {
-			return nil, err
-		}
-
-		return correlator.SingleTracker(tracker), nil
-	}
-
 	fallback, err := a.taskTracker(defaultProject)
 	if err != nil {
 		return nil, err
 	}
 
-	byName := make(map[string]tasktracker.TaskReader, len(a.config.Jira))
+	if _, conn, err := a.trackerConnection(defaultProject); err != nil || conn.Kind != config.KindJira {
+		return correlator.SingleTracker(fallback), nil
+	}
+
+	byName := make(map[string]tasktracker.TaskReader, len(a.config.Connections))
 
 	return func(connection string) (tasktracker.TaskReader, error) {
 		// No connection recorded: a branch- or prose-derived candidate, which is
@@ -258,8 +303,8 @@ func (a *appContext) trackerResolver(defaultProject string) (correlator.TrackerR
 			return tracker, nil
 		}
 
-		conn, ok := a.config.JiraConnectionByName(connection)
-		if !ok {
+		conn, ok := a.config.ConnectionByName(connection)
+		if !ok || conn.Kind != config.KindJira {
 			// Not configured: renamed, removed, or a typo. An error rather than
 			// a silent fallback to the default site, because falling back is how
 			// the original bug behaved — it would check the wrong site and report
@@ -267,16 +312,9 @@ func (a *appContext) trackerResolver(defaultProject string) (correlator.TrackerR
 			return nil, fmt.Errorf("no configured jira connection named %q", connection)
 		}
 
-		creds, ok := a.jiraCredentials.Set().For(conn.Name)
-		if !ok {
-			return nil, fmt.Errorf(
-				"no credentials for jira connection %q in %s", conn.Name, credentials.EnvVar,
-			)
-		}
-
-		client, err := jira.New(conn.Site, creds.Email, creds.Token)
+		client, err := a.jiraClient(conn)
 		if err != nil {
-			return nil, fmt.Errorf("building jira client for connection %q: %w", conn.Name, err)
+			return nil, err
 		}
 
 		tracker := jira.NewTracker(client)
@@ -287,16 +325,17 @@ func (a *appContext) trackerResolver(defaultProject string) (correlator.TrackerR
 }
 
 // projectKey resolves --project, falling back to the first configured
-// project key.
+// project-key scope.
 func (a *appContext) projectKey(flag string) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
-	if len(a.config.Jira) > 0 && len(a.config.Jira[0].ProjectKeys) > 0 {
-		return a.config.Jira[0].ProjectKeys[0], nil
+
+	if scope, ok := a.config.FirstProjectScope(); ok {
+		return scope, nil
 	}
 
-	return "", fmt.Errorf("no project key: pass --project or set jira[].project_keys in config")
+	return "", fmt.Errorf("no project key: pass --project or set a tracker's scopes in config")
 }
 
 // llmClient builds the configured LLM client, validating the config and the
@@ -786,29 +825,9 @@ func (c *watchCmd) Run(app *appContext) error {
 
 	// Write scope's startup layer (see
 	// docs/superpowers/specs/2026-08-27-write-scope-design.md, "Choke point:
-	// gate.Applier, plus startup validation"): writable_project_keys must be
-	// a subset of project_keys for every connection — a writable-but-
-	// unreachable project would otherwise load silently and only surface
-	// whenever a write against it was actually attempted.
-	for _, conn := range app.config.Jira {
-		if err := conn.ValidateWriteScope(); err != nil {
-			return err
-		}
-	}
-	// The second half: tracker.default_project, since it's static config
-	// known entirely at startup, must ALSO be writable — not merely
-	// resolvable to a connection (JiraConnectionForProject) — or `watch`
-	// would run for however long it takes a `create` action to actually
-	// fire before this misconfiguration surfaces. Skipped when unset: an
-	// operator who never expects a `create` action need not configure a
-	// default project at all (the existing, unrelated "no
-	// tracker.default_project configured" error only matters once a
-	// `create` action is actually attempted — see Applier.applyCreate).
-	if app.config.Tracker.DefaultProject != "" {
-		if _, err := app.config.DefaultProjectConnection(); err != nil {
-			return err
-		}
-	}
+	// gate.Applier, plus startup validation") runs in config.Load:
+	// ValidateTrackers refuses a writable scope a tracker cannot read, and a
+	// default_ticket_in tracker that is not writable or has no default_scope.
 
 	linkExclusions, err := app.config.CompiledLinkExclusions()
 	if err != nil {
@@ -828,7 +847,7 @@ func (c *watchCmd) Run(app *appContext) error {
 		return err
 	}
 
-	applier := gate.NewApplier(app.store, tracker, app.config.Tracker.DefaultProject, app.config.Jira)
+	applier := gate.NewApplier(app.store, tracker, app.config.DefaultCreateScope(), app.config.Trackers)
 
 	// Resolved once for the whole watch loop, not per pass: a workflow changes on
 	// the order of months and the cache TTL is measured in hours, so re-resolving
@@ -1012,7 +1031,7 @@ func (a *appContext) runWatchPass(
 }
 
 var cli struct {
-	Config            string              `help:"Path to unjira.config.json (default: ./unjira.config.json)."`
+	Config            string              `help:"Path to the config file (default: ./unjira.config.yaml, .yml or .json, whichever one exists)."`
 	JiraCredentials   credentials.JSONSet `env:"UNJIRA_JIRA_CREDENTIALS" help:"JSON object mapping connection name to {email, token}."`
 	GitHubCredentials credentials.JSONSet `env:"UNJIRA_GITHUB_CREDENTIALS" help:"JSON object mapping host to {token}."`
 	LLMAPIKey         string              `name:"llm-api-key" env:"UNJIRA_LLM_API_KEY" help:"API key for the LLM backend."`

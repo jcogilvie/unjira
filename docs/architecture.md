@@ -220,7 +220,7 @@ flowchart LR
     subgraph gates["Deny-by-default gates"]
         G1["auto_commit.graduated<br/>false by zero value<br/>gate/decide.go:66"]
         G2["confidence >= confidence_floor<br/>gate/decide.go:66"]
-        G3["writable_project_keys<br/>empty denies everything<br/>gate/applier.go:382"]
+        G3["trackers[].writable_scopes<br/>empty denies everything<br/>gate/applier.go:401"]
     end
 
     HUMAN["Human approval<br/>via triage / actions decide"]
@@ -254,6 +254,15 @@ its comment says *"the parameter's absence is the guarantee."*
 Each gate is independently load-bearing, per `docs/design-notes.md` incident 16 — a gate that
 duplicates another is not a gate. Gate 3 answers a different question from gates 1–2: not "is this
 action trusted" but "is this project one we may write to at all."
+
+**Where gate 3's answer comes from.** Config separates a *connection* (`config.Connection`: a system
+kind and endpoint, `internal/config/trackers.go`) from a *tracker* (`config.Tracker`: the scopes it
+owns on one connection, and the `writable_scopes` subset unjira may write). `config.ProjectWritability`
+finds the one tracker whose scopes cover a project and asks whether that scope is writable; both
+`gate.Applier` and triage read it. `config.Load` runs `ValidateTrackers` before any command does work,
+so the statically-checkable half of write scope fails at startup: a writable scope the tracker cannot
+read, a writable scope on a kind with no writer (`github`), overlapping scopes across trackers, and a
+`default_ticket_in` tracker that is not writable or names no `default_scope`.
 
 ---
 
@@ -444,8 +453,9 @@ would change the answer, so a later reader can check whether that condition now 
 re-deriving the analysis from scratch. Where a note says "revisit when X," X arriving is a reason to
 act, not a reason to argue.
 
-**A registry for tracker backends.** Today it is a `switch` (`cmd/unjira/main.go:97`) with five
-backend-aware sites, all confined to `cmd` and `config`. That is an asymmetry with the collector
+**A registry for tracker backends.** Today it is a `switch` on the tracker's connection kind
+(`appContext.taskTracker`, `cmd/unjira/main.go:137`), with the other kind-aware sites confined to `cmd`
+and `config`. That is an asymmetry with the collector
 registry, and a defensible one at two backends — one of which exists only for tests. Registries start
 paying off around three variants. *Revisit when a third tracker lands*, or if backend-aware sites
 begin appearing outside `cmd`/`config`.

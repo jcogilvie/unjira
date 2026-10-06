@@ -28,7 +28,7 @@ import (
 
 // triageCmd is `unjira triage`.
 type triageCmd struct {
-	AutoApprove bool `help:"Approve every action without prompting. Bypasses the prompt AND auto_commit.graduated (the approve path never consults gate.Decide) — only jira[].writable_project_keys still applies."`
+	AutoApprove bool `help:"Approve every action without prompting. Bypasses the prompt AND auto_commit.graduated (the approve path never consults gate.Decide) — only trackers[].writable_scopes still applies."`
 	Refresh     bool `help:"Block until any in-flight watch pass finishes, so the batch is not mid-change."`
 	DryRun      bool `help:"Walk the batch and show dispositions, but never write to the store or a tracker."`
 }
@@ -393,7 +393,7 @@ func (c *triageCmd) Run(app *appContext) error {
 func (a *appContext) triageHandler() (triage.Handler, error) {
 	project, err := a.projectKey("")
 	if err != nil {
-		noteUnavailable("no default project is configured (tracker.default_project)")
+		noteUnavailable("no default project is configured (default_ticket_in, and that tracker's default_scope)")
 
 		return triage.NewStoreHandler(
 			a.store, nil, nil, nil, a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
@@ -401,7 +401,7 @@ func (a *appContext) triageHandler() (triage.Handler, error) {
 
 	tracker, err := a.taskTracker(project)
 	if err != nil {
-		noteUnavailable("the tracker could not be resolved (check tracker.backend and credentials)")
+		noteUnavailable("the tracker could not be resolved (check its connection and credentials)")
 
 		return triage.NewStoreHandler(
 			a.store, nil, nil, nil, a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
@@ -474,7 +474,7 @@ func (a *appContext) recordRulings(rulings []triage.Ruling) error {
 // applyApproved hands the confirmed set to gate.Applier — the only code in
 // unjira that writes to a tracker. Constructed exactly as `actions decide
 // --approve` does, including the jira connections that carry
-// writable_project_keys: triage must not become a second, differently-gated
+// writable_scopes: triage must not become a second, differently-gated
 // write path.
 func (a *appContext) applyApproved(approved []store.ActionRow) error {
 	writer, err := a.approveWriter()
@@ -482,7 +482,7 @@ func (a *appContext) applyApproved(approved []store.ActionRow) error {
 		return err
 	}
 
-	applier := gate.NewApplier(a.store, writer, a.config.Tracker.DefaultProject, a.config.Jira)
+	applier := gate.NewApplier(a.store, writer, a.config.DefaultCreateScope(), a.config.Trackers)
 
 	var errs error
 	for _, action := range approved {

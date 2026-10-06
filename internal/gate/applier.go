@@ -42,35 +42,35 @@ type Applier struct {
 	store          *store.Store
 	writer         tasktracker.TaskWriter
 	defaultProject string
-	// jiraConnections backs the write-scope check: which project a write
+	// trackers backs the write-scope check: which project a write
 	// targets is resolved per call (from action.IssueKey for comment/
 	// transition, or from defaultProject for create — see checkWritable),
-	// then checked against JiraConnection.IsProjectWritable. Held as the
-	// plain connection slice rather than a whole config.Config, matching
+	// then checked against the covering Tracker's writable_scopes. Held as
+	// the plain tracker slice rather than a whole config.Config, matching
 	// defaultProject's own precedent as a plain runtime field: project
 	// writability is a runtime, data-dependent fact this same Applier must
 	// answer differently per call (see the design doc's "Not
 	// compiler-enforced, and that is deliberate").
-	jiraConnections []config.JiraConnection
+	trackers []config.Tracker
 }
 
 // NewApplier constructs an Applier. defaultProject routes a `create` action,
 // which has no existing issue to anchor a project from — see
-// config.Config.DefaultProjectConnection, whose Name identifies the same
-// project this parameter expects. An empty defaultProject is not rejected
+// config.Config.DefaultCreateScope, the default_scope of the tracker
+// default_ticket_in names. An empty defaultProject is not rejected
 // here (Apply rejects it only when a `create` action actually needs it), so
 // a caller wiring only comment/transition auto-commit need not resolve a
-// default-project connection it will never use.
+// default create target it will never use.
 //
-// jiraConnections is config.Config.Jira, unmodified — passed directly rather
+// trackers is config.Config.Trackers, unmodified — passed directly rather
 // than resolved down to a smaller shape, since Apply must resolve a
-// DIFFERENT project per call (see checkWritable) and JiraConnectionForProject
+// DIFFERENT project per call (see checkWritable) and TrackerForScope
 // already knows how to do that lookup; duplicating it here would risk the
 // two falling out of sync.
 func NewApplier(
-	s *store.Store, writer tasktracker.TaskWriter, defaultProject string, jiraConnections []config.JiraConnection,
+	s *store.Store, writer tasktracker.TaskWriter, defaultProject string, trackers []config.Tracker,
 ) *Applier {
-	return &Applier{store: s, writer: writer, defaultProject: defaultProject, jiraConnections: jiraConnections}
+	return &Applier{store: s, writer: writer, defaultProject: defaultProject, trackers: trackers}
 }
 
 // commentPayload/transitionPayload/createPayload mirror
@@ -272,7 +272,7 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 	if a.defaultProject == "" {
 		return fmt.Errorf(
 			"action %d: create action needs a default project, but none is configured "+
-				"(tracker.default_project)", action.ID,
+				"(default_ticket_in, and that tracker's default_scope)", action.ID,
 		)
 	}
 
@@ -365,27 +365,25 @@ func (a *Applier) checkWritable(issueKey string) error {
 }
 
 // checkProjectWritable is the write-scope choke point itself: a project must
-// resolve to a configured jira connection AND that connection must list it in
-// writable_project_keys, or the write is refused with a message naming both
-// the project and the config key — per the design doc's required error shape
-// ("action N: project %q is not writable (jira[].writable_project_keys does
-// not include it for connection %q)"). This is the ONLY place in unjira that
+// resolve to a configured tracker AND that tracker must list it in
+// writable_scopes, or the write is refused with a message naming both the
+// project and the config key. This is the ONLY place in unjira that
 // makes this check; Apply calls it (via checkWritable/applyCreate) before
 // every AddComment/SetStatus/CreateIssue call, and there is no other
 // TaskWriter holder in the repo to route around it.
 //
 // The two refusals are reported DIFFERENTLY, which an earlier version of this
-// function deliberately did not do — it argued that "no connection says yes" and
-// "a connection says no" are the same outcome from a write-authorization
+// function deliberately did not do — it argued that "no tracker says yes" and
+// "a tracker says no" are the same outcome from a write-authorization
 // standpoint. That is true of the outcome and false of the remedy, which is what
 // the message is for.
 //
-// A project inside a connection's project_keys but absent from
-// writable_project_keys is a scope decision someone made: the fix is to add it,
-// and naming the connection tells them where. A project no connection covers at
-// all is not a scope decision — unjira does not track it, and the old message
-// sent the reader to edit `writable_project_keys` for connection "none", a
-// connection that does not exist. Following that advice is impossible.
+// A project inside a tracker's scopes but absent from writable_scopes is a
+// scope decision someone made: the fix is to add it, and naming the tracker
+// tells them where. A project no tracker covers at all is not a scope decision
+// — unjira does not track it, and an earlier message sent the reader to edit
+// the write scope of a connection named "none", which does not exist.
+// Following that advice is impossible.
 //
 // The distinction matters most for a reviewer in triage. Both refusals look
 // identical in the output, and only one of them means "you can allow this if you
@@ -401,7 +399,7 @@ func (a *Applier) checkWritable(issueKey string) error {
 // are the worst available here — triage offering an apply the gate then refuses, or
 // hiding one the gate would have allowed.
 func (a *Applier) checkProjectWritable(project string) error {
-	writability := config.Config{Jira: a.jiraConnections}.ProjectWritability(project)
+	writability := config.Config{Trackers: a.trackers}.ProjectWritability(project)
 	if writability.Writable {
 		return nil
 	}

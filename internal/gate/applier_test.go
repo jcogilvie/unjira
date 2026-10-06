@@ -17,14 +17,14 @@ import (
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
-// writableConnections is the test-default write scope: one jira connection
+// writableTrackers is the test-default write scope: one tracker
 // that both reads and writes project. Every existing test in this file
 // predates write scope and assumed an implicit "PROJ is always writable" —
 // this is that assumption made explicit and named, so a reader sees exactly
 // which project each test authorizes for writes.
-func writableConnections(project string) []config.JiraConnection {
-	return []config.JiraConnection{
-		{Name: "test", ProjectKeys: []string{project}, WritableProjectKeys: []string{project}},
+func writableTrackers(project string) []config.Tracker {
+	return []config.Tracker{
+		{Name: "test", Scopes: []string{project}, WritableScopes: []string{project}},
 	}
 }
 
@@ -118,7 +118,7 @@ func TestApplier_Comment_CallsAddCommentAndMarksApplied(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.NoError(t, err)
@@ -141,7 +141,7 @@ func TestApplier_Transition_CallsSetStatusAndMarksApplied(t *testing.T) {
 		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"In Review"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.NoError(t, err)
@@ -160,7 +160,7 @@ func TestApplier_Create_CallsCreateIssueAndMarksApplied(t *testing.T) {
 		Type: "create", Payload: `{"summary":"New work","description":"a description"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.NoError(t, err)
@@ -178,7 +178,7 @@ func TestApplier_Create_WithNoDefaultProjectErrorsRatherThanGuessing(t *testing.
 		Type: "create", Payload: `{"summary":"New work"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -202,7 +202,7 @@ func TestApplier_WriteFailure_MarksFailedAndKeepsTheRow(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -230,7 +230,7 @@ func TestApplier_WriteFailure_PersistsTheReasonOnTheRow(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 	require.Error(t, err)
 
@@ -252,7 +252,7 @@ func TestApplier_Success_LeavesErrorEmpty(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	require.NoError(t, applier.Apply(action))
 
 	got, err := s.GetAction(action.ID)
@@ -278,7 +278,7 @@ func TestApplier_RetryAfterFailure_ClearsTheStaleReason(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	require.Error(t, applier.Apply(action))
 
 	got, err := s.GetAction(action.ID)
@@ -305,7 +305,7 @@ func TestApplier_MalformedPayload_ErrorsWithoutCallingTheTracker(t *testing.T) {
 		Type: "comment", IssueKey: "PROJ-1", Payload: `not json at all`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -336,7 +336,7 @@ func TestApplier_PassesAnArbitraryStatusNameThrough(t *testing.T) {
 		Type: "transition", IssueKey: "PROJ-1", Payload: `{"target_status":"Blocked"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 
 	require.NoError(t, applier.Apply(action))
 	assert.Equal(t, []string{"SetStatus:PROJ-1:Blocked"}, w.calls,
@@ -355,7 +355,7 @@ func TestApplier_EmptyTargetStatus_ErrorsWithoutCallingTheTracker(t *testing.T) 
 			Type: "transition", IssueKey: "PROJ-1", Payload: payload, Confidence: 0.9,
 		})
 
-		applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+		applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 		err := applier.Apply(action)
 
 		require.Error(t, err, "payload %s must be refused", payload)
@@ -373,7 +373,7 @@ func TestApplier_UnknownActionType_ErrorsRatherThanGuessing(t *testing.T) {
 		Type: "estimate", Payload: `{}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -391,7 +391,7 @@ func TestApplier_MissingIssueKeyOnComment_Errors(t *testing.T) {
 		Type: "comment", Payload: `{"body":"x"}`, Confidence: 0.9,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -403,7 +403,7 @@ func TestApplier_MissingIssueKeyOnComment_Errors(t *testing.T) {
 // IssueKey "PAAS-1" with a writable set of {DEVSBX} must be refused — the
 // fake sees NO calls (asserted on the recording fake, not merely "no error"),
 // status=failed, and the persisted error names both "PAAS" and
-// "writable_project_keys" so an operator reading `actions list --status
+// "writable_scopes" so an operator reading `actions list --status
 // failed` tomorrow can find the config key to fix.
 func TestApplier_WriteScope_RefusesWriteOutsideWritableSet(t *testing.T) {
 	s := applierStore(t)
@@ -412,8 +412,8 @@ func TestApplier_WriteScope_RefusesWriteOutsideWritableSet(t *testing.T) {
 		Type: "comment", IssueKey: "PAAS-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	conns := []config.JiraConnection{
-		{Name: "dev", ProjectKeys: []string{"PAAS", "DEVSBX"}, WritableProjectKeys: []string{"DEVSBX"}},
+	conns := []config.Tracker{
+		{Name: "dev", Scopes: []string{"PAAS", "DEVSBX"}, WritableScopes: []string{"DEVSBX"}},
 	}
 	applier := gate.NewApplier(s, w, "DEVSBX", conns)
 	err := applier.Apply(action)
@@ -425,12 +425,12 @@ func TestApplier_WriteScope_RefusesWriteOutsideWritableSet(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "failed", got.Status)
 	assert.Contains(t, got.Error, "PAAS", "the persisted reason must name the refused project")
-	assert.Contains(t, got.Error, "writable_project_keys", "the persisted reason must name the config key to fix")
+	assert.Contains(t, got.Error, "writable_scopes", "the persisted reason must name the config key to fix")
 }
 
 // TestApplier_WriteScope_EmptyWritableSetRefusesEvenAReadableProject is test 2:
 // an empty/absent WritableProjectKeys must refuse EVERYTHING, including a
-// project the connection can read via ProjectKeys — deny-by-default, not
+// project the tracker can read via Scopes — deny-by-default, not
 // "readable implies writable".
 func TestApplier_WriteScope_EmptyWritableSetRefusesEvenAReadableProject(t *testing.T) {
 	s := applierStore(t)
@@ -439,8 +439,8 @@ func TestApplier_WriteScope_EmptyWritableSetRefusesEvenAReadableProject(t *testi
 		Type: "comment", IssueKey: "PROJ-1", Payload: `{"body":"the work landed"}`, Confidence: 0.9,
 	})
 
-	conns := []config.JiraConnection{
-		{Name: "dev", ProjectKeys: []string{"PROJ"}}, // WritableProjectKeys deliberately unset
+	conns := []config.Tracker{
+		{Name: "dev", Scopes: []string{"PROJ"}}, // WritableProjectKeys deliberately unset
 	}
 	applier := gate.NewApplier(s, w, "PROJ", conns)
 	err := applier.Apply(action)
@@ -454,8 +454,8 @@ func TestApplier_WriteScope_EmptyWritableSetRefusesEvenAReadableProject(t *testi
 }
 
 // TestApplier_WriteScope_CreateHonoursWritableSetNotJustProjectKeys is test 4:
-// a `create` action's target must be checked against writable_project_keys,
-// not merely resolved as covered by SOME connection's project_keys.
+// a `create` action's target must be checked against writable_scopes,
+// not merely resolved as covered by SOME tracker's scopes.
 func TestApplier_WriteScope_CreateHonoursWritableSetNotJustProjectKeys(t *testing.T) {
 	s := applierStore(t)
 	w := &fakeWriter{}
@@ -463,9 +463,9 @@ func TestApplier_WriteScope_CreateHonoursWritableSetNotJustProjectKeys(t *testin
 		Type: "create", Payload: `{"summary":"New work"}`, Confidence: 0.9,
 	})
 
-	conns := []config.JiraConnection{
-		// PAAS is readable (in project_keys) but not writable.
-		{Name: "dev", ProjectKeys: []string{"PAAS", "DEVSBX"}, WritableProjectKeys: []string{"DEVSBX"}},
+	conns := []config.Tracker{
+		// PAAS is readable (in scopes) but not writable.
+		{Name: "dev", Scopes: []string{"PAAS", "DEVSBX"}, WritableScopes: []string{"DEVSBX"}},
 	}
 	applier := gate.NewApplier(s, w, "PAAS", conns)
 	err := applier.Apply(action)
@@ -498,7 +498,7 @@ func TestApplier_Create_LinksTheNewIssueToItsNarrative(t *testing.T) {
 		Payload: `{"summary":"Do the thing","description":"the body"}`,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 
 	require.NoError(t, applier.Apply(action))
 
@@ -521,7 +521,7 @@ func TestApplier_Create_RecordsUnjiraCreatedProvenance(t *testing.T) {
 		Payload: `{"summary":"s","description":"d"}`,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	require.NoError(t, applier.Apply(action))
 
 	links, err := s.NarrativeIssues(action.NarrativeID)
@@ -566,7 +566,7 @@ func TestApplier_Create_ASecondPassFindsTheNarrativeTracked(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, before, 1, "precondition: the narrative starts untracked")
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	require.NoError(t, applier.Apply(action))
 
 	tracked, err := s.NarrativesWithActionableLinks(10, []store.Role{store.Role("primary")})
@@ -597,7 +597,7 @@ func TestApplier_Create_ReportsAnOrphanWhenTheTrackerReturnsNoKey(t *testing.T) 
 		Payload: `{"summary":"s","description":"d"}`,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 
 	err := applier.Apply(action)
 
@@ -624,7 +624,7 @@ func (w *keylessWriter) CreateIssue(string, string, string, string, []string) (s
 // "no connection says yes" and "a connection says no" are the same outcome. They
 // are the same OUTCOME and different REMEDIES, which is what the message is for.
 //
-// The old message sent a reader to edit writable_project_keys for connection
+// The old message sent a reader to edit writable_scopes for connection
 // "none" — a connection that does not exist, so following the advice was
 // impossible.
 func TestApplier_UntrackedProjectRefusalNamesTheRightRemedy(t *testing.T) {
@@ -635,14 +635,14 @@ func TestApplier_UntrackedProjectRefusalNamesTheRightRemedy(t *testing.T) {
 	})
 
 	// PROJ is tracked and writable; SUMO is not tracked at all.
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 
 	err := applier.Apply(action)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not tracked by unjira",
-		"an untracked project must not be reported as a writable_project_keys problem")
-	assert.Contains(t, err.Error(), "project_keys",
+		"an untracked project must not be reported as a writable_scopes problem")
+	assert.Contains(t, err.Error(), "scopes",
 		"the message must name the config key that would actually change this")
 	assert.Contains(t, err.Error(), "retarget",
 		"the likely remedy is retargeting, since unjira attributed work to a project it does not track")
@@ -652,29 +652,29 @@ func TestApplier_UntrackedProjectRefusalNamesTheRightRemedy(t *testing.T) {
 	assert.Empty(t, w.calls, "nothing may reach the tracker")
 }
 
-// TestApplier_ReadableButUnwritableRefusalNamesTheConnection: this one IS a scope
-// decision someone made, so the message names the connection to edit.
-func TestApplier_ReadableButUnwritableRefusalNamesTheConnection(t *testing.T) {
+// TestApplier_ReadableButUnwritableRefusalNamesTheTracker: this one IS a scope
+// decision someone made, so the message names the tracker to edit.
+func TestApplier_ReadableButUnwritableRefusalNamesTheTracker(t *testing.T) {
 	s := applierStore(t)
 	w := &fakeWriter{}
 	action := insertAction(t, s, store.ActionRow{
 		Type: "comment", IssueKey: "PAAS-4038", Payload: `{"body":"b"}`,
 	})
 
-	// PAAS is readable on connection "test" but absent from writable_project_keys.
-	applier := gate.NewApplier(s, w, "DEVSBX", []config.JiraConnection{{
-		Name:                "test",
-		ProjectKeys:         []string{"PAAS", "DEVSBX"},
-		WritableProjectKeys: []string{"DEVSBX"},
+	// PAAS is readable on tracker "test" but absent from writable_scopes.
+	applier := gate.NewApplier(s, w, "DEVSBX", []config.Tracker{{
+		Name:           "test",
+		Scopes:         []string{"PAAS", "DEVSBX"},
+		WritableScopes: []string{"DEVSBX"},
 	}})
 
 	err := applier.Apply(action)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "readable but not writable")
-	assert.Contains(t, err.Error(), `connection "test"`,
+	assert.Contains(t, err.Error(), `tracker "test"`,
 		"a scope decision names where to change it")
-	assert.Contains(t, err.Error(), "writable_project_keys")
+	assert.Contains(t, err.Error(), "writable_scopes")
 	assert.NotContains(t, err.Error(), "not tracked",
 		"a tracked-but-unwritable project must not read as untracked")
 
@@ -687,20 +687,20 @@ func TestApplier_BothRefusalsPersistTheirReasonForTriage(t *testing.T) {
 	cases := []struct {
 		name      string
 		issueKey  string
-		conns     []config.JiraConnection
+		conns     []config.Tracker
 		wantPhras string
 	}{
 		{
 			name:      "untracked project",
 			issueKey:  "SUMO-1",
-			conns:     writableConnections("PROJ"),
+			conns:     writableTrackers("PROJ"),
 			wantPhras: "not tracked by unjira",
 		},
 		{
 			name:     "readable but unwritable",
 			issueKey: "PAAS-1",
-			conns: []config.JiraConnection{{
-				Name: "test", ProjectKeys: []string{"PAAS"}, WritableProjectKeys: nil,
+			conns: []config.Tracker{{
+				Name: "test", Scopes: []string{"PAAS"}, WritableScopes: nil,
 			}},
 			wantPhras: "readable but not writable",
 		},
@@ -742,7 +742,7 @@ func TestApplier_Transition_WalksEveryHopOfARoute(t *testing.T) {
 		Payload: `{"target_status":"In Review","route":["In Progress","In Review"]}`,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 
 	require.NoError(t, applier.Apply(action))
 	assert.Equal(t, []string{"SetStatus:PROJ-1:In Progress", "SetStatus:PROJ-1:In Review"}, w.calls,
@@ -760,7 +760,7 @@ func TestApplier_Transition_NoRouteMeansASingleHop(t *testing.T) {
 		Payload: `{"target_status":"In Review"}`,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 
 	require.NoError(t, applier.Apply(action))
 	assert.Equal(t, []string{"SetStatus:PROJ-1:In Review"}, w.calls)
@@ -783,7 +783,7 @@ func TestApplier_Transition_MidRouteFailureRecordsHowFarItGot(t *testing.T) {
 		Payload: `{"target_status":"In Review","route":["In Progress","In Review"]}`,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -816,7 +816,7 @@ func TestApplier_Transition_FirstHopFailureReadsAsAPlainRefusal(t *testing.T) {
 		Payload: `{"target_status":"In Review","route":["In Progress","In Review"]}`,
 	})
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err)
@@ -853,7 +853,7 @@ func TestApplier_Create_RefusesWhenTheNarrativeIsAlreadyLinked(t *testing.T) {
 		{IssueKey: "PROJ-7", Role: store.RolePrimary, Provenance: "jira_event", Confidence: 1.0},
 	}))
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 	err := applier.Apply(action)
 
 	require.Error(t, err, "a create for already-tracked work must be refused, not applied")
@@ -880,7 +880,7 @@ func TestApplier_Create_StillAppliesWhenOnlyNonPrimaryLinksExist(t *testing.T) {
 		{IssueKey: "PROJ-9", Role: store.Role("mentioned"), Provenance: "prose_later", Confidence: 0.3},
 	}))
 
-	applier := gate.NewApplier(s, w, "PROJ", writableConnections("PROJ"))
+	applier := gate.NewApplier(s, w, "PROJ", writableTrackers("PROJ"))
 
 	require.NoError(t, applier.Apply(action))
 	assert.Len(t, w.calls, 1, "citing an issue is not being tracked by it")

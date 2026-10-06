@@ -70,16 +70,17 @@ queued or lands `failed` with a persisted reason:
 
 1. **`auto_commit.<type>.graduated`** — false for every action type, and nothing in unjira can
    write this field. Autonomy is granted by a human editing config, never earned by the system.
-2. **`jira[].writable_project_keys`** — which projects may be written to, declared separately from
-   `project_keys` (what may be *read*). Absent means nothing on that connection is writable. A
-   project no connection lists in `project_keys` at all is refused with a *different* message,
-   because it needs a different fix: unjira does not track it, so the likely remedy is retargeting
-   the action rather than widening write scope.
+2. **`trackers[].writable_scopes`** — which scopes may be written to, declared separately from
+   `scopes` (what may be *read*). Absent means nothing on that tracker is writable, and a tracker
+   on a connection kind with no writer (GitHub) cannot declare any: load refuses it. A project no
+   tracker lists in `scopes` at all is refused with a *different* message, because it needs a
+   different fix: unjira does not track it, so the likely remedy is retargeting the action rather
+   than widening write scope.
 3. **`auto_commit.<type>.confidence_floor`** — the action's own confidence must clear it.
 
-A fresh clone has none of these configured, so a fresh clone applies nothing. `config/unjira.example.json`
-deliberately omits `auto_commit` and `writable_project_keys` for exactly this reason: an example
-that grants write authority is one copy-paste from arming a real deployment.
+A fresh clone has none of these configured, so a fresh clone applies nothing. `config/unjira.example.yaml`
+deliberately omits `auto_commit` and leaves every `writable_scopes` empty for exactly this reason: an
+example that grants write authority is one copy-paste from arming a real deployment.
 
 **These three cover opening new issues too.** A `create` is proposed for untracked work like any
 other action and lands in the queue, where gate 1 refuses to auto-apply it unless a human graduated
@@ -123,7 +124,7 @@ non-obvious corrections each one produced.
 
 ```sh
 go build -o unjira ./cmd/unjira      # or: earthly +build
-cp config/unjira.example.json unjira.config.json
+cp config/unjira.example.yaml unjira.config.yaml   # commented; JSON in the same shape also works
 cp .env.example .env                 # Jira + LLM credentials (gitignored)
 
 ./unjira collect        # ingest new events from enabled collectors
@@ -144,6 +145,21 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 ./unjira learn --keep say-what-changed   # write one drafted rule, by name
 ./unjira learn --all                 # write all of them
 ```
+
+**Config is connections, trackers, and `default_ticket_in`.** A *connection* is a system and its
+endpoint (`kind: jira | github | local`); a *tracker* is a set of scopes on one connection (Jira
+project keys, or GitHub `owner/repo` with `owner/*` allowed), the subset of them unjira may write
+(`writable_scopes`), where its creates land (`default_scope`), and, for Jira, the JQL `queries` the
+collector reads. `default_ticket_in` names the tracker untracked work is ticketed in. Scopes may
+not overlap across trackers. The file is read strictly: an unknown key is an error, and so is the
+previous shape — the top-level `jira` and `tracker` keys are refused with the replacement named,
+never translated. `jira[]` becomes one `connections` entry (`kind: jira`, `endpoint:` the old
+`site`) plus one `trackers` entry on it (`project_keys` → `scopes`, `writable_project_keys` →
+`writable_scopes`, `queries` and `max_issues_per_query` unchanged); `tracker.default_project`
+becomes `default_ticket_in: [<that tracker>]` plus its `default_scope`. Keep the connection's
+`name` the same as the old `jira[].name`: it is still the `UNJIRA_JIRA_CREDENTIALS` key, the
+collector's cursor key, and the connection recorded on stored links. Quote short keys — YAML reads
+an unquoted `NO`, `ON` or `YES` as a boolean, and load says so.
 
 **The store has no migrations; a schema change needs a fresh one.** There will be none until
 unjira is productionized. Every table is `CREATE TABLE IF NOT EXISTS`, so an existing database
@@ -238,7 +254,8 @@ internal/
   store/                SQLite schema and access: events, cursors, narratives,
                         narrative_events, narrative_issues, actions, estimates, ledger,
                         pipeline_lock
-  config/               config loading (unjira.config.json) and validation
+  config/               config loading (unjira.config.yaml) and validation: connections,
+                        trackers, scopes and write scope
   credentials/          the JSON-blob credential sets from UNJIRA_JIRA_CREDENTIALS and
                         UNJIRA_GITHUB_CREDENTIALS
   envfile/              .env loader with repo-root walk-up
@@ -387,14 +404,15 @@ data/                   SQLite database lives here (gitignored)
   error, not a code-review catch. `gate.Applier` holds a `TaskWriter` and does nothing else. Note
   `AvailableStatusCategories` sits on the **reader** deliberately: it is a read that describes a
   write, reporting what a write *could* do without performing one.
-- **Read scope and write scope are separate config.** `jira[].project_keys` is what unjira may
-  *read*; `jira[].writable_project_keys` (a subset) is what it may *write*. Absent means nothing
+- **Read scope and write scope are separate config.** `trackers[].scopes` is what unjira may
+  *read*; `trackers[].writable_scopes` (a subset) is what it may *write*. Absent means nothing
   is writable. Learned the hard way: reusing the read list as the write surface meant a config
   spanning a sandbox and a production project would, on graduation, have written to production.
   The check lives in `gate.Applier` rather than the gate's `Decide`, because `actions decide
   --approve` never calls `Decide` — a check there would have covered only the automatic path.
 - **Pluggable apply-target backend, decided before phase 1 needs it.** `clients/jira.Tracker` and
-  `clients/local.Tracker` both implement the interface, config-selected via `tracker.backend`. The local backend lets unjira run with no real
+  `clients/local.Tracker` both implement the interface, selected by the `kind` of the connection a
+  tracker sits on (`jira`, `local`; `github` is configurable and read-only). The local backend lets unjira run with no real
   tracker reachable (e.g. a hosted control plane with no Jira auth) while still deriving value
   from event clustering, persisting its own issue state locally. `SetStatus` takes the tracker's own
   **status name** ("In Review"), not a normalized category. It was categorical until 2026-09-01, on
@@ -408,9 +426,11 @@ data/                   SQLite database lives here (gitignored)
   Legality is `AvailableTransitions`, a live per-issue read — there is no closed set of names to
   validate against, so `gate.Applier` does not try. Workflow-graph mining is a separate
   `workflow.GraphProvider` capability (type-asserted, not part of `TaskTracker`), since only
-  backends with an admin-configurable workflow to mine (Jira) need it. `Config.Jira` is a list of
-  named connections, not a single global site, so one project set can span more than one Jira
-  instance (a migration, an acquisition). Matching resolves a tracker **per candidate** from the
+  backends with an admin-configurable workflow to mine (Jira) need it. Config separates
+  **connections** (a system kind and endpoint) from **trackers** (scopes and write authority on one
+  connection), so one project set can span more than one Jira instance (a migration, an
+  acquisition), several trackers can share one site and credential, and no tracker is special by
+  name. Scopes may not overlap across trackers, so every issue routes to exactly one. Matching resolves a tracker **per candidate** from the
   connection its provenance recorded (`correlator.TrackerResolver`), so a cross-site candidate is
   verified against the site that actually holds it rather than whichever one the default project
   selects; a candidate naming an unconfigured connection is reported with the reason rather than

@@ -41,7 +41,7 @@ import (
 // consequence rather than an oversight.
 var searchFields = []string{"key", "project", "updated", fieldSummary, fieldDescription}
 
-// Collector reads Jira changes for every configured connection's named queries.
+// Collector reads Jira changes for every jira-kind tracker's named queries.
 type Collector struct{}
 
 // New builds the collector. Stateless: everything it needs arrives on the
@@ -62,7 +62,7 @@ func (c *Collector) SuppliesStatusHistory() {}
 
 var _ pipeline.StatusHistorySource = (*Collector)(nil)
 
-// Collect walks every configured connection's queries.
+// Collect walks every jira connection, running the queries of each tracker on it.
 //
 // Failure is per query, not per pass: a 403 on one JQL (a revoked project
 // permission) must not stop an unrelated query from progressing. Failed queries
@@ -71,14 +71,19 @@ var _ pipeline.StatusHistorySource = (*Collector)(nil)
 func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)) error {
 	var failures []error
 
-	for _, conn := range cc.Config.Jira {
-		if len(conn.Queries) == 0 {
-			// Write-only connection: it routes project keys but collects
+	for _, conn := range cc.Config.Connections {
+		if conn.Kind != config.KindJira {
+			continue
+		}
+
+		trackers := trackersWithQueries(cc.Config, conn.Name)
+		if len(trackers) == 0 {
+			// Write-only connection: its trackers route project keys but collect
 			// nothing. Not an error.
 			continue
 		}
 
-		if err := c.collectConnection(cc, conn, visit); err != nil {
+		if err := c.collectConnection(cc, conn, trackers, visit); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -86,10 +91,26 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 	return errors.Join(failures...)
 }
 
-// collectConnection builds one client for a connection and runs its queries.
+// trackersWithQueries returns the trackers on connection that have something to
+// collect, in config order.
+func trackersWithQueries(cfg config.Config, connection string) []config.Tracker {
+	var out []config.Tracker
+
+	for _, t := range cfg.Trackers {
+		if t.Connection == connection && len(t.Queries) > 0 {
+			out = append(out, t)
+		}
+	}
+
+	return out
+}
+
+// collectConnection builds one client for a connection and runs every query of
+// every tracker on it.
 func (c *Collector) collectConnection(
 	cc pipeline.CollectContext,
-	conn config.JiraConnection,
+	conn config.Connection,
+	trackers []config.Tracker,
 	visit func(events.Event),
 ) error {
 	cred, ok := cc.Credentials.For(conn.Name)
@@ -98,20 +119,15 @@ func (c *Collector) collectConnection(
 			"jira connection %q has no credential: set it in UNJIRA_JIRA_CREDENTIALS", conn.Name)
 	}
 
-	client, err := jiraclient.New(conn.Site, cred.Email, cred.Token)
+	client, err := jiraclient.New(conn.Endpoint, cred.Email, cred.Token)
 	if err != nil {
 		return fmt.Errorf("building jira client for connection %q: %w", conn.Name, err)
 	}
 
-	limit, err := conn.IssueLimit()
-	if err != nil {
-		return err
-	}
-
-	// One Myself() call per connection per pass, not per issue. It yields two
-	// things: our own accountId (for the self-authored tag) and the account's
-	// configured timezone (which JQL date literals are interpreted in — see
-	// watermarkClause).
+	// One Myself() call per connection per pass, not per issue or per tracker. It
+	// yields two things: our own accountId (for the self-authored tag) and the
+	// account's configured timezone (which JQL date literals are interpreted in —
+	// see watermarkClause).
 	//
 	// An empty accountID (a permission that does not allow reading self)
 	// degrades to "tag nothing", which is preferable to failing the whole pass —
@@ -130,30 +146,46 @@ func (c *Collector) collectConnection(
 
 	var failures []error
 
-	for _, query := range conn.Queries {
-		if err := c.collectQuery(
-			cc, conn, query, client, selfAccountID, accountZone, limit, visit,
-		); err != nil {
-			failures = append(failures, fmt.Errorf("query %s/%s: %w", conn.Name, query.Name, err))
+	for _, tracker := range trackers {
+		limit, err := tracker.IssueLimit()
+		if err != nil {
+			failures = append(failures, err)
+
+			continue
+		}
+
+		for _, query := range tracker.Queries {
+			q := queryRun{conn: conn, tracker: tracker, query: query, limit: limit}
+			if err := c.collectQuery(cc, q, client, selfAccountID, accountZone, visit); err != nil {
+				failures = append(failures, fmt.Errorf("query %s/%s: %w", conn.Name, query.Name, err))
+			}
 		}
 	}
 
 	return errors.Join(failures...)
 }
 
+// queryRun is one query to run: where, under which tracker's scope, and its cap.
+type queryRun struct {
+	conn    config.Connection
+	tracker config.Tracker
+	query   config.JiraQuery
+	limit   int
+}
+
 // collectQuery runs one named query: search, then per-issue changelog and
 // comments, then advance the watermark.
 func (c *Collector) collectQuery(
 	cc pipeline.CollectContext,
-	conn config.JiraConnection,
-	query config.JiraQuery,
+	q queryRun,
 	client *jiraclient.Client,
 	selfAccountID string,
 	accountZone string,
-	limit int,
 	visit func(events.Event),
 ) error {
-	effectiveJQL, err := conn.EffectiveJQL(query)
+	conn, query, limit := q.conn, q.query, q.limit
+
+	effectiveJQL, err := q.tracker.EffectiveJQL(query)
 	if err != nil {
 		return err
 	}
@@ -300,7 +332,7 @@ func watermarkClause(watermark time.Time, accountZone, connName string, log *slo
 // collectIssue emits every event for one issue and returns its updated time,
 // which feeds the query's watermark.
 func (c *Collector) collectIssue(
-	conn config.JiraConnection,
+	conn config.Connection,
 	issue map[string]any,
 	client *jiraclient.Client,
 	selfAccountID string,
@@ -326,7 +358,7 @@ func (c *Collector) collectIssue(
 		Key:           key,
 		ProjectKey:    projectKey,
 		Connection:    conn.Name,
-		Site:          conn.Site,
+		Site:          conn.Endpoint,
 		SelfAccountID: selfAccountID,
 	}
 

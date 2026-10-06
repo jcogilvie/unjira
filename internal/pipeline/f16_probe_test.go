@@ -213,11 +213,28 @@ func TestF16_WideWindowsWithCap(t *testing.T) {
 	}
 }
 
+// repoConfig loads the repository root's config file, whichever of
+// config.DefaultConfigNames it is. A missing one is an error rather than
+// config.Default(), since a probe run against defaults measures nothing.
+func repoConfig() (config.Config, error) {
+	path, err := config.DefaultPathIn("../..")
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	if path == "" {
+		return config.Config{}, fmt.Errorf("no config file at the repository root (one of %v)",
+			config.DefaultConfigNames)
+	}
+
+	return config.Load(path)
+}
+
 // realClient builds the configured LLM client for the decision-delta test only,
-// mirroring cmd/unjira's llmClient(). Reads unjira.config.json rather than
+// mirroring cmd/unjira's llmClient(). Reads the repository's config rather than
 // hardcoding an endpoint, so it cannot send prompts somewhere unintended.
 func realClient() (llm.Client, error) {
-	cfg, err := config.Load("../../unjira.config.json")
+	cfg, err := repoConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +254,7 @@ func realClient() (llm.Client, error) {
 	// built a smaller prompt and then exceeded 32,000 completion tokens, since ~104
 	// clusters each emit a title and summary. That is F16's other half — the response
 	// ceiling binds before the prompt budget. Overridden by env rather than by editing
-	// unjira.config.json, so a measurement leaves config alone.
+	// config file, so a measurement leaves config alone.
 	maxOut := cfg.LLM.MaxOutputTokens
 	if v := os.Getenv("F16_MAX_OUTPUT"); v != "" {
 		n, err := strconv.Atoi(v)

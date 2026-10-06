@@ -55,8 +55,8 @@ func TestCollect_TruncatedPassDoesNotAdvanceTheWatermark(t *testing.T) {
 	// indistinguishable from one that truncated a larger result set. That is the
 	// real condition — the collector cannot tell "exactly full" from "more
 	// waiting" without fetching limit+1, which it does not do here.
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"}, MaxIssuesPerQuery: 2,
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"}, MaxIssuesPerQuery: 2,
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 
@@ -88,8 +88,8 @@ func TestCollect_CompletePassAdvancesTheWatermark(t *testing.T) {
 	}
 
 	// Cap comfortably above the result count, so len(issues) < limit.
-	cc := testContext(t, fake.start(t), config.JiraConnection{
-		Name: "corp", ProjectKeys: []string{"PROJ"}, MaxIssuesPerQuery: 50,
+	cc := testContext(t, fake.start(t), config.Tracker{
+		Name: "corp", Scopes: []string{"PROJ"}, MaxIssuesPerQuery: 50,
 		Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 	})
 

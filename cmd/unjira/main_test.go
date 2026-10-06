@@ -33,14 +33,40 @@ func jsonSetFor(t *testing.T, byName map[string]credentials.Credential) credenti
 	return set
 }
 
+// jiraSites builds a config with one jira connection and one tracker per site, each
+// tracker named after its connection.
+func jiraSites(sites ...jiraSite) config.Config {
+	var cfg config.Config
+
+	for _, site := range sites {
+		cfg.Connections = append(cfg.Connections,
+			config.Connection{Name: site.name, Kind: config.KindJira, Endpoint: site.endpoint})
+		cfg.Trackers = append(cfg.Trackers,
+			config.Tracker{Name: site.name, Connection: site.name, Scopes: site.scopes})
+	}
+
+	return cfg
+}
+
+type jiraSite struct {
+	name, endpoint string
+	scopes         []string
+}
+
+// localTracker is a config whose one tracker sits on the local backend.
+func localTracker(scopes ...string) config.Config {
+	return config.Config{
+		Connections: []config.Connection{{Name: "local", Kind: config.KindLocal}},
+		Trackers:    []config.Tracker{{Name: "local", Connection: "local", Scopes: scopes}},
+	}
+}
+
 func TestJiraClientForProject_ResolvesCredentialsByConnectionName(t *testing.T) {
 	app := &appContext{
-		config: config.Config{
-			Jira: []config.JiraConnection{
-				{Name: "corp", Site: "https://corp.atlassian.net", ProjectKeys: []string{"SUMO"}},
-				{Name: "paas", Site: "https://paas.atlassian.net", ProjectKeys: []string{"PAAS"}},
-			},
-		},
+		config: jiraSites(
+			jiraSite{"corp", "https://corp.atlassian.net", []string{"SUMO"}},
+			jiraSite{"paas", "https://paas.atlassian.net", []string{"PAAS"}},
+		),
 		jiraCredentials: jsonSetFor(t, map[string]credentials.Credential{
 			"corp": {Email: "corp@example.com", Token: "corp-token"},
 			"paas": {Email: "paas@example.com", Token: "paas-token"},
@@ -55,11 +81,7 @@ func TestJiraClientForProject_ResolvesCredentialsByConnectionName(t *testing.T) 
 
 func TestJiraClientForProject_MissingCredentialsErrorsWithConnectionName(t *testing.T) {
 	app := &appContext{
-		config: config.Config{
-			Jira: []config.JiraConnection{
-				{Name: "corp", Site: "https://corp.atlassian.net", ProjectKeys: []string{"SUMO"}},
-			},
-		},
+		config:          jiraSites(jiraSite{"corp", "https://corp.atlassian.net", []string{"SUMO"}}),
 		jiraCredentials: jsonSetFor(t, map[string]credentials.Credential{}),
 	}
 
@@ -72,11 +94,7 @@ func TestJiraClientForProject_MissingCredentialsErrorsWithConnectionName(t *test
 
 func TestJiraClientForProject_UnknownProjectErrors(t *testing.T) {
 	app := &appContext{
-		config: config.Config{
-			Jira: []config.JiraConnection{
-				{Name: "corp", Site: "https://corp.atlassian.net", ProjectKeys: []string{"SUMO"}},
-			},
-		},
+		config: jiraSites(jiraSite{"corp", "https://corp.atlassian.net", []string{"SUMO"}}),
 	}
 
 	_, err := app.jiraClientForProject("GHOST")
@@ -97,13 +115,8 @@ func openTestStore(t *testing.T) *store.Store {
 
 func TestTaskTracker_JiraBackendReturnsJiraTracker(t *testing.T) {
 	app := &appContext{
-		config: config.Config{
-			Tracker: config.TrackerConfig{Backend: "jira"},
-			Jira: []config.JiraConnection{
-				{Name: "default", Site: "https://yourorg.atlassian.net", ProjectKeys: []string{"PROJ"}},
-			},
-		},
-		store: openTestStore(t),
+		config: jiraSites(jiraSite{"default", "https://yourorg.atlassian.net", []string{"PROJ"}}),
+		store:  openTestStore(t),
 		jiraCredentials: jsonSetFor(t, map[string]credentials.Credential{
 			"default": {Email: "e", Token: "t"},
 		}),
@@ -117,7 +130,7 @@ func TestTaskTracker_JiraBackendReturnsJiraTracker(t *testing.T) {
 
 func TestTaskTracker_LocalBackendReturnsLocalTracker(t *testing.T) {
 	app := &appContext{
-		config: config.Config{Tracker: config.TrackerConfig{Backend: "local"}},
+		config: localTracker("PROJ"),
 		store:  openTestStore(t),
 	}
 
@@ -125,52 +138,6 @@ func TestTaskTracker_LocalBackendReturnsLocalTracker(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.IsType(t, &local.Tracker{}, tracker)
-}
-
-// watchTestLLMConfig is the minimal config.LLMConfig that satisfies
-// appContext.llmClient's own validation (Model, ContextWindowTokens, BaseURL,
-// and a credential) so a watchCmd.Run test can reach the write-scope
-// validation block that follows it without a real LLM backend.
-func watchTestLLMConfig() config.LLMConfig {
-	return config.LLMConfig{
-		Model:               "test-model",
-		ContextWindowTokens: 128000,
-		BaseURL:             "http://localhost:4000/v1",
-	}
-}
-
-// TestWatchCmd_UnwritableDefaultProjectFailsFast is test 6 from
-// docs/superpowers/specs/2026-08-27-write-scope-design.md's testing section:
-// tracker.default_project must be validated for writability at STARTUP
-// (before any pass, any lease, any tracker construction), not merely
-// discovered the first time a `create` action tries to fire. This exercises
-// the real watchCmd.Run — the actual wiring in cmd/unjira/main.go — not just
-// config.DefaultProjectConnection in isolation (internal/config/config_test.go
-// already covers that method directly).
-func TestWatchCmd_UnwritableDefaultProjectFailsFast(t *testing.T) {
-	app := &appContext{
-		config: config.Config{
-			LLM:        watchTestLLMConfig(),
-			Correlator: config.CorrelatorConfig{TailSummarizeThresholdTokens: 1_000_000, RecentEventsKept: 20},
-			Reconciler: config.ReconcilerConfig{MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5},
-			Tracker:    config.TrackerConfig{DefaultProject: "PAAS"},
-			Jira: []config.JiraConnection{
-				// PAAS is readable but deliberately not in WritableProjectKeys.
-				{Name: "dev", ProjectKeys: []string{"PAAS", "DEVSBX"}, WritableProjectKeys: []string{"DEVSBX"}},
-			},
-		},
-		llmAPIKey: "test-key",
-		// store is deliberately left nil: this test's whole point is that the
-		// error surfaces BEFORE anything reaches app.store (a lease
-		// acquisition, a tracker construction) — a nil-pointer panic here
-		// would itself be evidence the check runs too late.
-	}
-
-	err := (&watchCmd{}).Run(app)
-
-	require.Error(t, err, "an unwritable default_project must fail fast, before the first pass")
-	assert.Contains(t, err.Error(), "PAAS")
-	assert.Contains(t, err.Error(), "writable_project_keys")
 }
 
 // TestWarnIfNoStatusHistorySource_LogsOnceWhenNothingSuppliesHistory is
@@ -187,10 +154,8 @@ func TestWarnIfNoStatusHistorySource_LogsOnceWhenNothingSuppliesHistory(t *testi
 	require.NoError(t, err)
 
 	app := &appContext{
-		config: config.Config{
-			Tracker:    config.TrackerConfig{Backend: "jira"},
-			Collectors: map[string]map[string]any{"claude_code": {"enabled": true}},
-		},
+		config: withCollectors(jiraSites(jiraSite{"default", "https://x.atlassian.net", []string{"PROJ"}}),
+			map[string]map[string]any{"claude_code": {"enabled": true}}),
 		log: testLog,
 	}
 
@@ -210,10 +175,8 @@ func TestWarnIfNoStatusHistorySource_SilentWhenTheJiraCollectorIsEnabled(t *test
 	require.NoError(t, err)
 
 	app := &appContext{
-		config: config.Config{
-			Tracker:    config.TrackerConfig{Backend: "jira"},
-			Collectors: map[string]map[string]any{"jira": {"enabled": true}},
-		},
+		config: withCollectors(jiraSites(jiraSite{"default", "https://x.atlassian.net", []string{"PROJ"}}),
+			map[string]map[string]any{"jira": {"enabled": true}}),
 		log: testLog,
 	}
 
@@ -235,11 +198,8 @@ func TestWarnIfNoStatusHistorySource_SilentOnTheLocalBackend(t *testing.T) {
 	require.NoError(t, err)
 
 	app := &appContext{
-		config: config.Config{
-			Tracker:    config.TrackerConfig{Backend: "local"},
-			Collectors: map[string]map[string]any{"claude_code": {"enabled": true}},
-		},
-		log: testLog,
+		config: withCollectors(localTracker("PROJ"), map[string]map[string]any{"claude_code": {"enabled": true}}),
+		log:    testLog,
 	}
 
 	app.warnIfNoStatusHistorySource()
@@ -247,14 +207,48 @@ func TestWarnIfNoStatusHistorySource_SilentOnTheLocalBackend(t *testing.T) {
 	assert.Empty(t, logged.String(), "the local backend has no external tracker to diverge from")
 }
 
-func TestTaskTracker_UnknownBackendErrors(t *testing.T) {
+// withCollectors sets cfg's collector block.
+func withCollectors(cfg config.Config, collectors map[string]map[string]any) config.Config {
+	cfg.Collectors = collectors
+
+	return cfg
+}
+
+// TestWarnIfNoStatusHistorySource_SilentWithNoTrackers: nothing is reconciled, so there
+// is no transition for the guard to protect.
+func TestWarnIfNoStatusHistorySource_SilentWithNoTrackers(t *testing.T) {
+	var logged strings.Builder
+	testLog, err := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, err)
+
+	app := &appContext{config: config.Config{}, log: testLog}
+
+	app.warnIfNoStatusHistorySource()
+
+	assert.Empty(t, logged.String())
+}
+
+func TestTaskTracker_UncoveredProjectErrors(t *testing.T) {
+	app := &appContext{config: localTracker("PROJ"), store: openTestStore(t)}
+
+	_, err := app.taskTracker("GHOST")
+
+	require.ErrorContains(t, err, "GHOST")
+}
+
+// TestTaskTracker_GitHubTrackerHasNoBackendYet: a github tracker is configurable, but
+// nothing reads or writes it in this build, so resolving one is a named error rather
+// than a silent fallback to some other backend.
+func TestTaskTracker_GitHubTrackerHasNoBackendYet(t *testing.T) {
 	app := &appContext{
-		config: config.Config{Tracker: config.TrackerConfig{Backend: "trello"}},
-		store:  openTestStore(t),
+		config: config.Config{
+			Connections: []config.Connection{{Name: "gh", Kind: config.KindGitHub, Endpoint: "https://api.github.com"}},
+			Trackers:    []config.Tracker{{Name: "upstream", Connection: "gh", Scopes: []string{"o/r"}}},
+		},
+		store: openTestStore(t),
 	}
 
-	_, err := app.taskTracker("PROJ")
+	_, err := app.taskTracker("o/r")
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "trello")
+	require.ErrorContains(t, err, "upstream")
 }

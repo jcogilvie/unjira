@@ -96,16 +96,16 @@ func seedProposedComment(t *testing.T, s *store.Store, issueKey, body string, co
 	return got
 }
 
-// liveWritableConnections is the write-scope config this file's tests build
-// in-process: one connection covering testProject() for both read (ProjectKeys)
-// and write (WritableProjectKeys). Every test in this file predates write
+// liveWritableTrackers is the write-scope config this file's tests build
+// in-process: one tracker covering testProject() for both read (Scopes)
+// and write (WritableScopes). Every test in this file predates write
 // scope and implicitly assumed testProject() was always writable — this
 // helper makes that assumption explicit, matching internal/gate/applier_test.go's
 // own writableConnections helper (unreachable from this package, since it's
 // unexported in gate_test).
-func liveWritableConnections() []config.JiraConnection {
-	return []config.JiraConnection{
-		{Name: "live", ProjectKeys: []string{testProject()}, WritableProjectKeys: []string{testProject()}},
+func liveWritableTrackers() []config.Tracker {
+	return []config.Tracker{
+		{Name: "live", Scopes: []string{testProject()}, WritableScopes: []string{testProject()}},
 	}
 }
 
@@ -171,7 +171,7 @@ func TestLiveAutoCommit_UngraduatedActionIsNotWrittenToJira(t *testing.T) {
 	key := liveThrowawayIssue(t, client, "ungraduated must not write")
 	action := seedProposedComment(t, s, key, "THIS BODY MUST NEVER APPEAR ON THE ISSUE", 0.99)
 
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableConnections())
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableTrackers())
 
 	// Graduated false at maximum confidence: the confidence floor is satisfied
 	// and the gate must still refuse. An empty rules map (the shipped default,
@@ -227,7 +227,7 @@ func TestLiveAutoCommit_GraduatedActionReachesJira(t *testing.T) {
 	// Confirm the pre-state rather than assuming a fresh issue is empty.
 	require.Empty(t, commentBodies(t, client, key), "a freshly created issue must start with no comments")
 
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableConnections())
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableTrackers())
 
 	result, err := pipeline.RunAutoCommit([]store.ActionRow{action}, pipeline.AutoCommitOptions{
 		Rules: map[string]config.AutoCommitRule{
@@ -283,7 +283,7 @@ func TestLiveAutoCommit_RealFailureRecordsARealReason(t *testing.T) {
 
 	require.NoError(t, client.DeleteIssue(key), "the issue must be gone before the apply")
 
-	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableConnections())
+	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), liveWritableTrackers())
 
 	result, err := pipeline.RunAutoCommit([]store.ActionRow{action}, pipeline.AutoCommitOptions{
 		Rules: map[string]config.AutoCommitRule{
@@ -315,8 +315,8 @@ func TestLiveAutoCommit_RealFailureRecordsARealReason(t *testing.T) {
 // section — "the cheapest and most important drill, because a sign-flipped
 // safety check is worse than none." The connection shape here deliberately
 // mirrors the REAL unjira.config.json this design exists to fix: PAAS and
-// DEVSBX both readable (ProjectKeys), only DEVSBX writable
-// (WritableProjectKeys) — not a single-project config that could pass
+// DEVSBX both readable (Scopes), only DEVSBX writable
+// (WritableScopes) — not a single-project config that could pass
 // vacuously regardless of which way the check points.
 //
 // This never creates or touches a PAAS issue: the point is proving DEVSBX
@@ -330,8 +330,8 @@ func TestLiveAutoCommit_RealFailureRecordsARealReason(t *testing.T) {
 //
 // Drill (per the design doc, and to be performed manually — not run
 // automatically, since this test writes to real Jira): invert
-// checkProjectWritable's condition (e.g. `if ok && conn.IsProjectWritable(...)`
-// instead of `if !ok || !conn.IsProjectWritable(...)`) and this test must FAIL.
+// checkProjectWritable's condition (e.g. `if ok && tracker.IsScopeWritable(...)`
+// instead of `if !ok || !tracker.IsScopeWritable(...)`) and this test must FAIL.
 func TestLiveWriteScope_GraduatedCommentStillReachesAWritableProject(t *testing.T) {
 	client := testClient(t)
 	s := liveAutoCommitStore(t)
@@ -349,11 +349,11 @@ func TestLiveWriteScope_GraduatedCommentStillReachesAWritableProject(t *testing.
 	// testProject() (DEVSBX in production) both readable and writable. Never
 	// used to target PAAS — only to prove its PRESENCE in the connection list
 	// does not block a write to the project that IS listed as writable.
-	conns := []config.JiraConnection{
+	conns := []config.Tracker{
 		{
-			Name:                "live",
-			ProjectKeys:         []string{"PAAS", testProject()},
-			WritableProjectKeys: []string{testProject()},
+			Name:           "live",
+			Scopes:         []string{"PAAS", testProject()},
+			WritableScopes: []string{testProject()},
 		},
 	}
 	applier := gate.NewApplier(s, jira.NewTracker(client), testProject(), conns)
@@ -367,7 +367,7 @@ func TestLiveWriteScope_GraduatedCommentStillReachesAWritableProject(t *testing.
 	require.NoError(t, err)
 	require.Len(t, result.Applied, 1,
 		"a graduated action against the WRITABLE project must still apply, even with an "+
-			"unwritable sibling project in the same connection's project_keys")
+			"unwritable sibling project in the same tracker's scopes")
 	assert.Empty(t, result.Failed)
 
 	bodies := commentBodies(t, client, key)
