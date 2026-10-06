@@ -704,6 +704,78 @@ func TestNarrativesOverlapping_IncludesOverlapAndTouching(t *testing.T) {
 		"touching endpoints count as adjacent; strictly disjoint windows do not")
 }
 
+// TestNarrativesOverlappingExtended_AnswersAsIfWindowEndsHadMoved: the query a dry run
+// asks (F46), answering as the store would once each listed narrative's window_end had
+// been moved forward. It moves a window_end only forward, never past a split, and
+// writes nothing.
+func TestNarrativesOverlappingExtended_AnswersAsIfWindowEndsHadMoved(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	windowStart, windowEnd := base, base.Add(time.Hour)
+
+	// Ends a day before the window; extended into it, it overlaps.
+	extended, err := s.InsertNarrative(base.Add(-25*time.Hour), base.Add(-24*time.Hour), "extended", "s")
+	require.NoError(t, err)
+	// Overlaps already; a planned end EARLIER than its own must not move it back.
+	overlapping, err := s.InsertNarrative(base.Add(-30*time.Minute), base.Add(30*time.Minute), "overlapping", "s")
+	require.NoError(t, err)
+	// Split narratives stay excluded however far their window would move.
+	split, err := s.InsertNarrative(base.Add(-25*time.Hour), base.Add(-24*time.Hour), "split", "s")
+	require.NoError(t, err)
+	require.NoError(t, s.SetNarrativeStatus(split, store.StatusSplit))
+	// Disjoint and not listed: excluded, as NarrativesOverlapping would.
+	_, err = s.InsertNarrative(base.Add(-48*time.Hour), base.Add(-47*time.Hour), "ancient", "s")
+	require.NoError(t, err)
+
+	const missing = int64(9999)
+	got, err := s.NarrativesOverlappingExtended(windowStart, windowEnd, map[int64]time.Time{
+		extended:    base.Add(10 * time.Minute),
+		overlapping: base.Add(-time.Hour),
+		split:       base.Add(10 * time.Minute),
+		missing:     base,
+	})
+
+	require.NoError(t, err)
+	ends := make(map[int64]time.Time, len(got))
+	ids := make([]int64, 0, len(got))
+	for _, row := range got {
+		ids = append(ids, row.ID)
+		ends[row.ID] = row.WindowEnd
+	}
+	assert.Equal(t, []int64{extended, overlapping}, ids, "ordered by (window_start, id), as NarrativesOverlapping is")
+	assert.True(t, base.Add(10*time.Minute).Equal(ends[extended]), "reported with the window_end it would have")
+	assert.True(t, base.Add(30*time.Minute).Equal(ends[overlapping]), "a window_end never moves back")
+
+	row, err := s.GetNarrative(extended)
+	require.NoError(t, err)
+	assert.True(t, base.Add(-24*time.Hour).Equal(row.WindowEnd), "nothing written")
+
+	plain, err := s.NarrativesOverlapping(windowStart, windowEnd)
+	require.NoError(t, err)
+	none, err := s.NarrativesOverlappingExtended(windowStart, windowEnd, nil)
+	require.NoError(t, err)
+	assert.Equal(t, plain, none, "no planned ends is NarrativesOverlapping exactly")
+}
+
+// TestNarrativesOverlappingExtended_ComparesInstantsNotStrings: "later" is decided by
+// instant, as the join's writer decides it (time.After), not by comparing the RFC3339
+// strings. 12:45+02:00 sorts after 11:00Z as text but is the earlier instant, so it
+// must not replace the stored end.
+func TestNarrativesOverlappingExtended_ComparesInstantsNotStrings(t *testing.T) {
+	s := openStore(t)
+	base := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	nid, err := s.InsertNarrative(base, base.Add(time.Hour), "n", "s")
+	require.NoError(t, err)
+	earlierInstant := time.Date(2026, 8, 1, 12, 45, 0, 0, time.FixedZone("CEST", 2*60*60))
+	require.True(t, earlierInstant.Before(base.Add(time.Hour)))
+
+	got, err := s.NarrativesOverlappingExtended(base, base.Add(2*time.Hour), map[int64]time.Time{nid: earlierInstant})
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.True(t, base.Add(time.Hour).Equal(got[0].WindowEnd), "an earlier instant never replaces the stored end")
+}
+
 func TestNarrativesOverlapping_CarriesCompactionBoundary(t *testing.T) {
 	s := openStore(t)
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)

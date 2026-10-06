@@ -67,7 +67,8 @@ M7  screen: 0 pass-2 member placement(s) whose evidence points at another pass-1
 
 Two-pass M3 went from 24/26 to 26/26, and the four placements are exactly the merged/closed events of
 #72 and #73, the two PRs that split before. No several-holders or not-open fallbacks occurred, and no
-rep showed F45's reshuffle. See `docs/architecture-findings.md` F45 and F46 for what the join leaves open.
+rep showed F45's reshuffle. See `docs/architecture-findings.md` F45 for what the join leaves open. F46,
+a dry run clustering against less context than the real pass when the join fired, has since been fixed.
 
 **The cheaper first step, taken: a segment names the PRs its run opened.** The "inert" verdict above
 traced to the evidence. A root segment's summary said "opened a PR" and named none, so the model could

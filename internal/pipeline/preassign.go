@@ -24,6 +24,9 @@ package pipeline
 
 import (
 	"fmt"
+	"maps"
+	"slices"
+	"time"
 
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
@@ -136,6 +139,12 @@ func pullRequestKeys(candidates []events.Event) []string {
 // window_end moved forward to cover the event (never back, and window_start never
 // moved, as Persist's extend does).
 //
+// A dry run decides the same placements and writes none of them. The window_end
+// extension still matters to it, because it can bring a holder that ended before the
+// window into it, making it clustering context. So RunNarrate hydrates context from
+// plannedWindowEnds in both modes, and a dry run clusters against what the real pass
+// would.
+//
 // ACCEPTED COST: the narrative's summary is not rewritten, because the model never saw
 // the event, and no compaction is considered. The reconciler drafts from the new member
 // link itself, not from the summary, so this is cosmetic; the summary catches up the
@@ -172,12 +181,12 @@ func preassignByPullRequest(
 		placed, fallbacks, remaining = planPRIdentity(candidates, holders)
 
 		for _, p := range placed {
-			if err := writePRPreAssignment(tx, p); err != nil {
+			if err := linkPRPreAssignment(tx, p); err != nil {
 				return err
 			}
 		}
 
-		return nil
+		return extendForPreAssignments(tx, placed)
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -186,9 +195,8 @@ func preassignByPullRequest(
 	return remaining, placed, fallbacks, nil
 }
 
-// writePRPreAssignment links p's event to its narrative as an identity-placed member and
-// extends the narrative's window_end to cover it.
-func writePRPreAssignment(tx *store.Tx, p PRPreAssignment) error {
+// linkPRPreAssignment links p's event to its narrative as an identity-placed member.
+func linkPRPreAssignment(tx *store.Tx, p PRPreAssignment) error {
 	eventID, err := tx.EventIDByExternalID(p.Event.Source, p.Event.ExternalID)
 	if err != nil {
 		return fmt.Errorf("resolving %s/%s to join narrative %d by pull request %s: %w",
@@ -200,17 +208,47 @@ func writePRPreAssignment(tx *store.Tx, p PRPreAssignment) error {
 			p.Event.Source, p.Event.ExternalID, p.NarrativeID, p.PullRequest, err)
 	}
 
-	row, err := tx.GetNarrative(p.NarrativeID)
-	if err != nil {
-		return fmt.Errorf("reading narrative %d to extend its window: %w", p.NarrativeID, err)
-	}
-	if !p.Event.OccurredAt.After(row.WindowEnd) {
+	return nil
+}
+
+// plannedWindowEnds is how far the join moves each narrative it places into: to the
+// latest event placed there. The one rule for the extension, read by both its writer
+// (extendForPreAssignments) and a dry run's context query, so a dry run clusters
+// against the narratives the real pass would (F46). Moving only forward is the store
+// query's half of the rule and the writer's: neither moves a window_end back.
+func plannedWindowEnds(placed []PRPreAssignment) map[int64]time.Time {
+	if len(placed) == 0 {
 		return nil
 	}
 
-	// row.Summary, unchanged: see preassignByPullRequest's accepted cost.
-	if err := tx.ExtendNarrative(p.NarrativeID, p.Event.OccurredAt, row.Summary); err != nil {
-		return fmt.Errorf("extending narrative %d over %s/%s: %w", p.NarrativeID, p.Event.Source, p.Event.ExternalID, err)
+	out := make(map[int64]time.Time, len(placed))
+	for _, p := range placed {
+		if at, ok := out[p.NarrativeID]; !ok || p.Event.OccurredAt.After(at) {
+			out[p.NarrativeID] = p.Event.OccurredAt
+		}
+	}
+
+	return out
+}
+
+// extendForPreAssignments moves each placed-into narrative's window_end forward to
+// plannedWindowEnds' answer, never back, and leaves window_start alone, as Persist's
+// extend does. Ascending by narrative id, so a failure names the same narrative every run.
+func extendForPreAssignments(tx *store.Tx, placed []PRPreAssignment) error {
+	ends := plannedWindowEnds(placed)
+	for _, id := range slices.Sorted(maps.Keys(ends)) {
+		row, err := tx.GetNarrative(id)
+		if err != nil {
+			return fmt.Errorf("reading narrative %d to extend its window: %w", id, err)
+		}
+		if !ends[id].After(row.WindowEnd) {
+			continue
+		}
+
+		// row.Summary, unchanged: see preassignByPullRequest's accepted cost.
+		if err := tx.ExtendNarrative(id, ends[id], row.Summary); err != nil {
+			return fmt.Errorf("extending narrative %d over the event(s) joined to it by pull request: %w", id, err)
+		}
 	}
 
 	return nil
