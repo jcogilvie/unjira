@@ -88,6 +88,13 @@ A fresh clone has none of these configured, so a fresh clone applies nothing. `c
 deliberately omits `auto_commit` and leaves every `writable_scopes` empty for exactly this reason: an
 example that grants write authority is one copy-paste from arming a real deployment.
 
+**Where a new issue may be opened is decided before anything is drafted.** Untracked work is
+ticketed only in its allowed destinations: if it happened in a tracker's scope (the repository its
+pushes and PRs went to, else its working copy's remotes), that tracker if writable plus its
+`mirror_to`; otherwise `default_ticket_in`. Upstream work whose tracker says `mirror_to: []` gets no
+ticket anywhere, and an empty set proposes nothing and records why. A proposal naming a destination
+outside the set is rejected.
+
 **These three cover opening new issues too.** A `create` is proposed for untracked work like any
 other action and lands in the queue, where gate 1 refuses to auto-apply it unless a human graduated
 `create` specifically. There is no separate flag for proposing one — a proposal is a queue entry,
@@ -156,8 +163,10 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 endpoint (`kind: jira | github | local`); a *tracker* is a set of scopes on one connection (Jira
 project keys, or GitHub `owner/repo` with `owner/*` allowed), the subset of them unjira may write
 (`writable_scopes`), where its creates land (`default_scope`), and, for Jira, the JQL `queries` the
-collector reads. `default_ticket_in` names the tracker untracked work is ticketed in. Scopes may
-not overlap across trackers. The file is read strictly: an unknown key is an error, and so is the
+collector reads. `default_ticket_in` names the trackers untracked work outside every scope is
+ticketed in, and `mirror_to` the trackers work in one tracker's scope may also be ticketed in; both
+deny by default, so **leaving `default_ticket_in` empty means unjira proposes no new issue for
+untracked work**. Scopes may not overlap across trackers. The file is read strictly: an unknown key is an error, and so is the
 previous shape — the top-level `jira` and `tracker` keys are refused with the replacement named,
 never translated. `jira[]` becomes one `connections` entry (`kind: jira`, `endpoint:` the old
 `site`) plus one `trackers` entry on it (`project_keys` → `scopes`, `writable_project_keys` →

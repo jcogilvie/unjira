@@ -124,9 +124,9 @@ func TestRunReconcile_ProposesCreatesOnceMatchingIsCaughtUp(t *testing.T) {
 		`"summary":"Rework the ingest retry path","description":"d",` +
 		`"confidence":0.9,"rationale":"substantial"}`}}
 
-	cfg := config.Config{Reconciler: config.ReconcilerConfig{
+	cfg := withDefaultTicketIn(config.Config{Reconciler: config.ReconcilerConfig{
 		MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5,
-	}}
+	}})
 
 	got, err := pipeline.RunReconcile(context.Background(), s, nil, client, cfg,
 		pipeline.ReconcileOptions{UnmatchedNarratives: 0})

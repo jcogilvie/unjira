@@ -143,8 +143,13 @@ func RunReconcile(
 
 	createsDeferred := 0
 
+	// The allowed-destination set comes from the tracker config: a link on a read-only
+	// tracker is not drafted, and untracked work is ticketed where its location's
+	// tracker (or default_ticket_in) says, or nowhere.
+	destinations := reconciler.WithDestinations(cfg)
+
 	reconcileOpts := []reconciler.ReconcileOption{
-		reconciler.WithRules(reconcilerRules), reconciler.WithReconcileLogger(opts.Log),
+		reconciler.WithRules(reconcilerRules), reconciler.WithReconcileLogger(opts.Log), destinations,
 	}
 	if opts.Graph != nil {
 		reconcileOpts = append(reconcileOpts, reconciler.WithWorkflowGraph(opts.Graph))
@@ -168,7 +173,7 @@ func RunReconcile(
 		createsDeferred = opts.UnmatchedNarratives
 	} else {
 		createResults, createStats, createErr := reconciler.ProposeCreates(
-			ctx, s, client, cfg.Reconciler, reconcilerRules, opts.Log)
+			ctx, s, client, cfg.Reconciler, reconcilerRules, opts.Log, destinations)
 		results = append(results, createResults...)
 		stats.Add(createStats)
 		reconcileErr = errors.Join(reconcileErr, createErr)

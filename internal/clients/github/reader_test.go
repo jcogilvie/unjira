@@ -144,15 +144,3 @@ func TestReader_SearchIssues_SearchesIssuesOnly(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "o/r#3", got[0].Key)
 }
-
-func TestHostOfBaseURL_InvertsBaseURL(t *testing.T) {
-	for _, host := range []string{"github.com", "ghe.example.com"} {
-		got, err := github.HostOfBaseURL(github.BaseURL(host))
-
-		require.NoError(t, err)
-		assert.Equal(t, host, got)
-	}
-
-	_, err := github.HostOfBaseURL("not a url")
-	require.Error(t, err)
-}

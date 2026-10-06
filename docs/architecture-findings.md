@@ -520,72 +520,23 @@ description edit from a summary edit, which nothing else records"* — true, and
 Cheap to keep and genuinely useful when re-enriching (**#176**). Listed for completeness, not as
 something to remove.
 
-### F29 — nothing expresses which tracker a narrative's work belongs to
+### F57 — work linked to an upstream issue is never mirrored into another tracker
 
-**Narrowed by the tracker model's slice 1: the write-authority half has landed.** Each tracker declares
-its own `writable_scopes`, deny by default, and a `writable_scopes` entry on a connection kind with no
-writer is refused at load (`config.ValidateTrackers`, `internal/config/trackers.go`). A GitHub tracker
-can therefore be configured as "read this, never write to it", and cannot be configured any other way.
-`mirror_to` and `default_ticket_in` exist in config and are validated (every name resolves; every
-destination is writable and has a `default_scope`), but nothing reads `mirror_to` yet, and
-`default_ticket_in` is limited to one tracker.
+The spec's destination table gives work linked to issue *I* in tracker *T* two kinds of destination:
+comments and transitions on *I*, and **creates in *T*.mirror_to**. Only the first is built. The create
+path (`reconciler.ProposeCreates`, `internal/reconciler/create.go`) selects narratives with no link
+at all (`store.NarrativesWithNoIssueLink`), so a narrative matched to `crossplane/crossplane#6812`
+never reaches it, whatever `upstream.mirror_to` says.
 
-**What remains is the routing half**, which the spec's slice 5 closes. Nothing computes where
-untracked work happened, so a narrative with no linked issue still falls to the single
-`default_ticket_in`, whatever repository the work was in. That is the disclosure-shaped failure below
-with one gate fewer: no create can reach a read-only tracker, but an internal ticket can still be
-proposed for upstream work whose tracker says `mirror_to: []`.
+**Why it was not built with the rest.** A mirror create for linked work needs a selection of its own,
+and two invariants that assume one tracker per narrative to give way first: matching's
+`one_primary_per_narrative` index, and `gate.Applier`'s duplicate backstop, which refuses a create for
+a narrative with a primary (now narrowed to a primary in the destination's own tracker). It also wants
+a memory of "already mirrored", or every pass re-proposes. Each is a design decision, not a line.
 
-Classifying an event is settled (`CollectContext.TrackerFor`). This is about *routing* work, and it
-has a worse failure mode.
-
-The relationship between collectors and trackers is **many-to-many**, and all three directions occur
-in one real deployment:
-
-- **One collector, several trackers.** A single `claude_code` collector observes OSS work on an
-  upstream project (tracked in that project's GitHub Issues) and employer work (tracked in Jira), in
-  the same transcript corpus, often on the same day.
-- **One tracker, several collectors.** Jira already receives evidence from `claude_code` and the Jira
-  collector; a GitHub collector makes three.
-- **One narrative, several trackers.** An upstream PR raised for an internal reason legitimately
-  concerns both: the OSS issue wants "PR opened upstream", the internal ticket wants "fix submitted,
-  awaiting maintainer review." Same work, two audiences, and **different prose** — which is not
-  routing but per-destination content, and is the hard part.
-
-**Routing of untracked work still has nowhere to live.** A key already routes to its tracker
-(`tasktracker.Resolver`, `internal/tasktracker/resolve.go`), so verification is per key. What is
-missing is upstream of it, for work with no key at all: nothing maps where untracked work happened (a
-repository) onto a tracker's scope.
-
-**The consequence is a disclosure risk, not a cost.** Narrative summaries are generated from
-transcript content, which routinely contains employer-internal ticket keys, incident detail and
-architecture. Routing one to a *public* tracker publishes that prose irreversibly — categorically
-unlike a wrong comment on an internal Jira issue, which is embarrassing and deletable. That is why
-the write-authority half landed first: a public tracker cannot be armed.
-
-**The policy is the operator's, and unjira must not encode one.** Whether OSS work is also tracked
-internally varies by org — some require it for time and compliance reasons, some explicitly forbid it.
-So the deliverable is **configurability, not a default**: a routing key (the repository the work was
-in, matched against tracker scopes), per-tracker write authority (landed), and a deny-by-default
-stance when no rule matches (`mirror_to` absent means nowhere else). Enumerating the plausible operator policies — route, mirror, or exclude —
-is useful for validating that the mechanism can express each, not for choosing one.
-
-Not reachable while every tracker in a deployment is Jira or local: nothing yet reads a second
-tracker kind. It becomes reachable with the GitHub reader (the spec's slice 4), and the spec orders
-routing (slice 5) directly after it.
-
-### F56 — a narrative linked to a read-only issue can still draft a comment on it
-
-With the GitHub reader (the tracker model's slice 4), matching links upstream work to its upstream
-issue. The reconciler then drafts for that link like any other: `reconciler.Reconcile`
-(`internal/reconciler/reconciler.go`) has no notion of which trackers may receive what. No
-transition is drafted, because `clients/github.Reader.AvailableTransitions` offers none, but a
-comment can be, and it lands in the review queue as unappliable (`config.IssueWritability` reports
-the tracker read-only) where `gate.Applier` and the routed writer both refuse it.
-
-**Consequence:** a queue entry no one can approve, one per upstream-linked narrative with new work.
-Nothing reaches GitHub. The spec's slice 5 closes this with the allowed-destination set computed
-before any drafting call; until it lands, triage shows these with their reason.
+**Consequence:** an operator who sets `mirror_to` on an upstream tracker gets mirrored tickets for
+untracked upstream work only; upstream work that names its issue gets none. Silent in the sense that
+nothing reports the gap per narrative.
 
 ### F55 — a key no tracker lists is still read, through a fallback
 
@@ -695,9 +646,8 @@ yet; noted while writing the template, not found as a live incident.
 | F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |
 | F31 — learn's watermark can skip corrections | **resolved**, then superseded: the watermark is a `store.CorrectionsCursor` advanced by `KeepCandidates` from what the draft READ, never from a clock reading at keep, and never backwards. Its position is now `actions.corrected_seq`, a sequence stamped when a row becomes a correction (from `correction_marks`), which also closed F41 (the clock stepping back) and F42 (a lesson added by a later ruling). Drill: a clock reading at keep fails the between-draft-and-keep test 5/5 |
-| F56 — a read-only link can still draft a comment | open. Interim between the tracker model's slices 4 and 5; refused at triage and apply, never sent |
+| F57 — linked work is never mirrored into another tracker | open. The tracker model's slice 5 built mirror_to for untracked work only |
 | F55 — an unlisted project's key is still read through a fallback | open. Kept by the tracker model's slice 2 to preserve behaviour; reported at startup. Unmeasured |
-| F29 — nothing expresses which tracker a narrative's work belongs to | open, narrowed: per-tracker write authority landed with the tracker model's slice 1, before any public tracker can be read. The routing half (work location, `mirror_to`) is the spec's slice 5 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
 | F11 — issue_key denormalization drifts | resolved: the column is **deleted**, along with `.confidence`, `SetNarrativeIssueLink` and `NarrativeRow.IssueKey`/`.Confidence` — all write-only. `NarrativesWithoutIssueKey` became `NarrativesWithoutPrimaryLink`, asking `NOT EXISTS(primary link)`. The fix was already named in `design-notes.md` when the create path hit the same trap; matching was the one accessor never revisited. No migration: narrative 15 self-repaired, since it *has* a primary link. Verified by draining — the pass that crashed now completes, backlog 38 → 26. |

@@ -43,9 +43,10 @@ var SelectionRoles = []store.Role{
 // through ReconcileOption. See ReconcileOption's doc comment for why this
 // exists despite Reconcile having exactly one option today.
 type reconcileOptions struct {
-	rules []rules.Rule
-	graph *workflow.Graph
-	log   *slog.Logger
+	rules        []rules.Rule
+	graph        *workflow.Graph
+	log          *slog.Logger
+	destinations DestinationPolicy
 }
 
 // ReconcileOption configures an optional Reconcile behaviour.
@@ -173,7 +174,7 @@ func Reconcile(
 	)
 
 	for _, n := range narratives {
-		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg, o.rules, o.graph, o.log)
+		result, oneStats, err := reconcileOne(ctx, s, tracker, client, n, cfg, &o)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -198,10 +199,9 @@ func reconcileOne(
 	client llm.Client,
 	narrative store.NarrativeRow,
 	cfg config.ReconcilerConfig,
-	learnedRules []rules.Rule,
-	graph *workflow.Graph,
-	log *slog.Logger,
+	o *reconcileOptions,
 ) (ReconcileResult, correlator.Stats, error) {
+	learnedRules, graph, log := o.rules, o.graph, o.log
 	result := ReconcileResult{NarrativeID: narrative.ID}
 
 	links, err := s.NarrativeIssues(narrative.ID)
@@ -240,6 +240,17 @@ func reconcileOne(
 			return result, correlator.Stats{}, fmt.Errorf(
 				"recording reconcile examination for narrative %d: %w", narrative.ID, err)
 		}
+
+		return result, correlator.Stats{}, nil
+	}
+
+	// Destinations, before any tracker read or drafting call: a link on a tracker unjira
+	// can never write to is no destination, so nothing is drafted for it (F56). A
+	// readable-but-unwritable scope stays a destination, refused at apply with its
+	// remedy, exactly as before.
+	actionable, notDestinations := writableLinks(o.destinations, actionable)
+	if len(actionable) == 0 {
+		result.Suppressed = append(result.Suppressed, notDestinations...)
 
 		return result, correlator.Stats{}, nil
 	}

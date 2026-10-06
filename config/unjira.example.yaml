@@ -35,7 +35,8 @@ trackers:
     # Where this tracker's creates land. Must be writable. Required when the tracker
     # is writable and named in default_ticket_in or another tracker's mirror_to.
     # default_scope: "PROJ"
-    # Trackers whose work may ALSO be ticketed elsewhere. Unlisted means nowhere.
+    # Trackers that work tracked or done in this tracker's scope may ALSO be ticketed in.
+    # Unlisted means nowhere else: deny by default.
     mirror_to: []
     # What the Jira collector reads. Each query is scoped to this tracker's scopes.
     # The collector's cursor is keyed by connection and query name.
@@ -45,14 +46,16 @@ trackers:
         jql: "updated >= -14d AND (assignee = currentUser() OR reporter = currentUser() OR assignee IS EMPTY)"
 
   # A read-only GitHub tracker: upstream issues, never written. A whole-segment * matches
-  # every repository of that owner.
+  # every repository of that owner. Untracked work pushed to these repositories is
+  # ticketed only where mirror_to says: empty, so nowhere — no internal ticket for
+  # upstream work. To mirror it, name a writable tracker, e.g. mirror_to: ["work"].
   - name: upstream
     connection: github
     scopes: ["yourorg/yourrepo"]
     mirror_to: []
 
-# Where untracked work outside every scope is ticketed: a writable tracker with a
-# default_scope. Empty means no default, so a create has nowhere to land.
+# Where untracked work outside every tracker's scope is ticketed: writable trackers with a
+# default_scope, e.g. ["work"]. Empty means nowhere, so unjira proposes no new issue for it.
 default_ticket_in: []
 
 collectors:

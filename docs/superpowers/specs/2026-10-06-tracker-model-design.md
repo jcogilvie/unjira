@@ -383,3 +383,55 @@ Decisions the design left open:
 - **Interim gap, F56.** A narrative linked to an upstream issue can still draft a comment on it, which
   triage shows as unappliable and both write layers refuse. Slice 5's destination set closes it.
 
+### Slice 5, destinations: landed 2026-10-06, measurement pending
+
+Work location: `collector/claudecode` records `events.ArtifactWorkRepos` (a `git push` result's
+remote, a PR a call created, the `-R/--repo` of an authoring `gh` command, a GitHub MCP write call's
+owner/repo) and `events.ArtifactCwdRemotes` (every remote of the working copy, read with go-git
+`PlainOpenWithOptions(cwd, {DetectDotGit: true, EnableDotGitCommonDir: true})`, sorted, once per
+distinct directory per pass), or `events.ArtifactCwdRemotesOmitted` with the reason. The allowed set:
+`config.UntrackedDestinations` and `config.IssueAcceptsWrites`, applied by
+`reconciler.WithDestinations` before any drafting call. A create carries its destination's scope in
+its payload, and `gate.Applier` writes it there. `default_ticket_in` may name several trackers. F29 and
+F56 deleted; F57 added.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. The tests this spec lists: transcript evidence beats a disagreeing cwd
+(`TestProposeCreates_TranscriptEvidenceBeatsADisagreeingCwd`); a linked worktree resolves to its main
+repository's remotes, against a repository built in the test
+(`TestCollect_LinkedWorktreeResolvesToItsMainRepositorysRemotes`); fork remotes drop out by scope
+(`TestUntrackedDestinations_ForkRemotesDropOutByScope`, `TestProposeCreates_CwdRemotesAreTheFallback`);
+a two-tracker match is ambiguous (`TestUntrackedDestinations_TwoTrackerMatchIsAmbiguous`); an empty set
+is recorded as a suppression (`TestRunReconcile_AnEmptyDestinationSetIsRecordedAsASuppression`).
+
+**Not yet measured.** The before/after measurement on a fresh snapshot of local transcripts — how many
+narratives change destination, and how many would-be creates for externally scoped work disappear —
+needs real transcripts and LLM credentials, and has not been run.
+
+Decisions the design left open:
+- **Repositories are host-qualified** (`<host>/<owner>/<repo>`), and a repository matches a scope only
+  on the host its tracker's connection serves (`config.Connection.Host`, which now also keys the GitHub
+  credential). The spec said `owner/repo`; the host keeps a GitLab or GHES remote from matching a
+  github.com scope.
+- **"T if writable" needs a `default_scope`** to be a destination: a create must land somewhere. In
+  practice T is a GitHub tracker, so only `mirror_to` applies.
+- **The model is asked to choose only among several destinations.** With one, it is the answer and the
+  prompt is unchanged. With several, the user prompt lists them and asks for `"destinations"`; a name
+  outside the set is rejected and recorded, and a create is proposed per chosen destination.
+- **An open or applied create blocks its own scope only;** one recorded before destinations existed
+  names no scope and blocks every destination.
+- **`gate.Applier`'s duplicate backstop is per tracker.** A primary link in the destination's own
+  tracker still refuses a create (F13); one in another tracker does not, and the second ticket is
+  linked as `same_work`, since a narrative has one primary.
+- **A link on a tracker with no writer is not drafted for** (`IssueAcceptsWrites`), which closed F56.
+  A readable-but-unwritable Jira link is still drafted and refused at apply with its remedy, as the
+  table's "gated by T's writable_scopes as today" says.
+- **An empty set is recorded once,** then again only when new work arrives, so an unchanged narrative
+  does not write a suppression row per pass.
+- **Not built: creates in T.mirror_to for work LINKED to an issue in T** (F57). The create path selects
+  only narratives with no link, and the schema's one-primary rule and the applier's backstop assumed
+  one tracker per narrative; both want a design of their own.
+- **Extraction limits:** `gh -R host/owner/repo` is recorded as github.com (the parser drops the
+  host), and the GitHub MCP is assumed to be github.com. Only a `git push`'s own result is read for its
+  remote.
+

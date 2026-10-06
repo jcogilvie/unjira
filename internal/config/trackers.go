@@ -279,9 +279,11 @@ func (c Config) FirstProjectScope() (string, bool) {
 	return "", false
 }
 
-// DefaultCreateTarget resolves default_ticket_in to the tracker a new issue lands in,
-// erroring loudly when unset. Its DefaultScope names the project. ValidateTrackers has
-// already checked that the tracker is writable and has a DefaultScope.
+// DefaultCreateTarget resolves the first default_ticket_in tracker, erroring loudly when
+// unset. Its DefaultScope is where a create that names no scope of its own lands — every
+// create persisted before destinations existed; a create proposed since carries its
+// destination's scope (UntrackedDestinations). ValidateTrackers has already checked that
+// the tracker is writable and has a DefaultScope.
 func (c Config) DefaultCreateTarget() (Tracker, error) {
 	if len(c.DefaultTicketIn) == 0 {
 		return Tracker{}, errors.New(
@@ -365,6 +367,8 @@ func validateConnection(i int, conn Connection, seen map[string]ConnectionKind) 
 	case KindJira, KindGitHub:
 		if conn.Endpoint == "" {
 			errs = append(errs, fmt.Errorf("connections[%d].endpoint is required for kind %q", i, conn.Kind))
+		} else if conn.Host() == "" {
+			errs = append(errs, fmt.Errorf("connections[%d].endpoint %q is not an absolute URL", i, conn.Endpoint))
 		}
 	case KindLocal:
 		if conn.Endpoint != "" {
@@ -471,13 +475,6 @@ func destinationReady(t Tracker, listedIn string) error {
 
 func (c Config) validateDefaultTicketIn() []error {
 	var errs []error
-
-	// One destination for now: the create path proposes into a single default, and
-	// silently using the first of several would drop the operator's other choices.
-	if len(c.DefaultTicketIn) > 1 {
-		errs = append(errs, fmt.Errorf(
-			"default_ticket_in names %d trackers, but new issues are created in exactly one: name one", len(c.DefaultTicketIn)))
-	}
 
 	for _, name := range c.DefaultTicketIn {
 		t, ok := c.TrackerByName(name)

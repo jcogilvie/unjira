@@ -116,6 +116,11 @@ func ActionPayload(action ProposedAction) (string, error) {
 		}
 	case ActionCreate:
 		payload = map[string]any{"summary": action.Summary, "description": action.Body}
+		if action.Scope != "" {
+			// Only when a destination chose it, so a create with no destination keeps
+			// the payload shape every earlier build wrote.
+			payload["scope"] = action.Scope
+		}
 	default:
 		return "", fmt.Errorf("unknown action type %q", action.Type)
 	}
@@ -126,6 +131,21 @@ func ActionPayload(action ProposedAction) (string, error) {
 	}
 
 	return string(encoded), nil
+}
+
+// CreateScopeOf reads the scope a create action's payload names, or "" when it names
+// none (the applier's default, and every create persisted before destinations existed).
+// A payload that does not decode names none.
+func CreateScopeOf(payload string) string {
+	var p struct {
+		Scope string `json:"scope"`
+	}
+
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		return ""
+	}
+
+	return p.Scope
 }
 
 // recordSuppression writes one watermark row for a narrative a pass examined and

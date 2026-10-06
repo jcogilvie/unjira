@@ -72,6 +72,7 @@ flowchart TB
     end
 
     subgraph reconcile["internal/reconciler"]
+        DEST["destinations<br/>deterministic · allowed set before drafting:<br/>work location × trackers' mirror_to"]
         VERIFY["verifyLinks<br/>live tracker read"]
         DRAFT["draft / Redraft / create<br/>LLM · proposes actions"]
         FILTERS["runSuppression · ordered chain<br/>1 unroutable · 2 tracker-echo<br/>3 stale-transition · 4 duplicate"]
@@ -91,7 +92,7 @@ flowchart TB
     SPLIT -->|"tracker state · never clustered"| STORE
     PRID -->|"joined by identity · never shown to the model"| STORE
     STORE --> CAND --> MATCH --> STORE
-    STORE --> VERIFY --> DRAFT --> FILTERS --> STORE
+    STORE --> DEST --> VERIFY --> DRAFT --> FILTERS --> STORE
     STORE --> TRIAGE --> STORE
     STORE --> DECIDE --> APPLY -->|"AddComment · SetStatus · CreateIssue"| JIRA
 
@@ -99,17 +100,28 @@ flowchart TB
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,DISPUTE,MATCH,DRAFT llm
-    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID det
+    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID,DEST det
     class APPLY danger
 ```
 
 **GitHub PR events never enter `SPLIT`'s tracker-state branch.** A pull request is a thing
-somebody did, work evidence in every deployment `collector/github` supports today — never the
-tracker's own account of itself, since this slice collects no issue-shaped artifacts (a
-GitHub-Issues-as-tracker deployment is a materially different, unbuilt feature; see
-`docs/architecture-findings.md` F28). So every arrow out of `GHC` in the diagram above only ever
-reaches `CLUSTER`, never the `SPLIT -->|"tracker state"|` branch — there is no code path for it to
-take.
+somebody did, work evidence in every deployment — never the tracker's own account of itself, so
+`collector/github` never marks one, whichever trackers are configured. Whether an event IS a tracker
+record is decided by its collector asking the config (`pipeline.CollectContext.TrackerFor(kind,
+scope)`), never by which collector it is: the Jira collector marks an issue's events only when its
+project is a configured Jira tracker's scope. GitHub Issues are read as a tracker (`clients/github.
+Reader`, read-only) but not collected.
+
+**Where untracked work may be ticketed is decided before any drafting call** (`DEST`,
+`internal/reconciler/destinations.go`). `collector/claudecode` records where each segment's work
+happened: the repositories its own SCM actions sent work to (`events.ArtifactWorkRepos`: a `git push`
+remote, a created PR, a `gh -R`, a GitHub MCP write), and the remotes of its working copy, read with
+go-git (`events.ArtifactCwdRemotes`). At reconcile time the first, else the second, is matched against
+tracker scopes (`config.UntrackedDestinations`): work in one tracker's scope goes to that tracker if it
+is writable plus its `mirror_to`, work in no scope (or in several, which is ambiguous and reported) to
+`default_ticket_in`. An empty set proposes nothing and is recorded as a suppression. A link on a
+tracker with no writer is not drafted for at all. A create carries its destination's scope, and
+`gate.Applier` writes it there.
 
 **A pull request is seen from both sides, under one identifier.** `collector/claudecode` reads root
 session transcripts and the subagent transcripts beneath them (`<session>/subagents/`), and emits two
