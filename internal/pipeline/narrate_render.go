@@ -65,6 +65,12 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 
 	writePRIdentityLines(b, r)
 
+	// Only when something was dropped, for the same reason as the exclusions above.
+	if len(r.DroppedEmptyClusters) > 0 {
+		fmt.Fprintf(b, "dropped %d cluster(s) the model returned holding no event: %s\n",
+			len(r.DroppedEmptyClusters), strings.Join(r.DroppedEmptyClusters, ", "))
+	}
+
 	fmt.Fprintf(b, "llm      %d call(s), %d split(s), %d merge check(s)\n",
 		r.Stats.Calls, r.Stats.Splits, r.Stats.MergeChecks)
 	// Completion tokens are reported PER CLUSTER as well as in total, because that

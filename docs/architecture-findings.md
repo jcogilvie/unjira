@@ -163,6 +163,12 @@ Not built, because no such failure has been observed: 0 in the 32 other passes m
 and 2026-10-04 (acceptance reps for slice 1, F43 and the named-PR summaries), and a re-ask costs a
 full-prompt call (~70–110k tokens) each time it fires.
 
+A second lossless class has since been seen and absorbed. A real 30-day pass died after 37 clustering
+calls, because the model returned a NEW cluster with a title and no event in it, member or context.
+`pipeline.dropEmptyClusters` now discards a cluster holding no event and reports it in the pass
+summary. By then Cluster's omission re-ask has given every in-window event a member home, so nothing
+is lost. A NEW cluster holding only context is still refused (F37).
+
 ### F40 — a reshuffle can empty a context narrative of its members, leaving it open
 
 A context narrative's eligible members are numbered in the clustering prompt, so the model may place

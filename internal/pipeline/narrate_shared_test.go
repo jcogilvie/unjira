@@ -169,3 +169,47 @@ func commitAction(t *testing.T, s *store.Store, nid int64) {
 	require.NoError(t, err)
 	require.NoError(t, s.UpdateActionStatus(id, store.StatusApplied))
 }
+
+// TestRunNarrate_ANewClusterWithNoEventsIsDroppedNotFatal is the live failure. A real
+// 30-day pass died after 37 clustering calls on a NEW cluster the model titled ("meta-claude
+// TODO-refresh cron") and gave no event at all, member or context, and every cluster the
+// pass had already produced was lost with it. A cluster that holds no event carries no data,
+// and the omission re-ask has already given every in-window event a member home, so dropping
+// it loses nothing. It is reported, never silent.
+func TestRunNarrate_ANewClusterWithNoEventsIsDroppedNotFatal(t *testing.T) {
+	s := narrateStore(t)
+	base := time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
+	seedNarrateEvent(t, s, "E", "work", base)
+	client := &narrateLLM{responses: []string{
+		`[{"kind":"new","title":"Real","summary":"s","confidence":0.9,"event_indices":[0]},` +
+			`{"kind":"new","title":"meta-claude TODO-refresh cron","summary":"s","confidence":0.9,"event_indices":[]}]`,
+	}}
+
+	got, err := pipeline.RunNarrate(t.Context(), s, client, narrateConfig(),
+		correlator.TimeRange{Start: base, End: base.Add(time.Hour)}, pipeline.NarrateOptions{})
+
+	require.NoError(t, err)
+	require.Len(t, got.Narratives, 1, "the real cluster persists")
+	assert.Equal(t, "Real", got.Narratives[0].Title)
+	assert.Equal(t, []string{`new "meta-claude TODO-refresh cron"`}, got.DroppedEmptyClusters)
+	assert.Contains(t, pipeline.RenderNarrateResult(got),
+		`dropped 1 cluster(s) the model returned holding no event: new "meta-claude TODO-refresh cron"`)
+}
+
+// TestRunNarrate_AnExtendWithNoEventsIsDropped: an extend naming neither a member nor a
+// context event says nothing about its narrative either.
+func TestRunNarrate_AnExtendWithNoEventsIsDropped(t *testing.T) {
+	s := narrateStore(t)
+	base := time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
+	seedNarrateEvent(t, s, "E", "work", base)
+	client := &narrateLLM{responses: []string{
+		`[{"kind":"new","title":"Real","summary":"s","confidence":0.9,"event_indices":[0]},` +
+			`{"kind":"extends","narrative_id":42,"title":"t","summary":"s"}]`,
+	}}
+
+	got, err := pipeline.RunNarrate(t.Context(), s, client, narrateConfig(),
+		correlator.TimeRange{Start: base, End: base.Add(time.Hour)}, pipeline.NarrateOptions{})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"extends narrative 42"}, got.DroppedEmptyClusters)
+}

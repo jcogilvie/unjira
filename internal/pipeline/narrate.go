@@ -66,10 +66,14 @@ type NarrateResult struct {
 	// the correlator is called, and Stats is the correlator's own accounting.
 	PreAssigned        []PRPreAssignment
 	PreAssignFallbacks []PRFallback
-	DryRun             bool
-	Stats              correlator.Stats
-	Narratives         []NarratedNarrative
-	Compactions        []Compaction
+	// DroppedEmptyClusters names the clusters the model returned holding no event at all,
+	// member or context, which this pass discarded (dropEmptyClusters). Reported because a
+	// discard nobody sees is how a model regression would go unnoticed.
+	DroppedEmptyClusters []string
+	DryRun               bool
+	Stats                correlator.Stats
+	Narratives           []NarratedNarrative
+	Compactions          []Compaction
 }
 
 // NarratedNarrative is one narrative this pass produced, with the member
@@ -192,6 +196,7 @@ func RunNarrate(
 	if err != nil {
 		return NarrateResult{}, fmt.Errorf("clustering: %w", err)
 	}
+	clustered, result.DroppedEmptyClusters = dropEmptyClusters(clustered)
 	if err := requireNonEmptyClusters(clustered); err != nil {
 		return NarrateResult{}, err
 	}
@@ -243,29 +248,49 @@ func finishNarrate(
 	return result, nil
 }
 
-// requireNonEmptyClusters rejects a NEW cluster with no member events, and an
-// EXTENDS with neither a member nor a context event.
-// parseClusterResponse (internal/correlator) does not itself reject an empty
-// event_indices array — a model could return one — and an empty cluster
-// would otherwise reach eventWindow (dry-run path) or prepareOneResult
-// (persist path) and silently produce a zero-width, zero-time window rather
-// than a loud failure. Per this repo's "never silently drop data" invariant,
-// that must be an error, not a quietly wrong narrative.
+// dropEmptyClusters removes the clusters holding no event at all, member or context,
+// and returns them described, for the pass summary.
 //
-// The two kinds differ (shared-context spec §4). A new narrative IS its member
-// work, so context alone cannot make one — it would be an empty narrative whose
-// title describes somebody else's events (F37). An extend may legitimately add only
-// background to a narrative that already exists, which leaves its summary and window
-// untouched.
+// parseClusterResponse (internal/correlator) does not reject an empty event_indices
+// array, and a model does return one: a real 30-day pass died after 37 clustering calls
+// on a NEW cluster titled "meta-claude TODO-refresh cron" with no event in it, and every
+// cluster the pass had produced was lost with it. Such a cluster carries no data. By the
+// time Cluster returns, its omission re-ask has given every in-window event a member home,
+// so discarding it loses nothing. It is the same class as a trailing comma: punctuation,
+// not content. A cluster holding only CONTEXT is a different case, and requireNonEmptyClusters
+// still refuses it.
+func dropEmptyClusters(clustered []correlator.ClusterResult) ([]correlator.ClusterResult, []string) {
+	kept := make([]correlator.ClusterResult, 0, len(clustered))
+	var dropped []string
+
+	for _, r := range clustered {
+		if len(r.Events) > 0 || len(r.ContextEvents) > 0 {
+			kept = append(kept, r)
+
+			continue
+		}
+		if r.Kind == correlator.ClusterNew {
+			dropped = append(dropped, fmt.Sprintf("new %q", r.Title))
+		} else {
+			dropped = append(dropped, fmt.Sprintf("extends narrative %d", r.NarrativeID))
+		}
+	}
+
+	return kept, dropped
+}
+
+// requireNonEmptyClusters rejects a NEW cluster with no member events. A new narrative
+// IS its member work, so context alone cannot make one: it would be an empty narrative
+// whose title describes somebody else's events (F37, shared-context spec §4). Left
+// unrejected it would reach eventWindow (dry-run path) or prepareOneResult (persist path)
+// and silently produce a zero-width window. An extend may legitimately add only background
+// to a narrative that already exists. Clusters with no event at all are removed first, by
+// dropEmptyClusters.
 func requireNonEmptyClusters(clustered []correlator.ClusterResult) error {
 	for _, r := range clustered {
-		switch {
-		case r.Kind == correlator.ClusterNew && len(r.Events) == 0:
+		if r.Kind == correlator.ClusterNew && len(r.Events) == 0 {
 			return fmt.Errorf("clustering produced new narrative %q with no member events (%d context event(s)); "+
 				"a new narrative must hold at least one event as its own work", r.Title, len(r.ContextEvents))
-		case r.Kind == correlator.ClusterExtends && len(r.Events) == 0 && len(r.ContextEvents) == 0:
-			return fmt.Errorf("clustering produced an extend of narrative %d with no member and no context events",
-				r.NarrativeID)
 		}
 	}
 
