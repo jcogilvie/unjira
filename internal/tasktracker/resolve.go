@@ -61,6 +61,15 @@ func IsTransportError(err error) bool {
 	return true
 }
 
+// SelfIdentifier is a backend that can say who unjira is on it: Jira's accountId, from
+// Myself(). Every writer must also be one. When a collector's system is the tracker,
+// unjira's own writes come back through that collector on the next pass, and a backend
+// that cannot name unjira's identity leaves them indistinguishable from new work, so
+// unjira would narrate its own output back at itself (F28).
+type SelfIdentifier interface {
+	SelfIdentity() (string, error)
+}
+
 // Route is one configured tracker as the resolver sees it: what it is called, which
 // scopes route to it, which of those it may write, and how to open its backend.
 type Route struct {
@@ -235,6 +244,32 @@ func (r *Resolver) resolve(key, scope string, syntax KeySyntax) (Resolution, err
 	return res, nil
 }
 
+// CheckWriters refuses any route with writable scopes whose writer cannot report
+// unjira's own identity (SelfIdentifier). Run at startup, before any pass, so the
+// misconfiguration fails loudly rather than when unjira first reads its own writes
+// back as work. A read-only route has no writes to echo and is not checked.
+//
+// It opens each writable route's writer, which builds a client but makes no request:
+// the requirement is the capability, checked by type.
+func (r *Resolver) CheckWriters() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var errs []error
+
+	for _, route := range r.routes {
+		if len(route.WritableScopes) == 0 || route.OpenWriter == nil {
+			continue
+		}
+
+		if _, err := route.openWriter(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // hasSyntax reports whether any of the route's scopes routes keys of syntax.
 func (o *openRoute) hasSyntax(syntax KeySyntax) bool {
 	return slices.ContainsFunc(o.Scopes, func(s string) bool { return syntaxOfScope(s) == syntax })
@@ -263,6 +298,14 @@ func (o *openRoute) openWriter() (TaskWriter, error) {
 	writer, err := o.OpenWriter()
 	if err != nil {
 		return nil, fmt.Errorf("opening tracker %q for writing: %w", o.Tracker, err)
+	}
+
+	// Never hand out a writer that cannot say who it writes as, even to a command
+	// that skipped CheckWriters.
+	if _, ok := writer.(SelfIdentifier); !ok {
+		return nil, fmt.Errorf("tracker %q is writable, but its backend cannot report unjira's own "+
+			"identity, so unjira's writes would be collected back as new work: remove writable_scopes, "+
+			"or use a backend that can", o.Tracker)
 	}
 
 	o.writer = writer

@@ -655,6 +655,14 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	// source does not stop this pass from running, it only means the
 	// staleness guard cannot fire — see warnIfNoStatusHistorySource.
 	app.warnIfNoStatusHistorySource()
+
+	// A writable tracker must sit on a backend that can say who unjira is, or this
+	// pass would narrate unjira's own writes back as new work (F28). Fatal, and before
+	// any store or collector work.
+	if err := app.resolver().CheckWriters(); err != nil {
+		return err
+	}
+
 	app.warnUnroutedStoredKeys()
 
 	linkExclusions, err := app.config.CompiledLinkExclusions()
@@ -852,6 +860,13 @@ func (c *watchCmd) Run(app *appContext) error {
 	// gate.Applier, plus startup validation") runs in config.Load:
 	// ValidateTrackers refuses a writable scope a tracker cannot read, and a
 	// default_ticket_in tracker that is not writable or has no default_scope.
+	//
+	// The backend half runs here: a writable tracker must sit on a backend that can
+	// report unjira's own identity, or every pass would narrate unjira's own writes
+	// back as new work (F28). Before the lease and the store, like the checks above.
+	if err := app.resolver().CheckWriters(); err != nil {
+		return err
+	}
 
 	linkExclusions, err := app.config.CompiledLinkExclusions()
 	if err != nil {

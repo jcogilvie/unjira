@@ -43,7 +43,12 @@ func (b *namedBackend) CreateIssue(scope, _, _, _ string, _ []string) (string, e
 	return scope + "-1", nil
 }
 
-var _ tasktracker.TaskTracker = (*namedBackend)(nil)
+func (b *namedBackend) SelfIdentity() (string, error) { return "unjira@" + b.name, nil }
+
+var (
+	_ tasktracker.TaskTracker    = (*namedBackend)(nil)
+	_ tasktracker.SelfIdentifier = (*namedBackend)(nil)
+)
 
 // route builds a Route over b, opening it as both reader and writer.
 func route(tracker string, b *namedBackend, scopes, writable []string) tasktracker.Route {

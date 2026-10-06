@@ -47,6 +47,29 @@ type CollectContext struct {
 	Log *slog.Logger
 }
 
+// TrackerFor reports whether scope, on a system of the given kind, is a configured
+// tracker's scope in this deployment, and returns that tracker.
+//
+// It is how a collector classifies what it read (F28): whether an artifact is a tracker
+// record is a property of the artifact's kind AND of which systems are trackers here,
+// never of the collector that produced it. A Jira comment is a tracker record where Jira
+// is the tracker and work evidence where it is not; a GitHub issue event is one only
+// when its repository is a tracker scope. Asking the config keeps that decision out of
+// every collector's package identity, the inference events.ArtifactTrackerRecord forbids.
+func (cc CollectContext) TrackerFor(kind config.ConnectionKind, scope string) (config.Tracker, bool) {
+	t, ok := cc.Config.TrackerForScope(scope)
+	if !ok {
+		return config.Tracker{}, false
+	}
+
+	conn, ok := cc.Config.ConnectionOf(t)
+	if !ok || conn.Kind != kind {
+		return config.Tracker{}, false
+	}
+
+	return t, true
+}
+
 // Collector reads its source since the last cursor, emits normalized
 // events via visit, and advances its cursor via the store. Collectors must
 // be deterministic and idempotent: re-running one is always safe because

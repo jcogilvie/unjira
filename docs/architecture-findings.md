@@ -520,52 +520,6 @@ description edit from a summary edit, which nothing else records"* — true, and
 Cheap to keep and genuinely useful when re-enriching (**#176**). Listed for completeness, not as
 something to remove.
 
-### F28 — a collector cannot ask whether its own system is a tracker in this deployment
-
-unjira must work for arbitrary tracker/collector combinations — Jira, GitHub, GitLab, Trello,
-YouTrack as trackers; collectors for each of those plus Slack and other streams. **Whether an event is
-a tracker record is a property of (artifact kind × which systems are trackers *here*), not of the
-collector that produced it.** `events/tracker_record.go` says so explicitly, as its stated reason the
-marker is declared rather than inferred: *"A GitHub-Issues collector's timeline events are tracker
-records too, and must be recognized without editing any consumer."*
-
-A GitHub Issue closing is a tracker record when GitHub Issues is the tracker, and work evidence when
-Jira is. Symmetrically, a Jira comment is work evidence in a deployment tracking work in GitHub. Same
-artifact, classified oppositely by configuration.
-
-**A collector has no way to make that call.** `CollectContext` carries `Config`, so it can *look*, but
-there is nothing to ask: `config.Tracker` now says which scopes are a tracker's, but `CollectContext`
-offers no question that maps an artifact's kind and scope onto one, and `events.ArtifactConnection` is
-documented as "the configured **Jira** connection name"
-(`events/artifact_keys.go:12`). So the only available basis for the decision is the collector's own
-package identity — exactly the inference `tracker_record.go` forbids, and the one incident 21 already
-burned this codebase for.
-
-**Consequence.** Any collector for a system that *could* be a tracker (GitHub, GitLab, Trello — most
-of the planned ones) must either hardcode an assumption about the deployment or mark nothing, and both
-are wrong in some valid configuration. Marking nothing is the direction `IsTrackerRecord`'s default
-chooses deliberately (too talkative, never silent), so the symptom is unjira paraphrasing a tracker
-back onto itself — design-notes #24's 18-of-21 measurement.
-
-**A second, sharper gap: self-authorship detection is Jira-only.** When a collector's system *is* the
-tracker, unjira's own writes return through that collector — post a comment, re-collect it next pass.
-`ArtifactAuthoredByUnjira` handles this, computed per-connection from `SelfAccountID` via one
-`Myself()` call (`collector/jira/events.go:211`). Nothing requires a collector to supply an
-equivalent, and absence reads as "not self-authored", so a tracker-collector without a self-identity
-narrates unjira's own output back at itself. **This is the one thing that genuinely differs when
-collector and tracker coincide** — and F26 (fixed, deleted) existed because those events accumulate
-even with Jira's detection working.
-
-Not urgent while Jira is the only real tracker and `local` the only alternative. It becomes a blocker
-for the second `tasktracker` implementation, and a **prerequisite for any GitHub slice collecting
-Issues** rather than only PRs (see
-`docs/superpowers/specs/2026-09-17-github-collector-design.md` §"Which side of the diff GitHub sits
-on", which sidesteps the ambiguity by collecting no issue-shaped artifacts).
-
-Overlaps **F7** and should probably be decided with it: F7 asks whether `JiraConnection` wants a
-kubeconfig-like shape, and a system-typed connection is most of what this needs. F7 currently reads as
-a tidiness question about one struct; this makes it a multi-tracker blocker.
-
 ### F29 — nothing expresses which tracker a narrative's work belongs to
 
 **Narrowed by the tracker model's slice 1: the write-authority half has landed.** Each tracker declares
@@ -582,7 +536,8 @@ untracked work happened, so a narrative with no linked issue still falls to the 
 with one gate fewer: no create can reach a read-only tracker, but an internal ticket can still be
 proposed for upstream work whose tracker says `mirror_to: []`.
 
-F28 is about *classifying* an event. This is about *routing* one, and it has a worse failure mode.
+Classifying an event is settled (`CollectContext.TrackerFor`). This is about *routing* work, and it
+has a worse failure mode.
 
 The relationship between collectors and trackers is **many-to-many**, and all three directions occur
 in one real deployment:
@@ -725,7 +680,6 @@ yet; noted while writing the template, not found as a live incident.
 | F50 — a split narrative is still read by the create path and the review queue | open. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed: a split narrative held a create slot for 3 of 3 passes at cap 1 |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |
-| F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |
 | F31 — learn's watermark can skip corrections | **resolved**, then superseded: the watermark is a `store.CorrectionsCursor` advanced by `KeepCandidates` from what the draft READ, never from a clock reading at keep, and never backwards. Its position is now `actions.corrected_seq`, a sequence stamped when a row becomes a correction (from `correction_marks`), which also closed F41 (the clock stepping back) and F42 (a lesson added by a later ruling). Drill: a clock reading at keep fails the between-draft-and-keep test 5/5 |
 | F55 — an unlisted project's key is still read through a fallback | open. Kept by the tracker model's slice 2 to preserve behaviour; reported at startup. Unmeasured |

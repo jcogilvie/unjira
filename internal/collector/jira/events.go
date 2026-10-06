@@ -71,6 +71,12 @@ type IssueContext struct {
 	// SelfAccountID is our own Jira accountId, from one Myself() call per pass.
 	// Empty means "unknown", in which case nothing is tagged self-authored.
 	SelfAccountID string
+	// ScopeUntracked is true when the issue's project is no configured Jira
+	// tracker's scope (pipeline.CollectContext.TrackerFor). Its events are then work
+	// evidence, not the tracker's account of itself, so they are not marked as
+	// tracker records. The zero value marks them: query scoping makes every issue
+	// the collector reads a tracked one, so that is the ordinary case.
+	ScopeUntracked bool
 }
 
 // browseURL is the human-facing link back to the issue.
@@ -210,16 +216,26 @@ func (ic IssueContext) annotate(evt *events.Event, authorAccountID string) {
 	evt.Artifacts[events.ArtifactConnection] = ic.Connection
 	evt.Artifacts[events.ArtifactAuthoredByUnjira] = ic.SelfAccountID != "" && authorAccountID == ic.SelfAccountID
 
-	// Every event this collector emits is the tracker's own account of itself: a
-	// changelog entry, a tracked field edit, or a comment already on the issue.
-	// None of it is evidence that work happened outside Jira, so a comment drafted
-	// from these alone would paraphrase the issue back onto the issue — see
-	// events.ArtifactTrackerRecord and reconciler.suppressTrackerEcho.
+	// Every event this collector emits from a TRACKED project is the tracker's own
+	// account of itself: a changelog entry, a tracked field edit, or a comment already
+	// on the issue. None of it is evidence that work happened outside Jira, so a
+	// comment drafted from these alone would paraphrase the issue back onto the issue —
+	// see events.ArtifactTrackerRecord and reconciler.suppressTrackerEcho.
 	//
 	// Set here, in the one function every emitted event passes through, rather
 	// than at each call site: a future event type added to this collector is a
 	// tracker record too, and having to remember to mark it is how the marker
 	// silently stops covering the collector it was written for.
+	ic.markTrackerRecord(evt)
+}
+
+// markTrackerRecord marks evt as a tracker record unless its project is no
+// configured tracker's scope, in which case the event is work evidence (F28).
+func (ic IssueContext) markTrackerRecord(evt *events.Event) {
+	if ic.ScopeUntracked {
+		return
+	}
+
 	events.SetTrackerRecord(evt)
 }
 

@@ -17,6 +17,23 @@ type Tracker struct {
 	client *Client
 }
 
+// SelfIdentity is the authenticated account's accountId, which the Jira collector
+// compares an author against to tag unjira's own writes (tasktracker.SelfIdentifier).
+// An account that cannot read itself is an error: an empty identity would tag nothing.
+func (t *Tracker) SelfIdentity() (string, error) {
+	me, err := t.client.Myself()
+	if err != nil {
+		return "", fmt.Errorf("reading own jira account: %w", err)
+	}
+
+	id, _ := me["accountId"].(string)
+	if id == "" {
+		return "", fmt.Errorf("reading own jira account: the response has no accountId")
+	}
+
+	return id, nil
+}
+
 // NewTracker returns a Tracker wrapping client.
 func NewTracker(client *Client) *Tracker {
 	return &Tracker{client: client}
