@@ -538,11 +538,48 @@ func classifyCandidates(
 	stats.AddUsage(usage)
 
 	verdicts, err := parseMatchResponse(raw)
-	if err != nil {
-		return nil, stats, err
+	if err == nil {
+		return verdicts, stats, nil
+	}
+
+	// One re-ask, quoting the parser's reason (finding F44). Seen twice on one real
+	// 30-day pass: prose where the array belonged, and a duplicated malformed key.
+	// The parser is right to refuse both, since a best-effort reading is how a
+	// narrative gets attributed to the wrong ticket, but the model nearly always
+	// answers correctly when shown what was wrong. A matching call is one
+	// narrative's prompt, so the re-ask is cheap. One is the budget, as for the
+	// clustering re-asks: a second refusal is information, and fails loudly.
+	stats.MatchReasks++
+
+	raw2, usage, err2 := client.Complete(ctx, systemPrompt, buildMatchReaskPrompt(userPrompt, raw, err))
+	if err2 != nil {
+		return nil, stats, fmt.Errorf("re-asking for narrative %d after %w: %w", n.ID, err, err2)
+	}
+	stats.AddUsage(usage)
+
+	verdicts, err2 = parseMatchResponse(raw2)
+	if err2 != nil {
+		return nil, stats, fmt.Errorf("match response refused twice: first: %w; re-ask: %w", err, err2)
 	}
 
 	return verdicts, stats, nil
+}
+
+// buildMatchReaskPrompt repeats the original user prompt verbatim, so the
+// candidates mean what they meant the first time, then quotes the refused
+// response and the parser's reason.
+func buildMatchReaskPrompt(userPrompt, refused string, reason error) string {
+	var b strings.Builder
+
+	b.WriteString(userPrompt)
+	b.WriteString("\n\n## Your previous response could not be used\n\n")
+	fmt.Fprintf(&b, "It was refused because: %v\n\n", reason)
+	b.WriteString("The refused response:\n\n")
+	b.WriteString(refused)
+	b.WriteString("\n\nAnswer again. Return ONLY the bare JSON array the system prompt specifies, " +
+		"with one entry per candidate, no prose and no markdown fences.\n")
+
+	return b.String()
 }
 
 // buildMatchPrompt renders the narrative's title/summary plus each

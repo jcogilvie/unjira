@@ -333,3 +333,20 @@ func TestRenderMatchResult_MarksAnUnpromotedPrimary(t *testing.T) {
 	assert.Contains(t, out, "PAAS-1")
 	assert.Contains(t, out, "no primary promoted")
 }
+
+// A recovered re-ask is reported, and only when one happened: the one re-ask is all
+// that stands between a malformed response and a narrative left unmatched, so an
+// operator should see how often it fires (finding F44).
+func TestRenderMatchResult_ReportsReasksOnlyWhenTheyHappened(t *testing.T) {
+	out := pipeline.RenderMatchResult(pipeline.MatchRunResult{
+		Matched: []correlator.MatchResult{},
+		Stats:   correlator.Stats{Calls: 5, MatchReasks: 2},
+	})
+	assert.Contains(t, out, "re-asked     2 unparseable response(s)")
+
+	quiet := pipeline.RenderMatchResult(pipeline.MatchRunResult{
+		Matched: []correlator.MatchResult{},
+		Stats:   correlator.Stats{Calls: 5},
+	})
+	assert.NotContains(t, quiet, "re-asked")
+}

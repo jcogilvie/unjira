@@ -170,25 +170,23 @@ prompt are the same as the real pass's. The fix is to report an extend from the 
 row, the way the context-only branch already does. Not fixed here because it is a separate defect from
 the clustering context.
 
-### F44 — a malformed model response that is not a lossless slip still kills the whole pass
+### F44 — a malformed clustering response that is not a lossless slip still kills the whole pass
 
-The one observed death was a trailing comma (`"event_indices":[51,56,57,62,63],\n},` in a complete,
-11.8k-character response), and that class is now absorbed: `llm.JSONArrayPayload` and
-`llm.JSONObjectPayload` drop a comma before a closer via `hujson.Standardize`, since it carries no data.
-What remains is every malformation that is NOT lossless: an out-of-range index, an unknown `kind`, a
-missing `confidence`, prose instead of JSON. `parseClusterResponse` still fails the pass on each, which
-is right, because a best-effort reading is how events get silently misattributed. But nothing retries,
-so one such response costs the whole multi-minute pass, and under `watch` the window may move on. #79's
-re-ask machinery could ask once for a corrected response, quoting the parser's reason, then fail loudly.
-Not built, because no such failure has been observed: 0 in the 32 other passes measured on 2026-10-02
-and 2026-10-04 (acceptance reps for slice 1, F43 and the named-PR summaries), and a re-ask costs a
-full-prompt call (~70–110k tokens) each time it fires.
+Two lossless classes are absorbed: a trailing comma (`llm.JSONArrayPayload` and `llm.JSONObjectPayload`
+drop it via `hujson.Standardize`), and a NEW cluster holding no event (`pipeline.dropEmptyClusters`
+discards it and reports it in the pass summary). Matching is covered too: `classifyCandidates`
+re-asks once on an unparseable match response, quoting the parser's reason, then fails that
+narrative loudly. A real 30-day matching drain hit two, in consecutive passes: prose where the array
+belonged and a duplicated malformed key (`"confidence=0.2"`).
 
-A second lossless class has since been seen and absorbed. A real 30-day pass died after 37 clustering
-calls, because the model returned a NEW cluster with a title and no event in it, member or context.
-`pipeline.dropEmptyClusters` now discards a cluster holding no event and reports it in the pass
-summary. By then Cluster's omission re-ask has given every in-window event a member home, so nothing
-is lost. A NEW cluster holding only context is still refused (F37).
+What remains is clustering. An out-of-range index, an unknown `kind`, a missing `confidence` or prose
+instead of JSON still fails `parseClusterResponse`, which is right, because a best-effort reading is
+how events get silently misattributed. But nothing retries, so one such response costs the whole
+multi-minute pass, and under `watch` the window may move on. The same re-ask shape would fit: once,
+quoting the reason, then fail loudly. Not built, because no such clustering failure has been observed
+(0 in the 32 passes measured on 2026-10-02 and 2026-10-04, and none in the 30-day drain), and a
+clustering re-ask costs a full-prompt call (~70–110k tokens), where a matching re-ask costs one
+narrative's prompt.
 
 ### F50 — a split narrative is still read by the create path and the review queue
 

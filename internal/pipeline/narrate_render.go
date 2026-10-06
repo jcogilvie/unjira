@@ -336,6 +336,14 @@ func writeMatchHeader(b *strings.Builder, r MatchRunResult) {
 	fmt.Fprintf(b, "llm          %d call(s)\n", r.Stats.Calls)
 	fmt.Fprintf(b, "tokens       %d prompt + %d completion (estimated %d)\n",
 		r.Stats.PromptTokens, r.Stats.CompletionTokens, r.Stats.EstimatedTokens)
+
+	// Only when one fired, like the narration pass's re-ask line. It does not say
+	// how many recovered: a failed pass is rendered too, and a narrative refused
+	// twice is named in the pass's error, not here.
+	if r.Stats.MatchReasks > 0 {
+		fmt.Fprintf(b, "re-asked     %d unparseable response(s), once each\n",
+			r.Stats.MatchReasks)
+	}
 }
 
 // writeMatchedNarrative writes one narrative that has at least one surviving

@@ -197,9 +197,10 @@ context link re-admits no narrative and reaches no prompt that drafts or matches
 the next clustering prompt (rendered under each context narrative as background, a numbered event as
 `-> #N`), by the pass summary, and by nothing else.
 
-**Ten LLM call sites**, in three packages — `correlator/correlator.go:505` (cluster), `:1116` (same-story
-check at a bisection seam), `:1796` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
-`correlator/cluster_dispute.go:177` (dispute re-ask), `correlator/match.go:627`,
+**Eleven LLM call sites**, in three packages — `correlator/correlator.go:511` (cluster), `:1122` (same-story
+check at a bisection seam), `:1802` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
+`correlator/cluster_dispute.go:177` (dispute re-ask), `correlator/match.go:627` (match), `:647` (match
+re-ask, once, on an unparseable response),
 `reconciler/draft.go:92`, `:339`, `reconciler/create.go:244`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
 
