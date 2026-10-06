@@ -1781,7 +1781,7 @@ func TestRemoveNarrativeIssue_MissingLinkErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "NOPE-1")
 }
 
-// TestNarrativesWithNoIssueLink_IsStricterThanWithoutPrimaryLink pins the
+// TestNarrativesAwaitingCreate_IsStricterThanWithoutPrimaryLink pins the
 // distinction the create path depends on, and it survived finding F11 in a
 // different form.
 //
@@ -1792,12 +1792,12 @@ func TestRemoveNarrativeIssue_MissingLinkErrors(t *testing.T) {
 //
 //   - NarrativesWithoutPrimaryLink: "no PRIMARY link". A `mentioned` citation is
 //     not an attribution, so matching still has work to do.
-//   - NarrativesWithNoIssueLink: "no link of ANY role". Stricter, because the
+//   - NarrativesAwaitingCreate: "no link of ANY role". Stricter, because the
 //     create path must not open a ticket for work that names any issue at all —
 //     even one it only cited.
 //
 // Both accessors are asserted on one fixture so the contrast is the assertion.
-func TestNarrativesWithNoIssueLink_IsStricterThanWithoutPrimaryLink(t *testing.T) {
+func TestNarrativesAwaitingCreate_IsStricterThanWithoutPrimaryLink(t *testing.T) {
 	s := openStore(t)
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 
@@ -1820,17 +1820,17 @@ func TestNarrativesWithNoIssueLink_IsStricterThanWithoutPrimaryLink(t *testing.T
 	assert.Len(t, byPrimary, 2,
 		"a mentioned-only narrative is unattributed, so matching still owns it")
 
-	byAnyLink, err := s.NarrativesWithNoIssueLink(10)
+	byAnyLink, err := s.NarrativesAwaitingCreate(10)
 	require.NoError(t, err)
 	require.Len(t, byAnyLink, 1,
 		"but the create path must skip it: it names an issue, and a create would duplicate")
 	assert.Equal(t, unlinked, byAnyLink[0].ID)
 }
 
-// TestNarrativesWithNoIssueLink_AnyRoleCounts: a `mentioned`-only narrative is not
+// TestNarrativesAwaitingCreate_AnyRoleCounts: a `mentioned`-only narrative is not
 // untracked work — somebody cited an issue for it. Creating a new ticket would
 // duplicate whatever that citation points at.
-func TestNarrativesWithNoIssueLink_AnyRoleCounts(t *testing.T) {
+func TestNarrativesAwaitingCreate_AnyRoleCounts(t *testing.T) {
 	s := openStore(t)
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 
@@ -1843,7 +1843,7 @@ func TestNarrativesWithNoIssueLink_AnyRoleCounts(t *testing.T) {
 		}})
 	}))
 
-	got, err := s.NarrativesWithNoIssueLink(10)
+	got, err := s.NarrativesAwaitingCreate(10)
 
 	require.NoError(t, err)
 	assert.Empty(t, got, "a mentioned link is still a link; this is not untracked work")

@@ -30,7 +30,7 @@ const (
 	// ActionCreate opens a new issue. Proposed only when a narrative has no
 	// verified link at all — never alongside one, or unjira would manufacture
 	// duplicate tickets for work already tracked.
-	ActionCreate ActionType = "create"
+	ActionCreate ActionType = store.ActionTypeCreate
 )
 
 // StatusProposed is the actions.status value every freshly drafted action

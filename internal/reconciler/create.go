@@ -99,6 +99,13 @@ type createVerdict struct {
 // meaning adding "create" to draftSystemPrompt would have changed nothing at all.
 // The missing piece was a selection path, not a prompt option.
 //
+// The selection (store.NarrativesAwaitingCreate) already excludes every narrative
+// proposeCreateOne would skip without a model call, and the cap applies after that
+// exclusion. Applied before it, the narratives a pass had handled kept the first
+// max_narratives_per_pass slots on every later pass and starved everything behind
+// them. proposeCreateOne's own checks stay as a backstop: a selector bug here costs
+// a duplicate ticket, not a wasted call.
+//
 // Deliberately NOT behind a config flag. A create reaches the review queue like
 // any other action, and the queue is what gates it: gate.Decide refuses to
 // auto-apply a create unless a human set auto_commit["create"].graduated, which
@@ -136,9 +143,9 @@ func ProposeCreates(
 
 	limit := cfg.NarrativeLimit()
 
-	narratives, err := s.NarrativesWithNoIssueLink(limit + 1)
+	narratives, err := s.NarrativesAwaitingCreate(limit + 1)
 	if err != nil {
-		return nil, stats, fmt.Errorf("listing narratives with no issue link: %w", err)
+		return nil, stats, fmt.Errorf("listing narratives awaiting a create decision: %w", err)
 	}
 
 	if len(narratives) > limit {
@@ -192,6 +199,17 @@ func proposeCreateOne(
 	if len(evts) == 0 {
 		// Every event was unjira's own. Proposing a ticket for unjira's own
 		// commentary would be the loop dropSelfAuthored exists to prevent.
+		//
+		// RECORDED, because nothing else about this outcome is: no draft exists to
+		// persist, and store.NarrativesAwaitingCreate cannot see a Go-side filter. An
+		// outcome that leaves no trace under the selector's stable order keeps this
+		// narrative's slot on every pass — see store.awaitingCreate.
+		if err := s.RecordCreateExamined(
+			narrative.ID, "every member event is authored_by_unjira"); err != nil {
+			return result, stats, fmt.Errorf(
+				"recording create examination for narrative %d: %w", narrative.ID, err)
+		}
+
 		result.Suppressed = append(result.Suppressed,
 			"every event is unjira's own output; nothing to open an issue about")
 
@@ -239,6 +257,17 @@ func proposeCreateOne(
 		}
 
 		if len(dropSelfAuthored(delta)) == 0 {
+			// An EMPTY delta never reaches here through ProposeCreates (the
+			// selector's decline clause excludes it), but a delta made only of
+			// unjira's own events does: it passes the decline clause, so it is
+			// recorded for the same reason as the all-self-authored case above, or
+			// it holds its slot from here on.
+			if err := s.RecordCreateExamined(
+				narrative.ID, "every member event since the decline is authored_by_unjira"); err != nil {
+				return result, stats, fmt.Errorf(
+					"recording create examination for narrative %d: %w", narrative.ID, err)
+			}
+
 			result.Suppressed = append(result.Suppressed,
 				"already judged not worth tracking, and nothing new has happened since")
 

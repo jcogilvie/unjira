@@ -902,6 +902,16 @@ so much as one missing invariant: **every path that examines a narrative should 
 state or be excluded from selection.** Stated that way it is checkable, and it is what a future
 reviewer should hold new suppression paths to.
 
+**The sweep's answer was wrong, and the invariant needed one more clause.** The sweep above asked for
+narratives with *no action row*, on the theory that only a trace-less outcome can livelock. The create
+path livelocked with traces. A declined or proposed create is a row, and `NarrativesWithNoIssueLink`
+read none of them, so the narratives a pass had handled held every slot of the cap on every later pass.
+On a real 30-day store with 129 untracked narratives and a cap of 20, pass 1 proposed 11 and declined 9,
+every later pass proposed nothing, and the other 109 were never examined. A trace advances nothing
+unless the selector reads it, so the invariant is: **every path that examines a narrative must change
+state that its selector reads, or be excluded from selection.** The create selector now reads all of it
+in one predicate shared with its count (`awaitingCreate`, `internal/store/createbacklog.go`).
+
 ## 30. A subset is reached sooner, not later
 
 Two stages, both selecting oldest-first with a cap of 20, over different populations:

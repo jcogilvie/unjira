@@ -20,7 +20,7 @@ package store_test
 // docs/design-notes.md had already named the fix when the CREATE path hit the
 // same trap: "The correct question is NOT EXISTS (SELECT 1 FROM
 // narrative_issues ...)". Two of the three accessors applied that lesson
-// (`NarrativesWithNoIssueLink`, `NarrativesWithActionableLinks`); matching was
+// (`NarrativesAwaitingCreate`, `NarrativesWithActionableLinks`); matching was
 // never revisited. This is that revisit.
 //
 // The tests below are written against the LINK TABLE only. They must keep
@@ -89,7 +89,7 @@ func TestNarrativesWithoutPrimaryLink_KeepsANarrativeWithNoPrimary(t *testing.T)
 // Match records `mentioned` for a cited-but-unrelated ticket while promoting
 // nothing. That narrative is still unattributed and still matching's work.
 //
-// Note this is deliberately NOT the same predicate as NarrativesWithNoIssueLink,
+// Note this is deliberately NOT the same predicate as NarrativesAwaitingCreate,
 // which asks "any link at all" because the CREATE path must not open a duplicate
 // ticket for work that names any issue. Two questions, two predicates.
 func TestNarrativesWithoutPrimaryLink_KeepsANarrativeWithOnlyNonPrimaryLinks(t *testing.T) {

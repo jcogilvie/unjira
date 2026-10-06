@@ -111,7 +111,9 @@ func TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink(t *testing.T) {
 }
 
 // TestProposeCreates_DoesNotProposeASecondCreateWhenOneIsApplied: the
-// duplicate-ticket case. An applied create means an issue exists.
+// duplicate-ticket case. An applied create means an issue exists, so the narrative is
+// not selected at all. proposeCreateOne's own refusal is the backstop, pinned in
+// TestProposeCreateOne_BackstopsRemainInPlace.
 func TestProposeCreates_DoesNotProposeASecondCreateWhenOneIsApplied(t *testing.T) {
 	s := reconcileStore(t)
 	nid := seedUntracked(t, s, codeEvent("cr:1", "work"))
@@ -128,10 +130,7 @@ func TestProposeCreates_DoesNotProposeASecondCreateWhenOneIsApplied(t *testing.T
 	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Empty(t, got[0].Proposed)
-	require.Len(t, got[0].Suppressed, 1)
-	assert.Contains(t, got[0].Suppressed[0], "would open a duplicate")
+	assert.Empty(t, got, "a narrative already created for must not take a create slot")
 	assert.Empty(t, client.prompts, "no LLM call should be spent on a narrative already created for")
 }
 
@@ -153,9 +152,8 @@ func TestProposeCreates_DoesNotProposeASecondCreateWhileOneAwaitsReview(t *testi
 	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 
 	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Empty(t, got[0].Proposed)
-	assert.Contains(t, got[0].Suppressed[0], "awaiting review")
+	assert.Empty(t, got, "a narrative whose create awaits review must not take a create slot")
+	assert.Empty(t, client.prompts)
 }
 
 // TestProposeCreates_ARejectedCreateDoesNotBlockForever: a human rejected THAT
@@ -327,11 +325,16 @@ func TestProposeCreates_ADeclineIsRememberedSoTheNextPassIsFree(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{declined, declined, declined}}
 
-	for pass := 1; pass <= 3; pass++ {
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
+	require.NoError(t, err, "pass 1")
+	require.Len(t, got, 1)
+	assert.Empty(t, got[0].Proposed, "pass 1 declines")
+
+	for pass := 2; pass <= 3; pass++ {
 		got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
 		require.NoError(t, err, "pass %d", pass)
-		require.Len(t, got, 1)
-		assert.Empty(t, got[0].Proposed, "pass %d must propose nothing", pass)
+		assert.Empty(t, got,
+			"pass %d must not select the declined narrative: it would hold a slot for nothing", pass)
 	}
 
 	assert.Len(t, client.prompts, 1,
@@ -398,24 +401,29 @@ func TestProposeCreates_ADeclineIsReconsideredWhenNewWorkArrives(t *testing.T) {
 	assert.Len(t, client.prompts, 2, "exactly two calls: one per genuine change")
 }
 
-// TestProposeCreates_ADeclinedNarrativeSaysWhyItWasSkipped: "declined earlier" and
-// "never considered" are different facts, and a silent skip makes them
-// indistinguishable in a pass's output.
-func TestProposeCreates_ADeclinedNarrativeSaysWhyItWasSkipped(t *testing.T) {
+// TestProposeCreates_DeclinedAndNeverConsideredStayDistinct: "declined earlier" and
+// "never considered" are different facts. A declined narrative is no longer selected,
+// so a pass's output cannot tell them apart; the create backlog count does, since it
+// counts the narrative a cap kept from the model and not the one the model declined.
+func TestProposeCreates_DeclinedAndNeverConsideredStayDistinct(t *testing.T) {
 	s := reconcileStore(t)
 	seedUntracked(t, s, codeEvent("dc:1", "not much"))
+	neverConsidered := seedUntracked(t, s, codeEvent("dc:2", "behind the cap"))
 
-	client := &fakeLLM{responses: []string{declined, declined}}
+	client := &fakeLLM{responses: []string{declined}}
 
-	_, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
+	_, _, err := ProposeCreates(context.Background(), s, client, capOf(1), nil, nil)
 	require.NoError(t, err)
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
-
+	awaiting, err := s.NarrativesAwaitingCreate(10)
 	require.NoError(t, err)
-	require.Len(t, got, 1)
-	require.Len(t, got[0].Suppressed, 1)
-	assert.Contains(t, got[0].Suppressed[0], "nothing new has happened since")
+	require.Len(t, awaiting, 1)
+	assert.Equal(t, neverConsidered, awaiting[0].ID,
+		"only the narrative the model never saw still awaits a decision")
+
+	count, err := s.CountNarrativesAwaitingCreate()
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
 }
 
 // TestProposeCreates_ADeclineDoesNotBlockACommentOnTheSameNarrative: a decline

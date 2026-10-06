@@ -75,9 +75,9 @@ type NarrativeIssueRef struct {
 // one_primary_per_narrative and aborted the entire pass. That crashed a drain.
 //
 // A primary link at ANY confidence means attributed. Deliberately narrower than
-// NarrativesWithNoIssueLink's "any link at all": a `mentioned` link is a citation,
+// NarrativesAwaitingCreate's "any link at all": a `mentioned` link is a citation,
 // not an attribution, so a narrative carrying only those is still matching's work.
-// Two questions, two predicates — see that method for why the create path needs
+// Two questions, two predicates — see awaitingCreate for why the create path needs
 // the broader one.
 func (s *Store) NarrativesWithoutPrimaryLink(limit int) ([]NarrativeRow, error) {
 	rows, err := s.db.Query(
@@ -497,54 +497,4 @@ func removeNarrativeIssueImpl(c dbConn, narrativeID int64, issueKey string) erro
 	}
 
 	return nil
-}
-
-// NarrativesWithNoIssueLink returns up to limit narratives having NO
-// narrative_issues row of any role — genuinely untracked work.
-//
-// Distinct from NarrativesWithoutPrimaryLink, and the difference is the whole point.
-// That accessor selects on the denormalized narratives.issue_key, which
-// MatchConfig.ConfidenceFloor only promotes above the floor — so a narrative with
-// a real but low-confidence primary has narrative_issues rows AND a NULL
-// issue_key, and appears in its results. Proposing a create for one of those
-// would open a duplicate ticket for work that IS tracked, just not confidently.
-//
-// So this asks the stricter question: does any link exist at all? Only a NOT
-// EXISTS answer means nobody filed anything.
-//
-// Exists because the reconciler could not see untracked narratives at all.
-// NarrativesWithActionableLinks requires a link by construction, so reconcileOne
-// was never invoked for an unlinked narrative — proven by probe:
-//
-//	NarrativesWithActionableLinks (reconciler's backlog) -> 0 rows
-//	NarrativesWithoutPrimaryLink (matching's backlog)    -> 1 rows
-//
-// which is why adding "create" to the drafting prompt would have changed nothing.
-func (s *Store) NarrativesWithNoIssueLink(limit int) ([]NarrativeRow, error) {
-	rows, err := s.db.Query(
-		`SELECT n.id, n.window_start, n.window_end, n.title, n.summary,
-		        n.status, n.compaction_boundary, n.compaction_boundary_event_id
-		 FROM narratives n
-		 WHERE NOT EXISTS (
-		     SELECT 1 FROM narrative_issues ni WHERE ni.narrative_id = n.id
-		 )
-		 ORDER BY n.window_start, n.id
-		 LIMIT ?`,
-		limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("querying narratives with no issue link: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []NarrativeRow
-	for rows.Next() {
-		row, err := scanNarrativeRow(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scanning unlinked narrative row: %w", err)
-		}
-		out = append(out, row)
-	}
-
-	return out, rows.Err()
 }

@@ -441,8 +441,7 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 
 	if len(r.Results) == 0 {
 		b.WriteString("\nno linked narratives to reconcile\n")
-		writeRemainder(&b, r.Remaining, "carrying unexamined work")
-		writeDeferredCreates(&b, r.CreatesDeferred)
+		writeReconcileBacklogs(&b, r)
 
 		return b.String()
 	}
@@ -451,10 +450,23 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 		writeReconciledNarrative(&b, result)
 	}
 
-	writeRemainder(&b, r.Remaining, "carrying unexamined work")
-	writeDeferredCreates(&b, r.CreatesDeferred)
+	writeReconcileBacklogs(&b, r)
 
 	return b.String()
+}
+
+// writeReconcileBacklogs writes the reconcile pass's three trailing lines, each silent
+// at zero: the linked backlog, the create backlog, and a deferred create path.
+//
+// The create backlog is its own line rather than folded into Remaining because the two
+// populations are disjoint (linked narratives versus narratives with no link at all),
+// and its absence was a pass starved by its cap reading as a finished one.
+// CreatesRemaining is 0 whenever creates were deferred, so at most one of the last two
+// lines appears.
+func writeReconcileBacklogs(b *strings.Builder, r ReconcileRunResult) {
+	writeRemainder(b, r.Remaining, "carrying unexamined work")
+	writeRemainder(b, r.CreatesRemaining, "awaiting a create decision")
+	writeDeferredCreates(b, r.CreatesDeferred)
 }
 
 // writeDeferredCreates reports a skipped create path, and says nothing when creates

@@ -77,9 +77,21 @@ type ReconcileRunResult struct {
 	//
 	// Covers the ACTIONABLE-LINK cap only, not ProposeCreates' separate untracked
 	// cap. Two numbers in one field would be a lie, and the create backlog drains
-	// on its own schedule; reporting the one an operator can act on beats reporting
-	// a sum of two unrelated populations.
+	// on its own schedule; CreatesRemaining reports that one.
 	Remaining int
+	// CreatesRemaining is how many untracked narratives STILL await a create decision
+	// after this pass (store.CountNarrativesAwaitingCreate, the create selector's own
+	// predicate) — 0 when that backlog drained, and 0 when creates were deferred, since
+	// a deferred pass examined none of them and CreatesDeferred already says so.
+	//
+	// Counted after Persist, so the creates this pass proposed are no longer counted
+	// as awaiting. Under DryRun nothing is persisted, so it counts them: in the store
+	// they do still await a decision.
+	//
+	// Exists because a pass starved by its cap rendered like a finished one: on a real
+	// 30-day store the create path reached 20 of 129 untracked narratives on its first
+	// pass and none on any later one, and nothing on stdout said so.
+	CreatesRemaining int
 	// Persisted is exactly what reconciler.Persist wrote THIS call — empty
 	// under DryRun (Persist never ran) or after a Persist failure. This is
 	// watch's auto-commit seam: it identifies "freshly proposed this pass" by
@@ -204,7 +216,13 @@ func RunReconcile(
 		result.Remaining = remaining
 	}
 
+	createsRan := createsDeferred == 0
+
 	if opts.DryRun {
+		if createsRan {
+			result.CreatesRemaining = countCreateBacklog(s, opts.Log)
+		}
+
 		return result, reconcileErr
 	}
 
@@ -214,5 +232,25 @@ func RunReconcile(
 	}
 	result.Persisted = persisted
 
+	if createsRan {
+		result.CreatesRemaining = countCreateBacklog(s, opts.Log)
+	}
+
 	return result, reconcileErr
+}
+
+// countCreateBacklog is ReconcileRunResult.CreatesRemaining. A count failure does not
+// fail the pass, for the reason given at the Remaining count above: the work happened,
+// and 0 is the quieter wrong answer.
+func countCreateBacklog(s *store.Store, log *slog.Logger) int {
+	n, err := s.CountNarrativesAwaitingCreate()
+	if err != nil {
+		logging.For(log, "pipeline").Warn(
+			"could not count the narratives awaiting a create decision",
+			"err", err, "consequence", "this pass's summary will not report a create backlog")
+
+		return 0
+	}
+
+	return n
 }
