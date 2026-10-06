@@ -16,8 +16,9 @@ var githubRefRE = regexp.MustCompile(
 
 // githubIssueURLRE is a github.com issue URL. Pull request URLs (/pull/N) are not
 // matched: a pull request is work evidence, never an issue a narrative is tracked in.
+// The leading group prevents matching inside a longer token.
 var githubIssueURLRE = regexp.MustCompile(
-	`https?://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9._-]+)/issues/(\d+)\b`)
+	`(?:^|[^A-Za-z0-9_./-])https?://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([A-Za-z0-9._-]+)/issues/(\d+)\b`)
 
 // ExtractGitHubIssueRefs returns the GitHub issue references in text as
 // tasktracker-native keys, <owner>/<repo>#<N>, lower-cased, deduplicated, in order of
