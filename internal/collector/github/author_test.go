@@ -96,6 +96,7 @@ func TestCollect_AFailedUserLookupFailsTheRepo(t *testing.T) {
 	got, err := collectAll(t, collectorFor(api), testContext(s, []string{"o/r"}, "github.com"))
 
 	require.ErrorContains(t, err, "401 bad credentials")
+	require.ErrorContains(t, err, "`authors` option", "the error names the fix")
 	assert.Empty(t, got)
 }
 

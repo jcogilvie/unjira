@@ -18,7 +18,9 @@ shared. On a real 30-day pass over six repos, 365 of 3,845 PR events were the us
 - **Whose PRs count:** only PRs authored by the credential's own user. `GET /user` is called once per
   host per pass. Login comparison ignores case.
 - **`authors` replaces that** with an explicit list.
-- **A failed lookup fails the repo**, never guessing everyone or no one.
+- **A failed lookup fails the repo**, never guessing everyone or no one. A token that belongs to no
+  user (a GitHub App or Actions installation token) cannot be looked up at all, so it needs `authors`.
+  The error says so, and the CI live test sets it.
 - **The watermark still steps past PRs it skips,** so they are out of scope rather than re-listed every
   pass. One consequence: adding an author later does not backfill PRs already stepped over.
 

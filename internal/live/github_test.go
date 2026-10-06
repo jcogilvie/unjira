@@ -174,6 +174,9 @@ func collectSandbox(t *testing.T, s *store.Store, creds credentials.Set) ([]even
 			"enabled":       true,
 			"repos":         []any{sandboxRepo},
 			"backfill_days": sandboxBackfillDays,
+			// Explicit, because CI authenticates with the Actions token, which belongs to no
+			// user, so GET /user is refused. The sandbox's PRs are all jcogilvie's.
+			"authors": []any{"jcogilvie"},
 		},
 	}}
 

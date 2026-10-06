@@ -287,7 +287,10 @@ func (a *authorSet) matcher(host string, client API) (func(login string) bool, e
 		if !ok {
 			var err error
 			if login, err = client.AuthenticatedLogin(); err != nil {
-				return nil, fmt.Errorf("deciding whose PRs to collect on %s: %w", host, err)
+				return nil, fmt.Errorf(
+					"deciding whose PRs to collect on %s: %w (a token that belongs to no user, such as a "+
+						"GitHub App or Actions token, cannot be looked up: set the github collector's "+
+						"`authors` option to name whose PRs count)", host, err)
 			}
 			a.byHost[host] = login
 		}
