@@ -28,6 +28,23 @@ type fakeAPI struct {
 	timelineErr   error
 	seenSince     []time.Time
 	requestedRefs []ghclient.RepoRef
+	// login is the credential's own user; empty means "alice", the author pr() gives
+	// every fixture, so tests that predate the authorship filter see their PRs.
+	login      string
+	loginErr   error
+	loginCalls int
+}
+
+func (f *fakeAPI) AuthenticatedLogin() (string, error) {
+	f.loginCalls++
+	if f.loginErr != nil {
+		return "", f.loginErr
+	}
+	if f.login == "" {
+		return "alice", nil
+	}
+
+	return f.login, nil
 }
 
 func (f *fakeAPI) ListPullRequests(ref ghclient.RepoRef, since time.Time) ([]ghclient.PullRequest, error) {

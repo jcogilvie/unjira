@@ -238,3 +238,28 @@ func mustRef(t *testing.T, raw string) github.RepoRef {
 
 	return ref
 }
+
+func TestAuthenticatedLogin_ReadsTheTokensUser(t *testing.T) {
+	var path, auth string
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, auth = r.URL.Path, r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"login":"jcogilvie","id":1}`))
+	}))
+
+	login, err := client.AuthenticatedLogin()
+
+	require.NoError(t, err)
+	assert.Equal(t, "jcogilvie", login)
+	assert.Equal(t, "/user", path)
+	assert.Equal(t, "Bearer test-token", auth)
+}
+
+func TestAuthenticatedLogin_AnEmptyLoginIsAnError(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+
+	_, err := client.AuthenticatedLogin()
+
+	require.ErrorContains(t, err, "no login")
+}

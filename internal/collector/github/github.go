@@ -15,6 +15,8 @@ package github
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	ghclient "github.com/jcogilvie/unjira/internal/clients/github"
@@ -44,6 +46,7 @@ const DefaultBackfillDays = 30
 type API interface {
 	ListPullRequests(ref ghclient.RepoRef, since time.Time) ([]ghclient.PullRequest, error)
 	ListIssueEvents(ref ghclient.RepoRef, number int) ([]ghclient.IssueEvent, error)
+	AuthenticatedLogin() (string, error)
 }
 
 // Compile-time proof the real client satisfies API.
@@ -94,9 +97,10 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 	backfillDays := intOption(cc.Options, "backfill_days", DefaultBackfillDays)
 
 	var failures []error
+	authors := newAuthorSet(stringSliceOption(cc.Options, "authors"))
 
 	for _, raw := range repos {
-		if err := c.collectRepo(cc, raw, backfillDays, visit); err != nil {
+		if err := c.collectRepo(cc, raw, backfillDays, authors, visit); err != nil {
 			failures = append(failures, fmt.Errorf("repo %q: %w", raw, err))
 		}
 	}
@@ -106,7 +110,7 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 
 // collectRepo builds a client for one repo's host and collects it.
 func (c *Collector) collectRepo(
-	cc pipeline.CollectContext, raw string, backfillDays int, visit func(events.Event),
+	cc pipeline.CollectContext, raw string, backfillDays int, authors *authorSet, visit func(events.Event),
 ) error {
 	ref, err := ghclient.ParseRepoRef(raw)
 	if err != nil {
@@ -123,6 +127,11 @@ func (c *Collector) collectRepo(
 	client, err := c.newClient(ghclient.BaseURL(ref.Host), cred.Token)
 	if err != nil {
 		return fmt.Errorf("building github client for host %q: %w", ref.Host, err)
+	}
+
+	isMine, err := authors.matcher(ref.Host, client)
+	if err != nil {
+		return err
 	}
 
 	resource := CursorResource(ref)
@@ -148,16 +157,21 @@ func (c *Collector) collectRepo(
 	var highest time.Time
 
 	for _, pr := range prs {
+		// The watermark steps past a PR whoever wrote it, so another person's PR is out of
+		// scope rather than unread, and is not listed again next pass.
+		if pr.UpdatedAt.After(highest) {
+			highest = pr.UpdatedAt
+		}
+		if !isMine(pr.User.Login) {
+			continue
+		}
+
 		if err := c.collectPR(client, ref, pr, visit); err != nil {
 			// One PR's failure fails its repo. Advancing past a PR we could
 			// not fully read would step over it permanently — the same
 			// all-or-nothing-per-scope discipline collector/jira's
 			// collectQuery uses for one issue's failure.
 			return fmt.Errorf("PR %s#%d: %w", ref.OwnerRepo(), pr.Number, err)
-		}
-
-		if pr.UpdatedAt.After(highest) {
-			highest = pr.UpdatedAt
 		}
 	}
 
@@ -244,4 +258,43 @@ func intOption(options map[string]any, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+// authorSet decides whose PRs are this user's work evidence. Another person's PR is not:
+// measured on a real 30-day pass over six repos, 365 of 3,845 PR events were the user's,
+// and the rest (dependabot, Renovate, cherry-pick bots, other contributors) became 843
+// narratives. The user's reviews and comments on others' PRs are a different kind of
+// evidence, planned separately.
+//
+// With an `authors` option, exactly those logins count. Without one, the login of the
+// credential the host's client uses counts, looked up once per host per pass.
+type authorSet struct {
+	explicit []string
+	byHost   map[string]string
+}
+
+func newAuthorSet(explicit []string) *authorSet {
+	return &authorSet{explicit: explicit, byHost: map[string]string{}}
+}
+
+// matcher returns whether a PR author's login counts on host. Logins compare without
+// case, as GitHub's do. A failed lookup is an error, never a guess: guessing would collect
+// everyone's PRs or nobody's.
+func (a *authorSet) matcher(host string, client API) (func(login string) bool, error) {
+	allowed := a.explicit
+	if len(allowed) == 0 {
+		login, ok := a.byHost[host]
+		if !ok {
+			var err error
+			if login, err = client.AuthenticatedLogin(); err != nil {
+				return nil, fmt.Errorf("deciding whose PRs to collect on %s: %w", host, err)
+			}
+			a.byHost[host] = login
+		}
+		allowed = []string{login}
+	}
+
+	return func(login string) bool {
+		return slices.ContainsFunc(allowed, func(a string) bool { return strings.EqualFold(a, login) })
+	}, nil
 }

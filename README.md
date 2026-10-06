@@ -102,6 +102,13 @@ non-obvious corrections each one produced.
   ensemble, the `emergent` tag, the ancillary-work ledger.
 - **Phase 3 — productize**: autonomy graduation, Slack review mode, shared team memory,
   config-driven setup.
+- **Participation evidence (planned)**: your activity on work that isn't yours — reviews, review
+  comments, issue comments — collected as evidence for *that* work, so the tokens a review costs are
+  attributed to the task reviewed even when you don't own it. Part of token attribution being
+  complete. Today the GitHub collector reads only PRs you authored.
+- **Phase 4 — presentation and inbox**: a local web UI over the store, and collectors that also
+  gather work you still *need* to do (review requests, assigned issues, mentions), so the same
+  pipeline yields an inbox of incoming work beside the record of work done.
 - **Onboarding backfill (planned, unscheduled)**: a one-shot pass that summarises historical
   transcripts with a cheap model to recover work bodies from before unjira was watching. Deliberately
   NOT part of collection: a transcript is re-read on every collect (the external ID includes the file
@@ -251,8 +258,8 @@ internal/
                         <session>/subagents/**/*.jsonl): one event per branch run, plus
                         one anchor per pull request a tool call created
     jira/               Jira issues and changelogs as an observed stream
-    github/             GitHub PR lifecycle (opened, merged, closed) as an observed
-                        stream — PRs are work evidence, never a tracker record
+    github/             GitHub PR lifecycle (opened, merged, closed) of PRs you authored,
+                        as an observed stream — work evidence, never a tracker record
   correlator/
     refs/               fully-qualified, range-aware PR/issue reference extraction
     fanout/             env-mirror fan-out clustering

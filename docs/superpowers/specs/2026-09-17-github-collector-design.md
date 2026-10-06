@@ -11,6 +11,20 @@ not always identically to what this document's body still says below.** Per this
 "leave the original open questions as written" convention, the body text is left untouched; read
 this Status section as the authority on what actually shipped.
 
+**Authorship, added 2026-10-06.** The collector originally ingested every PR in a configured repo.
+That was invisible against `jcogilvie/unjira`, where every PR is the user's, and decisive anywhere
+shared. On a real 30-day pass over six repos, 365 of 3,845 PR events were the user's, and the rest
+(dependabot, Renovate, cherry-pick bots, other contributors) became 843 narratives. Now:
+- **Whose PRs count:** only PRs authored by the credential's own user. `GET /user` is called once per
+  host per pass. Login comparison ignores case.
+- **`authors` replaces that** with an explicit list.
+- **A failed lookup fails the repo**, never guessing everyone or no one.
+- **The watermark still steps past PRs it skips,** so they are out of scope rather than re-listed every
+  pass. One consequence: adding an author later does not backfill PRs already stepped over.
+
+The user's reviews and comments on others' PRs are a separate, planned kind of evidence (README
+roadmap, "participation evidence").
+
 **Decision 1 — `ExternalID` uses GitHub's own timeline-event id, not a bare `:closed`/`:merged`
 suffix.** §3 below still describes the bare form (`<owner>/<repo>#<N>:merged` /
 `:closed`) as if it were final; it was not. The shipped scheme is
