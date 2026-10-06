@@ -75,6 +75,11 @@ type appContext struct {
 	// (correlator.WithLogger and friends), so a library function never depends on
 	// ambient state.
 	log *slog.Logger
+
+	// resolverOnce holds the one tasktracker.Resolver per process (see resolver), and
+	// backends the backend opened for each connection, shared by every tracker on it.
+	resolverOnce *tasktracker.Resolver
+	backends     map[string]tasktracker.TaskTracker
 }
 
 // jiraClient constructs a client against a jira connection, using the credential
@@ -130,15 +135,14 @@ func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, erro
 	return a.jiraClient(conn)
 }
 
-// taskTracker resolves the backend for the tracker covering projectKey, by its
-// connection's kind. devNarrateCmd and watchCmd resolve a single tracker from the
-// default project for reconciling and applying — see their call sites for the
-// multi-tracker limitation that implies.
-func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, error) {
-	tracker, conn, err := a.trackerConnection(projectKey)
-	if err != nil {
-		return nil, err
+// backend opens the backend for a connection, once per connection: two trackers on
+// one Jira site share one client and one credential.
+func (a *appContext) backend(conn config.Connection) (tasktracker.TaskTracker, error) {
+	if b, ok := a.backends[conn.Name]; ok {
+		return b, nil
 	}
+
+	var b tasktracker.TaskTracker
 
 	switch conn.Kind {
 	case config.KindJira:
@@ -147,13 +151,112 @@ func (a *appContext) taskTracker(projectKey string) (tasktracker.TaskTracker, er
 			return nil, err
 		}
 
-		return jira.NewTracker(client), nil
+		b = jira.NewTracker(client)
 	case config.KindLocal:
-		return local.New(a.store), nil
+		b = local.New(a.store)
 	case config.KindGitHub:
-		return nil, fmt.Errorf("tracker %q is on a github connection, which has no backend in this build", tracker.Name)
+		return nil, fmt.Errorf("connection %q is kind %q, which has no backend in this build", conn.Name, conn.Kind)
 	default:
-		return nil, fmt.Errorf("tracker %q: unknown connection kind %q", tracker.Name, conn.Kind)
+		return nil, fmt.Errorf("connection %q: unknown kind %q", conn.Name, conn.Kind)
+	}
+
+	if a.backends == nil {
+		a.backends = make(map[string]tasktracker.TaskTracker)
+	}
+
+	a.backends[conn.Name] = b
+
+	return b, nil
+}
+
+// resolver builds the one tasktracker.Resolver over every configured tracker:
+// matching, the reconciler and the applier all route through it, so a key is read and
+// written on the tracker whose scopes own it, never on a default chosen for the pass.
+// Built once per process; backends open lazily, so building it costs nothing and a
+// command that never resolves a key never needs credentials.
+//
+// The read fallback is the tracker covering the first configured project scope — the
+// tracker every candidate used to be verified against. It keeps a ticket in a project
+// no tracker lists readable, as it was, so the work on it stays linked instead of
+// reaching the create path as untracked; tasktracker.Resolver.WithReadFallback says why.
+// Such keys are reported at startup (warnUnroutedStoredKeys) and never written.
+func (a *appContext) resolver() *tasktracker.Resolver {
+	if a.resolverOnce != nil {
+		return a.resolverOnce
+	}
+
+	routes := make([]tasktracker.Route, 0, len(a.config.Trackers))
+
+	for _, t := range a.config.Trackers {
+		conn, ok := a.config.ConnectionOf(t)
+		if !ok {
+			// ValidateTrackers refuses this at load; an in-process config can still
+			// carry it, and a route with no backend would only defer the error.
+			continue
+		}
+
+		route := tasktracker.Route{
+			Tracker:        t.Name,
+			Scopes:         t.Scopes,
+			WritableScopes: t.WritableScopes,
+			OpenReader: func() (tasktracker.TaskReader, error) {
+				return a.backend(conn)
+			},
+		}
+
+		if conn.Kind == config.KindJira || conn.Kind == config.KindLocal {
+			route.OpenWriter = func() (tasktracker.TaskWriter, error) {
+				return a.backend(conn)
+			}
+		}
+
+		routes = append(routes, route)
+	}
+
+	a.resolverOnce = tasktracker.NewResolver(routes...)
+
+	if scope, ok := a.config.FirstProjectScope(); ok {
+		if t, ok := a.config.TrackerForScope(scope); ok {
+			a.resolverOnce.WithReadFallback(t.Name)
+		}
+	}
+
+	return a.resolverOnce
+}
+
+// routedTracker is the resolver as a TaskTracker: every call routes by its key.
+func (a *appContext) routedTracker() tasktracker.TaskTracker {
+	return tasktracker.Routed(a.resolver())
+}
+
+// trackerReader returns the reader of the tracker covering scope, for the per-project
+// workflow graph, which needs the backend itself rather than a routed view of it.
+func (a *appContext) trackerReader(scope string) (tasktracker.TaskReader, error) {
+	res, err := a.resolver().ResolveScope(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	return res.Reader, nil
+}
+
+// warnUnroutedStoredKeys logs, once at startup, every stored issue key no configured
+// tracker's scopes cover — a config change can strand keys, since routing is never
+// stored. Reported, never deleted. A failure to list them is logged too, and does not
+// stop the command: the report is advice, not a gate.
+func (a *appContext) warnUnroutedStoredKeys() {
+	unrouted, err := pipeline.UnroutedStoredKeys(a.store, a.resolver())
+	if err != nil {
+		logging.For(a.log, "cmd").Warn("could not check stored issue keys against tracker scopes", "err", err)
+
+		return
+	}
+
+	for _, u := range unrouted {
+		logging.For(a.log, "cmd").Warn("stored issue key routes to no configured tracker",
+			"issue_key", u.Key, "reason", u.Reason,
+			"consequence", "it stays stored; reads go through the fallback if one serves it, writes are refused",
+			"action", "add its scope to a tracker's scopes, or leave it if the change was intended")
 	}
 }
 
@@ -228,7 +331,7 @@ func (a *appContext) warnIfNoStatusHistorySource() {
 // never correctness. Failing a whole reconcile pass because a planning aid was
 // unavailable would trade a real capability for a cosmetic one.
 func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
-	tracker, err := a.taskTracker(projectKey)
+	tracker, err := a.trackerReader(projectKey)
 	if err != nil {
 		logging.For(a.log, "workflow").Warn("no tracker for project; transitions will be single-hop",
 			"project_key", projectKey, "err", err)
@@ -259,69 +362,6 @@ func (a *appContext) workflowGraph(projectKey string) *workflow.Graph {
 	}
 
 	return graph
-}
-
-// trackerResolver builds a correlator.TrackerResolver over the configured
-// connections, so a candidate is verified against the site that actually holds
-// it rather than whichever one the default project happened to select.
-//
-// That was the bug: matching took ONE tracker for a whole pass, so on a
-// multi-connection setup a candidate whose provenance recorded a different
-// connection was checked against the wrong site — reported "does not exist" for a
-// ticket that exists, or, if the key collided, silently resolved to an unrelated
-// issue. Both look identical to a genuinely stale key in the output.
-//
-// A default project on a non-jira tracker gets SingleTracker: the local backend
-// ignores connections entirely, and collapsing that into the general case keeps
-// one code path through Match rather than a special one.
-//
-// Trackers are built once and memoized per connection. Each is an HTTP client
-// with its own credentials, and matching resolves per candidate — rebuilding one
-// per candidate would construct the same client dozens of times in a pass.
-func (a *appContext) trackerResolver(defaultProject string) (correlator.TrackerResolver, error) {
-	fallback, err := a.taskTracker(defaultProject)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, conn, err := a.trackerConnection(defaultProject); err != nil || conn.Kind != config.KindJira {
-		return correlator.SingleTracker(fallback), nil
-	}
-
-	byName := make(map[string]tasktracker.TaskReader, len(a.config.Connections))
-
-	return func(connection string) (tasktracker.TaskReader, error) {
-		// No connection recorded: a branch- or prose-derived candidate, which is
-		// the common case since only jira-source events carry one. The default
-		// project's tracker is the best available guess, and it is a guess — see
-		// this function's own doc comment.
-		if connection == "" {
-			return fallback, nil
-		}
-
-		if tracker, ok := byName[connection]; ok {
-			return tracker, nil
-		}
-
-		conn, ok := a.config.ConnectionByName(connection)
-		if !ok || conn.Kind != config.KindJira {
-			// Not configured: renamed, removed, or a typo. An error rather than
-			// a silent fallback to the default site, because falling back is how
-			// the original bug behaved — it would check the wrong site and report
-			// a real ticket missing. verifyCandidates records this per candidate.
-			return nil, fmt.Errorf("no configured jira connection named %q", connection)
-		}
-
-		client, err := a.jiraClient(conn)
-		if err != nil {
-			return nil, err
-		}
-
-		tracker := jira.NewTracker(client)
-		byName[connection] = tracker
-
-		return tracker, nil
-	}, nil
 }
 
 // projectKey resolves --project, falling back to the first configured
@@ -615,6 +655,7 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	// source does not stop this pass from running, it only means the
 	// staleness guard cannot fire — see warnIfNoStatusHistorySource.
 	app.warnIfNoStatusHistorySource()
+	app.warnUnroutedStoredKeys()
 
 	linkExclusions, err := app.config.CompiledLinkExclusions()
 	if err != nil {
@@ -656,27 +697,17 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 		return nil
 	}
 
-	// The default project selects the FALLBACK tracker — the one used for a
-	// candidate with no recorded connection, which is every branch- or
-	// prose-derived key. Candidates that do carry one are resolved per candidate
-	// by trackerResolver, so a multi-connection setup no longer verifies them
-	// against whichever site this project happens to name.
+	// The default project names whose workflow graph plans transitions. Every read
+	// and write routes per key through app.resolver, so a multi-tracker setup
+	// verifies each candidate and link on the tracker that owns it.
 	project, err := app.projectKey("")
 	if err != nil {
 		return err
 	}
 
-	tracker, err := app.taskTracker(project)
-	if err != nil {
-		return err
-	}
+	tracker := app.routedTracker()
 
-	resolve, err := app.trackerResolver(project)
-	if err != nil {
-		return err
-	}
-
-	matchResult, matchErr := pipeline.RunMatch(ctx, app.store, resolve, client, app.config,
+	matchResult, matchErr := pipeline.RunMatch(ctx, app.store, tracker, client, app.config,
 		pipeline.MatchOptions{Log: app.log})
 
 	// Render before returning the error: RunMatch isolates failures per
@@ -691,13 +722,6 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 	// Reconcile only after a clean matching pass: it reconciles against
 	// matching's link set, so running it after a failed pass would draft
 	// against a half-updated one.
-	//
-	// NOTE: the reconciler still takes a single tracker, so the limitation
-	// matching just shed still applies HERE — a link whose Connection differs
-	// from this one is verified against the wrong site, and its transitions read
-	// from there too. store.NarrativeIssue.Connection is persisted and available;
-	// verifyLinks simply does not consult it yet. Tracked as task #177, and the
-	// seam it needs (correlator.TrackerResolver) now exists.
 	reconcileResult, reconcileErr := pipeline.RunReconcile(
 		ctx, app.store, tracker, client, app.config,
 		pipeline.ReconcileOptions{
@@ -834,18 +858,14 @@ func (c *watchCmd) Run(app *appContext) error {
 		return err
 	}
 
-	// Matching/reconciling/applying all use ONE tracker, resolved from the
-	// default project — the same multi-connection limitation
-	// devNarrateCmd.Run's own doc comment names, unchanged here.
+	// Matching, reconciling and applying all route per key through app.resolver.
+	// The default project only names whose workflow graph plans transitions.
 	project, err := app.projectKey("")
 	if err != nil {
 		return err
 	}
 
-	tracker, err := app.taskTracker(project)
-	if err != nil {
-		return err
-	}
+	tracker := app.routedTracker()
 
 	applier := gate.NewApplier(app.store, tracker, app.config.DefaultCreateScope(), app.config.Trackers)
 
@@ -855,12 +875,7 @@ func (c *watchCmd) Run(app *appContext) error {
 	// changed. A nil graph here simply means transitions stay single-hop.
 	graph := app.workflowGraph(project)
 
-	// Resolved once for the loop, like the graph: building it walks config and
-	// credentials, and neither changes between passes.
-	resolve, err := app.trackerResolver(project)
-	if err != nil {
-		return err
-	}
+	app.warnUnroutedStoredKeys()
 
 	// ctx governs the LOOP — whether to acquire another lease, whether to
 	// keep waiting out the interval — but deliberately does NOT govern an
@@ -877,7 +892,7 @@ func (c *watchCmd) Run(app *appContext) error {
 
 	return app.watchLoop(ctx, c.Interval.Duration(), c.Once, func(passCtx context.Context, _ string) error {
 		return app.runWatchPass(
-			passCtx, client, tracker, applier, linkExclusions, graph, resolve, since, c.DryRun)
+			passCtx, client, tracker, applier, linkExclusions, graph, since, c.DryRun)
 	})
 }
 
@@ -972,7 +987,6 @@ func (a *appContext) runWatchPass(
 	applier *gate.Applier,
 	linkExclusions []*regexp.Regexp,
 	graph *workflow.Graph,
-	resolve correlator.TrackerResolver,
 	since time.Duration,
 	dryRun bool,
 ) error {
@@ -998,7 +1012,7 @@ func (a *appContext) runWatchPass(
 		return nil
 	}
 
-	matchResult, matchErr := pipeline.RunMatch(ctx, a.store, resolve, client, a.config,
+	matchResult, matchErr := pipeline.RunMatch(ctx, a.store, tracker, client, a.config,
 		pipeline.MatchOptions{Log: a.log})
 	fmt.Print(pipeline.RenderMatchResult(matchResult))
 

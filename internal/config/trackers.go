@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
 // ConnectionKind is the system a connection talks to. It decides which backend reads
@@ -51,7 +53,7 @@ const (
 	syntaxRepo
 )
 
-// projectScopeRE matches a project key, the same shape tasktracker.ProjectFromIssueKey
+// projectScopeRE matches a project key, the same shape tasktracker.ParseIssueKey
 // accepts as an issue key's prefix.
 var projectScopeRE = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 
@@ -107,16 +109,17 @@ type Tracker struct {
 	MaxIssuesPerQuery int `json:"max_issues_per_query"`
 }
 
-// IsScopeWritable reports whether scope is in WritableScopes — the single question
-// gate.Applier asks before every tracker write. Empty WritableScopes answers false for
+// IsScopeWritable reports whether scope is in WritableScopes (matched by
+// tasktracker.ScopeMatches) — the single question gate.Applier asks before every tracker
+// write. Empty WritableScopes answers false for
 // every scope, including the ones the tracker reads.
 func (t Tracker) IsScopeWritable(scope string) bool {
-	return slices.ContainsFunc(t.WritableScopes, func(w string) bool { return scopeMatches(w, scope) })
+	return slices.ContainsFunc(t.WritableScopes, func(w string) bool { return tasktracker.ScopeMatches(w, scope) })
 }
 
 // containsScope reports whether scope routes to this tracker.
 func (t Tracker) containsScope(scope string) bool {
-	return slices.ContainsFunc(t.Scopes, func(s string) bool { return scopeMatches(s, scope) })
+	return slices.ContainsFunc(t.Scopes, func(s string) bool { return tasktracker.ScopeMatches(s, scope) })
 }
 
 // EffectiveJQL returns query's JQL scoped to this tracker's Scopes.
@@ -158,29 +161,6 @@ func (t Tracker) IssueLimit() (int, error) {
 	default:
 		return t.MaxIssuesPerQuery, nil
 	}
-}
-
-// scopeMatches reports whether pattern, a configured scope, covers scope. A repo scope
-// (one containing "/") compares segment by segment, case-folded the way
-// events.PullRequestRef folds case, with "*" matching any one segment. A project scope
-// is compared exactly, since Jira project keys are case-sensitive uppercase.
-func scopeMatches(pattern, scope string) bool {
-	if !strings.Contains(pattern, "/") {
-		return pattern == scope
-	}
-
-	ps, ss := strings.Split(pattern, "/"), strings.Split(scope, "/")
-	if len(ps) != len(ss) {
-		return false
-	}
-
-	for i := range ps {
-		if ps[i] != "*" && !strings.EqualFold(ps[i], ss[i]) {
-			return false
-		}
-	}
-
-	return true
 }
 
 // scopesOverlap reports whether some issue could route to both a and b. Only "*" is a

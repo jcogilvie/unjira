@@ -475,21 +475,6 @@ GitHub collector exists (see the opening paragraph above for what that decision 
 `docs/superpowers/specs/2026-09-17-github-collector-design.md`'s §6). This entry stays only so a
 future reader who greps for uncalled packages finds the reasoning instead of re-deriving it.
 
-### F3 — A backend-agnostic correlator has a hardcoded Jira dependency
-
-`internal/correlator` imports `internal/clients/jira` for one function: `IsTransportError`
-(`correlator/match.go:12`, used at `:129`), which type-asserts `*jira.Error` to distinguish a
-transport failure from a real 404.
-
-This was reasoned, not accidental — `match.go:105-123` explains it at length: `tasktracker` is the
-natural home, but `clients/jira` already imports `tasktracker`, so putting it there is an immediate
-cycle; `correlator` was the cycle-free option.
-
-The reasoning is sound and the consequence is still real: the classifier a *future GitHub tracker*
-would need cannot recognize its errors, and `correlator` — which otherwise talks only to
-`tasktracker` interfaces — has a concrete backend in its import list. This is incident 21's shape at
-the package level. The comment names the cycle as the blocker, which is the actionable part.
-
 ### F6 — Six artifacts are written and never read
 
 `cwd`, `session_id`, `started_at`, `ended_at`, `session_branches`, `user_message_count` (claudecode),
@@ -612,12 +597,10 @@ in one real deployment:
   awaiting maintainer review." Same work, two audiences, and **different prose** — which is not
   routing but per-destination content, and is the hard part.
 
-**Routing still has nowhere to live.** `correlator.TrackerResolver` is already per-candidate
-(`func(connection string) (tasktracker.TaskReader, error)`), and its doc comment says the design
-intent plainly: *"this package only knows that different candidates can need different trackers."* So
-the *verification* layer is ready. What is missing is upstream of it — `Candidate.Connection` is
-populated only by jira-source events, everything else arrives empty and takes a resolver's default,
-and nothing maps where untracked work happened (a repository) onto a tracker's scope.
+**Routing of untracked work still has nowhere to live.** A key already routes to its tracker
+(`tasktracker.Resolver`, `internal/tasktracker/resolve.go`), so verification is per key. What is
+missing is upstream of it, for work with no key at all: nothing maps where untracked work happened (a
+repository) onto a tracker's scope.
 
 **The consequence is a disclosure risk, not a cost.** Narrative summaries are generated from
 transcript content, which routinely contains employer-internal ticket keys, incident detail and
@@ -636,6 +619,27 @@ Not reachable while every tracker in a deployment is Jira or local: nothing yet 
 tracker kind. It becomes reachable with the GitHub reader (the spec's slice 4), and the spec orders
 routing (slice 5) directly after it.
 
+### F55 — a key no tracker lists is still read, through a fallback
+
+The tracker model's routing is a pure function of key and config, and the spec reads that as "find the
+one tracker whose scopes contain it". The resolver keeps one exception, deliberately: a project-syntax
+key no tracker's scopes cover is **read** through the tracker covering the first configured project
+scope (`appContext.resolver`, `cmd/unjira/main.go`; `tasktracker.Resolver.WithReadFallback`). That is
+the tracker every candidate used to be verified against, so behaviour is unchanged by the refactor.
+A fallback resolution never carries a writer, and the write gate refuses the key as untracked.
+
+**Why it stays for now.** Without it, work on another team's ticket (a key in an unlisted project) no
+longer verifies, the narrative stays unmatched, and the create path proposes a new ticket for work that
+is already tracked: a duplicate, which is worse than today's "linked, refused as untracked, retarget
+in triage".
+
+**The cost.** Such a key reads from a site chosen by config order rather than by ownership, so on a
+multi-site setup it can be checked against the wrong site, the bug per-key routing otherwise removes.
+Every stored key that resolves only this way is reported at startup (`pipeline.UnroutedStoredKeys`),
+so the population is visible. Deciding whether to keep the fallback needs that population measured
+on a real store: how many links depend on it, and how many of them a scope added to config would
+cover instead.
+
 ### F7 — a connection's name still does four jobs
 
 **Narrowed by the tracker model's slice 1** (`docs/superpowers/specs/2026-10-06-tracker-model-design.md`).
@@ -647,20 +651,11 @@ survives unchanged — `writable_scopes` does not default to `scopes`.
 **What remains:** identity still has no field of its own. `Connection.Name` is the config key, the
 `UNJIRA_JIRA_CREDENTIALS` lookup key, the Jira collector's cursor prefix
 (`collector/jira/cursor.go:24`), and the connection recorded on every stored link
-(`narrative_issues.connection`, read back by `correlator.TrackerResolver`). Renaming a connection
-therefore resets its cursors and orphans the connection named on its old links, which then fail
-verification with "no configured jira connection named". **#178**'s kubeconfig-like question (a user
+(`narrative_issues.connection`). Renaming a connection therefore resets its cursors, and leaves its
+old links naming a connection that no longer exists. Verification no longer reads that column — a key
+routes by its scope — so the stale name is provenance only, but it is still the one place a link
+records where it came from. **#178**'s kubeconfig-like question (a user
 by name, separate from the server) is still open on its own terms.
-
-### F8 — correlator.TrackerResolver may be in the wrong package
-
-`TrackerResolver` (`correlator/match.go:162`) is `func(connection string) (tasktracker.TaskReader, error)`
-— a type owned by `correlator` whose signature is entirely `tasktracker` vocabulary. It has one
-consumer today (`correlator.Match`) and **#177** proposes two more, on the reconciler and applier
-paths. When it has three consumers in three packages, the resolver living in one of them is arbitrary.
-
-At one consumer this is not worth moving. `tasktracker` is the obvious home if it grows, and #177 is
-the natural moment to decide.
 
 ### F32 — a subagent that names no branch of its own has no branch at all
 
@@ -712,7 +707,6 @@ yet; noted while writing the template, not found as a live incident.
 | Finding | Task |
 |---|---|
 | F1 — refs/fanout await the GitHub collector | resolved: keep, invariant corrected. Not a blocker. |
-| F3 — concrete backend in the correlator | **#183** |
 | F5 — dead schema (estimates, ledger) | **resolved**: both dropped. Only TWO tables, not the three the finding claimed — a miscount nobody had checked. Existing databases keep their orphans, since this package has no migration mechanism, which is harmless because nothing referenced them |
 | F6 — unread artifacts | **#176**, re-verified 2026-09-16 after F15/F20/F25 each added artifacts: still zero readers. Near-miss worth naming — `segmentSummary` renders `len(seg.userTexts)`, not the `user_message_count` artifact. `scm_keys` is the counter-example: written AND wired in one change, so it never belonged here. Narrowed 2026-10-02: `events.ArtifactPullRequest` gained readers, the dispute re-ask's evidence and then the PR identity join (F43) |
 | F32 — a subagent that names no branch has none | open, narrowed: a subagent's own calls now supply its branch when they name exactly one (39 of 1,041 segments); several are recorded as a set. The remainder named none |
@@ -731,10 +725,10 @@ yet; noted while writing the template, not found as a live incident.
 | F50 — a split narrative is still read by the create path and the review queue | open. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed: a split narrative held a create slot for 3 of 3 passes at cap 1 |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |
-| F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |
 | F31 — learn's watermark can skip corrections | **resolved**, then superseded: the watermark is a `store.CorrectionsCursor` advanced by `KeepCandidates` from what the draft READ, never from a clock reading at keep, and never backwards. Its position is now `actions.corrected_seq`, a sequence stamped when a row becomes a correction (from `correction_marks`), which also closed F41 (the clock stepping back) and F42 (a lesson added by a later ruling). Drill: a clock reading at keep fails the between-draft-and-keep test 5/5 |
+| F55 — an unlisted project's key is still read through a fallback | open. Kept by the tracker model's slice 2 to preserve behaviour; reported at startup. Unmeasured |
 | F29 — nothing expresses which tracker a narrative's work belongs to | open, narrowed: per-tracker write authority landed with the tracker model's slice 1, before any public tracker can be read. The routing half (work location, `mirror_to`) is the spec's slice 5 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |

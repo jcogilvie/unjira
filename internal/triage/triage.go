@@ -169,12 +169,7 @@ func (s *Session) itemWritability(a store.ActionRow) (bool, string) {
 		return true, ""
 	}
 
-	project, _, found := strings.Cut(a.IssueKey, "-")
-	if !found {
-		return true, ""
-	}
-
-	w := s.writability.ProjectWritability(project)
+	w := s.writability.IssueWritability(a.IssueKey)
 
 	return w.Writable, w.Reason
 }

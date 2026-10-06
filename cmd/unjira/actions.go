@@ -178,16 +178,19 @@ func (a *appContext) approveAction(id int64) error {
 
 // approveWriter resolves the tasktracker.TaskWriter `actions decide
 // --approve` hands to gate.Applier — deliberately typed as the narrow
-// TaskWriter interface, not the full TaskTracker appContext.taskTracker
+// TaskWriter interface, not the full TaskTracker appContext.routedTracker
 // returns, so the compiler (not a reviewer re-reading this file later)
 // enforces that this command's approve path cannot also read-and-decide on
-// its own. Obtaining the full TaskTracker here is fine — approveAction just
-// never widens what it hands onward to Applier.
+// its own.
+//
+// It routes each write by its key through appContext.resolver, which hands
+// out a writer only for a writable scope. An error is kept in the signature
+// for the callers' sake: none of them should change if building the writer
+// ever needs to fail early again.
 func (a *appContext) approveWriter() (tasktracker.TaskWriter, error) {
-	project, err := a.projectKey("")
-	if err != nil {
-		return nil, err
+	if len(a.config.Trackers) == 0 {
+		return nil, fmt.Errorf("no trackers are configured, so there is nothing to write to")
 	}
 
-	return a.taskTracker(project)
+	return a.routedTracker(), nil
 }
