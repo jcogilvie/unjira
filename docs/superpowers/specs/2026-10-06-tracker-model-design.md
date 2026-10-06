@@ -1,0 +1,255 @@
+# Tracker model: connections, trackers, routing and destinations
+
+Status: design, approved.
+
+Resolves the tracker-model chain in `docs/architecture-findings.md`:
+
+- **F7:** one struct carries four concerns.
+- **F28:** a collector cannot ask whether its system is a tracker here.
+- **F29:** nothing expresses which tracker a narrative's work belongs to.
+- **F8:** `TrackerResolver` lives in the wrong package.
+- **F3:** the correlator imports `clients/jira` for one error check.
+- **F1:** partly; `refs` gets its consumer.
+
+## Goal
+
+unjira reconciles against more than one tracker. The motivating deployment does employer work tracked in
+Jira and open-source work tracked in upstream GitHub issues, in the same transcript corpus, often on the
+same day. Two things go wrong today:
+
+- Upstream work has no Jira key, so it looks untracked, and the reconciler may propose a Jira ticket for it.
+- No config surface can say which tracker work belongs to, or that a tracker may be read but never written.
+
+## Decisions
+
+**GitHub is a read-only tracker.**
+- unjira reads upstream issues to match and verify work, and never writes to a public tracker.
+- The GitHub backend implements `tasktracker.TaskReader` only. A public write is therefore structurally
+  impossible, not merely gated.
+- A GitHub writer is out of scope, and would need its own spec.
+
+**No tracker is special by name.**
+- Trackers form a named list, and work may be ticketed in whichever allowed trackers fit.
+- The schema permits several destinations for one narrative.
+- Per-destination prose (one narrative ticketed in two trackers with different text) is a later slice.
+- Every rule is stated in terms of configured trackers, never "Jira".
+
+**Mirroring is a per-tracker rule, and the default is none.**
+- Work tracked in, or done in, tracker *T*'s scope may also be ticketed in the trackers named by
+  *T*`.mirror_to`.
+- Unlisted means nowhere else, which is deny by default.
+- The policy belongs to the operator, and differs by org. unjira encodes the mechanism, not a policy.
+
+**Untracked work in an external scope follows the same rule.**
+- A crossplane PR with no upstream issue gets no ticket in another tracker unless crossplane's tracker
+  says `mirror_to` it.
+
+**Config is YAML, with JSON still accepted.**
+- `unjira.config.yaml` / `.yml`, parsed with `sigs.k8s.io/yaml` in strict mode, so unknown keys are
+  errors. `.json` keeps working, because that library reads JSON too.
+- Short scope keys must be quoted. YAML reads an unquoted `NO`, `ON` or `YES` as a boolean.
+  - Every scope is a typed string field, so this fails at load, not silently.
+  - The load error says to quote the value.
+  - The example config quotes short keys.
+
+## Config model
+
+```yaml
+connections:            # WHO and WHERE: system kind, endpoint. Nothing about scope.
+  - name: work-jira
+    kind: jira
+    endpoint: https://org.atlassian.net
+  - name: github
+    kind: github
+    endpoint: https://api.github.com
+  - name: local         # the existing local backend, as a connection kind
+    kind: local
+
+trackers:               # WHAT: scopes and write authority, per tracker
+  - name: work
+    connection: work-jira
+    scopes: ["PAAS", "DEVSBX"]      # read scope: which issues route here
+    writable_scopes: ["DEVSBX"]     # write authority; absent or empty means nothing is writable
+    default_scope: "DEVSBX"         # where this tracker's creates land; required if writable and a destination
+    queries:                        # what the Jira collector reads (was jira[].queries)
+      - name: mine
+        jql: "assignee = currentUser()"
+    max_issues_per_query: 200
+  - name: upstream
+    connection: github
+    scopes: ["crossplane/crossplane", "crossplane-contrib/*"]
+    writable_scopes: []             # read-only; no GitHub writer exists
+    mirror_to: []                   # work here is ticketed nowhere else
+
+default_ticket_in: ["work"]         # untracked work outside every scope; empty means propose nothing
+```
+
+**Credentials** stay in the environment, under the existing variables, so no credential contract changes:
+- **`jira`** connections read `UNJIRA_JIRA_CREDENTIALS`, keyed by connection name, as today.
+- **`github`** connections read `UNJIRA_GITHUB_CREDENTIALS`, keyed by the endpoint's host (`github.com`),
+  as the GitHub collector does today.
+- Collectors name a connection (the GitHub collector's `connection: github`). A collector and a tracker on
+  one connection share one credential.
+
+**Validation at startup.** Each check is a loud error naming the field:
+- every `connection`, `mirror_to` and `default_ticket_in` name resolves;
+- `writable_scopes` ⊆ `scopes` (today's `ValidateWriteScope`, generalized);
+- a `writable_scopes` entry on a connection kind with no writer is refused, never silently ignored;
+- **scopes do not overlap across trackers**, so every issue routes to exactly one tracker;
+- a writable tracker's backend can report unjira's own identity (see "Classification and self-authorship").
+
+**Old keys are refused.** Config is user-local, and the store has no migrations. So the top-level `jira`
+and `tracker` keys are an error naming the new shape, not silently mapped. The example config is rewritten
+as commented YAML.
+
+`tracker.default_project` becomes `default_ticket_in` plus each tracker's own default scope for creates
+(`default_scope`, required when the tracker is writable and named in a destination list). The global
+`workflow` (named status transitions) stays global in slice 1. Make it per-tracker when a second writable
+backend exists.
+
+## Issue identity and routing
+
+- **An issue key stays in its tracker's native syntax:** Jira `PAAS-123`, GitHub
+  `crossplane/crossplane#6812`. The two cannot be confused, so stored keys (`narrative_issues`,
+  `actions`) need no schema change.
+- **Routing is a pure function of key and config.**
+  - Parse the key's scope by syntax. Jira: the project prefix. GitHub: `owner/repo`, case-folded, the way
+    `events.PullRequestRef` folds case.
+  - Then find the one tracker whose `scopes` contain it. Glob entries (`crossplane-contrib/*`) match a
+    path segment.
+  - Routing is not stored, so config stays the single source of truth.
+  - A stored key that no longer routes after a config change is reported at startup, never dropped.
+- **One resolver for every path (F8).** `tasktracker.Resolve(issueKey)` returns the tracker's reader, plus
+  its writer when the scope is writable. Matching, the reconciler and the applier all use it.
+  `correlator.TrackerResolver` is removed.
+- **Each backend classifies its own errors (F3).** Transport errors are recognized through a
+  `tasktracker` interface method or error type, so `internal/correlator` stops importing `clients/jira`.
+- **Matching learns every configured kind.**
+  - `gatherCandidates` extracts Jira keys as today.
+  - It also extracts qualified GitHub references: `owner/repo#N`, issue URLs, and "Fixes owner/repo#N" in
+    a PR body.
+  - Each candidate is verified against its own tracker's reader.
+  - Bare `#N` does not count yet: resolving it needs repo context, which is what `internal/correlator/refs`
+    is for (F1, a later slice).
+- **A GitHub PR is not an issue.** It stays work evidence. The GitHub reader resolves issues only, and a
+  PR that `Fixes` an upstream issue is how work becomes "tracked upstream".
+
+## Classification and self-authorship (F28)
+
+- **Classification asks the config.** `pipeline.CollectContext` gains `TrackerFor(kind, scope)`. It
+  reports whether an artifact's scope is a configured tracker's scope, and returns that tracker.
+  - The Jira collector uses it as it uses its connection today.
+  - A future GitHub Issues collector marks an issue event as a tracker record only when its repo is a
+    tracker scope here.
+- **Unchanged:** PRs stay work evidence in every configuration, and the exit filters
+  (`AnyWorkEvidence`, `suppressTrackerEcho`, `dropSelfAuthored`) stay as they are.
+- **Self-authorship is a requirement on writers.**
+  - A tracker with any `writable_scopes` must sit on a backend that reports unjira's own identity (Jira's
+    `Myself()` today). Otherwise startup refuses it, because unjira would narrate its own writes back as
+    new work.
+  - A read-only tracker has no writes to echo.
+- **Collectors read through connections.** The Jira collector's queries are scoped to the scopes of the
+  trackers on its connection, generalizing `EffectiveJQL`. A collector with no tracker on its connection
+  (the GitHub PR collector) produces evidence only.
+
+## Destinations
+
+Before any drafting call, the pipeline computes each narrative's **allowed destinations** deterministically:
+
+| The narrative's work… | Allowed destinations |
+|---|---|
+| is linked to issue *I* in tracker *T* | comments and transitions on *I*, gated by *T*'s `writable_scopes` as today; plus creates in *T*`.mirror_to` |
+| is untracked, and happened in a scope of tracker *T* | *T* if writable, plus *T*`.mirror_to` |
+| is untracked, with no known scope | `default_ticket_in` |
+| has an empty set | nothing is proposed; recorded as a suppression with its reason, like the other filters |
+
+- The model proposes onto whichever allowed destinations fit.
+- A proposal naming a destination outside the set is rejected deterministically.
+- The three existing write gates still apply on top.
+
+**Work location**, meaning where untracked work happened, uses two kinds of evidence in strict order.
+
+1. **The transcript's own SCM actions:**
+   - the remote named in `git push` output (`To github.com:owner/repo.git`);
+   - PR-creation URLs;
+   - `gh … -R/--repo`;
+   - GitHub MCP write calls.
+
+   Where this exists it wins, because it names where work *went*. Measured over 1,296 local segments, it
+   disagreed with the cwd's repo in 5 of 123 root and 33 of 104 subagent segments where both existed. One
+   example: a `helm-charts` worktree pushing to `cse-gitops`.
+
+2. **Fallback: the cwd's git remotes, read with go-git** (`github.com/go-git/go-git/v5`).
+   - **Opened with** `PlainOpenWithOptions(cwd, {DetectDotGit: true, EnableDotGitCommonDir: true})`.
+     Verified: a linked worktree, whose `.git` is a file, resolves to its main repository's remotes, a
+     subdirectory resolves to its repository, and a non-repo returns an error.
+   - **No `git` binary,** no network, no `$PATH` dependency.
+   - **Sorted,** since go-git's remote order is not stable.
+   - **Read at collect time, once per distinct cwd per pass.** 8% of root and 13% of subagent cwds no
+     longer exist later, mostly deleted worktrees.
+   - **Stored as an artifact:** the normalized `owner/repo` of every remote. If the cwd is gone or is not
+     a repository, the artifact records why, as the existing `*_omitted` artifacts do.
+
+   This fallback covers the 61 of 255 root segments (24%) that have no push or PR evidence. That is
+   investigation and in-progress work, exactly what would otherwise fall to `default_ticket_in`.
+
+**Scope is decided at reconcile time,** from config, so a config change applies without re-collecting:
+- Every remote is matched against tracker scopes, not just `origin`.
+- Contributor forks match no scope, and drop out. `crossplane-diff` has six fork remotes.
+- One matching tracker is the work's scope.
+- Remotes matching **different** trackers are ambiguous: reported, and treated as no known scope, never
+  guessed.
+
+**Rejected: tracking branches.** Of 86 multi-remote root segments, 36 had an upstream set; for subagents,
+6 of 379. That is too rare to justify the complexity.
+
+**Invariant change.** CLAUDE.md's "collectors are dumb and deterministic" gains a named, bounded
+exception: the claude_code collector reads a working tree's local git config through go-git. This is
+local, deterministic, judgment-free extraction, with no network.
+
+## Slices
+
+Each slice ships on its own and keeps the write path safe throughout.
+
+1. **Config model.** YAML/JSON loading, `connections` and `trackers`, validation, refusal of the old keys,
+   and the example rewritten. Behaviour is unchanged: one Jira tracker, as today.
+2. **Resolver.** `tasktracker.Resolve(issueKey)`, typed key parsing per kind, and per-backend error
+   classification (F8, F3). Matching, the reconciler and the applier move onto it.
+3. **Classification and self-authorship (F28).** `CollectContext.TrackerFor`, and the startup check that a
+   writable tracker has a self-identity.
+4. **GitHub read-only tracker.** A `TaskReader` over GitHub Issues on the shared connection, and qualified
+   `owner/repo#N` candidates in matching.
+5. **Destinations.** Work-location evidence (transcript first, then go-git remotes), the allowed-destination
+   set, `mirror_to` and `default_ticket_in`, and the empty set recorded as a suppression.
+
+Slices 1–3 are refactors behind unchanged behaviour. Slices 4–5 change behaviour.
+
+## Out of scope, recorded as follow-ups
+
+- Per-destination prose: one narrative ticketed in two trackers with different text.
+- A GitHub writer, and any public write.
+- Bare `#N` references, with repo context (F1's `refs`).
+- A GitHub Issues collector.
+- Per-tracker `workflow` (named status transitions).
+
+## Testing
+
+- **Every slice is TDD**, with break-it drills on each guard. Each drill is a one-line mutation that must
+  compile and fail a named test.
+- **Slice 1:**
+  - an old-shape config refusal test per removed key;
+  - the YAML `NO`/`ON`/`YES` load error;
+  - the scope-overlap refusal;
+  - a writable scope on a writer-less kind refused.
+- **Slice 2:**
+  - routing tests per key syntax, including a glob scope and case folding;
+  - the stored-key-no-longer-routes report.
+- **Slice 5:**
+  - transcript evidence beats a disagreeing cwd;
+  - a linked worktree resolves to its main repository's remotes, against a real temporary repository
+    built in the test;
+  - fork remotes drop out by scope;
+  - a two-tracker match is ambiguous;
+  - an empty destination set is recorded as a suppression.
+- **Measured before and after slice 5,** on a fresh snapshot of local transcripts: how many narratives
+  change destination, and how many would-be creates for externally-scoped work disappear.
