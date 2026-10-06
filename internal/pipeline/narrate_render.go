@@ -213,8 +213,12 @@ func writeSharingLines(b *strings.Builder, s correlator.Stats) {
 	}
 
 	if s.DisputedEvents > 0 {
-		fmt.Fprintf(b, "dispute  %d event(s) placed in more than one cluster; resolved %d by one re-ask\n",
-			s.DisputedEvents, len(s.Disputes))
+		how := "by one re-ask"
+		if s.DisputeCalls > 1 {
+			how = fmt.Sprintf("by %d re-ask calls, batched to fit the context window", s.DisputeCalls)
+		}
+		fmt.Fprintf(b, "dispute  %d event(s) placed in more than one cluster; resolved %d %s\n",
+			s.DisputedEvents, len(s.Disputes), how)
 		for _, d := range s.Disputes {
 			fmt.Fprintf(b, "         %s: %s chosen over %s (confidence %.2f)\n",
 				d.Event, d.Chosen, strings.Join(otherClaimants(d), ", "), d.Confidence)

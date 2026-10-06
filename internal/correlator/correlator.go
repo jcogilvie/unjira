@@ -216,13 +216,17 @@ type Stats struct {
 	OmittedEvents   int
 	RecoveredEvents int
 	// DisputedEvents counts events two or more clusters placed in event_indices,
-	// which the one dispute re-ask then gave a single member home; Disputes says how
+	// which the one dispute pass then gave a single member home; Disputes says how
 	// each was resolved. On a pass that returned, every disputed event was resolved,
 	// because an unresolved one is a loud error. Reported so the acceptance
 	// measurement (shared-context spec §9, M4) can read how often the model claims
 	// one event twice and what it decided, without re-deriving it from a prompt.
 	DisputedEvents int
 	Disputes       []DisputeResolution
+	// DisputeCalls is how many calls the dispute pass made: one, unless the disputes
+	// together exceeded the context window and were split into batches that each fit.
+	// Already counted in Calls; broken out so a report can say which happened.
+	DisputeCalls int
 	// ContextLinks is how many context links Persist wrote, SharedEvents how many
 	// distinct events received at least one, and MaxContextFanOut the most context
 	// links one event received in this call. The distribution the spec reports in
@@ -277,6 +281,7 @@ func (s *Stats) Add(other Stats) {
 	s.RecoveredEvents += other.RecoveredEvents
 	s.DisputedEvents += other.DisputedEvents
 	s.Disputes = append(s.Disputes, other.Disputes...)
+	s.DisputeCalls += other.DisputeCalls
 	s.ContextLinks += other.ContextLinks
 	s.SharedEvents += other.SharedEvents
 	s.MaxContextFanOut = max(s.MaxContextFanOut, other.MaxContextFanOut)
@@ -371,11 +376,13 @@ func WithInstruction(instruction string) ClusterOption {
 // tagged new or extending an existing row. Pure compute: no store access.
 //
 // On return every event is a member of at most one result. An event the model
-// placed in two or more clusters' event_indices is resolved by ONE dispute re-ask
-// over the whole pass (resolveDisputes) — after any bisection has merged its
-// halves, so a double placement no single response contains (finding F36, one
-// eligible event numbered in both halves) is resolved by the same call as one a
-// single response made. Not by response order: membership drives token attribution,
+// placed in two or more clusters' event_indices is resolved by ONE dispute pass
+// over the whole pass's results (resolveDisputes) — after any bisection has merged
+// its halves, so a double placement no single response contains (finding F36, one
+// eligible event numbered in both halves) is resolved the same way as one a single
+// response made. The dispute pass is one call, or, when the disputes together exceed
+// the context window, one call per batch that fits; each disputed event is asked
+// about once either way. Not by response order: membership drives token attribution,
 // and which cluster the model happened to write first says nothing about whose work
 // an event is.
 func Cluster(
@@ -586,7 +593,14 @@ const charsPerTokenEstimate = 2
 // it is; TestCluster_TokenEstimateIsNotOptimistic pins it against the
 // measurements so a future "optimization" back toward 4 fails loudly.
 func estimateTokens(text string) int {
-	return (len(text) + charsPerTokenEstimate - 1) / charsPerTokenEstimate
+	return estimateTokensOfLen(len(text))
+}
+
+// estimateTokensOfLen is estimateTokens for text of n bytes, for sizing a prompt
+// from the lengths of its parts without concatenating them. The estimate depends on
+// length alone, so the two always agree.
+func estimateTokensOfLen(n int) int {
+	return (n + charsPerTokenEstimate - 1) / charsPerTokenEstimate
 }
 
 // buildClusterPrompt renders the system prompt (the fixed clusterSystemPrompt

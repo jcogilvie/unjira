@@ -97,3 +97,21 @@ func CapEventSummariesForTest(in []Narrative, maxChars int) ([]Narrative, Trunca
 // (an external _test package) can assert cap+marker rather than a hand-computed byte
 // count — "…" is 3 bytes in UTF-8, and guessing 1 is how that assertion first failed.
 const TruncationMarkerForTest = truncationMarker
+
+// BuildDisputePromptForTest renders the dispute re-ask prompt pair for the disputes
+// findDisputes sees in results (no rules, no instruction), restricted to the
+// disputes at the given ordinals when any are given. Lets a test size a context
+// window between "one dispute fits" and "all of them together do not" from the real
+// renderer rather than a guess.
+func BuildDisputePromptForTest(results []ClusterResult, ordinals ...int) (systemPrompt, userPrompt string) {
+	disputes := findDisputes(results)
+	if len(ordinals) > 0 {
+		subset := make([]dispute, 0, len(ordinals))
+		for _, o := range ordinals {
+			subset = append(subset, disputes[o])
+		}
+		disputes = subset
+	}
+
+	return buildDisputePrompt(disputeRequest{results: results}, disputes)
+}

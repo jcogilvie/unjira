@@ -24,7 +24,7 @@ import (
 // pass drafts from and what token attribution charges. Intentional sharing has its
 // own channel, context_indices. A second member placement is therefore a contract
 // violation, and it must be resolved CORRECTLY rather than consistently: the model is
-// asked, in one follow-up call, which workstream each disputed event is primarily the
+// asked, in one follow-up pass, which workstream each disputed event is primarily the
 // work of. Rejected alternatives:
 //
 //   - Last writer wins — the old relinkEvents. Order-dependent, and on
@@ -37,15 +37,40 @@ import (
 //   - Deterministic evidence applied by code (the event carries a claimant's PR, or
 //     its branch). Relevance is the model's call (CLAUDE.md); the evidence is
 //     PRESENTED to the model, never applied.
-//   - One call per disputed event. One call for the whole pass, at most: a dispute is
-//     usually a handful of events, and each call re-pays the system prompt.
+//   - One call per disputed event. One call for the whole pass when the disputes fit
+//     the context window together: a dispute is usually a handful of events, and
+//     each call re-pays the system prompt.
 //
 // Run once per Cluster call, after any bisection has merged its halves, so an
 // eligible event numbered in both halves and placed differently by each (F36) is a
 // dispute like any other. Each loser keeps the event as CONTEXT: it claimed the
 // event as its work, which is at least a claim that the event is relevant to it.
+//
+// The prompt lists every claimant's other member events in full, per dispute, so it
+// grows with disputes × claimants × members and can exceed the context window even
+// when every clustering call fitted — most likely after a bisection, whose claimants
+// span both halves. When the disputes do not fit together, the pass splits them, in
+// order, into batches that each fit, one call per batch. Still ONE dispute pass per
+// Cluster call: every disputed event is asked about exactly once, and no answer is
+// applied until every batch has answered. Splitting is sound because each dispute is
+// an independent question — "which of THESE claimants is this event the work of" —
+// and nothing in the prompt or the parser relates one dispute to another: each block
+// names its claimants by their position in the pass's results (global, so the same
+// cluster has the same name in every batch) and describes them in full; each batch
+// numbers and parses its own event_index space; and the one cross-dispute rule, a
+// NEW cluster must keep a member, is checked by applyDisputeAnswers over all the
+// answers at once, exactly as for a single call. Rejected bounds:
+//
+//   - Refusing whenever the whole set does not fit. Correct but brittle: a pass whose
+//     every clustering call fitted would die at a step whose questions each fit.
+//   - Capping each listed member summary, or listing at most N members per claimant.
+//     Trades the model's view of a claimant for the call fitting, the trade F16
+//     measured for context narratives; deciding it needs real dispute sizes first.
+//
+// A single dispute too large on its own is the one case batching cannot fit, and it
+// refuses loudly rather than cut a claimant's description (finding F52).
 
-// disputeRequest is what one dispute re-ask needs.
+// disputeRequest is what one dispute pass needs.
 type disputeRequest struct {
 	window      TimeRange
 	results     []ClusterResult
@@ -96,10 +121,12 @@ func findDisputes(results []ClusterResult) []dispute {
 	return out
 }
 
-// resolveDisputes makes the one dispute re-ask, if any event has more than one member
-// placement, and applies the model's answer: the chosen cluster keeps the member,
+// resolveDisputes makes the dispute pass, if any event has more than one member
+// placement, and applies the model's answers: the chosen cluster keeps the member,
 // with the answer's per-event confidence; every other claimant gets it as context.
-// Returns results unchanged, with no call, when nothing is disputed.
+// One call when the disputes fit the context window together, otherwise one per
+// batch that fits (batchDisputes). Returns results unchanged, with no call, when
+// nothing is disputed.
 func resolveDisputes(ctx context.Context, client llm.Client, req disputeRequest) ([]ClusterResult, Stats, error) {
 	disputes := findDisputes(req.results)
 	if len(disputes) == 0 {
@@ -108,34 +135,58 @@ func resolveDisputes(ctx context.Context, client llm.Client, req disputeRequest)
 
 	stats := Stats{DisputedEvents: len(disputes)}
 
-	systemPrompt, userPrompt := buildDisputePrompt(req, disputes)
-	estimated := estimateTokens(systemPrompt + userPrompt)
-	stats.EstimatedTokens = estimated
+	batches := batchDisputes(req, disputes)
+	prompts := make([]disputePrompt, len(batches))
+	for i, batch := range batches {
+		systemPrompt, userPrompt := buildDisputePrompt(req, batch)
+		prompts[i] = disputePrompt{system: systemPrompt, user: userPrompt}
+		stats.EstimatedTokens += estimateTokens(systemPrompt + userPrompt)
+	}
 
 	logging.For(req.log, "correlator").WarnContext(ctx, "clusters placed one event in several; asking which owns it",
 		"disputed_events", len(disputes),
 		"disputed", describeDisputes(req.results, disputes),
-		"est_tokens", estimated,
+		"calls", len(batches),
+		"est_tokens", stats.EstimatedTokens,
 	)
 
-	if estimated > req.contextWindowTokens {
-		return nil, stats, fmt.Errorf(
-			"clustering events in window [%s, %s): %d event(s) were placed in more than one cluster (%s), and the "+
-				"re-ask resolving them is estimated at %d tokens, over the %d-token context window",
-			req.window.Start, req.window.End, len(disputes), describeDisputes(req.results, disputes),
-			estimated, req.contextWindowTokens)
+	// Every batch is checked before any is sent, so a pass that cannot finish spends
+	// nothing. batchDisputes only leaves a batch over budget when it is one dispute
+	// that does not fit alone; the check covers every batch regardless, so no prompt
+	// is ever sent over budget whatever the packing believed.
+	for i, p := range prompts {
+		if err := requireDisputeFits(req, batches[i], p, i, len(batches)); err != nil {
+			return nil, stats, err
+		}
 	}
 
-	raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
-	if err != nil {
-		return nil, stats, fmt.Errorf("re-asking which cluster owns %d disputed event(s) in window [%s, %s): %w",
-			len(disputes), req.window.Start, req.window.End, err)
-	}
-	stats.AddUsage(usage)
+	answers := make([]disputeAnswer, 0, len(disputes))
+	for i, batch := range batches {
+		systemPrompt, userPrompt := prompts[i].system, prompts[i].user
 
-	answers, err := parseDisputeResponse(raw, disputes)
-	if err != nil {
-		return nil, stats, err
+		// A batched pass names which call failed; a single call's errors read as they
+		// always have.
+		inCall := func(err error) error {
+			if len(batches) == 1 {
+				return err
+			}
+
+			return fmt.Errorf("%s: %w", disputeCallLabel(i, len(batches)), err)
+		}
+
+		raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
+		if err != nil {
+			return nil, stats, inCall(fmt.Errorf("re-asking which cluster owns %d disputed event(s) in window [%s, %s): %w",
+				len(batch), req.window.Start, req.window.End, err))
+		}
+		stats.AddUsage(usage)
+		stats.DisputeCalls++
+
+		batchAnswers, err := parseDisputeResponse(raw, batch)
+		if err != nil {
+			return nil, stats, inCall(err)
+		}
+		answers = append(answers, batchAnswers...)
 	}
 
 	resolved, resolutions, err := applyDisputeAnswers(req.results, disputes, answers)
@@ -174,18 +225,101 @@ func buildDisputePrompt(req disputeRequest, disputes []dispute) (systemPrompt, u
 	systemPrompt = withRulesAndInstruction(clusterDisputeSystemPrompt, req.rules, req.instruction)
 
 	var b strings.Builder
-	b.WriteString("Disputed events — each was placed in the event_indices of more than one cluster:\n")
+	b.WriteString(disputePromptHeader)
 	for i, d := range disputes {
-		fmt.Fprintf(&b, "\nevent_index=%d [%s] %q (occurred_at=%s)\n",
-			i, d.event.Source, d.event.Summary, d.event.OccurredAt.Format(time.RFC3339))
-		b.WriteString("  claimed by:\n")
-		for _, pos := range d.claimants {
-			writeClaimant(&b, pos, req.results[pos], d.event)
-		}
-		writeEvidence(&b, d, req.results)
+		writeDispute(&b, i, d, req.results)
 	}
 
 	return systemPrompt, b.String()
+}
+
+const disputePromptHeader = "Disputed events — each was placed in the event_indices of more than one cluster:\n"
+
+// writeDispute renders one disputed event under event_index, with every claimant and
+// any evidence. Self-contained: nothing in it depends on any other dispute, which is
+// what lets batchDisputes size a batch as the sum of its blocks.
+func writeDispute(b *strings.Builder, index int, d dispute, results []ClusterResult) {
+	fmt.Fprintf(b, "\nevent_index=%d [%s] %q (occurred_at=%s)\n",
+		index, d.event.Source, d.event.Summary, d.event.OccurredAt.Format(time.RFC3339))
+	b.WriteString("  claimed by:\n")
+	for _, pos := range d.claimants {
+		writeClaimant(b, pos, results[pos], d.event)
+	}
+	writeEvidence(b, d, results)
+}
+
+// disputePrompt is one dispute call's prompt pair.
+type disputePrompt struct {
+	system, user string
+}
+
+// batchDisputes splits disputes, in order, into contiguous batches whose dispute
+// prompt each fits req.contextWindowTokens: one batch, the whole set, whenever it
+// fits. Greedy: a dispute joins the current batch unless that would take it over
+// budget, and then starts the next. Never drops or splits a dispute — a dispute too
+// large on its own still gets a batch of its own, which requireDisputeFits refuses.
+//
+// Sized from the lengths of buildDisputePrompt's own parts, rendered with the
+// event_index each dispute will carry in its batch, so the arithmetic is the prompt's
+// length exactly (estimateTokens depends on length alone) without re-rendering a
+// growing batch for every candidate.
+func batchDisputes(req disputeRequest, disputes []dispute) [][]dispute {
+	systemPrompt := withRulesAndInstruction(clusterDisputeSystemPrompt, req.rules, req.instruction)
+	fixed := len(systemPrompt) + len(disputePromptHeader)
+	blockLen := func(index int, d dispute) int {
+		var b strings.Builder
+		writeDispute(&b, index, d, req.results)
+
+		return b.Len()
+	}
+
+	// Each batch is disputes[start:i]: contiguous, so concatenating the batches is
+	// disputes again, in order, and the answers line up with it.
+	var batches [][]dispute
+	start, size := 0, fixed
+	for i, d := range disputes {
+		n := blockLen(i-start, d)
+		if i > start && estimateTokensOfLen(size+n) > req.contextWindowTokens {
+			batches = append(batches, disputes[start:i])
+			start, size = i, fixed
+			n = blockLen(0, d)
+		}
+		size += n
+	}
+
+	return append(batches, disputes[start:])
+}
+
+// requireDisputeFits refuses a dispute call whose prompt is over the context window,
+// before anything is sent. After batchDisputes that is one dispute whose claimants'
+// member events, listed in full, exceed the window alone: nothing smaller can be
+// asked without cutting a claimant's description, which would trade the model's view
+// of a claimant for the call fitting (finding F52).
+func requireDisputeFits(req disputeRequest, batch []dispute, p disputePrompt, call, calls int) error {
+	estimated := estimateTokens(p.system + p.user)
+	if estimated <= req.contextWindowTokens {
+		return nil
+	}
+
+	if len(batch) == 1 {
+		return fmt.Errorf(
+			"clustering events in window [%s, %s): an event was placed in more than one cluster (%s), and the "+
+				"re-ask resolving it alone is estimated at %d tokens, over the %d-token context window. The re-ask "+
+				"lists each claimant's member events in full and never truncates them (finding F52)",
+			req.window.Start, req.window.End, describeDisputes(req.results, batch),
+			estimated, req.contextWindowTokens)
+	}
+
+	return fmt.Errorf(
+		"clustering events in window [%s, %s): %s: %d event(s) were placed in more than one cluster (%s), and the "+
+			"re-ask resolving them is estimated at %d tokens, over the %d-token context window",
+		req.window.Start, req.window.End, disputeCallLabel(call, calls), len(batch),
+		describeDisputes(req.results, batch), estimated, req.contextWindowTokens)
+}
+
+// disputeCallLabel names one call of the dispute pass in an error, 1-based.
+func disputeCallLabel(call, calls int) string {
+	return fmt.Sprintf("dispute re-ask call %d of %d", call+1, calls)
 }
 
 // writeClaimant renders one claiming cluster by position, with its other members.
