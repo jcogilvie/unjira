@@ -637,6 +637,27 @@ proposed as a create anywhere. Two things are not measured yet: how often an int
 upstream narrative names its internal ticket at all, and whether the candidate ranking reaches the
 ticket when it does.
 
+### F58 — work that only cites tickets is proposed nowhere
+
+A narrative whose every verified candidate the model judged `mentioned` (a citation, a "caused by", a
+"discovered while") ends matching with link rows and no primary. Matching now records that as an
+examination, so it no longer re-selects the narrative. But no other path picks it up:
+
+- **The reconciler** drafts comments and transitions onto a narrative's linked issue, and a `mentioned`
+  link is not the work, so drafting onto it would put one narrative's story on a ticket it only cites.
+- **The create path** selects on `NarrativesWithNoIssueLink`
+  (`internal/store/narrativeissues.go:523`), which treats a link of any role as tracked.
+
+So the work is untracked, and unjira can say nothing about it. Seen on a real 30-day store: narrative
+14, citing two tickets at confidence 0.80–0.92, both `mentioned`. Two inputs disagree here as well.
+`classifySystemPrompt` says exactly one candidate must be primary, while `parseMatchResponse` accepts
+zero, and zero is the honest answer when every candidate is a citation.
+
+The open question is policy, not mechanism: should a narrative with only `mentioned` links be a create
+candidate, with the cited tickets named in the proposal so a reviewer can link instead? The F13
+backstop (`applyCreate` refusing once a primary exists) would still hold. Unmeasured beyond the one
+narrative.
+
 ## Task cross-references
 
 | Finding | Task |
@@ -656,6 +677,7 @@ ticket when it does.
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
 | F60 — upstream work done for an internal ticket is routed by repository, not by purpose | open. Matching's job, not routing's. 3 of 5 measured cases |
+| F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F50 — a split narrative is still read by the create path and the review queue | open. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed: a split narrative held a create slot for 3 of 3 passes at cap 1 |

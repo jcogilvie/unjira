@@ -87,8 +87,11 @@ const matchExaminationPredicate = `
 // which is the mistake StatusSuppressed's own doc comment warns about for its case.
 //
 // reason is stored for the operator, never read as control flow: "no candidate keys in
-// any event" and "every candidate failed verification" are different situations worth
-// telling apart when someone asks why a narrative is quiet.
+// any event", "every candidate failed verification" and "the model judged no candidate
+// this narrative's primary record" are different situations worth telling apart when
+// someone asks why a narrative is quiet. The third is not "nothing to match against",
+// strictly: there were candidates, and the model's answer was that none is the work.
+// It needs the watermark for the same reason, since its outcome writes no primary.
 func (s *Store) RecordMatchExamined(narrativeID int64, reason string) error {
 	if _, err := s.db.Exec(
 		`INSERT INTO match_examinations (narrative_id, examined_at, examined_link_seq, reason)

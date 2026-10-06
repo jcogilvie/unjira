@@ -278,6 +278,21 @@ func matchOne(
 	if err != nil {
 		return result, stats, fmt.Errorf("persisting issue links for narrative %d: %w", narrative.ID, err)
 	}
+
+	// The third form of the same livelock: candidates verified, and the model judged
+	// none of them the work (every one "mentioned" or "same_work"). The link rows are
+	// written, but no primary is, so without a watermark the narrative is re-selected
+	// and re-classified, at a model call, on every pass. Because it counts as
+	// unmatched it also defers every create proposal (F13's precondition), so one such
+	// narrative stopped a real store from ever proposing a ticket. A below-floor
+	// primary is not this case: its link row has role primary, which already takes
+	// the narrative out of the backlog (F11).
+	if primaryKey == "" {
+		if err := s.RecordMatchExamined(
+			narrative.ID, "the model judged no candidate this narrative's primary record"); err != nil {
+			return result, stats, err
+		}
+	}
 	result.Primary = promoted
 
 	return result, stats, nil
