@@ -383,3 +383,218 @@ Decisions the design left open:
 - **Interim gap, F56.** A narrative linked to an upstream issue can still draft a comment on it, which
   triage shows as unappliable and both write layers refuse. Slice 5's destination set closes it.
 
+### Slice 5, destinations: landed 2026-10-06, measured
+
+Work location: `collector/claudecode` records `events.ArtifactWorkRepos` (a `git push` result's
+remote, a PR a call created, the `-R/--repo` of an authoring `gh` command, a GitHub MCP write call's
+owner/repo) and `events.ArtifactCwdRemotes` (every remote of the working copy, read with go-git
+`PlainOpenWithOptions(cwd, {DetectDotGit: true, EnableDotGitCommonDir: true})`, sorted, once per
+distinct directory per pass), or `events.ArtifactCwdRemotesOmitted` with the reason. The allowed set:
+`config.UntrackedDestinations` and `config.IssueAcceptsWrites`, applied by
+`reconciler.WithDestinations` before any drafting call. A create carries its destination's scope in
+its payload, and `gate.Applier` writes it there. `default_ticket_in` may name several trackers. F29 and
+F56 deleted; F57 added.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. The tests this spec lists: transcript evidence beats a disagreeing cwd
+(`TestProposeCreates_TranscriptEvidenceBeatsADisagreeingCwd`); a linked worktree resolves to its main
+repository's remotes, against a repository built in the test
+(`TestCollect_LinkedWorktreeResolvesToItsMainRepositorysRemotes`); fork remotes drop out by scope
+(`TestUntrackedDestinations_ForkRemotesDropOutByScope`, `TestProposeCreates_CwdRemotesAreTheFallback`);
+a two-tracker match is ambiguous (`TestUntrackedDestinations_TwoTrackerMatchIsAmbiguous`); an empty set
+is recorded as a suppression (`TestRunReconcile_AnEmptyDestinationSetIsRecordedAsASuppression`).
+
+**Measured** on a real 30-day store: 163 narratives, 130 of them untracked. Before slice 5, every
+untracked narrative went to the default project. The narratives were clustered without slice 5. Each
+one's work location was then taken from a fresh collection of the same transcripts, joined by event:
+350 of 350 Claude Code member events, 298 by ExternalID and 52 by session and segment index, because
+their transcripts had grown since. The destinations come from `config.UntrackedDestinations` itself.
+No model call was needed. Upstream here is `crossplane/*`, `crossplane-contrib/*`, `argoproj/*` and
+`helm-unittest/*`, plus `jcogilvie/unjira`, all in a read-only tracker with `mirror_to: []`.
+
+- **As first landed, only `collector/claudecode` recorded a location.** That moved 56 of the 130 out of
+  the work tracker:
+  - **Every one was upstream work,** in crossplane-diff, argo-cd, crossplane/cli, helm-unittest and
+    provider-upjet-aws. None was internal.
+  - **Fork remotes dropped out as designed,** and no narrative was ambiguous.
+  - **73 narratives had no location at all,** and 62 of them were plainly upstream or unjira PR work.
+    Those narratives were made only of GitHub PR events, which carried no location.
+- **`collector/github` now records each PR's repository** (this change). Location coverage rose from
+  57 to 117 of 130, and 116 of 130 go nowhere under the policy above. Of the 89 create proposals the
+  pre-slice-5 pass had queued, none would be proposed, and 27 of its 41 declines would never have cost
+  a model call.
+- **The policy decides the outcome, not the mechanism.** Mirroring crossplane-diff, crossplane/cli,
+  argo-cd and unjira into the work tracker, with the rest upstream mirroring nowhere, keeps 86 of the 89
+  and sends 5 narratives nowhere. Because `mirror_to` is per tracker, that takes two upstream trackers.
+- **Three of those five are internally motivated work in an upstream repository:**
+  - a managementPolicyOptions evaluation that serves an internal ticket;
+  - a provider-upjet-aws reconcile-loop investigation behind a blocked internal ticket;
+  - a provider-upgrade regression analysis.
+
+  Routing by repository cannot express "this serves an internal ticket". Only matching can, by linking
+  the narrative to that ticket, and here it did not (F60).
+- **Caveats:**
+  - Working-copy remotes were read at measurement time, not when the work happened.
+  - The deployment's config excludes unjira's own working copy, so unjira work is located only through
+    its PR events.
+
+Decisions the design left open:
+- **Discovery.** With no `--config`, `Load` reads whichever of `unjira.config.yaml`, `.yml` and `.json`
+  exists in the working directory. Two is an error, not a precedence order.
+- **Validation runs in `Load`,** so every command refuses a bad tracker model, not only `watch`.
+- **A destination must be ready.** A tracker named in `default_ticket_in` or `mirror_to` must have
+  `writable_scopes` and a `default_scope`. A read-only destination is refused rather than ignored.
+- **One `default_ticket_in` until slice 5.** The create path has one default; naming two is refused
+  rather than silently using the first.
+- **Scope syntax per kind.** Jira and local scopes are project keys (`^[A-Z][A-Z0-9]*$`), and share one
+  key space, so a project cannot be claimed by a Jira and a local tracker at once. GitHub scopes are
+  `owner/repo`, matched case-insensitively, with `*` allowed only as the whole repository segment. An
+  owner glob would make every fork remote match a scope.
+- **Cursor key unchanged.** The Jira collector's cursor stays keyed by connection and query name, so a
+  converted config keeps its watermarks. Two trackers on one connection may not reuse a query name.
+- **Endpoints.** Required for `jira` and `github` connections, refused on `local`.
+
+### Slice 2, resolver: landed 2026-10-06
+
+`tasktracker.ParseIssueKey`, `ScopeMatches`, `Resolver` (`Resolve`, `ResolveScope`, `Locate`) and
+`Routed`, in `internal/tasktracker/key.go` and `resolve.go`. `correlator.TrackerResolver` and
+`SingleTracker` are removed. Matching, the reconciler and `gate.Applier` all read and write through one
+resolver built in `cmd/unjira` (`appContext.resolver`). `IsTransportError` moved to `tasktracker` and
+asks the error: `*jira.Error` and `*tasktracker.UnroutedError` implement `IsTransport()`, the local
+backend wraps `tasktracker.ErrNotFound`, so `internal/correlator` imports no backend (F3, F8 deleted).
+`store.StoredIssueKeys` and `pipeline.UnroutedStoredKeys` report stranded keys at the start of `watch`
+and `dev narrate`.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. 26 break-it drills, each failing a named test (see the slice's commit message).
+
+Decisions the design left open:
+- **`Routed` adapts the resolver to `TaskReader`/`TaskWriter`,** so `correlator.Match`,
+  `reconciler.Reconcile` and `gate.Applier` keep their signatures and route per call. The write path
+  then holds two independent refusals: config's writability check, which names the remedy, and a
+  routed writer that has no writer to give for a read-only scope.
+- **A read fallback, kept on purpose (F55).** A project-syntax key no tracker covers is still read
+  through the tracker covering the first project scope, the tracker every candidate used to be
+  verified against. Removing it would turn work on an unlisted project's ticket into a duplicate create
+  proposal, a behaviour change this refactor slice should not make. A fallback read never writes, and
+  every key that depends on it is in the startup report.
+- **Reported keys come from both tables:** `narrative_issues` and `actions`. Routing uses `Locate`, so
+  the report opens no backend and needs no credential.
+- **Writability reads the key, not a "-" split.** `config.IssueWritability` parses by syntax, so
+  `crossplane-contrib/x#1` is scope `crossplane-contrib/x`, not project `crossplane`. A malformed key
+  is untracked in triage now, where a key without a "-" used to read as appliable.
+
+### Slice 3, classification and self-authorship: landed 2026-10-06
+
+`pipeline.CollectContext.TrackerFor(kind, scope)` returns the configured tracker whose scope covers an
+artifact's scope on a connection of that kind. The Jira collector marks an issue's events as tracker
+records only when `TrackerFor(jira, project)` answers, which query scoping makes every issue it reads,
+so behaviour is unchanged. `tasktracker.SelfIdentifier` is the requirement on writers:
+`jira.Tracker.SelfIdentity` returns the `Myself()` accountId, and the local backend reports `unjira`.
+`Resolver.CheckWriters` refuses a writable route whose writer is not one, and runs at the start of
+`watch` and `dev narrate` before the store is touched. F28 deleted.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. Break-it drills in the slice's commit message.
+
+Decisions the design left open:
+- **The identity check is by type, at the backend.** Config cannot know what a backend implements, so
+  the check opens each writable route's writer (building a client, sending nothing) and asserts the
+  interface. The resolver also refuses to hand out a writer without it, so `actions decide` and
+  `triage`, which skip the startup check, still cannot write anonymously.
+- **The local backend reports a constant.** Every local write is unjira's and nothing collects the
+  local store back, so there is no echo to tag; reporting `unjira` lets a writable local tracker meet
+  the same rule as any other writer rather than being an exception.
+- **The Jira collector's scoping stays per tracker.** Each query is bounded by its own tracker's
+  scopes (slice 1), which is a subset of "the trackers on its connection" and narrower than their
+  union. An issue the search returns outside that scope is now work evidence rather than a tracker
+  record.
+- **A zero-value `IssueContext` still marks tracker records** (`ScopeUntracked` is the opt-out), so
+  the pure event builders keep their behaviour for every caller that does not classify.
+
+### Slice 4, GitHub read-only tracker: landed 2026-10-06
+
+`clients/github.Reader` implements `tasktracker.TaskReader` over GitHub Issues and nothing else; the
+client's one request method is now `get`, so it cannot send anything but GET. `cmd/unjira` opens it for
+a `github` connection with the `UNJIRA_GITHUB_CREDENTIALS` entry for the endpoint's host
+(`clients/github.HostOfBaseURL`, the inverse of `BaseURL`), the same entry the GitHub collector uses.
+`events.ExtractGitHubIssueRefs` reads `owner/repo#N` and github.com issue URLs, and `gatherCandidates`
+takes them from every event's summary.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. Read-only live run against the sandbox, `UNJIRA_LIVE=1 go test -tags=live -run
+TestLiveGitHubReader -v ./internal/live/`: both tests PASS — every sandbox PR reads as not found
+through the issues endpoint, and a missing issue is not a transport error.
+
+Decisions the design left open:
+- **Candidates come from the summary, not a collector artifact,** so every stored event yields them,
+  including ones collected before the extraction existed (F21). On an event about a pull request the
+  text is its authored title and body, so its references rank with SCM authoring commands; the pull
+  request's own `owner/repo#N`, which heads its summary, is not a candidate.
+- **Prose ordering.** The order between Jira keys and GitHub references in one text is not recorded,
+  so a GitHub reference is the event's first mention only when it names no Jira key. Lower-cased
+  references sort after uppercase project keys within a tier, so they cannot push Jira keys past the
+  candidate cap.
+- **Pull requests read as not found** (`tasktracker.ErrNotFound`, "is a pull request, not an issue"),
+  open is todo and closed is done, and `AvailableTransitions` offers nothing: unjira cannot move a
+  GitHub issue, so the reconciler proposes no transition there.
+- **Error classification.** 404 and 410 are answers; 0, 429, 5xx and a 403 saying "rate limit" are
+  transport.
+- **Issue URLs on github.com only.** A GHES issue URL is not a candidate yet.
+- **No collector `connection` option.** Credentials are keyed by host, so the collector and a tracker
+  on one GitHub already share one credential without the collector naming the connection.
+- **Interim gap, F56.** A narrative linked to an upstream issue can still draft a comment on it, which
+  triage shows as unappliable and both write layers refuse. Slice 5's destination set closes it.
+
+### Slice 5, destinations: landed 2026-10-06, measured
+
+Work location: `collector/claudecode` records `events.ArtifactWorkRepos` (a `git push` result's
+remote, a PR a call created, the `-R/--repo` of an authoring `gh` command, a GitHub MCP write call's
+owner/repo) and `events.ArtifactCwdRemotes` (every remote of the working copy, read with go-git
+`PlainOpenWithOptions(cwd, {DetectDotGit: true, EnableDotGitCommonDir: true})`, sorted, once per
+distinct directory per pass), or `events.ArtifactCwdRemotesOmitted` with the reason. The allowed set:
+`config.UntrackedDestinations` and `config.IssueAcceptsWrites`, applied by
+`reconciler.WithDestinations` before any drafting call. A create carries its destination's scope in
+its payload, and `gate.Applier` writes it there. `default_ticket_in` may name several trackers. F29 and
+F56 deleted; F57 added.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. The tests this spec lists: transcript evidence beats a disagreeing cwd
+(`TestProposeCreates_TranscriptEvidenceBeatsADisagreeingCwd`); a linked worktree resolves to its main
+repository's remotes, against a repository built in the test
+(`TestCollect_LinkedWorktreeResolvesToItsMainRepositorysRemotes`); fork remotes drop out by scope
+(`TestUntrackedDestinations_ForkRemotesDropOutByScope`, `TestProposeCreates_CwdRemotesAreTheFallback`);
+a two-tracker match is ambiguous (`TestUntrackedDestinations_TwoTrackerMatchIsAmbiguous`); an empty set
+is recorded as a suppression (`TestRunReconcile_AnEmptyDestinationSetIsRecordedAsASuppression`).
+
+**Not yet measured.** The before/after measurement on a fresh snapshot of local transcripts — how many
+narratives change destination, and how many would-be creates for externally scoped work disappear —
+needs real transcripts and LLM credentials, and has not been run.
+
+Decisions the design left open:
+- **Repositories are host-qualified** (`<host>/<owner>/<repo>`), and a repository matches a scope only
+  on the host its tracker's connection serves (`config.Connection.Host`, which now also keys the GitHub
+  credential). The spec said `owner/repo`; the host keeps a GitLab or GHES remote from matching a
+  github.com scope.
+- **"T if writable" needs a `default_scope`** to be a destination: a create must land somewhere. In
+  practice T is a GitHub tracker, so only `mirror_to` applies.
+- **The model is asked to choose only among several destinations.** With one, it is the answer and the
+  prompt is unchanged. With several, the user prompt lists them and asks for `"destinations"`; a name
+  outside the set is rejected and recorded, and a create is proposed per chosen destination.
+- **An open or applied create blocks its own scope only;** one recorded before destinations existed
+  names no scope and blocks every destination.
+- **`gate.Applier`'s duplicate backstop is per tracker.** A primary link in the destination's own
+  tracker still refuses a create (F13); one in another tracker does not, and the second ticket is
+  linked as `same_work`, since a narrative has one primary.
+- **A link on a tracker with no writer is not drafted for** (`IssueAcceptsWrites`), which closed F56.
+  A readable-but-unwritable Jira link is still drafted and refused at apply with its remedy, as the
+  table's "gated by T's writable_scopes as today" says.
+- **An empty set is recorded once,** then again only when new work arrives, so an unchanged narrative
+  does not write a suppression row per pass.
+- **Not built: creates in T.mirror_to for work LINKED to an issue in T** (F57). The create path selects
+  only narratives with no link, and the schema's one-primary rule and the applier's backstop assumed
+  one tracker per narrative; both want a design of their own.
+- **Extraction limits:** `gh -R host/owner/repo` is recorded as github.com (the parser drops the
+  host), and the GitHub MCP is assumed to be github.com. Only a `git push`'s own result is read for its
+  remote.
+

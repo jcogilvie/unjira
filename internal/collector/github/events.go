@@ -83,10 +83,17 @@ func prSummary(ref ghclient.RepoRef, pr ghclient.PullRequest) string {
 // pre-assignment) without parsing an ExternalID. The host is the configured repo's,
 // so a GHES PR never joins a github.com PR with the same owner/repo#N. ExternalIDs and
 // summaries keep the host-less "<owner>/<repo>#<N>" they always had.
+//
+// And events.ArtifactWorkRepos, the PR's repository: where the work went, exactly, in
+// the host-qualified, case-folded form events.NormalizeRepo writes for the claudecode
+// collector's work locations. Without it a narrative made only of PR events has no
+// location, and destinations send it to default_ticket_in whatever repository it was
+// in.
 func annotate(evt *events.Event, ref ghclient.RepoRef, pr ghclient.PullRequest) {
 	evt.Actor = pr.User.Login
 	evt.RawRef = pr.HTMLURL
 	evt.Artifacts[events.ArtifactPullRequest] = events.PullRequestRef(ref.Host, ref.Owner, ref.Repo, pr.Number)
+	events.SetRepos(evt, events.ArtifactWorkRepos, []string{strings.ToLower(ref.Host + "/" + ref.Owner + "/" + ref.Repo)})
 	evt.Artifacts[events.ArtifactGitBranch] = pr.Head.Ref
 	events.SetSCMKeys(evt, events.ExtractTicketKeys(pr.Title+" "+pr.Body))
 }

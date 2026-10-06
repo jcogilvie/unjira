@@ -55,6 +55,10 @@ type ProposedAction struct {
 	Body string
 	// Summary is the issue title, set only for ActionCreate.
 	Summary string
+	// Scope is where an ActionCreate lands: a destination tracker's default_scope (see
+	// DestinationPolicy). Empty means the applier's configured default, which is what
+	// every create persisted before destinations existed carries.
+	Scope string
 	// TargetStatus is the tracker's own name for the destination ("In Review"),
 	// set only for ActionTransition.
 	//
@@ -155,4 +159,8 @@ type ReconcileResult struct {
 	// Populated by noteUnguarded, from the same HaveLastStatus the guard itself
 	// reads, so the two cannot disagree about whether a check happened.
 	Unguarded []UnguardedTransition
+	// Notes are facts worth reporting that are neither a suppression nor a proposal: a
+	// work location that was ambiguous, so the default destination was used. Rendered,
+	// never persisted.
+	Notes []string
 }

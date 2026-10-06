@@ -475,12 +475,19 @@ func writeReconciledNarrative(b *strings.Builder, result reconciler.ReconcileRes
 	for _, u := range result.Unguarded {
 		fmt.Fprintf(b, "  unguarded: %s\n", u.Reason())
 	}
+
+	for _, note := range result.Notes {
+		fmt.Fprintf(b, "  note: %s\n", note)
+	}
 }
 
 // writeProposedAction writes one drafted action's type, target issue,
 // confidence, and (when set) its comment body or transition target.
 func writeProposedAction(b *strings.Builder, a reconciler.ProposedAction) {
 	fmt.Fprintf(b, "  propose %s", a.Type)
+	if a.Scope != "" {
+		fmt.Fprintf(b, " in %s", a.Scope)
+	}
 	if a.IssueKey != "" {
 		fmt.Fprintf(b, " on %s", a.IssueKey)
 	}

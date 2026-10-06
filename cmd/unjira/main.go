@@ -106,10 +106,7 @@ func (a *appContext) jiraClient(conn config.Connection) (*jira.Client, error) {
 // the GitHub collector uses for that host, so a collector and a tracker on one GitHub
 // share one credential.
 func (a *appContext) githubReader(conn config.Connection) (*ghclient.Reader, error) {
-	host, err := ghclient.HostOfBaseURL(conn.Endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("github connection %q: %w", conn.Name, err)
-	}
+	host := conn.Host()
 
 	cred, ok := a.githubCredentials.Set().For(host)
 	if !ok {

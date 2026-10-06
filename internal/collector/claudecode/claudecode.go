@@ -112,6 +112,9 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 		return err
 	}
 
+	// One read of each distinct working directory's remotes per pass (location.go).
+	reader := newRemoteReader()
+
 	for _, t := range transcripts {
 		path := t.path
 		stat, err := os.Stat(path)
@@ -136,7 +139,7 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 			continue
 		}
 
-		evts, err := sessionEvents(t, mtime, normalizedExcludes, minSegment, owners)
+		evts, err := sessionEvents(t, mtime, normalizedExcludes, minSegment, owners, reader)
 		if err != nil {
 			return fmt.Errorf("reading session %s: %w", path, err)
 		}
@@ -238,7 +241,7 @@ func sessionLabel(t transcript) string {
 // segment also carries the full branch set (see segment.allBranches): slicing only helps
 // sessions that change branch, and 42 of 79 multi-day sessions never do.
 func sessionEvents(
-	t transcript, mtime time.Time, excludeCwds []string, minSegment int, owners lineOwners,
+	t transcript, mtime time.Time, excludeCwds []string, minSegment int, owners lineOwners, reader *remoteReader,
 ) ([]events.Event, error) {
 	path := t.path
 
@@ -339,6 +342,8 @@ func sessionEvents(
 		// under is stronger evidence than one mentioned, and the correlator ranks on
 		// exactly that difference (finding F20).
 		events.SetSCMKeys(&evt, seg.scmKeys)
+		// Where the work happened, for destination routing at reconcile time.
+		setLocationArtifacts(&evt, seg, created, reader)
 		evt.Artifacts["user_message_count"] = len(seg.userTexts)
 		evt.Artifacts["started_at"] = seg.firstTS
 		// The interval, not just its end. A segment spanning three weeks and one

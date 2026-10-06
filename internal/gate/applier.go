@@ -95,6 +95,10 @@ type transitionPayload struct {
 type createPayload struct {
 	Summary     string `json:"summary"`
 	Description string `json:"description"`
+	// Scope is the destination a create was proposed for (reconciler.DestinationPolicy).
+	// Absent on every create persisted before destinations existed, which land in the
+	// configured default.
+	Scope string `json:"scope,omitempty"`
 }
 
 // Apply performs exactly one action's tracker write and records the outcome
@@ -269,14 +273,24 @@ func (a *Applier) applyTransition(action store.ActionRow) error {
 // alternative — swallowing the link error — would recreate the duplicate loop
 // while reporting success.
 func (a *Applier) applyCreate(action store.ActionRow) error {
-	if a.defaultProject == "" {
+	var p createPayload
+	if err := json.Unmarshal([]byte(action.Payload), &p); err != nil {
+		return fmt.Errorf("action %d: decoding create payload %q: %w", action.ID, action.Payload, err)
+	}
+
+	target := p.Scope
+	if target == "" {
+		target = a.defaultProject
+	}
+
+	if target == "" {
 		return fmt.Errorf(
 			"action %d: create action needs a default project, but none is configured "+
 				"(default_ticket_in, and that tracker's default_scope)", action.ID,
 		)
 	}
 
-	if err := a.checkProjectWritable(a.defaultProject); err != nil {
+	if err := a.checkProjectWritable(target); err != nil {
 		return fmt.Errorf("action %d: %w", action.ID, err)
 	}
 
@@ -295,24 +309,26 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 	// attribution, so that narrative's work is still untracked and a create is still
 	// correct; refusing on any link would make unjira unable to open a ticket for
 	// work that merely references another issue.
-	if key, err := a.primaryLinkFor(action.NarrativeID); err != nil {
+	//
+	// And only one in the SAME tracker as this create's destination. One narrative may
+	// be ticketed in several trackers (destinations); the first create's link sits in
+	// another tracker and says nothing about whether this one is a duplicate there.
+	primary, err := a.primaryLinkFor(action.NarrativeID)
+	if err != nil {
 		return fmt.Errorf("action %d: %w", action.ID, err)
-	} else if key != "" {
+	}
+
+	if primary != "" && a.sameTracker(primary, target) {
 		return fmt.Errorf(
 			"action %d: narrative %d is already tracked by %s, so creating an issue would "+
 				"duplicate it; the link was made after this action was proposed (reject it rather "+
-				"than retrying)", action.ID, action.NarrativeID, key,
+				"than retrying)", action.ID, action.NarrativeID, primary,
 		)
 	}
 
-	var p createPayload
-	if err := json.Unmarshal([]byte(action.Payload), &p); err != nil {
-		return fmt.Errorf("action %d: decoding create payload %q: %w", action.ID, action.Payload, err)
-	}
-
-	key, err := a.writer.CreateIssue(a.defaultProject, p.Summary, defaultIssueType, p.Description, nil)
+	key, err := a.writer.CreateIssue(target, p.Summary, defaultIssueType, p.Description, nil)
 	if err != nil {
-		return fmt.Errorf("creating issue in %s: %w", a.defaultProject, err)
+		return fmt.Errorf("creating issue in %s: %w", target, err)
 	}
 
 	if key == "" {
@@ -322,10 +338,17 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 		return fmt.Errorf(
 			"created an issue in %s but the tracker returned no key, so it cannot be linked to "+
 				"narrative %d; find it and link it by hand before the next pass proposes another",
-			a.defaultProject, action.NarrativeID)
+			target, action.NarrativeID)
 	}
 
-	if err := a.linkCreatedIssue(action.NarrativeID, key); err != nil {
+	// The narrative's first ticket is its primary; a ticket in a further destination is
+	// the same work represented again (one primary per narrative is a schema invariant).
+	role := store.Role("primary")
+	if primary != "" {
+		role = "same_work"
+	}
+
+	if err := a.linkCreatedIssue(action.NarrativeID, key, role); err != nil {
 		return fmt.Errorf("created %s but could not link it to narrative %d (%w); link it by hand "+
 			"before the next pass proposes another", key, action.NarrativeID, err)
 	}
@@ -333,16 +356,17 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 	return nil
 }
 
-// linkCreatedIssue records the new issue as the narrative's primary.
+// linkCreatedIssue records the new issue on the narrative: as its primary, or as
+// same_work when a create in another destination already supplied the primary.
 //
 // provenance is "unjira_created": distinct from every matching provenance because
 // this is not an inference about where work belongs — unjira put it there.
 // Confidence 1.0 for the same reason.
-func (a *Applier) linkCreatedIssue(narrativeID int64, key string) error {
+func (a *Applier) linkCreatedIssue(narrativeID int64, key string, role store.Role) error {
 	return a.store.WithTx(func(tx *store.Tx) error {
 		return tx.AddNarrativeIssues(narrativeID, []store.NarrativeIssue{{
 			IssueKey:   key,
-			Role:       "primary",
+			Role:       role,
 			Provenance: "unjira_created",
 			Confidence: 1.0,
 		}})
@@ -426,6 +450,23 @@ func (a *Applier) checkProjectWritable(project string) error {
 // What survives is the malformed-payload check inline in applyTransition: an
 // empty target_status means the payload was never valid for its declared type,
 // and is this package's business rather than a tracker round trip to spend.
+
+// sameTracker reports whether issueKey routes to the tracker that owns scope. A key that
+// routes nowhere, or a scope no tracker owns, is treated as the same tracker: when in
+// doubt the create is refused, since a duplicate ticket cannot be un-opened.
+func (a *Applier) sameTracker(issueKey, scope string) bool {
+	cfg := config.Config{Trackers: a.trackers}
+
+	ref, err := tasktracker.ParseIssueKey(issueKey)
+	if err != nil {
+		return true
+	}
+
+	owner, ok := cfg.TrackerForScope(ref.Scope)
+	destination, okDestination := cfg.TrackerForScope(scope)
+
+	return !ok || !okDestination || owner.Name == destination.Name
+}
 
 // primaryLinkFor returns the issue key of narrativeID's primary link, or "" when it
 // has none. A read, on the write-authority package's one narrow exception: refusing

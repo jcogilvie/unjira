@@ -522,8 +522,9 @@ type Config struct {
 	// Trackers are the scopes unjira reconciles against, each on one connection, with
 	// its own write authority. See Tracker.
 	Trackers []Tracker `json:"trackers"`
-	// DefaultTicketIn names the tracker untracked work outside every scope is ticketed
-	// in. Empty means no default: a create has nowhere to land.
+	// DefaultTicketIn names the trackers untracked work outside every tracker's scope is
+	// ticketed in (see UntrackedDestinations). Empty means nowhere: no create is proposed
+	// for such work.
 	DefaultTicketIn []string                  `json:"default_ticket_in"`
 	Collectors      map[string]map[string]any `json:"collectors"`
 	// ExcludeFromLinking is a list of regex patterns; a ticket-key-shaped

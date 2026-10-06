@@ -9,6 +9,7 @@ import (
 
 	ghclient "github.com/jcogilvie/unjira/internal/clients/github"
 	collectorgithub "github.com/jcogilvie/unjira/internal/collector/github"
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
@@ -345,4 +346,65 @@ func TestArtifactPullRequest_CarriesTheConfiguredHost(t *testing.T) {
 
 	assert.Equal(t, "ghes.corp.example/o/r#42", opened.Artifacts[events.ArtifactPullRequest])
 	assert.Equal(t, "o/r#42:opened", opened.ExternalID)
+}
+
+// A PR's events say where the work went: the PR's own repository, host-qualified and
+// case-folded the way events.NormalizeRepo writes every other work location. Without
+// it a narrative made only of PR events has no location and falls to
+// default_ticket_in, which on a real 30-day store sent 62 plainly upstream narratives
+// to the work tracker. The repository is exact, so this is extraction, not judgment.
+func TestEveryPREventRecordsItsRepositoryAsWorkLocation(t *testing.T) {
+	ref, err := ghclient.ParseRepoRef("github.com/Crossplane-Contrib/Crossplane-Diff")
+	require.NoError(t, err)
+	pr := samplePR()
+
+	opened := collectorgithub.OpenedEvent(ref, pr)
+	assert.Equal(t, []string{"github.com/crossplane-contrib/crossplane-diff"},
+		events.ReposOf(opened, events.ArtifactWorkRepos))
+
+	pr.State = "closed"
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	pr.ClosedAt = &closedAt
+	completions, err := collectorgithub.CompletionEvents(ref, pr,
+		[]ghclient.IssueEvent{closedTimelineEvent(1, closedAt)})
+	require.NoError(t, err)
+	require.NotEmpty(t, completions)
+	for _, evt := range completions {
+		assert.Equal(t, []string{"github.com/crossplane-contrib/crossplane-diff"},
+			events.ReposOf(evt, events.ArtifactWorkRepos), evt.ExternalID)
+	}
+
+	ghes, err := ghclient.ParseRepoRef("ghes.corp.example/o/r")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ghes.corp.example/o/r"},
+		events.ReposOf(collectorgithub.OpenedEvent(ghes, samplePR()), events.ArtifactWorkRepos),
+		"the host is the configured repo's, so a GHES repo never routes to a github.com tracker")
+}
+
+// TestAPROnlyNarrativeRoutesByItsRepository joins the two halves: the form the collector
+// writes is the form tracker scopes match, so upstream PR work is ticketed nowhere under
+// a read-only tracker that mirrors nowhere, and a fork's PR falls to default_ticket_in.
+func TestAPROnlyNarrativeRoutesByItsRepository(t *testing.T) {
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "j", Kind: config.KindJira, Endpoint: "https://org.atlassian.net"},
+			{Name: "gh", Kind: config.KindGitHub, Endpoint: "https://api.github.com"},
+		},
+		Trackers: []config.Tracker{
+			{Name: "work", Connection: "j", Scopes: []string{"DEVSBX"}, WritableScopes: []string{"DEVSBX"}, DefaultScope: "DEVSBX"},
+			{Name: "upstream", Connection: "gh", Scopes: []string{"crossplane-contrib/*"}},
+		},
+		DefaultTicketIn: []string{"work"},
+	}
+
+	upstream, err := ghclient.ParseRepoRef("github.com/Crossplane-Contrib/Crossplane-Diff")
+	require.NoError(t, err)
+	plan := cfg.UntrackedDestinations(events.ReposOf(collectorgithub.OpenedEvent(upstream, samplePR()), events.ArtifactWorkRepos))
+	assert.Empty(t, plan.Destinations)
+	assert.Equal(t, "upstream", plan.Location)
+
+	fork, err := ghclient.ParseRepoRef("github.com/someone/crossplane-diff")
+	require.NoError(t, err)
+	plan = cfg.UntrackedDestinations(events.ReposOf(collectorgithub.OpenedEvent(fork, samplePR()), events.ArtifactWorkRepos))
+	assert.Equal(t, []config.Destination{{Tracker: "work", Scope: "DEVSBX"}}, plan.Destinations)
 }

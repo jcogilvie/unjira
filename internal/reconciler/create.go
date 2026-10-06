@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/jcogilvie/unjira/internal/config"
@@ -79,6 +80,9 @@ type createVerdict struct {
 	Description   string  `json:"description"`
 	Confidence    float64 `json:"confidence"`
 	Rationale     string  `json:"rationale"`
+	// Destinations names the trackers the work should be ticketed in, asked for only
+	// when several are allowed (see chooseDestinations).
+	Destinations []string `json:"destinations"`
 }
 
 // ProposeCreates drafts a create action for each narrative that matched no issue
@@ -121,7 +125,13 @@ func ProposeCreates(
 	cfg config.ReconcilerConfig,
 	learnedRules []rules.Rule,
 	log *slog.Logger,
+	opts ...ReconcileOption,
 ) ([]ReconcileResult, correlator.Stats, error) {
+	var o reconcileOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	var stats correlator.Stats
 
 	limit := cfg.NarrativeLimit()
@@ -140,7 +150,7 @@ func ProposeCreates(
 
 	var results []ReconcileResult
 	for _, n := range narratives {
-		result, oneStats, err := proposeCreateOne(ctx, s, client, n, learnedRules)
+		result, oneStats, err := proposeCreateOne(ctx, s, client, n, learnedRules, o.destinations)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -162,6 +172,7 @@ func proposeCreateOne(
 	client llm.Client,
 	narrative store.NarrativeRow,
 	learnedRules []rules.Rule,
+	policy DestinationPolicy,
 ) (ReconcileResult, correlator.Stats, error) {
 	result := ReconcileResult{NarrativeID: narrative.ID}
 
@@ -187,20 +198,19 @@ func proposeCreateOne(
 		return result, stats, nil
 	}
 
-	if existing, err := s.ActionsForNarrative(narrative.ID); err == nil {
-		if reason, found := openOrAppliedCreate(existing); found {
-			// An already-proposed or already-applied create must not be proposed
-			// again: the first would double the review queue, the second would
-			// open a duplicate ticket.
-			result.Suppressed = append(result.Suppressed, reason)
-
-			return result, stats, nil
-		}
-	} else {
+	existing, err := s.ActionsForNarrative(narrative.ID)
+	if err != nil {
 		// A failed lookup must not silently permit a second create — that is the
 		// duplicate-ticket case. Refuse and say why.
 		return result, stats, fmt.Errorf(
 			"checking existing actions for narrative %d: %w", narrative.ID, err)
+	}
+
+	// Destinations, decided before any drafting call. Nil policy: the one configured
+	// default, which is the behaviour before destinations existed.
+	allowed, done, err := allowedDestinations(s, &result, evts, existing, policy)
+	if err != nil || done {
+		return result, stats, err
 	}
 
 	// A previous pass already judged this work not worth tracking. Ask again only
@@ -241,7 +251,7 @@ func proposeCreateOne(
 		systemPrompt += "\n\n" + rendered
 	}
 
-	raw, usage, err := client.Complete(ctx, systemPrompt, buildCreatePrompt(narrative, evts))
+	raw, usage, err := client.Complete(ctx, systemPrompt, buildCreatePrompt(narrative, evts, allowed))
 	if err != nil {
 		return result, stats, fmt.Errorf("proposing a create for narrative %d: %w", narrative.ID, err)
 	}
@@ -268,15 +278,107 @@ func proposeCreateOne(
 		return result, stats, nil
 	}
 
-	result.Proposed = append(result.Proposed, ProposedAction{
+	proposal := ProposedAction{
 		Type:       ActionCreate,
 		Summary:    verdict.Summary,
 		Body:       verdict.Description,
 		Confidence: clampConfidence(verdict.Confidence),
 		Rationale:  verdict.Rationale,
-	})
+	}
+
+	if policy == nil {
+		result.Proposed = append(result.Proposed, proposal)
+
+		return result, stats, nil
+	}
+
+	chosen, rejected := chooseDestinations(allowed, verdict.Destinations)
+	result.Suppressed = append(result.Suppressed, rejected...)
+
+	for _, d := range chosen {
+		p := proposal
+		p.Scope = d.Scope
+		result.Proposed = append(result.Proposed, p)
+	}
 
 	return result, stats, nil
+}
+
+// allowedDestinations computes where this untracked narrative may be ticketed, and
+// whether that already settles the narrative (done): an empty set, or every allowed
+// scope already holding an open or applied create, is recorded on result and needs no
+// drafting call. With no policy it applies the pre-destination rule: one create, unless
+// one is already open or applied.
+func allowedDestinations(
+	s *store.Store, result *ReconcileResult, evts []events.Event, existing []store.ActionRow, policy DestinationPolicy,
+) ([]config.Destination, bool, error) {
+	if policy == nil {
+		if reason, found := openOrAppliedCreate(existing); found {
+			// An already-proposed or already-applied create must not be proposed
+			// again: the first would double the review queue, the second would
+			// open a duplicate ticket.
+			result.Suppressed = append(result.Suppressed, reason)
+
+			return nil, true, nil
+		}
+
+		return nil, false, nil
+	}
+
+	plan := policy.UntrackedDestinations(workLocation(evts))
+	if len(plan.Ambiguous) > 0 {
+		result.Notes = append(result.Notes, fmt.Sprintf(
+			"work location is ambiguous: its repositories route to trackers %s, so it is treated as "+
+				"in no tracker's scope", strings.Join(plan.Ambiguous, ", ")))
+	}
+
+	if len(plan.Destinations) == 0 {
+		// Recorded as a suppression, which is also the watermark DeltaEvents reads;
+		// re-recorded only once something new has happened, or every pass would write
+		// another row for a narrative nothing changed.
+		fresh, err := somethingNewSinceLastAction(s, result.NarrativeID, existing)
+		if err != nil {
+			return nil, true, err
+		}
+
+		if fresh {
+			result.Suppressed = append(result.Suppressed, "no allowed destination: "+plan.Reason)
+		}
+
+		return nil, true, nil
+	}
+
+	// The open-or-applied rule per destination: a create already open or applied in a
+	// scope blocks that scope, not the others.
+	taken, blocksAll := openCreateScopes(existing)
+	allowed := slices.DeleteFunc(plan.Destinations, func(d config.Destination) bool {
+		return blocksAll || slices.Contains(taken, d.Scope)
+	})
+
+	if len(allowed) == 0 {
+		reason, _ := openOrAppliedCreate(existing)
+		result.Suppressed = append(result.Suppressed, reason)
+
+		return nil, true, nil
+	}
+
+	return allowed, false, nil
+}
+
+// somethingNewSinceLastAction reports whether a narrative has work evidence newer than
+// its latest action, or has no action at all — the condition for recording a fresh
+// suppression rather than repeating one.
+func somethingNewSinceLastAction(s *store.Store, narrativeID int64, existing []store.ActionRow) (bool, error) {
+	if len(existing) == 0 {
+		return true, nil
+	}
+
+	delta, err := s.DeltaEvents(narrativeID)
+	if err != nil {
+		return false, fmt.Errorf("computing delta for narrative %d: %w", narrativeID, err)
+	}
+
+	return len(dropSelfAuthored(delta)) > 0, nil
 }
 
 // recordDecline persists the model's refusal as an action row.
@@ -398,9 +500,16 @@ func parseCreateResponse(raw string) (createVerdict, error) {
 	return v, nil
 }
 
-// buildCreatePrompt renders the narrative and its full event list.
-func buildCreatePrompt(narrative store.NarrativeRow, evts []events.Event) string {
+// buildCreatePrompt renders the narrative and its full event list, and, when several
+// destinations are allowed, asks the model to name the ones the work belongs in.
+func buildCreatePrompt(narrative store.NarrativeRow, evts []events.Event, allowed []config.Destination) string {
 	var b strings.Builder
+
+	if len(allowed) > 1 {
+		fmt.Fprintf(&b, "Allowed destinations: %s. If the work is worth tracking, add "+
+			"\"destinations\": [...] to your JSON, naming each tracker it should be ticketed in. "+
+			"Name only these.\n\n", destinationNames(allowed))
+	}
 
 	fmt.Fprintf(&b, "Narrative: title=%q\nsummary: %q\n\n", narrative.Title, narrative.Summary)
 	b.WriteString("Every event in this work (no tracker issue exists for any of it):\n")

@@ -319,12 +319,16 @@ connections:
 			wantErr: `"t" is a destination`,
 		},
 		{
-			name: "more than one default_ticket_in",
+			name: "several default_ticket_in",
 			body: conns + `trackers:
   - {name: a, connection: j, scopes: ["PAAS"], writable_scopes: ["PAAS"], default_scope: "PAAS"}
   - {name: b, connection: l, scopes: ["PROJ"], writable_scopes: ["PROJ"], default_scope: "PROJ"}
 default_ticket_in: [a, b]`,
-			wantErr: "default_ticket_in names 2 trackers",
+		},
+		{
+			name:    "endpoint that is not a URL",
+			body:    `connections: [{name: x, kind: github, endpoint: "api.github.com"}]`,
+			wantErr: `connections[0].endpoint "api.github.com" is not an absolute URL`,
 		},
 		{
 			name: "writable default_ticket_in with default_scope",

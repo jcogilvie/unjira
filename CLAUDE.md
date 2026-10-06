@@ -60,7 +60,11 @@ export UNJIRA_GITHUB_CREDENTIALS="{\"github.com\":{\"token\":\"$(gh auth token)\
 These are load-bearing — `docs/design-notes.md` explains the incidents behind each:
 
 - **Collectors are dumb and deterministic.** They extract metadata + candidates and defer all
-  judgment. No LLM, no network beyond their own source, no "does this ticket exist" checks. Adding
+  judgment. No LLM, no network beyond their own source, no "does this ticket exist" checks. One
+  bounded exception: the claude_code collector reads each working directory's local git config
+  through go-git (`collector/claudecode/location.go`) to record its remotes — local, deterministic,
+  no network, no `git` binary, read once per directory per pass. It records remotes only; which
+  tracker they belong to is decided at reconcile time, from config. Adding
   a stream = implement the `Collector` interface in `internal/pipeline`, register it in
   `cmd/unjira/main.go`'s registry, enable it in config.
 - **All verification lives in the reconciler.** Never emit a state-bearing action from transcript
