@@ -138,6 +138,13 @@ func RunNarrate(
 ) (NarrateResult, error) {
 	result := NarrateResult{Window: window, DryRun: opts.DryRun}
 
+	// Before anything is read or written: config.Load already refuses a bad budget,
+	// but a Config built in code never passed through it.
+	budgets, err := cfg.ReaskBudgets()
+	if err != nil {
+		return NarrateResult{}, fmt.Errorf("invalid llm config: %w", err)
+	}
+
 	unlinked, err := s.UnlinkedEventsInRange(window.Start, window.End)
 	if err != nil {
 		return NarrateResult{}, fmt.Errorf("assembling clustering candidates: %w", err)
@@ -196,6 +203,8 @@ func RunNarrate(
 		ctx, candidates, existing, client, window, cfg.LLM.ContextWindowTokens,
 		correlator.WithClusterRules(correlatorRules),
 		correlator.WithMaxEventSummaryChars(cfg.Correlator.MaxEventSummaryChars),
+		correlator.WithOmissionReasks(budgets.Omission),
+		correlator.WithDisputeReasks(budgets.Dispute),
 		correlator.WithLogger(opts.Log))
 	result.Stats.Add(clusterStats)
 	if err != nil {

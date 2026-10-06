@@ -101,13 +101,19 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 
 	// Only when the model left something out. Rendered even though the pass
 	// succeeded: recovered omissions are how often the model fails to account for
-	// every event it was shown, and the one re-ask is all that stands between that
-	// and a failed pass, so an operator should see how close it came. On a pass
-	// that renders at all the two numbers are equal, since an unrecovered omission
-	// is an error; both are printed so a mismatch could not hide.
+	// every event it was shown, and the re-ask rounds (llm.max_omission_reasks) are
+	// all that stand between that and a failed pass, so an operator should see how
+	// close it came — including how many rounds it took, when more than one, since
+	// that is how near the budget the pass ran. On a pass that renders at all the two
+	// numbers are equal, since an unrecovered omission is an error; both are printed
+	// so a mismatch could not hide.
 	if r.Stats.OmittedEvents > 0 {
-		fmt.Fprintf(b, "re-asked %d event(s) the model left in no cluster; recovered %d\n",
-			r.Stats.OmittedEvents, r.Stats.RecoveredEvents)
+		rounds := ""
+		if r.Stats.OmissionReasks > 1 {
+			rounds = fmt.Sprintf(" over %d rounds", r.Stats.OmissionReasks)
+		}
+		fmt.Fprintf(b, "re-asked %d event(s) the model left in no cluster; recovered %d%s\n",
+			r.Stats.OmittedEvents, r.Stats.RecoveredEvents, rounds)
 	}
 
 	writeSharingLines(b, r.Stats)
@@ -214,9 +220,15 @@ func writeSharingLines(b *strings.Builder, s correlator.Stats) {
 	}
 
 	if s.DisputedEvents > 0 {
+		// Batches and refusal re-asks both add dispute calls, and they mean different
+		// things: one is the prompt's size, the other the model's answer being
+		// refused. Said apart so neither reads as the other.
 		how := "by one re-ask"
-		if s.DisputeCalls > 1 {
-			how = fmt.Sprintf("by %d re-ask calls, batched to fit the context window", s.DisputeCalls)
+		if batches := s.DisputeCalls - s.DisputeReasks; batches > 1 {
+			how = fmt.Sprintf("by %d re-ask calls, batched to fit the context window", batches)
+		}
+		if s.DisputeReasks > 0 {
+			how += fmt.Sprintf(", after re-asking %d refused answer(s)", s.DisputeReasks)
 		}
 		fmt.Fprintf(b, "dispute  %d event(s) placed in more than one cluster; resolved %d %s\n",
 			s.DisputedEvents, len(s.Disputes), how)
@@ -339,11 +351,11 @@ func writeMatchHeader(b *strings.Builder, r MatchRunResult) {
 		r.Stats.PromptTokens, r.Stats.CompletionTokens, r.Stats.EstimatedTokens)
 
 	// Only when one fired, like the narration pass's re-ask line. It does not say
-	// how many recovered: a failed pass is rendered too, and a narrative refused
-	// twice is named in the pass's error, not here.
+	// how many recovered: a failed pass is rendered too, and a narrative that spent
+	// its budget (llm.max_match_reasks) is named in the pass's error, not here. Each
+	// re-ask answers one refused response, so the count is both.
 	if r.Stats.MatchReasks > 0 {
-		fmt.Fprintf(b, "re-asked     %d unparseable response(s), once each\n",
-			r.Stats.MatchReasks)
+		fmt.Fprintf(b, "re-asked     %d unparseable response(s)\n", r.Stats.MatchReasks)
 	}
 }
 

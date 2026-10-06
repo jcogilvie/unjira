@@ -175,18 +175,21 @@ the clustering context.
 Two lossless classes are absorbed: a trailing comma (`llm.JSONArrayPayload` and `llm.JSONObjectPayload`
 drop it via `hujson.Standardize`), and a NEW cluster holding no event (`pipeline.dropEmptyClusters`
 discards it and reports it in the pass summary). Matching is covered too: `classifyCandidates`
-re-asks once on an unparseable match response, quoting the parser's reason, then fails that
-narrative loudly. A real 30-day matching drain hit two, in consecutive passes: prose where the array
-belonged and a duplicated malformed key (`"confidence=0.2"`).
+re-asks an unparseable match response, quoting the parser's reason, up to `llm.max_match_reasks`
+times (default 1), then fails that narrative loudly. A real 30-day matching drain hit two, in
+consecutive passes: prose where the array belonged and a duplicated malformed key
+(`"confidence=0.2"`). So are clustering's own follow-ups: an omission re-ask round whose response
+`mergeReaskResponse` refuses spends the round and the next round quotes the refusal, and a refused
+dispute answer is re-asked per batch, each up to its configured budget.
 
-What remains is clustering. An out-of-range index, an unknown `kind`, a missing `confidence` or prose
-instead of JSON still fails `parseClusterResponse`, which is right, because a best-effort reading is
-how events get silently misattributed. But nothing retries, so one such response costs the whole
-multi-minute pass, and under `watch` the window may move on. The same re-ask shape would fit: once,
-quoting the reason, then fail loudly. Not built, because no such clustering failure has been observed
-(0 in the 32 passes measured on 2026-10-02 and 2026-10-04, and none in the 30-day drain), and a
-clustering re-ask costs a full-prompt call (~70–110k tokens), where a matching re-ask costs one
-narrative's prompt.
+What remains is the FIRST clustering response. An out-of-range index, an unknown `kind`, a missing
+`confidence` or prose instead of JSON there still fails `parseClusterResponse`, which is right,
+because a best-effort reading is how events get silently misattributed. But nothing retries it: no
+re-ask budget covers it, so one such response costs the whole multi-minute pass, and under `watch`
+the window may move on. The same shape would fit: re-ask quoting the reason, bounded by a budget,
+then fail loudly. Not built, because no such clustering failure has been observed (0 in the 32
+passes measured on 2026-10-02 and 2026-10-04, and none in the 30-day drain), and a clustering re-ask
+costs a full-prompt call (~70–110k tokens), where a matching re-ask costs one narrative's prompt.
 
 ### F50 — a split narrative is still read by the create path and the review queue
 
@@ -241,11 +244,11 @@ real data is unmeasured.
 ### F52 — a single dispute too large for the context window fails the pass
 
 The dispute re-ask describes each claimant of a disputed event by ALL of its other member events, in
-full (`writeClaimant`, `internal/correlator/cluster_dispute.go:326`). A dispute set that does not fit
-one call is split into batches that each fit (`batchDisputes`, `:266`), so the set's size no longer
+full (`writeClaimant`, `internal/correlator/cluster_dispute.go:419`). A dispute set that does not fit
+one call is split into batches that each fit (`batchDisputes`, `:359`), so the set's size no longer
 matters. One dispute's size still does: if a single disputed event's claimants alone exceed the
 context window, nothing smaller can be asked, and the pass refuses before spending a dispute call
-(`requireDisputeFits`, `:298`). It never truncates and never sends a prompt over budget. The case
+(`requireDisputeFits`, `:391`). It never truncates and never sends a prompt over budget. The case
 that makes this likely is a bisected pass, which bisected because the window did not fit: each
 claimant can hold a whole half, so one dispute can list more member text than either half's prompt
 did (`TestCluster_ADisputeTooLargeAloneFailsLoudly`). **Consequence:** a wide window whose halves
@@ -700,7 +703,7 @@ narrative.
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
 | F60 — upstream work done for an internal ticket is routed by repository, not by purpose | open. Matching's job, not routing's. 3 of 5 measured cases |
 | F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance |
-| F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
+| F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson); matching, omission-round and dispute responses are re-asked within configurable budgets. Only the first clustering response is still never retried. 0 such deaths in 32 passes; a budgeted re-ask is the shape if one appears |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F50 — a split narrative is still read by the create path and the review queue | open, narrowed: the create path examines a split narrative once and its create examination then excludes it, so it no longer holds a slot (`TestProposeCreates_AnEmptiedNarrativeYieldsItsSlot`); it is still reported with a false reason, and the review-queue half is untouched. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed before the create backlog fix: a split narrative held a create slot for 3 of 3 passes at cap 1 |
 | F59 — a rejected create is re-asked on the next pass whether or not anything changed | open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data |

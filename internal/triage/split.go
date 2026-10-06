@@ -78,12 +78,13 @@ func (h *StoreHandler) SplitNarrative(
 			narrativeID, len(eligible))
 	}
 
-	results, _, err := correlator.Cluster(
-		ctx, eligible, nil, h.client,
-		windowSpanning(eligible), h.contextTokens,
+	opts := append([]correlator.ClusterOption{
 		correlator.WithClusterRules(h.rules),
 		correlator.WithInstruction(splitInstruction),
-	)
+	}, h.clusterReaskOptions()...)
+	results, _, err := correlator.Cluster(
+		ctx, eligible, nil, h.client,
+		windowSpanning(eligible), h.contextTokens, opts...)
 	if err != nil {
 		return SplitResult{}, fmt.Errorf("re-clustering narrative %d for a split: %w", narrativeID, err)
 	}

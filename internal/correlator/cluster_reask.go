@@ -22,23 +22,33 @@ import (
 // and the window moves on.
 //
 // So Cluster checks coverage after every clustering call and, when something was
-// left out, makes ONE follow-up call asking the model to place exactly those
-// events. Anything still unplaced is a loud error. Rejected alternatives:
+// left out, makes follow-up calls — rounds — asking the model to place exactly the
+// events still unplaced, up to a configured budget (llm.max_omission_reasks,
+// default 1). Each round shows the clusters as merged so far, so a cluster an
+// earlier round created can be joined by position. A round whose response the
+// parser refuses merges nothing and still spends the round; the next one quotes
+// the refused response and the reason. Anything unplaced once the budget is spent
+// is a loud error. Rejected alternatives:
 //
-//   - Erroring on the first omission. Correct but brittle: one forgotten event
-//     fails a whole pass the model can usually finish when shown what it missed.
+//   - Erroring on the first omission, always. Correct but brittle: one forgotten
+//     event fails a whole pass the model can usually finish when shown what it
+//     missed. A budget of 0 still chooses exactly this, for whoever wants it.
 //   - Putting each omitted event in a cluster of its own. That invents a
 //     narrative per forgotten event, which is the fragmentation the prompt's
 //     grouping criterion exists to prevent, and hides that anything went wrong.
-//   - Re-asking until complete. Unbounded cost on a model that keeps omitting; one
-//     re-ask is the budget, and a second failure is information, not noise.
+//   - Re-asking until complete. Unbounded cost on a model that keeps omitting, so
+//     the rounds are bounded by configuration rather than by the model, and the
+//     bound defaults to one: a model still omitting after it was shown what it
+//     missed is information, not noise, and an operator raises the bound knowing
+//     what each round costs (the full first prompt again, plus the clusters).
 //   - Re-clustering the whole window. It throws away the clusters the model
 //     already got right and costs the full prompt again for a handful of events.
 
-// reaskRequest is what one re-ask needs from the clustering call it follows up on.
+// reaskRequest is what the omission re-ask rounds need from the clustering call they
+// follow up on.
 type reaskRequest struct {
 	window TimeRange
-	// userPrompt is the first call's user prompt, verbatim. The re-ask repeats it
+	// userPrompt is the first call's user prompt, verbatim. Every round repeats it
 	// so every index means what it meant the first time — the index space is
 	// assignable, shared with the parser, and must not be renumbered.
 	userPrompt   string
@@ -48,9 +58,28 @@ type reaskRequest struct {
 	omitted      []int
 	rules        []rules.Rule
 	instruction  string
+	// maxRounds is the budget: how many follow-up calls may be made. 0 (or less)
+	// makes any omission an error with no call.
+	maxRounds int
 
 	contextWindowTokens int
 	log                 *slog.Logger
+}
+
+// reaskRound is the state one round's prompt is built from: the clusters as merged
+// so far, each one's member indices into assignable, the events still unplaced, and
+// the previous round's response when the parser refused it.
+type reaskRound struct {
+	number   int
+	clusters []ClusterResult
+	indices  [][]int
+	missing  []int
+	// refused and reason are the previous round's response and the parser's reason
+	// for refusing it. reason is nil when the previous round was accepted or this is
+	// the first round (a refused response can itself be empty, so refused cannot
+	// mark it).
+	refused string
+	reason  error
 }
 
 // unassignedIndices returns, ascending, every index in [0, n) that appears in no
@@ -87,87 +116,158 @@ func unassignedIndices(indices [][]int, n int) []int {
 	return out
 }
 
-// recoverOmittedEvents makes the one re-ask for req.omitted and merges its answer
-// into req.first. It returns the merged results only when every omitted event was
-// placed; otherwise a loud error naming what is still missing, and no results.
+// recoverOmittedEvents spends up to req.maxRounds rounds placing req.omitted, merging
+// each accepted answer into the clusters so far. It returns the merged results only
+// when every omitted event was placed; otherwise a loud error naming what is still
+// missing, and no results.
 func recoverOmittedEvents(ctx context.Context, client llm.Client, req reaskRequest) ([]ClusterResult, Stats, error) {
 	stats := Stats{OmittedEvents: len(req.omitted)}
 
-	systemPrompt, userPrompt := buildReaskPrompt(req)
-	estimated := estimateTokens(systemPrompt + userPrompt)
-	stats.EstimatedTokens = estimated
-
-	logging.For(req.log, "correlator").WarnContext(ctx, "cluster response left events unassigned; re-asking once",
-		"omitted_events", len(req.omitted),
-		"assignable_events", len(req.assignable),
-		"omitted", describeIndices(req.assignable, req.omitted),
-		"est_tokens", estimated,
-	)
-
-	// The re-ask is larger than the prompt that fitted, since it adds the clusters
-	// already produced. Sent over budget it would be rejected part-way through the
-	// pass; there is nothing to bisect, because the first response's clusters span
-	// the whole window.
-	if estimated > req.contextWindowTokens {
+	if req.maxRounds <= 0 {
 		return nil, stats, fmt.Errorf(
-			"clustering events in window [%s, %s): the model left %d event(s) unassigned (%s), and the re-ask "+
-				"for them is estimated at %d tokens, over the %d-token context window",
-			req.window.Start, req.window.End, len(req.omitted), describeIndices(req.assignable, req.omitted),
-			estimated, req.contextWindowTokens)
+			"clustering events in window [%s, %s): the model left %d event(s) in no cluster (%s), and the "+
+				"omission re-ask budget (llm.max_omission_reasks) is 0, so they were not asked about again",
+			req.window.Start, req.window.End, len(req.omitted), describeIndices(req.assignable, req.omitted))
 	}
 
-	raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
-	if err != nil {
-		return nil, stats, fmt.Errorf("re-asking for %d unassigned event(s) in window [%s, %s): %w",
-			len(req.omitted), req.window.Start, req.window.End, err)
+	round := reaskRound{clusters: req.first, indices: req.firstIndices, missing: req.omitted}
+	for round.number = 1; round.number <= req.maxRounds; round.number++ {
+		systemPrompt, userPrompt := buildReaskPrompt(req, round)
+		estimated := estimateTokens(systemPrompt + userPrompt)
+		stats.EstimatedTokens += estimated
+
+		logging.For(req.log, "correlator").WarnContext(ctx, "cluster response left events unassigned; re-asking",
+			"round", round.number,
+			"max_rounds", req.maxRounds,
+			"omitted_events", len(round.missing),
+			"assignable_events", len(req.assignable),
+			"omitted", describeIndices(req.assignable, round.missing),
+			"previous_round_refused", round.reason != nil,
+			"est_tokens", estimated,
+		)
+
+		// A round is larger than the prompt that fitted, since it adds the clusters so
+		// far (and, after a refusal, the refused response). Sent over budget it would
+		// be rejected part-way through the pass; there is nothing to bisect, because
+		// the clusters span the whole window.
+		if estimated > req.contextWindowTokens {
+			return nil, stats, withLastRefusal(fmt.Errorf(
+				"clustering events in window [%s, %s): the model left %d event(s) unassigned (%s), and re-ask "+
+					"round %d of %d for them is estimated at %d tokens, over the %d-token context window",
+				req.window.Start, req.window.End, len(round.missing), describeIndices(req.assignable, round.missing),
+				round.number, req.maxRounds, estimated, req.contextWindowTokens), round.reason)
+		}
+
+		stats.OmissionReasks++
+		raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
+		if err != nil {
+			return nil, stats, fmt.Errorf("re-asking (round %d of %d) for %d unassigned event(s) in window [%s, %s): %w",
+				round.number, req.maxRounds, len(round.missing), req.window.Start, req.window.End, err)
+		}
+		stats.AddUsage(usage)
+
+		merged, stillMissing, err := mergeReaskResponse(raw, req.assignable, round.clusters, round.missing)
+		if err != nil {
+			// Refused: nothing from it is merged, and the next round quotes it.
+			round.refused, round.reason = raw, err
+
+			continue
+		}
+
+		indices, err := memberIndices(merged, req.assignable)
+		if err != nil {
+			return nil, stats, fmt.Errorf("clustering events in window [%s, %s): %w", req.window.Start, req.window.End, err)
+		}
+		round = reaskRound{number: round.number, clusters: merged, indices: indices, missing: stillMissing}
+		stats.RecoveredEvents = len(req.omitted) - len(round.missing)
+
+		if len(round.missing) == 0 {
+			logging.For(req.log, "correlator").InfoContext(ctx, "re-ask placed every unassigned event",
+				"recovered_events", stats.RecoveredEvents, "rounds", stats.OmissionReasks)
+
+			return merged, stats, nil
+		}
 	}
-	stats.AddUsage(usage)
 
-	merged, stillMissing, err := mergeReaskResponse(raw, req.assignable, req.first, req.omitted)
-	if err != nil {
-		return nil, stats, err
+	return nil, stats, withLastRefusal(fmt.Errorf(
+		"clustering events in window [%s, %s): %d event(s) still in no cluster after %d re-ask round(s) "+
+			"(llm.max_omission_reasks): %s",
+		req.window.Start, req.window.End, len(round.missing), stats.OmissionReasks,
+		describeIndices(req.assignable, round.missing)), round.reason)
+}
+
+// withLastRefusal adds the last round's refusal to err, when the last round was
+// refused: it is why the events are still unplaced.
+func withLastRefusal(err, reason error) error {
+	if reason == nil {
+		return err
 	}
-	stats.RecoveredEvents = len(req.omitted) - len(stillMissing)
 
-	if len(stillMissing) > 0 {
-		return nil, stats, fmt.Errorf(
-			"clustering events in window [%s, %s): %d event(s) still in no cluster after one re-ask: %s",
-			req.window.Start, req.window.End, len(stillMissing), describeIndices(req.assignable, stillMissing))
+	return fmt.Errorf("%w; the last re-ask response was refused: %w", err, reason)
+}
+
+// memberIndices recomputes each result's member indices into assignable, so the
+// next round can list the merged clusters exactly as the first round listed the
+// first response's. assignable holds each event once (assignableEvents refuses a
+// repeat), so an event's index is unambiguous; a member not in it would mean a merge
+// invented an event, which is a loud error rather than an index to guess.
+func memberIndices(results []ClusterResult, assignable []Event) ([][]int, error) {
+	index := make(map[string]int, len(assignable))
+	for i, e := range assignable {
+		index[EventKey(e)] = i
 	}
 
-	logging.For(req.log, "correlator").InfoContext(ctx, "re-ask placed every unassigned event",
-		"recovered_events", stats.RecoveredEvents)
+	out := make([][]int, len(results))
+	for i, r := range results {
+		for _, e := range r.Events {
+			idx, ok := index[EventKey(e)]
+			if !ok {
+				return nil, fmt.Errorf("merged cluster_position=%d holds %s/%s, which is not a numbered event",
+					i, e.Source, e.ExternalID)
+			}
+			out[i] = append(out[i], idx)
+		}
+	}
 
-	return merged, stats, nil
+	return out, nil
 }
 
 // buildReaskPrompt repeats the first call's user prompt verbatim, then lists the
-// clusters that call produced, by position, and the omitted indices.
+// clusters so far, by position, and the indices still unplaced. After a refused
+// round it also quotes the refused response and the parser's reason.
 //
 // By position because a cluster tagged "new" has no narrative_id yet, so position
-// in the first response is the only name it has. Its event_indices are listed too:
+// in the list shown is the only name it has — and the list is the MERGED one, so a
+// cluster an earlier round created can be joined. Its event_indices are listed too:
 // they are what the cluster is, more precisely than a title.
-func buildReaskPrompt(req reaskRequest) (systemPrompt, userPrompt string) {
+func buildReaskPrompt(req reaskRequest, round reaskRound) (systemPrompt, userPrompt string) {
 	systemPrompt = withRulesAndInstruction(clusterReaskSystemPrompt, req.rules, req.instruction)
 
 	var b strings.Builder
 	b.WriteString(req.userPrompt)
 	b.WriteString("\nClusters you already produced, by cluster_position:\n")
-	if len(req.first) == 0 {
+	if len(round.clusters) == 0 {
 		b.WriteString("(none)\n")
 	}
-	for i, r := range req.first {
+	for i, r := range round.clusters {
 		fmt.Fprintf(&b, "cluster_position=%d kind=%s", i, clusterKindWire(r.Kind))
 		if r.Kind == ClusterExtends {
 			fmt.Fprintf(&b, " narrative_id=%d", r.NarrativeID)
 		} else {
 			fmt.Fprintf(&b, " title=%q", r.Title)
 		}
-		fmt.Fprintf(&b, " summary=%q event_indices=%s\n", r.Summary, formatIndices(req.firstIndices[i]))
+		fmt.Fprintf(&b, " summary=%q event_indices=%s\n", r.Summary, formatIndices(round.indices[i]))
 	}
 
 	fmt.Fprintf(&b, "\nUnassigned events — your response put these numbered events in no cluster. "+
-		"Assign each of them: %s\n", formatIndices(req.omitted))
+		"Assign each of them: %s\n", formatIndices(round.missing))
+
+	if round.reason != nil {
+		writeRefusal(&b, round.refused, round.reason)
+		b.WriteString("\n\nNothing from it was applied. Answer again: return ONLY the JSON array the system " +
+			"prompt specifies, placing only the events listed under \"Unassigned events\", no prose and no " +
+			"markdown fences.\n")
+	}
 
 	return systemPrompt, b.String()
 }

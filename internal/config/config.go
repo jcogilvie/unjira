@@ -102,6 +102,15 @@ type LLMConfig struct {
 	// path is conventionally written and silently failing on it would be a poor
 	// surprise.
 	APIKeyHelper string `json:"api_key_helper"`
+	// MaxReasks is this model's re-ask budget for every use that does not set its
+	// own; MaxMatchReasks, MaxOmissionReasks and MaxDisputeReasks set one use's.
+	// Pointers, because unset (inherit the tier below) and an explicit 0 (never
+	// re-ask) must differ. Resolved by Config.ReaskBudgets, which documents the
+	// tiers and what a re-ask is at each use.
+	MaxReasks         *int `json:"max_reasks"`
+	MaxMatchReasks    *int `json:"max_match_reasks"`
+	MaxOmissionReasks *int `json:"max_omission_reasks"`
+	MaxDisputeReasks  *int `json:"max_dispute_reasks"`
 }
 
 // ResolvedAPIKeyHelper returns APIKeyHelper with a leading ~ expanded to the
@@ -532,12 +541,16 @@ type Config struct {
 	// Jira link (see internal/events.CompileLinkExclusionPatterns). Empty by
 	// default — unjira makes no assumption about any workflow's own
 	// placeholder-ticket conventions.
-	ExcludeFromLinking []string         `json:"exclude_from_linking"`
-	LLM                LLMConfig        `json:"llm"`
-	Correlator         CorrelatorConfig `json:"correlator"`
-	Match              MatchConfig      `json:"match"`
-	Reconciler         ReconcilerConfig `json:"reconciler"`
-	Workflow           WorkflowConfig   `json:"workflow"`
+	ExcludeFromLinking []string  `json:"exclude_from_linking"`
+	LLM                LLMConfig `json:"llm"`
+	// LLMDefaults holds what applies across every model block. There is one model
+	// block today; this tier exists so a multi-model config has somewhere to put a
+	// default that no single model owns.
+	LLMDefaults LLMDefaultsConfig `json:"llm_defaults"`
+	Correlator  CorrelatorConfig  `json:"correlator"`
+	Match       MatchConfig       `json:"match"`
+	Reconciler  ReconcilerConfig  `json:"reconciler"`
+	Workflow    WorkflowConfig    `json:"workflow"`
 	// AutoCommit keys the auto-commit gate's rules by actions.type
 	// ("comment" | "transition" | "create"). Absent from config entirely
 	// (nil map) is the common case and the safe default: every action type
@@ -712,6 +725,13 @@ func Load(path string) (Config, error) {
 	}
 
 	if err := cfg.ValidateTrackers(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
+
+	// Checked here, not only where the budgets are used: a negative budget is a typo
+	// in a value no command can run correctly with, and every LLM-using command reads
+	// it, so the earliest point it can fail is the right one.
+	if _, err := cfg.ReaskBudgets(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 

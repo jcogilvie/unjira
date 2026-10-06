@@ -72,6 +72,10 @@ func RunMatch(
 	if err := cfg.Match.Validate(); err != nil {
 		return MatchRunResult{}, fmt.Errorf("invalid match config: %w", err)
 	}
+	budgets, err := cfg.ReaskBudgets()
+	if err != nil {
+		return MatchRunResult{}, fmt.Errorf("invalid llm config: %w", err)
+	}
 
 	compiled, err := cfg.CompiledLinkExclusions()
 	if err != nil {
@@ -85,7 +89,8 @@ func RunMatch(
 
 	matched, stats, err := correlator.Match(
 		ctx, s, tracker, client, cfg.Match,
-		correlator.WithLinkExclusions(compiled), correlator.WithRules(correlatorRules))
+		correlator.WithLinkExclusions(compiled), correlator.WithRules(correlatorRules),
+		correlator.WithMatchReasks(budgets.Match))
 	result := MatchRunResult{Matched: matched, Stats: stats}
 	if err != nil {
 		return result, fmt.Errorf("matching narratives: %w", err)

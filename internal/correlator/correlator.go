@@ -207,14 +207,17 @@ type Stats struct {
 	// from Cluster to internal/pipeline to the rendered pass summary — the same route
 	// EstimatedTokens takes, and reporting the cut is the point of having the cap.
 	Truncation TruncationReport
-	// OmittedEvents counts numbered events a clustering response put in no
-	// cluster, and RecoveredEvents how many of those the one follow-up call then
-	// assigned. Both sum across a bisected pass. They differ only on a pass that
-	// failed, because an event still unassigned after the re-ask is a loud error;
-	// on a pass that returned, a non-zero OmittedEvents says the model needed a
-	// second call to account for everything, which an operator should see.
+	// OmittedEvents counts in-window events a clustering response put in no
+	// cluster, and RecoveredEvents how many of those the omission re-ask rounds then
+	// assigned; OmissionReasks is how many rounds that took (each one call, bounded
+	// by llm.max_omission_reasks). All sum across a bisected pass. The first two
+	// differ only on a pass that failed, because an event still unassigned once the
+	// budget is spent is a loud error; on a pass that returned, a non-zero
+	// OmittedEvents says the model needed more calls to account for everything,
+	// which an operator should see. Rounds are already counted in Calls.
 	OmittedEvents   int
 	RecoveredEvents int
+	OmissionReasks  int
 	// DisputedEvents counts events two or more clusters placed in event_indices,
 	// which the one dispute pass then gave a single member home; Disputes says how
 	// each was resolved. On a pass that returned, every disputed event was resolved,
@@ -223,10 +226,13 @@ type Stats struct {
 	// one event twice and what it decided, without re-deriving it from a prompt.
 	DisputedEvents int
 	Disputes       []DisputeResolution
-	// DisputeCalls is how many calls the dispute pass made: one, unless the disputes
-	// together exceeded the context window and were split into batches that each fit.
-	// Already counted in Calls; broken out so a report can say which happened.
-	DisputeCalls int
+	// DisputeCalls is how many calls the dispute pass made, all told: one per batch
+	// (one batch unless the disputes together exceeded the context window), plus
+	// DisputeReasks, the calls that re-asked a batch whose answer the parser refused
+	// (bounded by llm.max_dispute_reasks). Already counted in Calls; broken out so a
+	// report can say which happened.
+	DisputeCalls  int
+	DisputeReasks int
 	// ContextLinks is how many context links Persist wrote, SharedEvents how many
 	// distinct events received at least one, and MaxContextFanOut the most context
 	// links one event received in this call. The distribution the spec reports in
@@ -238,10 +244,11 @@ type Stats struct {
 	// correlator.member_confidence_floor — the attributions triage asks a reviewer
 	// to confirm. Always zero while the floor is 0 (off, the default).
 	MembersBelowFloor int
-	// MatchReasks counts matching calls whose response could not be parsed and was
-	// asked for again, once, quoting the parser's reason (finding F44). A second
-	// refusal fails that narrative loudly and leaves it unmatched for a later pass;
-	// the other narratives are unaffected. Already counted in Calls.
+	// MatchReasks counts follow-up matching calls: each re-asks a narrative whose
+	// previous response the parser refused, quoting the reason (finding F44), up to
+	// llm.max_match_reasks per narrative. A narrative whose budget runs out fails
+	// loudly and stays unmatched for a later pass; the other narratives are
+	// unaffected. Already counted in Calls.
 	MatchReasks int
 	// Emptied lists the narratives Persist moved every remaining member off — a
 	// context narrative whose eligible members the model placed in other clusters —
@@ -300,9 +307,11 @@ func (s *Stats) Add(other Stats) {
 	}
 	s.OmittedEvents += other.OmittedEvents
 	s.RecoveredEvents += other.RecoveredEvents
+	s.OmissionReasks += other.OmissionReasks
 	s.DisputedEvents += other.DisputedEvents
 	s.Disputes = append(s.Disputes, other.Disputes...)
 	s.DisputeCalls += other.DisputeCalls
+	s.DisputeReasks += other.DisputeReasks
 	s.ContextLinks += other.ContextLinks
 	s.SharedEvents += other.SharedEvents
 	s.MaxContextFanOut = max(s.MaxContextFanOut, other.MaxContextFanOut)
@@ -333,10 +342,54 @@ type clusterOptions struct {
 	// maxEventSummaryChars caps each context event's summary. Zero is unlimited,
 	// which keeps every existing caller and test unchanged (finding F16).
 	maxEventSummaryChars int
+	// omissionReasks and disputeReasks are the re-ask budgets (WithOmissionReasks,
+	// WithDisputeReasks). defaultReasks unless an option sets them.
+	omissionReasks int
+	disputeReasks  int
 }
+
+// defaultReasks is each re-ask budget when its option is not given: one follow-up
+// per problem. config.DefaultMaxReasks is the same number for the same reason; it is
+// repeated rather than imported because the tiers that resolve a budget are config's,
+// and this package only ever receives the result.
+const defaultReasks = 1
 
 // ClusterOption configures an optional Cluster behaviour.
 type ClusterOption func(*clusterOptions)
+
+// newClusterOptions applies opts over the defaults. Every reader of clusterOptions
+// builds it here, so a default cannot be the zero value in one place and something
+// else in another.
+func newClusterOptions(opts []ClusterOption) clusterOptions {
+	o := clusterOptions{omissionReasks: defaultReasks, disputeReasks: defaultReasks}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	return o
+}
+
+// WithOmissionReasks sets how many rounds Cluster may spend asking for the in-window
+// events a clustering response left in no cluster (recoverOmittedEvents). 0 makes
+// any omission a loud error with no follow-up call; a negative value behaves as 0.
+// Absent, the budget is one round. The caller resolves the number from config
+// (config.Config.ReaskBudgets); this package never reads the tiers itself.
+func WithOmissionReasks(n int) ClusterOption {
+	return func(o *clusterOptions) {
+		o.omissionReasks = n
+	}
+}
+
+// WithDisputeReasks sets how many dispute calls Cluster may make per batch
+// (resolveDisputes): the first dispute call is the first re-ask of the clustering
+// response, and each further one re-asks a batch whose answer the parser refused.
+// 0 makes any double placement a loud error with no dispute call; a negative value
+// behaves as 0. Absent, the budget is one call per batch.
+func WithDisputeReasks(n int) ClusterOption {
+	return func(o *clusterOptions) {
+		o.disputeReasks = n
+	}
+}
 
 // WithClusterRules supplies rules/ entries already filtered to
 // rules.ScopeCorrelator (see rules.ForScope) so Cluster can append them to
@@ -417,10 +470,7 @@ func Cluster(
 	contextWindowTokens int,
 	opts ...ClusterOption,
 ) ([]ClusterResult, Stats, error) {
-	var o clusterOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
+	o := newClusterOptions(opts)
 
 	results, stats, err := clusterWindow(ctx, evts, existing, client, window, contextWindowTokens, opts...)
 	if err != nil {
@@ -432,6 +482,7 @@ func Cluster(
 		results:             results,
 		rules:               o.rules,
 		instruction:         o.instruction,
+		maxCalls:            o.disputeReasks,
 		contextWindowTokens: contextWindowTokens,
 		log:                 o.log,
 	})
@@ -456,10 +507,7 @@ func clusterWindow(
 	contextWindowTokens int,
 	opts ...ClusterOption,
 ) ([]ClusterResult, Stats, error) {
-	var o clusterOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
+	o := newClusterOptions(opts)
 
 	filtered := filterEventsInWindow(evts, window)
 	relevant := filterAdjacentOrOverlapping(existing, window)
@@ -550,6 +598,7 @@ func clusterWindow(
 		omitted:             omitted,
 		rules:               o.rules,
 		instruction:         o.instruction,
+		maxRounds:           o.omissionReasks,
 		contextWindowTokens: contextWindowTokens,
 		log:                 o.log,
 	})
@@ -1221,10 +1270,7 @@ func Persist(
 		return nil, Stats{}, nil
 	}
 
-	var o clusterOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
+	o := newClusterOptions(opts)
 
 	preps, stats, err := prepareResults(ctx, s, client, results, cfg, o.log)
 	if err != nil {

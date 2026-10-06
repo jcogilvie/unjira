@@ -47,6 +47,8 @@ type matchOptions struct {
 	linkExclusions []*regexp.Regexp
 	rules          []rules.Rule
 	log            *slog.Logger
+	// maxReasks bounds the follow-up calls per narrative (WithMatchReasks).
+	maxReasks int
 }
 
 // MatchOption configures an optional Match behaviour.
@@ -79,6 +81,17 @@ func WithLinkExclusions(compiled []*regexp.Regexp) MatchOption {
 func WithRules(learnedRules []rules.Rule) MatchOption {
 	return func(o *matchOptions) {
 		o.rules = learnedRules
+	}
+}
+
+// WithMatchReasks sets how many follow-up calls Match may make for one narrative
+// whose classification response the parser refused, each quoting the latest
+// refusal. 0 fails that narrative on the first refusal with no follow-up; a negative
+// value behaves as 0. Absent, the budget is one. The caller resolves the number from
+// config (config.Config.ReaskBudgets); this package never reads the tiers itself.
+func WithMatchReasks(n int) MatchOption {
+	return func(o *matchOptions) {
+		o.maxReasks = n
 	}
 }
 
@@ -122,7 +135,7 @@ func Match(
 	cfg config.MatchConfig,
 	opts ...MatchOption,
 ) ([]MatchResult, Stats, error) {
-	var o matchOptions
+	o := matchOptions{maxReasks: defaultReasks}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -178,7 +191,7 @@ func Match(
 	for _, n := range narratives {
 		result, oneStats, err := matchOne(
 			ctx, s, tracker, client, n, o.linkExclusions, candidateLimit, cfg, o.rules, jiraActivity,
-			o.log)
+			o.maxReasks, o.log)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -204,6 +217,7 @@ func matchOne(
 	cfg config.MatchConfig,
 	learnedRules []rules.Rule,
 	jiraActivity map[string]time.Time,
+	maxReasks int,
 	log *slog.Logger,
 ) (MatchResult, Stats, error) {
 	result := MatchResult{NarrativeID: narrative.ID}
@@ -266,7 +280,7 @@ func matchOne(
 		return result, Stats{}, nil
 	}
 
-	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, evts, verified, learnedRules, log)
+	links, primaryKey, primaryConfidence, rationale, stats, err := resolveVerified(ctx, client, narrative, evts, verified, learnedRules, maxReasks, log)
 	if err != nil {
 		return result, stats, fmt.Errorf("classifying candidates for narrative %d: %w", narrative.ID, err)
 	}
@@ -356,6 +370,7 @@ func resolveVerified(
 	evts []Event,
 	verified []verifiedCandidate,
 	learnedRules []rules.Rule,
+	maxReasks int,
 	log *slog.Logger,
 ) (links []store.NarrativeIssue, primaryKey string, primaryConfidence float64, rationale string, stats Stats, err error) {
 	if len(verified) == 1 {
@@ -379,7 +394,7 @@ func resolveVerified(
 		ID: narrative.ID, Title: narrative.Title, Summary: narrative.Summary, Events: evts,
 	}
 
-	verdicts, callStats, callErr := classifyCandidates(ctx, client, n, verified, learnedRules)
+	verdicts, callStats, callErr := classifyCandidates(ctx, client, n, verified, learnedRules, maxReasks)
 	if callErr != nil {
 		return nil, "", 0, "", callStats, callErr
 	}
@@ -529,13 +544,16 @@ Return ONLY a bare JSON array, no prose, no markdown fences:
 // prompt (plus, when learnedRules is non-empty, a rendered rules section —
 // see rules.Render) plus a rendered user prompt, parsed by the existing
 // parseMatchResponse (which strips a markdown fence models add despite the
-// system prompt forbidding it — see stripJSONFence's doc comment).
+// system prompt forbidding it — see stripJSONFence's doc comment). A refused
+// response is re-asked up to maxReasks times; spending them is an error naming
+// every refusal.
 func classifyCandidates(
 	ctx context.Context,
 	client llm.Client,
 	n Narrative,
 	candidates []verifiedCandidate,
 	learnedRules []rules.Rule,
+	maxReasks int,
 ) ([]matchVerdict, Stats, error) {
 	userPrompt := buildMatchPrompt(n, candidates)
 
@@ -557,40 +575,49 @@ func classifyCandidates(
 		return verdicts, stats, nil
 	}
 
-	// One re-ask, quoting the parser's reason (finding F44). Seen twice on one real
+	// Re-asks, quoting the parser's reason (finding F44). Seen twice on one real
 	// 30-day pass: prose where the array belonged, and a duplicated malformed key.
 	// The parser is right to refuse both, since a best-effort reading is how a
 	// narrative gets attributed to the wrong ticket, but the model nearly always
 	// answers correctly when shown what was wrong. A matching call is one
-	// narrative's prompt, so the re-ask is cheap. One is the budget, as for the
-	// clustering re-asks: a second refusal is information, and fails loudly.
-	stats.MatchReasks++
+	// narrative's prompt, so a re-ask is cheap. Bounded by maxReasks
+	// (llm.max_match_reasks): a model that keeps refusing is information, and
+	// spending the budget fails this narrative loudly, naming every refusal.
+	refusals := []error{err}
+	refused := raw
 
-	raw2, usage, err2 := client.Complete(ctx, systemPrompt, buildMatchReaskPrompt(userPrompt, raw, err))
-	if err2 != nil {
-		return nil, stats, fmt.Errorf("re-asking for narrative %d after %w: %w", n.ID, err, err2)
+	for attempt := 1; attempt <= maxReasks; attempt++ {
+		stats.MatchReasks++
+
+		latest := refusals[len(refusals)-1]
+		raw, usage, err = client.Complete(ctx, systemPrompt, buildMatchReaskPrompt(userPrompt, refused, latest))
+		if err != nil {
+			return nil, stats, fmt.Errorf("re-asking for narrative %d (re-ask %d of %d) after %w: %w",
+				n.ID, attempt, maxReasks, latest, err)
+		}
+		stats.AddUsage(usage)
+
+		verdicts, err = parseMatchResponse(raw)
+		if err == nil {
+			return verdicts, stats, nil
+		}
+		refusals = append(refusals, err)
+		refused = raw
 	}
-	stats.AddUsage(usage)
 
-	verdicts, err2 = parseMatchResponse(raw2)
-	if err2 != nil {
-		return nil, stats, fmt.Errorf("match response refused twice: first: %w; re-ask: %w", err, err2)
+	return nil, stats, &refusalsError{
+		what: "match response", key: "llm.max_match_reasks", budget: max(maxReasks, 0), reasons: refusals,
 	}
-
-	return verdicts, stats, nil
 }
 
 // buildMatchReaskPrompt repeats the original user prompt verbatim, so the
-// candidates mean what they meant the first time, then quotes the refused
+// candidates mean what they meant the first time, then quotes the latest refused
 // response and the parser's reason.
 func buildMatchReaskPrompt(userPrompt, refused string, reason error) string {
 	var b strings.Builder
 
 	b.WriteString(userPrompt)
-	b.WriteString("\n\n## Your previous response could not be used\n\n")
-	fmt.Fprintf(&b, "It was refused because: %v\n\n", reason)
-	b.WriteString("The refused response:\n\n")
-	b.WriteString(refused)
+	writeRefusal(&b, refused, reason)
 	b.WriteString("\n\nAnswer again. Return ONLY the bare JSON array the system prompt specifies, " +
 		"with one entry per candidate, no prose and no markdown fences.\n")
 

@@ -110,6 +110,36 @@ func TestRenderNarrateResult(t *testing.T) {
 			"a pass that needed a second call to account for everything says so")
 	})
 
+	t.Run("omissions recovered over several rounds say how many", func(t *testing.T) {
+		reasked := full
+		reasked.Stats.OmittedEvents = 5
+		reasked.Stats.RecoveredEvents = 5
+		reasked.Stats.OmissionReasks = 3
+
+		out := pipeline.RenderNarrateResult(reasked)
+
+		assert.Contains(t, out, "re-asked 5 event(s) the model left in no cluster; recovered 5 over 3 rounds")
+
+		one := full
+		one.Stats.OmittedEvents = 5
+		one.Stats.RecoveredEvents = 5
+		one.Stats.OmissionReasks = 1
+		assert.NotContains(t, pipeline.RenderNarrateResult(one), "rounds", "one round is the line as it always read")
+	})
+
+	t.Run("a refused dispute answer re-asked is reported apart from batching", func(t *testing.T) {
+		disputed := full
+		disputed.Stats.DisputedEvents = 1
+		disputed.Stats.DisputeCalls = 2
+		disputed.Stats.DisputeReasks = 1
+		disputed.Stats.Disputes = make([]correlator.DisputeResolution, 1)
+
+		out := pipeline.RenderNarrateResult(disputed)
+
+		assert.Contains(t, out, "resolved 1 by one re-ask, after re-asking 1 refused answer(s)")
+		assert.NotContains(t, out, "batched", "a second call that re-asked a refusal is not a batch")
+	})
+
 	t.Run("a dispute pass batched to fit the window says how many calls it took", func(t *testing.T) {
 		disputed := full
 		disputed.Stats.DisputedEvents = 3
