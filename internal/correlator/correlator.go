@@ -238,6 +238,11 @@ type Stats struct {
 	// correlator.member_confidence_floor — the attributions triage asks a reviewer
 	// to confirm. Always zero while the floor is 0 (off, the default).
 	MembersBelowFloor int
+	// MatchReasks counts matching calls whose response could not be parsed and was
+	// asked for again, once, quoting the parser's reason (finding F44). A second
+	// refusal fails that narrative loudly and leaves it unmatched for a later pass;
+	// the other narratives are unaffected. Already counted in Calls.
+	MatchReasks int
 	// Emptied lists the narratives Persist moved every remaining member off — a
 	// context narrative whose eligible members the model placed in other clusters —
 	// and so marked store.StatusSplit (finding F40). Reported because nothing else
@@ -302,6 +307,7 @@ func (s *Stats) Add(other Stats) {
 	s.SharedEvents += other.SharedEvents
 	s.MaxContextFanOut = max(s.MaxContextFanOut, other.MaxContextFanOut)
 	s.MembersBelowFloor += other.MembersBelowFloor
+	s.MatchReasks += other.MatchReasks
 	s.Emptied = append(s.Emptied, other.Emptied...)
 	s.PromptTokens += other.PromptTokens
 	s.CompletionTokens += other.CompletionTokens
