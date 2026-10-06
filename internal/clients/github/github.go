@@ -172,6 +172,22 @@ func (c *Client) ListIssueEvents(ref RepoRef, number int) ([]IssueEvent, error) 
 	}
 }
 
+// AuthenticatedLogin returns the login of the user the client's token belongs to
+// (GET /user), which the PR collector uses to decide whose PRs are this user's work.
+func (c *Client) AuthenticatedLogin() (string, error) {
+	var user struct {
+		Login string `json:"login"`
+	}
+	if err := c.do(http.MethodGet, "/user", &user); err != nil {
+		return "", fmt.Errorf("looking up the authenticated user: %w", err)
+	}
+	if user.Login == "" {
+		return "", fmt.Errorf("looking up the authenticated user: response has no login")
+	}
+
+	return user.Login, nil
+}
+
 // do performs one request against base+path, decoding a JSON response body
 // into result and translating a non-2xx status into *Error.
 func (c *Client) do(method, path string, result any) error {

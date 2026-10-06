@@ -28,6 +28,7 @@
       "repos": [
         "yourorg/yourrepo"
       ],
+      "authors": [],
       "backfill_days": 30
     },
     "slack": {
