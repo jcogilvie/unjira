@@ -549,8 +549,9 @@ Jira is. Symmetrically, a Jira comment is work evidence in a deployment tracking
 artifact, classified oppositely by configuration.
 
 **A collector has no way to make that call.** `CollectContext` carries `Config`, so it can *look*, but
-there is nothing typed to look at: `config.JiraConnection` is Jira-shaped, `tracker.backend` is a bare
-string, and `events.ArtifactConnection` is documented as "the configured **Jira** connection name"
+there is nothing to ask: `config.Tracker` now says which scopes are a tracker's, but `CollectContext`
+offers no question that maps an artifact's kind and scope onto one, and `events.ArtifactConnection` is
+documented as "the configured **Jira** connection name"
 (`events/artifact_keys.go:12`). So the only available basis for the decision is the collector's own
 package identity — exactly the inference `tracker_record.go` forbids, and the one incident 21 already
 burned this codebase for.
@@ -582,6 +583,20 @@ a tidiness question about one struct; this makes it a multi-tracker blocker.
 
 ### F29 — nothing expresses which tracker a narrative's work belongs to
 
+**Narrowed by the tracker model's slice 1: the write-authority half has landed.** Each tracker declares
+its own `writable_scopes`, deny by default, and a `writable_scopes` entry on a connection kind with no
+writer is refused at load (`config.ValidateTrackers`, `internal/config/trackers.go`). A GitHub tracker
+can therefore be configured as "read this, never write to it", and cannot be configured any other way.
+`mirror_to` and `default_ticket_in` exist in config and are validated (every name resolves; every
+destination is writable and has a `default_scope`), but nothing reads `mirror_to` yet, and
+`default_ticket_in` is limited to one tracker.
+
+**What remains is the routing half**, which the spec's slice 5 closes. Nothing computes where
+untracked work happened, so a narrative with no linked issue still falls to the single
+`default_ticket_in`, whatever repository the work was in. That is the disclosure-shaped failure below
+with one gate fewer: no create can reach a read-only tracker, but an internal ticket can still be
+proposed for upstream work whose tracker says `mirror_to: []`.
+
 F28 is about *classifying* an event. This is about *routing* one, and it has a worse failure mode.
 
 The relationship between collectors and trackers is **many-to-many**, and all three directions occur
@@ -597,61 +612,45 @@ in one real deployment:
   awaiting maintainer review." Same work, two audiences, and **different prose** — which is not
   routing but per-destination content, and is the hard part.
 
-**unjira has nowhere to express any of this.** `correlator.TrackerResolver` is already per-candidate
+**Routing still has nowhere to live.** `correlator.TrackerResolver` is already per-candidate
 (`func(connection string) (tasktracker.TaskReader, error)`), and its doc comment says the design
 intent plainly: *"this package only knows that different candidates can need different trackers."* So
 the *verification* layer is ready. What is missing is upstream of it — `Candidate.Connection` is
 populated only by jira-source events, everything else arrives empty and takes a resolver's default,
-and no config surface names a routing key at all (no repo, path, org, or source field exists).
+and nothing maps where untracked work happened (a repository) onto a tracker's scope.
 
 **The consequence is a disclosure risk, not a cost.** Narrative summaries are generated from
 transcript content, which routinely contains employer-internal ticket keys, incident detail and
 architecture. Routing one to a *public* tracker publishes that prose irreversibly — categorically
-unlike a wrong comment on an internal Jira issue, which is embarrassing and deletable. Today a
-GitHub-Issues tracker would arrive with no equivalent of `WritableProjectKeys`, so there is no way to
-say *"read this tracker, never write to it."*
-
-`config.JiraConnection.WritableProjectKeys` is the precedent and the right shape: write authority
-declared **independently** of read scope, absent meaning nothing is writable, and deliberately NOT
-defaulting to read scope because *"that would mean every project unjira reads is armed for writes the
-moment a connection is configured at all."* The multi-tracker version needs the same property per
-tracker, and a public tracker makes it load-bearing rather than merely prudent.
+unlike a wrong comment on an internal Jira issue, which is embarrassing and deletable. That is why
+the write-authority half landed first: a public tracker cannot be armed.
 
 **The policy is the operator's, and unjira must not encode one.** Whether OSS work is also tracked
 internally varies by org — some require it for time and compliance reasons, some explicitly forbid it.
-So the deliverable is **configurability, not a default**: a routing key (repo or path is the likely
-shape, since it is the one thing both collectors can name and it matches the ignore-list idea for
-keeping unjira's own sessions out of its corpus), per-tracker write authority, and a deny-by-default
-stance when no rule matches. Enumerating the plausible operator policies — route, mirror, or exclude —
+So the deliverable is **configurability, not a default**: a routing key (the repository the work was
+in, matched against tracker scopes), per-tracker write authority (landed), and a deny-by-default
+stance when no rule matches (`mirror_to` absent means nowhere else). Enumerating the plausible operator policies — route, mirror, or exclude —
 is useful for validating that the mechanism can express each, not for choosing one.
 
-Deferred deliberately, and recorded so the deferral is a decision rather than an oversight. It is not
-reachable today: one tracker backend is real, `local` is the only alternative, and no collector emits
-events for a second tracker. It becomes urgent with the **first public or second real tracker**, and
-the write-authority half should land *before* any tracker that could be public — a missing gate is
-discovered by publishing something.
+Not reachable while every tracker in a deployment is Jira or local: nothing yet reads a second
+tracker kind. It becomes reachable with the GitHub reader (the spec's slice 4), and the spec orders
+routing (slice 5) directly after it.
 
-Decide with **F7** (**#178**) and **F28**: a system-typed connection carrying its own write scope is
-most of the mechanism all three need.
+### F7 — a connection's name still does four jobs
 
-### F7 — config.JiraConnection carries four concerns
+**Narrowed by the tracker model's slice 1** (`docs/superpowers/specs/2026-10-06-tracker-model-design.md`).
+The one struct that held endpoint, identity, read scope, write scope and collection config is now two:
+`config.Connection` (`internal/config/trackers.go`) holds kind and endpoint, and `config.Tracker` holds
+scopes, `writable_scopes`, `default_scope`, `mirror_to` and the Jira `queries`. Write-scope separation
+survives unchanged — `writable_scopes` does not default to `scopes`.
 
-One struct (`config/config.go:57-86`) holds: **endpoint** (`Site`), **identity** (implicitly, via
-`Name` → credential lookup), **read scope** (`ProjectKeys`), **write scope**
-(`WritableProjectKeys`), and **collection config** (`Queries`, `MaxIssuesPerQuery`).
-
-One part of this is not up for reconsideration: **write-scope separation is a safety property.**
-`WritableProjectKeys` deliberately does not default to `ProjectKeys`, because defaulting would arm
-every readable project for writes the moment a connection is configured — the exact bug write scope
-exists to prevent. Collapsing the two fields would undo that, spec and all.
-
-The rest is a genuine open question. *Identity* is the one concern with no field of its own: it rides
-on `Name`, which is simultaneously the config key, the cursor key prefix, and the credential lookup
-key. One string doing four jobs is why renaming a connection has non-obvious consequences.
-
-**#178** asks whether this model wants a kubeconfig-like shape (contexts referencing a server and a
-user by name, with per-endpoint auth). No recommendation here — deliberately, so the question stays
-open on its own terms.
+**What remains:** identity still has no field of its own. `Connection.Name` is the config key, the
+`UNJIRA_JIRA_CREDENTIALS` lookup key, the Jira collector's cursor prefix
+(`collector/jira/cursor.go:24`), and the connection recorded on every stored link
+(`narrative_issues.connection`, read back by `correlator.TrackerResolver`). Renaming a connection
+therefore resets its cursors and orphans the connection named on its old links, which then fail
+verification with "no configured jira connection named". **#178**'s kubeconfig-like question (a user
+by name, separate from the server) is still open on its own terms.
 
 ### F8 — correlator.TrackerResolver may be in the wrong package
 
@@ -731,12 +730,12 @@ yet; noted while writing the template, not found as a live incident.
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F50 — a split narrative is still read by the create path and the review queue | open. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed: a split narrative held a create slot for 3 of 3 passes at cap 1 |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
-| F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
+| F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |
 | F8 — resolver's home | **#177** |
 | F28 — tracker-record-ness is deployment-relative; a collector cannot ask | open. Decide with F7/**#178**; prerequisite for a GitHub slice that collects Issues, and for any second `tasktracker` implementation |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |
 | F31 — learn's watermark can skip corrections | **resolved**, then superseded: the watermark is a `store.CorrectionsCursor` advanced by `KeepCandidates` from what the draft READ, never from a clock reading at keep, and never backwards. Its position is now `actions.corrected_seq`, a sequence stamped when a row becomes a correction (from `correction_marks`), which also closed F41 (the clock stepping back) and F42 (a lesson added by a later ruling). Drill: a clock reading at keep fails the between-draft-and-keep test 5/5 |
-| F29 — nothing expresses which tracker a narrative's work belongs to | open, **deferred deliberately**. Many-to-many collector↔tracker routing, plus per-tracker write authority. Not reachable with one real tracker; the write-authority half must land BEFORE any tracker that could be public, since a missing gate is discovered by publishing. Decide with F7/**#178** and F28 |
+| F29 — nothing expresses which tracker a narrative's work belongs to | open, narrowed: per-tracker write authority landed with the tracker model's slice 1, before any public tracker can be read. The routing half (work location, `mirror_to`) is the spec's slice 5 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |
 | F10 — truncated pass looks complete | resolved: the remainder is data on `MatchRunResult`/`ReconcileRunResult`, counted in `internal/pipeline` and rendered on stdout. The finding framed this as a choice between threading `correlator.Match`'s signature and giving the renderers I/O; both were avoidable, because the layer that already does store I/O is the one holding the result struct. |
 | F11 — issue_key denormalization drifts | resolved: the column is **deleted**, along with `.confidence`, `SetNarrativeIssueLink` and `NarrativeRow.IssueKey`/`.Confidence` — all write-only. `NarrativesWithoutIssueKey` became `NarrativesWithoutPrimaryLink`, asking `NOT EXISTS(primary link)`. The fix was already named in `design-notes.md` when the create path hit the same trap; matching was the one accessor never revisited. No migration: narrative 15 self-repaired, since it *has* a primary link. Verified by draining — the pass that crashed now completes, backlog 38 → 26. |

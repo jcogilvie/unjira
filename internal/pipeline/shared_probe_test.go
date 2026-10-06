@@ -13,7 +13,7 @@ package pipeline
 //
 // Add SHARED_CUT=<RFC3339 inside the window> for M7's two-pass scenario: pass 1
 // narrates [start, cut), pass 2 [cut, end), both persisted. Run from the main
-// checkout, where unjira.config.json and the credentials live (#37); the window is
+// checkout, where the config file and the credentials live (#37); the window is
 // ABSOLUTE, unlike `dev narrate --since`, so reps do not drift.
 //
 // A failed pass prints DIED and the error, and the test fails: it never reports a
@@ -36,7 +36,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -61,7 +60,7 @@ func TestSharedContext_AcceptanceRep(t *testing.T) {
 	require.NotEmpty(t, dbPath, "SHARED_DB must name a fresh COPY of the snapshot; this test writes it")
 	window := correlator.TimeRange{Start: probeTime(t, "SHARED_START"), End: probeTime(t, "SHARED_END")}
 
-	cfg, err := config.Load("../../unjira.config.json")
+	cfg, err := repoConfig()
 	require.NoError(t, err)
 	client, err := realClient()
 	require.NoError(t, err)

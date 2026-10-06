@@ -383,7 +383,7 @@ func seedCollectorIssue(t *testing.T, client *jira.Client) collectorIssue {
 
 	fx := collectorIssue{key: key}
 
-	scopedJQL, jqlErr := probeConnection(key).EffectiveJQL(probeQuery(key))
+	scopedJQL, jqlErr := probeTracker(key).EffectiveJQL(probeQuery(key))
 	if jqlErr != nil {
 		v := classifyIndexMiss(indexEvidence{jqlErr: jqlErr})
 		fx.failure, fx.detail = &v, "building the collector's query for "+key

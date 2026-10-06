@@ -1,11 +1,15 @@
-// Package config loads unjira's configuration. Copy
-// config/unjira.example.json to ./unjira.config.json.
+// Package config loads unjira's configuration. Copy config/unjira.example.yaml
+// to ./unjira.config.yaml.
 //
-// Credentials never live in config files. They come from the environment, as
-// UNJIRA_JIRA_CREDENTIALS: one JSON object mapping each Jira connection's name
-// to its {email, token} pair, so the variable count does not grow with the
-// number of configured connections. internal/envfile loads a gitignored .env
-// from the repository root, and real environment variables win over it.
+// The file is YAML, read with sigs.k8s.io/yaml in strict mode, so an unknown key
+// is an error. JSON is a subset of YAML and keeps working.
+//
+// Credentials never live in config files. They come from the environment:
+// UNJIRA_JIRA_CREDENTIALS maps each jira connection's name to its {email, token}
+// pair, and UNJIRA_GITHUB_CREDENTIALS maps each GitHub host to its {token}, so
+// the variable count does not grow with the number of configured connections.
+// internal/envfile loads a gitignored .env from the repository root, and real
+// environment variables win over it.
 //
 // In CI, UNJIRA_JIRA_CREDENTIALS is composed from the UNJIRA_CI_EMAIL variable
 // and the UNJIRA_CI_TOKEN secret — see .github/workflows/ci.yml.
@@ -13,18 +17,21 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
 
-// DefaultConfigPath is where Load looks when no path is given.
-const DefaultConfigPath = "unjira.config.json"
+// DefaultConfigNames are the file names Load looks for when no path is given, in
+// the working directory. Exactly one may exist: see DefaultPathIn.
+var DefaultConfigNames = []string{"unjira.config.yaml", "unjira.config.yml", "unjira.config.json"}
 
 // DefaultMaxIssuesPerQuery bounds how many issues one collector query examines
 // per pass. A limit is required rather than optional: the Jira collector makes
@@ -42,137 +49,6 @@ const DefaultMaxIssuesPerQuery = 200
 type JiraQuery struct {
 	Name string `json:"name"`
 	JQL  string `json:"jql"`
-}
-
-// JiraConnection describes one Jira Cloud site and the projects on it.
-// Multiple connections let a project set span more than one Jira instance —
-// e.g. after a migration or an acquisition merges two orgs' Jiras — without
-// unjira assuming a single global site. Name identifies the connection for
-// credential lookup (see cmd/unjira's UNJIRA_JIRA_CREDENTIALS). ProjectKeys
-// bounds what its Queries may collect (for reads; see EffectiveJQL) and which
-// projects JiraConnectionForProject resolves this connection's site/credential
-// for. WritableProjectKeys is the separate, narrower write authorization —
-// see its own doc comment.
-type JiraConnection struct {
-	Name        string   `json:"name"`
-	Site        string   `json:"site"`
-	ProjectKeys []string `json:"project_keys"`
-	// WritableProjectKeys is which of this connection's ProjectKeys unjira may
-	// actually WRITE to — the choke point gate.Applier consults before any
-	// AddComment/SetStatus/CreateIssue call. Declared independently of
-	// ProjectKeys, which only answers "read scope, and which connection's
-	// site/credential to use."
-	//
-	// Absent or empty means NOTHING on this connection is writable — deny by
-	// default, mirroring AutoCommitRule.Graduated's own zero-value safety
-	// property. Deliberately NOT "defaults to ProjectKeys when unset": that
-	// would mean every project unjira reads is armed for writes the moment a
-	// connection is configured at all, which is the exact bug write scope
-	// exists to fix rather than a safe default to fall back to. See
-	// docs/superpowers/specs/2026-08-27-write-scope-design.md.
-	//
-	// Must be a subset of ProjectKeys — ValidateWriteScope checks this at
-	// startup, since a writable project this connection cannot even read
-	// would leave JiraConnectionForProject unable to resolve a site for it at
-	// all.
-	WritableProjectKeys []string `json:"writable_project_keys"`
-	// Queries are the named JQL views the Jira collector reads. Empty means
-	// this connection is write-only: it routes project keys but collects
-	// nothing.
-	Queries []JiraQuery `json:"queries"`
-	// MaxIssuesPerQuery bounds one query's issue count per pass. Zero means
-	// DefaultMaxIssuesPerQuery.
-	MaxIssuesPerQuery int `json:"max_issues_per_query"`
-}
-
-// IsProjectWritable reports whether projectKey is in WritableProjectKeys —
-// the single question gate.Applier asks before every tracker write. An empty
-// or absent WritableProjectKeys answers false for every project, including
-// one this connection reads via ProjectKeys: see WritableProjectKeys' own doc
-// comment for why that is the deliberate default rather than a gap.
-func (c JiraConnection) IsProjectWritable(projectKey string) bool {
-	return slices.Contains(c.WritableProjectKeys, projectKey)
-}
-
-// ValidateWriteScope rejects a WritableProjectKeys entry this connection
-// cannot even read — the second of write scope's two layers (the first is
-// gate.Applier's per-action runtime check), catching a statically-checkable
-// misconfiguration at startup rather than leaving a writable-but-unreachable
-// project to fail in some stranger way whenever a write is actually
-// attempted. An empty or absent WritableProjectKeys is valid: it is the safe
-// default, not a misconfiguration to flag.
-func (c JiraConnection) ValidateWriteScope() error {
-	for _, writable := range c.WritableProjectKeys {
-		if !slices.Contains(c.ProjectKeys, writable) {
-			return fmt.Errorf(
-				"jira connection %q: writable_project_keys includes %q, which is not in "+
-					"project_keys — a project must be readable by this connection before it can "+
-					"be declared writable",
-				c.Name, writable,
-			)
-		}
-	}
-
-	return nil
-}
-
-// EffectiveJQL returns query's JQL scoped to this connection's ProjectKeys.
-//
-// The scope is added rather than left to the operator because the two lists
-// answer different questions that must not disagree: ProjectKeys says which
-// projects this connection can write to, and an unscoped JQL (assignee =
-// currentUser(), say) spans a whole site. Collecting an issue from a project no
-// connection covers would narrate work the reconciler can never act on —
-// JiraConnectionForProject would return false when it came time to write.
-//
-// Empty ProjectKeys is an error rather than "collect everything", for the same
-// reason.
-func (c JiraConnection) EffectiveJQL(query JiraQuery) (string, error) {
-	if len(c.ProjectKeys) == 0 {
-		return "", fmt.Errorf(
-			"jira connection %q has no project_keys: cannot scope collector query %q, and an "+
-				"unscoped query would collect issues no connection can write to",
-			c.Name, query.Name,
-		)
-	}
-
-	quoted := make([]string, 0, len(c.ProjectKeys))
-	for _, key := range c.ProjectKeys {
-		quoted = append(quoted, fmt.Sprintf("%q", key))
-	}
-
-	return fmt.Sprintf("(%s) AND project IN (%s)", query.JQL, strings.Join(quoted, ", ")), nil
-}
-
-// IssueLimit returns the per-query issue cap, defaulting when unset. A negative
-// value is a configuration error rather than silently coerced: it most likely
-// means someone intended "no limit", which this collector deliberately does not
-// offer.
-func (c JiraConnection) IssueLimit() (int, error) {
-	switch {
-	case c.MaxIssuesPerQuery < 0:
-		return 0, fmt.Errorf(
-			"jira connection %q has max_issues_per_query %d: must be positive, or omitted for the default of %d",
-			c.Name, c.MaxIssuesPerQuery, DefaultMaxIssuesPerQuery,
-		)
-	case c.MaxIssuesPerQuery == 0:
-		return DefaultMaxIssuesPerQuery, nil
-	default:
-		return c.MaxIssuesPerQuery, nil
-	}
-}
-
-// TrackerConfig selects the phase-1+ apply-target backend and, separately,
-// where a brand-new issue lands when a proposed action has no existing
-// issue link to anchor it to. Site/project info for existing issues comes
-// from Config.Jira + the project key at call time — TrackerConfig only
-// carries what's specific to backend selection and new-issue routing.
-type TrackerConfig struct {
-	Backend string `json:"backend"` // "" (defaults to "jira") | "jira" | "local"
-	// DefaultProject is where a new issue lands with no other routing
-	// signal (smart routing from repo/component/collector is a later,
-	// reconciler-level concern — this is only the configured floor).
-	DefaultProject string `json:"default_project"`
 }
 
 // LLMConfig configures the OpenAI-Chat-Completions-compatible endpoint the
@@ -640,15 +516,22 @@ type WorkflowConfig struct {
 
 // Config is unjira's top-level configuration.
 type Config struct {
-	Jira       []JiraConnection          `json:"jira"`
-	Collectors map[string]map[string]any `json:"collectors"`
+	// Connections are the systems unjira talks to: kind and endpoint, nothing about
+	// scope. See Connection.
+	Connections []Connection `json:"connections"`
+	// Trackers are the scopes unjira reconciles against, each on one connection, with
+	// its own write authority. See Tracker.
+	Trackers []Tracker `json:"trackers"`
+	// DefaultTicketIn names the tracker untracked work outside every scope is ticketed
+	// in. Empty means no default: a create has nowhere to land.
+	DefaultTicketIn []string                  `json:"default_ticket_in"`
+	Collectors      map[string]map[string]any `json:"collectors"`
 	// ExcludeFromLinking is a list of regex patterns; a ticket-key-shaped
 	// match against any of them is excluded from consideration as a real
 	// Jira link (see internal/events.CompileLinkExclusionPatterns). Empty by
 	// default — unjira makes no assumption about any workflow's own
 	// placeholder-ticket conventions.
 	ExcludeFromLinking []string         `json:"exclude_from_linking"`
-	Tracker            TrackerConfig    `json:"tracker"`
 	LLM                LLMConfig        `json:"llm"`
 	Correlator         CorrelatorConfig `json:"correlator"`
 	Match              MatchConfig      `json:"match"`
@@ -665,14 +548,14 @@ type Config struct {
 }
 
 // DefaultRulesDir is where RulesDir looks when Rules.Dir is unset — matching
-// how DefaultConfigPath is the default when Load's own path argument is
+// how DefaultConfigNames are the default when Load's own path argument is
 // empty: a working-directory-relative default rather than one baked into
 // the binary as an absolute path.
 const DefaultRulesDir = "rules"
 
 // RulesConfig configures where internal/rules.Load reads human-curated
 // markdown rule files from. A separate struct (rather than a bare top-level
-// string field) for the same reason as TrackerConfig/LLMConfig: room to grow
+// string field) for the same reason as LLMConfig: room to grow
 // (e.g. a later per-scope override) without adding another top-level Config
 // field alongside it.
 type RulesConfig struct {
@@ -683,7 +566,7 @@ type RulesConfig struct {
 
 // RulesDir returns the configured rules directory, defaulting to
 // DefaultRulesDir when unset — the same working-directory-relative default
-// DefaultConfigPath uses, so a fresh clone with no rules.dir configuration
+// DefaultConfigNames use, so a fresh clone with no rules.dir configuration
 // still resolves to the repo's seeded rules/ directory when run from the
 // repo root.
 func (c Config) RulesDir() string {
@@ -692,82 +575,6 @@ func (c Config) RulesDir() string {
 	}
 
 	return c.Rules.Dir
-}
-
-// JiraConnectionByName finds a connection by its configured name, reporting
-// whether one exists.
-//
-// Distinct from JiraConnectionForProject, which searches by project key: an
-// event's provenance records the connection NAME it was collected through (see
-// events.ArtifactIssueKey's neighbours and correlator.Candidate.Connection), and
-// two connections can legitimately cover the same project key during a migration
-// — which is exactly when looking one up by project would pick the wrong site.
-func (c Config) JiraConnectionByName(name string) (JiraConnection, bool) {
-	for _, conn := range c.Jira {
-		if conn.Name == name {
-			return conn, true
-		}
-	}
-
-	return JiraConnection{}, false
-}
-
-// JiraConnectionForProject finds the connection whose ProjectKeys contains
-// projectKey. Returns false if no configured connection covers it.
-func (c Config) JiraConnectionForProject(projectKey string) (JiraConnection, bool) {
-	for _, conn := range c.Jira {
-		if slices.Contains(conn.ProjectKeys, projectKey) {
-			return conn, true
-		}
-	}
-
-	return JiraConnection{}, false
-}
-
-// TrackerBackend returns the configured tracker backend, defaulting to
-// "jira" when unset — backward compatible with phase-0's Jira-only
-// assumption.
-func (c Config) TrackerBackend() string {
-	if c.Tracker.Backend == "" {
-		return "jira"
-	}
-
-	return c.Tracker.Backend
-}
-
-// DefaultProjectConnection resolves Tracker.DefaultProject via
-// JiraConnectionForProject, erroring loudly if unset, unresolvable, or not
-// writable — exactly the case a `create` action would hit with no routing
-// logic upstream of it yet.
-//
-// The writability check belongs here rather than only at gate.Applier's
-// per-action runtime check: tracker.default_project is static config, known
-// entirely at startup, so a misconfigured (unwritable) default project is a
-// statically-checkable error — the second of write scope's two layers. See
-// docs/superpowers/specs/2026-08-27-write-scope-design.md, "startup
-// validation is the second layer".
-func (c Config) DefaultProjectConnection() (JiraConnection, error) {
-	if c.Tracker.DefaultProject == "" {
-		return JiraConnection{}, fmt.Errorf("no tracker.default_project configured for new-issue creation")
-	}
-
-	conn, ok := c.JiraConnectionForProject(c.Tracker.DefaultProject)
-	if !ok {
-		return JiraConnection{}, fmt.Errorf(
-			"tracker.default_project %q is not covered by any configured jira connection",
-			c.Tracker.DefaultProject,
-		)
-	}
-
-	if !conn.IsProjectWritable(c.Tracker.DefaultProject) {
-		return JiraConnection{}, fmt.Errorf(
-			"tracker.default_project %q is not writable: jira[].writable_project_keys does not "+
-				"include it for connection %q",
-			c.Tracker.DefaultProject, conn.Name,
-		)
-	}
-
-	return conn, nil
 }
 
 // Default returns the configuration used when no config file is present:
@@ -799,11 +606,91 @@ func (c Config) EnabledCollectors() map[string]map[string]any {
 	return enabled
 }
 
-// Load reads a config file, falling back to Default when path does not
-// exist. An empty path uses DefaultConfigPath.
+// DefaultPathIn returns the one default-named config file in dir, or "" when there
+// is none. Two is an error rather than a preference: an operator editing the file
+// unjira does not read would see their change silently ignored.
+func DefaultPathIn(dir string) (string, error) {
+	var found []string
+
+	for _, name := range DefaultConfigNames {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			found = append(found, path)
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("checking for config %s: %w", path, err)
+		}
+	}
+
+	switch len(found) {
+	case 0:
+		return "", nil
+	case 1:
+		return found[0], nil
+	default:
+		return "", fmt.Errorf("found several config files (%s): keep one, so it is clear which unjira reads",
+			strings.Join(found, ", "))
+	}
+}
+
+// removedKeys are top-level keys of the previous config shape. Each is refused with
+// the new shape named, never mapped: config is user-local and the store has no
+// migrations, so a silent translation would be a second source of truth.
+var removedKeys = []struct{ key, replacement string }{
+	{
+		key: "jira",
+		replacement: `Jira sites are now "connections" entries (kind: jira, endpoint: <site>), and each ` +
+			`site's project_keys, writable_project_keys, queries and max_issues_per_query move to a ` +
+			`"trackers" entry on that connection as scopes, writable_scopes, queries and ` +
+			`max_issues_per_query`,
+	},
+	{
+		key: "tracker",
+		replacement: `tracker.backend is now each connection's kind, and tracker.default_project is now ` +
+			`"default_ticket_in" (a tracker name) plus that tracker's "default_scope"`,
+	},
+}
+
+// refuseRemovedKeys reports every removed top-level key present in a config body.
+func refuseRemovedKeys(path string, body []byte) error {
+	asJSON, err := yaml.YAMLToJSON(body)
+	if err != nil {
+		return fmt.Errorf("parsing config %s: %w", path, err)
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(asJSON, &top); err != nil {
+		return fmt.Errorf("parsing config %s: the top level must be a mapping: %w", path, err)
+	}
+
+	var errs []error
+
+	for _, removed := range removedKeys {
+		if _, ok := top[removed.key]; ok {
+			errs = append(errs, fmt.Errorf("config %s: key %q was removed: %s. See config/unjira.example.yaml",
+				path, removed.key, removed.replacement))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+// Load reads a config file, falling back to Default when none exists. An empty path
+// looks in the working directory for one of DefaultConfigNames.
+//
+// The tracker model is validated here (ValidateTrackers), so a misconfigured tracker
+// fails before any command does work rather than when a write is first attempted.
 func Load(path string) (Config, error) {
 	if path == "" {
-		path = DefaultConfigPath
+		found, err := DefaultPathIn(".")
+		if err != nil {
+			return Config{}, err
+		}
+
+		if found == "" {
+			return Default(), nil
+		}
+
+		path = found
 	}
 
 	body, err := os.ReadFile(path)
@@ -814,9 +701,17 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("reading config %s: %w", path, err)
 	}
 
+	if err := refuseRemovedKeys(path, body); err != nil {
+		return Config{}, err
+	}
+
 	var cfg Config
-	if err := json.Unmarshal(body, &cfg); err != nil {
+	if err := yaml.UnmarshalStrict(body, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing config %s: %w", path, err)
+	}
+
+	if err := cfg.ValidateTrackers(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 
 	return cfg, nil

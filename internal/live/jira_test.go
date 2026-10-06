@@ -38,7 +38,7 @@ import (
 
 // liveConnectionNameEnvVar overrides liveConnectionName, defaulting to "dev".
 // Kept overridable rather than hardcoded because the connection name must key
-// both the UNJIRA_JIRA_CREDENTIALS lookup and the config.JiraConnection.Name
+// both the UNJIRA_JIRA_CREDENTIALS lookup and the config.Connection.Name
 // this test builds, and someone pointing this tier at a differently-named
 // connection in their own UNJIRA_JIRA_CREDENTIALS (e.g. a shared credentials
 // blob also used by `unjira collect`) should not have to edit this file to do
@@ -46,7 +46,7 @@ import (
 const liveConnectionNameEnvVar = "UNJIRA_LIVE_JIRA_CONNECTION"
 
 // liveConnectionName returns the Jira connection name this tier authenticates
-// as: the key into UNJIRA_JIRA_CREDENTIALS and the config.JiraConnection.Name
+// as: the key into UNJIRA_JIRA_CREDENTIALS and the config.Connection.Name
 // used to build a CollectContext.
 func liveConnectionName() string {
 	if name := os.Getenv(liveConnectionNameEnvVar); name != "" {
@@ -217,30 +217,36 @@ func TestWorkflowMiningProducesAGraph(t *testing.T) {
 	assert.NotEmpty(t, categories, "project should report at least one status")
 }
 
-// probeConnection is the connection every collector test runs: the dev instance,
-// scoped to a single issue key so the test cannot be perturbed by unrelated
-// activity in the project. It is shared by liveCollectContext and the index probes
+// probeTracker is the tracker every collector test runs: the dev instance, scoped
+// to a single issue key so the test cannot be perturbed by unrelated activity in
+// the project. It is shared by liveCollectContext and the index probes
 // (index_test.go). The probes judge "the collector's own query", and that only
-// holds while both are built from this one definition.
-func probeConnection(issueKey string) config.JiraConnection {
+// holds while both are built from this one definition. It sits on a connection
+// of the same name (probeConnection).
+func probeTracker(issueKey string) config.Tracker {
+	return config.Tracker{
+		Name:       liveConnectionName(),
+		Connection: liveConnectionName(),
+		Scopes:     []string{testProject()},
+		Queries:    []config.JiraQuery{probeQuery(issueKey)},
+	}
+}
+
+// probeConnection is the dev instance's jira connection.
+func probeConnection() config.Connection {
 	site := os.Getenv("UNJIRA_JIRA_SITE")
 	if site == "" {
 		site = "https://unjira.atlassian.net"
 	}
 
-	return config.JiraConnection{
-		Name:        liveConnectionName(),
-		Site:        site,
-		ProjectKeys: []string{testProject()},
-		Queries:     []config.JiraQuery{probeQuery(issueKey)},
-	}
+	return config.Connection{Name: liveConnectionName(), Kind: config.KindJira, Endpoint: site}
 }
 
 func probeQuery(issueKey string) config.JiraQuery {
 	return config.JiraQuery{Name: "probe", JQL: fmt.Sprintf("key = %s", issueKey)}
 }
 
-// liveCollectContext builds a CollectContext for probeConnection.
+// liveCollectContext builds a CollectContext for probeTracker.
 //
 // The store is a fresh temp-file SQLite DB per call so a cursor from a previous
 // run cannot make a pass look incremental when it should be a full scan.
@@ -251,12 +257,15 @@ func liveCollectContext(t *testing.T, issueKey string) pipeline.CollectContext {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 
-	conn := probeConnection(issueKey)
+	conn := probeConnection()
 	cred := testCredential(t)
 
 	return pipeline.CollectContext{
-		Store:  s,
-		Config: config.Config{Jira: []config.JiraConnection{conn}},
+		Store: s,
+		Config: config.Config{
+			Connections: []config.Connection{conn},
+			Trackers:    []config.Tracker{probeTracker(issueKey)},
+		},
 		Credentials: credentials.NewSet(map[string]credentials.Credential{
 			conn.Name: cred,
 		}),
@@ -383,8 +392,8 @@ func collectUntilMatched(
 	// minute-floored bound provably included the issue. Without a verdict that
 	// evidence reads as ambiguous, and an OSS contributor cannot tell whether their
 	// PR broke something.
-	conn := cc.Config.Jira[0]
-	unbounded, jqlErr := conn.EffectiveJQL(conn.Queries[0])
+	tracker := cc.Config.Trackers[0]
+	unbounded, jqlErr := tracker.EffectiveJQL(tracker.Queries[0])
 
 	ev := indexEvidence{jqlErr: jqlErr}
 	if jqlErr == nil {

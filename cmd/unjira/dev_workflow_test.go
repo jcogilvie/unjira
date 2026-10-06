@@ -21,7 +21,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/credentials"
 )
 
@@ -71,11 +70,7 @@ func devWorkflowTestApp(t *testing.T, siteURL string) *appContext {
 	t.Helper()
 
 	return &appContext{
-		config: config.Config{
-			Jira: []config.JiraConnection{
-				{Name: "default", Site: siteURL, ProjectKeys: []string{"PROJ"}},
-			},
-		},
+		config: jiraSites(jiraSite{"default", siteURL, []string{"PROJ"}}),
 		jiraCredentials: jsonSetFor(t, map[string]credentials.Credential{
 			"default": {Email: "e", Token: "t"},
 		}),

@@ -5,7 +5,7 @@ package triage_test
 // The finding: every write gate lived in gate.Applier, so a reviewer read the issue,
 // read the work, read the drafted prose, judged it, pressed [a], and only then learned
 // the project was not writable. Measured on a real rebuilt queue: 17 proposed actions
-// targeting PAAS/RE/SUMO/SIA against a writable_project_keys of ["DEVSBX"] — every one
+// targeting PAAS/RE/SUMO/SIA against a writable_scopes of ["DEVSBX"] — every one
 // unappliable, with nothing saying so.
 //
 // The intended UX, in the reviewer's words: "I would do this, but I can't; add a
@@ -55,10 +55,10 @@ func (p *capturingPrompter) Notify(message string) error {
 // writabilityCfg tracks PAAS and DEVSBX, but only permits writes to DEVSBX — the
 // real shape of the dev configuration this was measured against.
 func writabilityCfg() config.Config {
-	return config.Config{Jira: []config.JiraConnection{{
-		Name:                "dev",
-		ProjectKeys:         []string{"PAAS", "DEVSBX"},
-		WritableProjectKeys: []string{"DEVSBX"},
+	return config.Config{Trackers: []config.Tracker{{
+		Name:           "dev",
+		Scopes:         []string{"PAAS", "DEVSBX"},
+		WritableScopes: []string{"DEVSBX"},
 	}}}
 }
 
@@ -83,7 +83,7 @@ func TestSession_MarksAnUnappliableActionBeforeAsking(t *testing.T) {
 
 	assert.False(t, got.Appliable,
 		"a reviewer must learn this BEFORE spending judgment, not after pressing [a]")
-	assert.Contains(t, got.UnappliableReason, "writable_project_keys",
+	assert.Contains(t, got.UnappliableReason, "writable_scopes",
 		"and the reason must name the config key to edit")
 	assert.Contains(t, got.UnappliableReason, "dev",
 		"and the connection, since that is the address of the fix")
@@ -114,7 +114,7 @@ func TestSession_RefusesApproveOnAnUnappliableAction(t *testing.T) {
 	require.NoError(t, s.Run())
 
 	require.NotEmpty(t, p.notices, "the refusal must be explained, not silent")
-	assert.Contains(t, p.notices[0], "writable_project_keys")
+	assert.Contains(t, p.notices[0], "writable_scopes")
 
 	assert.Empty(t, s.Approved(),
 		"and nothing may be approved: the gate would refuse it at apply time anyway, so approving "+

@@ -11,8 +11,8 @@ package config_test
 //
 // The two refusals stay DISTINCT, which is the whole reason this is a typed result
 // rather than a bool. gate/applier.go's own comment argues it: "not in
-// writable_project_keys" is a scope decision whose remedy is a config edit, while
-// "no connection tracks this project" means unjira drafted an action for work outside
+// writable_scopes" is a scope decision whose remedy is a config edit, while
+// "no tracker covers this project" means unjira drafted an action for work outside
 // what it manages — a signal about the correlator's attribution, whose remedy is
 // triage's [t]arget.
 
@@ -25,10 +25,10 @@ import (
 )
 
 func writabilityConfig() config.Config {
-	return config.Config{Jira: []config.JiraConnection{{
-		Name:                "dev",
-		ProjectKeys:         []string{"PAAS", "DEVSBX"},
-		WritableProjectKeys: []string{"DEVSBX"},
+	return config.Config{Trackers: []config.Tracker{{
+		Name:           "dev",
+		Scopes:         []string{"PAAS", "DEVSBX"},
+		WritableScopes: []string{"DEVSBX"},
 	}}}
 }
 
@@ -36,7 +36,7 @@ func TestProjectWritability_Writable(t *testing.T) {
 	got := writabilityConfig().ProjectWritability("DEVSBX")
 
 	assert.True(t, got.Writable)
-	assert.Equal(t, "dev", got.Connection)
+	assert.Equal(t, "dev", got.Tracker)
 	assert.Empty(t, got.Reason, "a writable project needs no explanation")
 	assert.False(t, got.Untracked)
 }
@@ -49,9 +49,9 @@ func TestProjectWritability_ReadableButNotWritable(t *testing.T) {
 	assert.False(t, got.Writable)
 	assert.False(t, got.Untracked,
 		"tracked-but-not-writable must be distinguishable from untracked: the remedies differ")
-	assert.Equal(t, "dev", got.Connection,
-		"and the connection must be named, since that is where the fix goes")
-	assert.Contains(t, got.Reason, "writable_project_keys",
+	assert.Equal(t, "dev", got.Tracker,
+		"and the tracker must be named, since that is where the fix goes")
+	assert.Contains(t, got.Reason, "writable_scopes",
 		"the reason must name the key to edit")
 	assert.Contains(t, got.Reason, "dev")
 }
@@ -65,16 +65,16 @@ func TestProjectWritability_Untracked(t *testing.T) {
 	assert.False(t, got.Writable)
 	assert.True(t, got.Untracked,
 		"an untracked project is a correlator-attribution signal, not a config gap")
-	assert.Empty(t, got.Connection, "no connection covers it, so none can be named")
+	assert.Empty(t, got.Tracker, "no tracker covers it, so none can be named")
 	assert.Contains(t, got.Reason, "retarget",
 		"the remedy is triage's [t]arget, and the message must say so")
-	assert.NotContains(t, got.Reason, "connection \"\"",
-		"and it must never name an empty connection")
+	assert.NotContains(t, got.Reason, "tracker \"\"",
+		"and it must never name an empty tracker")
 }
 
-// TestProjectWritability_NoConnectionsConfigured is the fresh-clone case: a clone
-// with no jira block writes nothing, and the message must still be actionable.
-func TestProjectWritability_NoConnectionsConfigured(t *testing.T) {
+// TestProjectWritability_NoTrackersConfigured is the fresh-clone case: a clone
+// with no trackers writes nothing, and the message must still be actionable.
+func TestProjectWritability_NoTrackersConfigured(t *testing.T) {
 	got := config.Config{}.ProjectWritability("PAAS")
 
 	assert.False(t, got.Writable)
@@ -83,16 +83,16 @@ func TestProjectWritability_NoConnectionsConfigured(t *testing.T) {
 }
 
 // TestProjectWritability_EmptyWritableListDeniesEverything pins the deny-by-default
-// property the README states: absent means nothing on that connection is writable.
+// property the README states: absent means nothing on that tracker is writable.
 func TestProjectWritability_EmptyWritableListDeniesEverything(t *testing.T) {
-	cfg := config.Config{Jira: []config.JiraConnection{{
-		Name: "dev", ProjectKeys: []string{"PAAS"},
+	cfg := config.Config{Trackers: []config.Tracker{{
+		Name: "dev", Scopes: []string{"PAAS"},
 	}}}
 
 	got := cfg.ProjectWritability("PAAS")
 
 	assert.False(t, got.Writable,
-		"an absent writable_project_keys must deny, not permit: a fresh clone applies nothing")
+		"an absent writable_scopes must deny, not permit: a fresh clone applies nothing")
 	assert.False(t, got.Untracked, "but the project IS tracked, so the remedy is still a config edit")
 }
 

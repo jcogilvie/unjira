@@ -1,0 +1,112 @@
+# unjira configuration. Copy to ./unjira.config.yaml and edit.
+#
+# Read with sigs.k8s.io/yaml in strict mode: an unknown key is an error, not ignored.
+# JSON is a subset of YAML, so an unjira.config.json in this shape also works.
+#
+# Quote short keys. YAML reads an unquoted NO, ON, YES or OFF as a boolean, so a Jira
+# project called NO must be written "NO". Load refuses the unquoted form and says so.
+#
+# Credentials never live here. They come from the environment (see .env.example):
+#   UNJIRA_JIRA_CREDENTIALS    keyed by jira connection name
+#   UNJIRA_GITHUB_CREDENTIALS  keyed by the GitHub host (github.com)
+
+# Connections: WHO and WHERE. A system kind and its endpoint, nothing about scope.
+# Kinds: jira, github (read-only: unjira never writes to GitHub), local (unjira's own
+# store-backed tracker, for tests).
+connections:
+  - name: work-jira
+    kind: jira
+    endpoint: https://yourorg.atlassian.net
+  - name: github
+    kind: github
+    endpoint: https://api.github.com
+
+# Trackers: WHAT. The scopes each tracker owns, and which of them unjira may write to.
+# Scopes never overlap across trackers, so every issue routes to exactly one.
+trackers:
+  - name: work
+    connection: work-jira
+    # Read scope: Jira project keys whose issues route here.
+    scopes: ["PROJ"]
+    # Write authority. Absent or empty means NOTHING is writable, and that is the
+    # default on purpose: a fresh clone writes nothing. To allow writes, list the
+    # scopes, e.g. writable_scopes: ["PROJ"].
+    writable_scopes: []
+    # Where this tracker's creates land. Must be writable. Required when the tracker
+    # is writable and named in default_ticket_in or another tracker's mirror_to.
+    # default_scope: "PROJ"
+    # Trackers whose work may ALSO be ticketed elsewhere. Unlisted means nowhere.
+    mirror_to: []
+    # What the Jira collector reads. Each query is scoped to this tracker's scopes.
+    # The collector's cursor is keyed by connection and query name.
+    max_issues_per_query: 200
+    queries:
+      - name: mine-or-unassigned
+        jql: "updated >= -14d AND (assignee = currentUser() OR reporter = currentUser() OR assignee IS EMPTY)"
+
+  # A read-only GitHub tracker: upstream issues, never written. A whole-segment * matches
+  # every repository of that owner.
+  - name: upstream
+    connection: github
+    scopes: ["yourorg/yourrepo"]
+    mirror_to: []
+
+# Where untracked work outside every scope is ticketed: a writable tracker with a
+# default_scope. Empty means no default, so a create has nowhere to land.
+default_ticket_in: []
+
+collectors:
+  claude_code:
+    enabled: true
+    backfill_days: 14
+    exclude_cwds:
+      - ~/workspace/unjira
+  github:
+    enabled: false
+    repos:
+      - yourorg/yourrepo
+    # GitHub logins whose PRs count as evidence. Empty means the credential's own user
+    # (resolved via GET /user).
+    authors: []
+    backfill_days: 30
+  slack:
+    enabled: false
+    channels:
+      - "#my-team"
+  jira:
+    enabled: false
+
+# Regex patterns; a ticket-key-shaped match against any of them is never linked.
+exclude_from_linking:
+  - "-0$"
+  - "-1$"
+
+llm:
+  model: claude-sonnet-5
+  base_url: http://localhost:4000/v1
+  context_window_tokens: 200000
+  max_output_tokens: 32000
+
+correlator:
+  tail_summarize_threshold_tokens: 6000
+  recent_events_kept: 20
+  max_event_summary_chars: 0
+  max_context_narratives: 0
+  member_confidence_floor: 0
+
+match:
+  max_candidates_per_narrative: 10
+  max_narratives_per_pass: 20
+  confidence_floor: 0.7
+
+reconciler:
+  max_narratives_per_pass: 20
+  min_confidence_to_propose: 0.5
+
+workflow:
+  cache_ttl: 24h
+
+rules:
+  dir: rules
+
+db_path: data/unjira.db

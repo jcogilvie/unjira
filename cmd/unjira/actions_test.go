@@ -37,18 +37,18 @@ func actionsTestApp(t *testing.T) (*appContext, *store.Store) {
 
 	return &appContext{
 		config: config.Config{
-			Tracker: config.TrackerConfig{Backend: "local", DefaultProject: "PROJ"},
 			// approveWriter resolves a project key via appContext.projectKey,
-			// which falls back to the first configured Jira connection's
-			// first project key even though the local backend itself ignores
-			// projectKey entirely — this connection exists only to satisfy
-			// that resolution step, matching watch_pass_test.go's own
-			// pattern for exercising the local backend under Approve.
-			// WritableProjectKeys makes PROJ writable: gate.Applier's
-			// write-scope choke point checks this regardless of tracker
-			// backend, so a local-backend test still needs an explicit grant
-			// (deny-by-default has no backend exception).
-			Jira: []config.JiraConnection{{Name: "local", ProjectKeys: []string{"PROJ"}, WritableProjectKeys: []string{"PROJ"}}},
+			// which falls back to the first configured project scope, and the
+			// tracker covering it sits on the local backend. WritableScopes makes
+			// PROJ writable: gate.Applier's write-scope choke point checks this
+			// regardless of backend, so a local-backend test still needs an
+			// explicit grant (deny-by-default has no backend exception).
+			Connections: []config.Connection{{Name: "local", Kind: config.KindLocal}},
+			Trackers: []config.Tracker{{
+				Name: "local", Connection: "local", Scopes: []string{"PROJ"},
+				WritableScopes: []string{"PROJ"}, DefaultScope: "PROJ",
+			}},
+			DefaultTicketIn: []string{"local"},
 		},
 		store: s,
 	}, s
@@ -364,10 +364,10 @@ func TestActionsDecide_ApproveOnRejectedActionIsAllowed(t *testing.T) {
 // identically-shaped config.
 func TestActionsDecide_ApproveRefusesAnUnwritableProject(t *testing.T) {
 	app, s := actionsTestApp(t)
-	// Override actionsTestApp's default connection: PROJ is readable but NOT
-	// writable, and PROJ is also DefaultProject, so `create` OR `comment`
-	// against it must both be refused by this one connection.
-	app.config.Jira = []config.JiraConnection{{Name: "local", ProjectKeys: []string{"PROJ"}}}
+	// Override actionsTestApp's tracker: PROJ is readable but NOT writable,
+	// and PROJ is also the default scope, so `create` OR `comment` against it
+	// must both be refused by this one tracker.
+	app.config.Trackers[0].WritableScopes = nil
 
 	issueKey, err := s.InsertLocalIssue("PROJ", "ticket", "Task", "", nil)
 	require.NoError(t, err)
@@ -384,7 +384,7 @@ func TestActionsDecide_ApproveRefusesAnUnwritableProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "failed", got.Status)
 	assert.Contains(t, got.Error, "PROJ")
-	assert.Contains(t, got.Error, "writable_project_keys")
+	assert.Contains(t, got.Error, "writable_scopes")
 
 	comments, err := s.LocalIssueComments(issueKey)
 	require.NoError(t, err)

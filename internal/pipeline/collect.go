@@ -30,7 +30,7 @@ type CollectContext struct {
 	Credentials credentials.Set
 	// GitHubCredentials is a second, independently-keyed credential.Set: Jira's
 	// Credentials is keyed by config connection NAME (a tenant concept — see
-	// config.JiraConnection), while GitHub's is keyed by HOST
+	// config.Connection), while GitHub's is keyed by HOST
 	// (github.com/a GHES instance), because GitHub is an identity provider
 	// rather than a multi-tenant system the way Jira is — one token carries
 	// org membership, so there is no per-connection auth surface to name. Both

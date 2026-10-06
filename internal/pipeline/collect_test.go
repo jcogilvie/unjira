@@ -210,9 +210,8 @@ func TestRunCollect_PassesConfigAndCredentialsToCollector(t *testing.T) {
 		Collectors: map[string]map[string]any{
 			"capture": {"enabled": true, "some_option": "value"},
 		},
-		Jira: []config.JiraConnection{
-			{Name: "corp", Site: "https://corp.atlassian.net", ProjectKeys: []string{"PROJ"}},
-		},
+		Connections: []config.Connection{{Name: "corp", Kind: config.KindJira, Endpoint: "https://corp.atlassian.net"}},
+		Trackers:    []config.Tracker{{Name: "corp", Connection: "corp", Scopes: []string{"PROJ"}}},
 	}
 	creds := credentials.NewSet(map[string]credentials.Credential{
 		"corp": {Email: "me@corp.example", Token: "t1"},
@@ -226,8 +225,8 @@ func TestRunCollect_PassesConfigAndCredentialsToCollector(t *testing.T) {
 	assert.Same(t, s, gotContext.Store, "the collector gets the same store RunCollect was given")
 	assert.Equal(t, "value", gotContext.Options["some_option"],
 		"the collector's own options block still reaches it")
-	require.Len(t, gotContext.Config.Jira, 1)
-	assert.Equal(t, "corp", gotContext.Config.Jira[0].Name,
+	require.Len(t, gotContext.Config.Connections, 1)
+	assert.Equal(t, "corp", gotContext.Config.Connections[0].Name,
 		"a remote collector needs connection config, which is why this seam exists")
 	gotCred, ok := gotContext.Credentials.For("corp")
 	require.True(t, ok, "credentials must reach the collector or no remote source can authenticate")
@@ -267,9 +266,10 @@ func TestRunCollect_JiraCollectorDedupesOnSecondPass(t *testing.T) {
 	defer func() { require.NoError(t, s.Close()) }()
 
 	cfg := config.Config{
-		Collectors: map[string]map[string]any{"jira": {"enabled": true}},
-		Jira: []config.JiraConnection{{
-			Name: "corp", Site: srv.URL, ProjectKeys: []string{"PROJ"},
+		Collectors:  map[string]map[string]any{"jira": {"enabled": true}},
+		Connections: []config.Connection{{Name: "corp", Kind: config.KindJira, Endpoint: srv.URL}},
+		Trackers: []config.Tracker{{
+			Name: "corp", Connection: "corp", Scopes: []string{"PROJ"},
 			Queries: []config.JiraQuery{{Name: "mine", JQL: "assignee = currentUser()"}},
 		}},
 	}

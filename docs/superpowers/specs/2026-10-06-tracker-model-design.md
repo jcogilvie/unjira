@@ -1,6 +1,6 @@
 # Tracker model: connections, trackers, routing and destinations
 
-Status: design, approved.
+Status: approved, landing slice by slice. See "Status by slice" at the end.
 
 Resolves the tracker-model chain in `docs/architecture-findings.md`:
 
@@ -253,3 +253,41 @@ Slices 1–3 are refactors behind unchanged behaviour. Slices 4–5 change behav
   - an empty destination set is recorded as a suppression.
 - **Measured before and after slice 5,** on a fresh snapshot of local transcripts: how many narratives
   change destination, and how many would-be creates for externally-scoped work disappear.
+
+## Status by slice
+
+### Slice 1, config model: landed 2026-10-06
+
+`config.Connection` and `config.Tracker` (`internal/config/trackers.go`), `default_ticket_in`, strict
+YAML/JSON loading, `ValidateTrackers` run by `Load`, refusal of the `jira` and `tracker` keys, and
+`config/unjira.example.yaml` as commented YAML. Behaviour is unchanged for a config that converts one
+`jira[]` entry into one connection plus one tracker of the same name.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. 24 break-it drills, each a one-line mutation failing a named test (see the slice's
+commit message).
+
+**Deviation: sigs.k8s.io/yaml does not fail on an unquoted `NO`.** The design assumed a typed string
+field would make it fail at load. It does not: the library converts YAML to JSON guided by the target
+type, and renders the YAML 1.1 boolean into the string field as `"false"` (`ON`/`YES` as `"true"`),
+without an error. Measured with `scopes: [PAAS, NO, ON, YES, 123]`, which decoded to
+`["PAAS", "false", "true", "true", "123"]`. The guard is therefore scope syntax: neither `"false"` nor
+`"true"` is a project key or an `owner/repo`, so validation refuses it, and the message names the
+quoting fix whenever the offending value is `true` or `false`.
+
+Decisions the design left open:
+- **Discovery.** With no `--config`, `Load` reads whichever of `unjira.config.yaml`, `.yml` and `.json`
+  exists in the working directory. Two is an error, not a precedence order.
+- **Validation runs in `Load`,** so every command refuses a bad tracker model, not only `watch`.
+- **A destination must be ready.** A tracker named in `default_ticket_in` or `mirror_to` must have
+  `writable_scopes` and a `default_scope`. A read-only destination is refused rather than ignored.
+- **One `default_ticket_in` until slice 5.** The create path has one default; naming two is refused
+  rather than silently using the first.
+- **Scope syntax per kind.** Jira and local scopes are project keys (`^[A-Z][A-Z0-9]*$`), and share one
+  key space, so a project cannot be claimed by a Jira and a local tracker at once. GitHub scopes are
+  `owner/repo`, matched case-insensitively, with `*` allowed only as the whole repository segment. An
+  owner glob would make every fork remote match a scope.
+- **Cursor key unchanged.** The Jira collector's cursor stays keyed by connection and query name, so a
+  converted config keeps its watermarks. Two trackers on one connection may not reuse a query name.
+- **Endpoints.** Required for `jira` and `github` connections, refused on `local`.
+
