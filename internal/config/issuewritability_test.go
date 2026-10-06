@@ -29,6 +29,21 @@ func TestIssueWritability_ReadsTheScopeOffTheKeyBySyntax(t *testing.T) {
 	assert.Equal(t, "upstream", upstream.Tracker)
 }
 
+// TestIssueWritability_AReadOnlyKindNamesNoImpossibleRemedy: "add it to writable_scopes"
+// is advice config would refuse for a GitHub tracker, so the reason says read-only.
+func TestIssueWritability_AReadOnlyKindNamesNoImpossibleRemedy(t *testing.T) {
+	cfg := config.Config{
+		Connections: []config.Connection{{Name: "gh", Kind: config.KindGitHub, Endpoint: "https://api.github.com"}},
+		Trackers:    []config.Tracker{{Name: "upstream", Connection: "gh", Scopes: []string{"o/r"}}},
+	}
+
+	got := cfg.IssueWritability("o/r#1")
+
+	assert.False(t, got.Writable)
+	assert.Contains(t, got.Reason, "read-only")
+	assert.NotContains(t, got.Reason, "add it there")
+}
+
 func TestIssueWritability_MalformedKeyIsUntracked(t *testing.T) {
 	got := config.Config{}.IssueWritability("not a key")
 

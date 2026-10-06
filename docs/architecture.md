@@ -226,12 +226,14 @@ flowchart LR
     HUMAN["Human approval<br/>via triage / actions decide"]
     A["gate.Applier<br/>internal/gate/applier.go:42<br/>the ONLY TaskWriter holder"]
     TRACKER[("Jira / local tracker")]
+    GH[("GitHub Issues<br/>clients/github.Reader<br/>no TaskWriter exists")]
 
     R1 -->|"read only"| TRACKER
     R2 -->|"read only"| TRACKER
     R3 -->|"read only"| TRACKER
     R4 -->|"read only"| TRACKER
     R5 -->|"read only"| TRACKER
+    R1 & R3 & R5 -->|"read only"| GH
     G1 --> A
     G2 --> A
     G3 --> A
@@ -246,7 +248,9 @@ flowchart LR
 
 **Verified: exactly one `TaskWriter` holder in the tree** — `gate.Applier`. `cmd/unjira/actions.go:186`
 resolves one to hand it over, and nothing else names the type outside the interface definition and
-doc comments. Every other consumer takes `TaskReader`.
+doc comments. Every other consumer takes `TaskReader`. GitHub has no edge from the applier because
+it cannot have one: its backend implements only `TaskReader`, and its client sends only GET, so
+`tasktracker.Resolver` has no writer to hand out for a GitHub scope.
 
 `reconciler/create.go:107` is worth reading as a design statement: it takes no tracker at all, and
 its comment says *"the parameter's absence is the guarantee."*
@@ -394,6 +398,7 @@ flowchart TB
     COLLJ --> CJIRA & CONFIG & EVENTS & PIPE
     COLLC --> EVENTS & PIPE
     COLLGH --> CGH & CONFIG & EVENTS & PIPE & CRED
+    CGH --> TT
     PIPE --> CRED
 
     classDef orphan fill:#eaeaea,stroke:#888,stroke-dasharray: 5 5,color:#1a1a1a

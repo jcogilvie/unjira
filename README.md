@@ -78,6 +78,12 @@ queued or lands `failed` with a persisted reason:
    than widening write scope.
 3. **`auto_commit.<type>.confidence_floor`** — the action's own confidence must clear it.
 
+**GitHub is never written to, by construction rather than by gate.** A `github` tracker is read
+through `clients/github.Reader`, which implements `tasktracker.TaskReader` and no write method, over a
+client that can only send GET; config refuses `writable_scopes` on it. Upstream issues are read to
+match and verify work (`owner/repo#N` and issue URLs are matching candidates), so work tracked
+upstream no longer looks untracked.
+
 A fresh clone has none of these configured, so a fresh clone applies nothing. `config/unjira.example.yaml`
 deliberately omits `auto_commit` and leaves every `writable_scopes` empty for exactly this reason: an
 example that grants write authority is one copy-paste from arming a real deployment.
@@ -261,8 +267,8 @@ internal/
   envfile/              .env loader with repo-root walk-up
   clients/
     jira/               Jira facade over go-jira/v2/cloud (reads + gated writes)
-    github/             GitHub REST facade (reads only, this slice) — PR listing and
-                        per-PR issue-events timeline
+    github/             GitHub REST facade, GET only — PR listing, per-PR issue-events
+                        timeline, and Reader, the read-only GitHub Issues tracker
     local/              local mimicked tracker — no real tracker reachable
     openai/             OpenAI-shaped LLM facade (litellm, etc.)
   llm/                  backend-agnostic LLM contract: Client, Usage, CredentialSource,

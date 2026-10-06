@@ -236,10 +236,10 @@ func TestTrackerReader_UncoveredProjectErrors(t *testing.T) {
 	require.ErrorContains(t, err, "GHOST")
 }
 
-// TestTaskTracker_GitHubTrackerHasNoBackendYet: a github tracker is configurable, but
-// nothing reads or writes it in this build, so resolving one is a named error rather
-// than a silent fallback to some other backend.
-func TestTrackerReader_GitHubTrackerHasNoBackendYet(t *testing.T) {
+// TestTrackerReader_GitHubTrackerNeedsItsHostsCredential: a github connection's
+// credential is UNJIRA_GITHUB_CREDENTIALS' entry for its endpoint's host, and its absence
+// is a named error, never a silent fallback to some other backend.
+func TestTrackerReader_GitHubTrackerNeedsItsHostsCredential(t *testing.T) {
 	app := &appContext{
 		config: config.Config{
 			Connections: []config.Connection{{Name: "gh", Kind: config.KindGitHub, Endpoint: "https://api.github.com"}},
@@ -250,5 +250,7 @@ func TestTrackerReader_GitHubTrackerHasNoBackendYet(t *testing.T) {
 
 	_, err := app.trackerReader("o/r")
 
-	require.ErrorContains(t, err, "upstream")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"github.com"`)
+	assert.Contains(t, err.Error(), "UNJIRA_GITHUB_CREDENTIALS")
 }
