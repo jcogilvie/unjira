@@ -574,6 +574,19 @@ Not reachable while every tracker in a deployment is Jira or local: nothing yet 
 tracker kind. It becomes reachable with the GitHub reader (the spec's slice 4), and the spec orders
 routing (slice 5) directly after it.
 
+### F56 — a narrative linked to a read-only issue can still draft a comment on it
+
+With the GitHub reader (the tracker model's slice 4), matching links upstream work to its upstream
+issue. The reconciler then drafts for that link like any other: `reconciler.Reconcile`
+(`internal/reconciler/reconciler.go`) has no notion of which trackers may receive what. No
+transition is drafted, because `clients/github.Reader.AvailableTransitions` offers none, but a
+comment can be, and it lands in the review queue as unappliable (`config.IssueWritability` reports
+the tracker read-only) where `gate.Applier` and the routed writer both refuse it.
+
+**Consequence:** a queue entry no one can approve, one per upstream-linked narrative with new work.
+Nothing reaches GitHub. The spec's slice 5 closes this with the allowed-destination set computed
+before any drafting call; until it lands, triage shows these with their reason.
+
 ### F55 — a key no tracker lists is still read, through a fallback
 
 The tracker model's routing is a pure function of key and config, and the spec reads that as "find the
@@ -682,6 +695,7 @@ yet; noted while writing the template, not found as a live incident.
 | F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |
 | F31 — learn's watermark can skip corrections | **resolved**, then superseded: the watermark is a `store.CorrectionsCursor` advanced by `KeepCandidates` from what the draft READ, never from a clock reading at keep, and never backwards. Its position is now `actions.corrected_seq`, a sequence stamped when a row becomes a correction (from `correction_marks`), which also closed F41 (the clock stepping back) and F42 (a lesson added by a later ruling). Drill: a clock reading at keep fails the between-draft-and-keep test 5/5 |
+| F56 — a read-only link can still draft a comment | open. Interim between the tracker model's slices 4 and 5; refused at triage and apply, never sent |
 | F55 — an unlisted project's key is still read through a fallback | open. Kept by the tracker model's slice 2 to preserve behaviour; reported at startup. Unmeasured |
 | F29 — nothing expresses which tracker a narrative's work belongs to | open, narrowed: per-tracker write authority landed with the tracker model's slice 1, before any public tracker can be read. The routing half (work location, `mirror_to`) is the spec's slice 5 |
 | F9 — alphabetical candidate tiebreak | resolved: `ProvenanceCorroborated` ranks between `JiraEvent` and `ProseFirst`, ordered WITHIN the tier by most-recent collected Jira activity (`store.IssueActivity`). The finding's own proposed fix was measured and does **not** fix its cited example — 30 of those 73 keys corroborate, still 3x the cap, so an alphabetical sort inside the new tier re-decides identically and PAAS-4001 lands at 26/30. Its recency *window* was rejected for the same reason: correct only in a ~21-30d band (14d excludes the answer, 60d restores the alphabetical tiebreak), so the knob would have been a latent bug. Recency ordering needs no knob and holds at every cap >= 8. Measured after: PAAS-4001 moves 45/73 -> 6/73. |

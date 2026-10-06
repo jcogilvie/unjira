@@ -39,7 +39,7 @@ func TestWatchCmd_RefusesAWritableTrackerWhoseBackendCannotNameUnjira(t *testing
 			}},
 		},
 		llmAPIKey: "test-key",
-		backends:  map[string]tasktracker.TaskTracker{"local": anonymousBackend{}},
+		backends:  map[string]tasktracker.TaskReader{"local": anonymousBackend{}},
 	}
 
 	err := (&watchCmd{}).Run(app)

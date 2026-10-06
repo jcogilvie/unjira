@@ -349,3 +349,37 @@ Decisions the design left open:
 - **A zero-value `IssueContext` still marks tracker records** (`ScopeUntracked` is the opt-out), so
   the pure event builders keep their behaviour for every caller that does not classify.
 
+### Slice 4, GitHub read-only tracker: landed 2026-10-06
+
+`clients/github.Reader` implements `tasktracker.TaskReader` over GitHub Issues and nothing else; the
+client's one request method is now `get`, so it cannot send anything but GET. `cmd/unjira` opens it for
+a `github` connection with the `UNJIRA_GITHUB_CREDENTIALS` entry for the endpoint's host
+(`clients/github.HostOfBaseURL`, the inverse of `BaseURL`), the same entry the GitHub collector uses.
+`events.ExtractGitHubIssueRefs` reads `owner/repo#N` and github.com issue URLs, and `gatherCandidates`
+takes them from every event's summary.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. Read-only live run against the sandbox, `UNJIRA_LIVE=1 go test -tags=live -run
+TestLiveGitHubReader -v ./internal/live/`: both tests PASS — every sandbox PR reads as not found
+through the issues endpoint, and a missing issue is not a transport error.
+
+Decisions the design left open:
+- **Candidates come from the summary, not a collector artifact,** so every stored event yields them,
+  including ones collected before the extraction existed (F21). On an event about a pull request the
+  text is its authored title and body, so its references rank with SCM authoring commands; the pull
+  request's own `owner/repo#N`, which heads its summary, is not a candidate.
+- **Prose ordering.** The order between Jira keys and GitHub references in one text is not recorded,
+  so a GitHub reference is the event's first mention only when it names no Jira key. Lower-cased
+  references sort after uppercase project keys within a tier, so they cannot push Jira keys past the
+  candidate cap.
+- **Pull requests read as not found** (`tasktracker.ErrNotFound`, "is a pull request, not an issue"),
+  open is todo and closed is done, and `AvailableTransitions` offers nothing: unjira cannot move a
+  GitHub issue, so the reconciler proposes no transition there.
+- **Error classification.** 404 and 410 are answers; 0, 429, 5xx and a 403 saying "rate limit" are
+  transport.
+- **Issue URLs on github.com only.** A GHES issue URL is not a candidate yet.
+- **No collector `connection` option.** Credentials are keyed by host, so the collector and a tracker
+  on one GitHub already share one credential without the collector naming the connection.
+- **Interim gap, F56.** A narrative linked to an upstream issue can still draft a comment on it, which
+  triage shows as unappliable and both write layers refuse. Slice 5's destination set closes it.
+

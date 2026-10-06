@@ -78,6 +78,18 @@ func (c Config) ProjectWritability(projectKey string) Writability {
 	}
 
 	if !tracker.IsScopeWritable(projectKey) {
+		// A tracker on a kind with no writer cannot be made writable at all, so the
+		// remedy differs: there is no config edit that allows this write.
+		if conn, ok := c.ConnectionOf(tracker); ok && !conn.Kind.hasWriter() {
+			return Writability{
+				Tracker: tracker.Name,
+				Reason: fmt.Sprintf(
+					"%q is tracked read-only by tracker %q (a %s tracker): unjira never writes to it, so "+
+						"retarget or reject the action",
+					projectKey, tracker.Name, conn.Kind),
+			}
+		}
+
 		return Writability{
 			Tracker: tracker.Name,
 			Reason: fmt.Sprintf(

@@ -1,6 +1,7 @@
 // Package github is a thin facade over GitHub's REST API, exposing only the
-// surface unjira's GitHub collector needs: listing pull requests and reading
-// one PR's issue-events timeline.
+// surface unjira needs: listing pull requests and reading one PR's issue-events
+// timeline for the collector, and reading issues for the read-only tracker
+// (Reader). It sends GET requests and nothing else.
 //
 // No SDK. This slice needs one listing call plus one per-changed-PR follow-up
 // call, both plain REST-over-JSON — encoding/json needs no library for a
@@ -37,6 +38,25 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("github API %d: %s", e.Status, e.Message)
+}
+
+// IsTransport classifies this error for tasktracker.IsTransportError: true when GitHub
+// was unreachable, failed, or throttled the request, false when it answered about the
+// issue (404 Not Found, 410 Gone for a deleted or transferred one, or a 403 that is a
+// permission answer).
+//
+// Status 0 means no HTTP response at all. GitHub throttles with 429 and, for its primary
+// rate limit, with 403 and a "rate limit" message, so a 403 is transport only when it
+// says so: a throttle says nothing about whether the issue exists.
+func (e *Error) IsTransport() bool {
+	switch {
+	case e.Status == 0, e.Status == http.StatusTooManyRequests, e.Status >= http.StatusInternalServerError:
+		return true
+	case e.Status == http.StatusForbidden:
+		return strings.Contains(strings.ToLower(e.Message), "rate limit")
+	default:
+		return false
+	}
 }
 
 // Client is a facade over GitHub's REST API.
@@ -130,7 +150,7 @@ func (c *Client) ListPullRequests(ref RepoRef, since time.Time) ([]PullRequest, 
 		)
 
 		var batch []PullRequest
-		if err := c.do(http.MethodGet, path, &batch); err != nil {
+		if err := c.get(path, &batch); err != nil {
 			return nil, err
 		}
 
@@ -161,7 +181,7 @@ func (c *Client) ListIssueEvents(ref RepoRef, number int) ([]IssueEvent, error) 
 		)
 
 		var batch []IssueEvent
-		if err := c.do(http.MethodGet, path, &batch); err != nil {
+		if err := c.get(path, &batch); err != nil {
 			return nil, err
 		}
 
@@ -178,7 +198,7 @@ func (c *Client) AuthenticatedLogin() (string, error) {
 	var user struct {
 		Login string `json:"login"`
 	}
-	if err := c.do(http.MethodGet, "/user", &user); err != nil {
+	if err := c.get("/user", &user); err != nil {
 		return "", fmt.Errorf("looking up the authenticated user: %w", err)
 	}
 	if user.Login == "" {
@@ -188,9 +208,15 @@ func (c *Client) AuthenticatedLogin() (string, error) {
 	return user.Login, nil
 }
 
-// do performs one request against base+path, decoding a JSON response body
-// into result and translating a non-2xx status into *Error.
-func (c *Client) do(method, path string, result any) error {
+// get performs one GET against base+path, decoding a JSON response body into
+// result and translating a non-2xx status into *Error.
+//
+// GET only, by construction: unjira reads GitHub and never writes to it (see
+// Reader), so this facade has no way to send any other method. A GitHub writer
+// would need its own design, and would start by adding one here.
+func (c *Client) get(path string, result any) error {
+	const method = http.MethodGet
+
 	req, err := http.NewRequestWithContext(context.Background(), method, c.base+path, nil)
 	if err != nil {
 		return fmt.Errorf("building %s %s: %w", method, path, err)

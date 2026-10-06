@@ -15,6 +15,7 @@ import (
 
 	"github.com/alecthomas/kong"
 
+	ghclient "github.com/jcogilvie/unjira/internal/clients/github"
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/clients/local"
 	"github.com/jcogilvie/unjira/internal/clients/openai"
@@ -79,7 +80,7 @@ type appContext struct {
 	// resolverOnce holds the one tasktracker.Resolver per process (see resolver), and
 	// backends the backend opened for each connection, shared by every tracker on it.
 	resolverOnce *tasktracker.Resolver
-	backends     map[string]tasktracker.TaskTracker
+	backends     map[string]tasktracker.TaskReader
 }
 
 // jiraClient constructs a client against a jira connection, using the credential
@@ -98,6 +99,30 @@ func (a *appContext) jiraClient(conn config.Connection) (*jira.Client, error) {
 	}
 
 	return client, nil
+}
+
+// githubReader builds the read-only GitHub Issues backend for a github connection. Its
+// credential is UNJIRA_GITHUB_CREDENTIALS' entry for the endpoint's host, the same entry
+// the GitHub collector uses for that host, so a collector and a tracker on one GitHub
+// share one credential.
+func (a *appContext) githubReader(conn config.Connection) (*ghclient.Reader, error) {
+	host, err := ghclient.HostOfBaseURL(conn.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("github connection %q: %w", conn.Name, err)
+	}
+
+	cred, ok := a.githubCredentials.Set().For(host)
+	if !ok {
+		return nil, fmt.Errorf("no credential for github connection %q: set host %q in %s",
+			conn.Name, host, credentials.GitHubEnvVar)
+	}
+
+	client, err := ghclient.New(conn.Endpoint, cred.Token)
+	if err != nil {
+		return nil, fmt.Errorf("building github client for connection %q: %w", conn.Name, err)
+	}
+
+	return ghclient.NewReader(client), nil
 }
 
 // trackerConnection resolves the tracker whose scopes cover projectKey, and the
@@ -136,13 +161,15 @@ func (a *appContext) jiraClientForProject(projectKey string) (*jira.Client, erro
 }
 
 // backend opens the backend for a connection, once per connection: two trackers on
-// one Jira site share one client and one credential.
-func (a *appContext) backend(conn config.Connection) (tasktracker.TaskTracker, error) {
+// one site share one client and one credential. It is a reader; a backend that can also
+// write implements tasktracker.TaskWriter, which only jira and local do. The GitHub
+// backend is a reader only, so a write to GitHub cannot be constructed at all.
+func (a *appContext) backend(conn config.Connection) (tasktracker.TaskReader, error) {
 	if b, ok := a.backends[conn.Name]; ok {
 		return b, nil
 	}
 
-	var b tasktracker.TaskTracker
+	var b tasktracker.TaskReader
 
 	switch conn.Kind {
 	case config.KindJira:
@@ -155,13 +182,18 @@ func (a *appContext) backend(conn config.Connection) (tasktracker.TaskTracker, e
 	case config.KindLocal:
 		b = local.New(a.store)
 	case config.KindGitHub:
-		return nil, fmt.Errorf("connection %q is kind %q, which has no backend in this build", conn.Name, conn.Kind)
+		reader, err := a.githubReader(conn)
+		if err != nil {
+			return nil, err
+		}
+
+		b = reader
 	default:
 		return nil, fmt.Errorf("connection %q: unknown kind %q", conn.Name, conn.Kind)
 	}
 
 	if a.backends == nil {
-		a.backends = make(map[string]tasktracker.TaskTracker)
+		a.backends = make(map[string]tasktracker.TaskReader)
 	}
 
 	a.backends[conn.Name] = b
@@ -206,7 +238,17 @@ func (a *appContext) resolver() *tasktracker.Resolver {
 
 		if conn.Kind == config.KindJira || conn.Kind == config.KindLocal {
 			route.OpenWriter = func() (tasktracker.TaskWriter, error) {
-				return a.backend(conn)
+				b, err := a.backend(conn)
+				if err != nil {
+					return nil, err
+				}
+
+				w, ok := b.(tasktracker.TaskWriter)
+				if !ok {
+					return nil, fmt.Errorf("connection %q has no writer", conn.Name)
+				}
+
+				return w, nil
 			}
 		}
 

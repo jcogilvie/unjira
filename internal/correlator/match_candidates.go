@@ -2,7 +2,9 @@ package correlator
 
 import (
 	"regexp"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/events"
@@ -76,6 +78,10 @@ type Candidate struct {
 // originally-proposed recency WINDOW was rejected (it is only correct in a narrow
 // 21-30 day band, so its config knob would be a latent bug).
 //
+// Qualified GitHub issue references (owner/repo#N, github.com issue URLs) are
+// candidates too, read from each event's summary (githubCandidates). Each is verified
+// later against the tracker its own scope routes to, like any key.
+//
 // Truncation keeps the head (the strongest candidates) because the limit
 // exists only to bound downstream cost (GetIssue fan-out, prompt size) — a
 // tail-keeping truncation would routinely throw away the branch candidate in
@@ -133,12 +139,17 @@ func gatherCandidates(
 			upsert(key, ProvenanceSCMCommand, "")
 		}
 
-		for i, key := range events.TicketKeysOf(e) {
+		ticketKeys := events.TicketKeysOf(e)
+		for i, key := range ticketKeys {
 			provenance := ProvenanceProseLater
 			if i == 0 {
 				provenance = ProvenanceProseFirst
 			}
 			upsert(key, provenance, "")
+		}
+
+		for i, key := range githubCandidates(e) {
+			upsert(key, githubProvenance(e, i, len(ticketKeys)), "")
 		}
 	}
 
@@ -157,6 +168,41 @@ func gatherCandidates(
 	}
 
 	return out
+}
+
+// githubCandidates returns the qualified GitHub issue references in e's summary
+// (events.ExtractGitHubIssueRefs), minus the pull request e is itself about: a pull
+// request's summary opens with its own owner/repo#N, and a pull request is work
+// evidence, never the issue it is tracked in.
+//
+// Read from the summary rather than from a collector artifact, so every stored event
+// yields them, including ones collected before this extraction existed (F21).
+func githubCandidates(e Event) []string {
+	refs := events.ExtractGitHubIssueRefs(e.Summary)
+
+	own := events.PullRequestOf(e)
+	if own == "" {
+		return refs
+	}
+
+	return slices.DeleteFunc(refs, func(ref string) bool { return strings.HasSuffix(own, "/"+ref) })
+}
+
+// githubProvenance ranks the i-th GitHub reference of e. On an event about a pull
+// request (one carrying events.ArtifactPullRequest), the text is the pull request's own
+// title and body, which are authored, so a "Fixes owner/repo#N" there ranks with SCM
+// authoring commands. Elsewhere it is prose: the first reference is the first mention
+// only when the event names no Jira key, since the order between the two kinds of key
+// is not recorded.
+func githubProvenance(e Event, i, ticketKeys int) Provenance {
+	switch {
+	case events.PullRequestOf(e) != "":
+		return ProvenanceSCMCommand
+	case i == 0 && ticketKeys == 0:
+		return ProvenanceProseFirst
+	default:
+		return ProvenanceProseLater
+	}
 }
 
 // promoteCorroborated relabels prose-tier candidates whose issue has collected

@@ -2,6 +2,7 @@ package github
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -75,4 +76,21 @@ func BaseURL(host string) string {
 	}
 
 	return "https://" + host + "/api/v3"
+}
+
+// HostOfBaseURL is BaseURL's inverse: the credential host for an API endpoint, which is
+// how a github connection's endpoint finds its UNJIRA_GITHUB_CREDENTIALS entry.
+// https://api.github.com is github.com; any other endpoint's host is itself (GHES serves
+// its API under /api/v3 on the same host).
+func HostOfBaseURL(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("github endpoint %q is not an absolute URL", endpoint)
+	}
+
+	if u.Host == "api.github.com" {
+		return DefaultHost, nil
+	}
+
+	return u.Host, nil
 }
