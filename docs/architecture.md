@@ -192,7 +192,7 @@ that action described. The pass summary lists each emptied narrative (`Stats.Emp
 no cluster of that pass.
 
 **Nothing downstream of clustering reads a context link.** The reconciler's delta, the create and
-redraft inputs, matching's candidates, and both examination watermarks read member links only, so a
+redraft inputs, matching's candidates, and all three examination watermarks read member links only, so a
 context link re-admits no narrative and reaches no prompt that drafts or matches. Context is read by
 the next clustering prompt (rendered under each context narrative as background, a numbered event as
 `-> #N`), by the pass summary, and by nothing else.
@@ -201,7 +201,7 @@ the next clustering prompt (rendered under each context narrative as background,
 check at a bisection seam), `:1802` (compaction), `correlator/cluster_reask.go:119` (omission re-ask),
 `correlator/cluster_dispute.go:177` (dispute re-ask), `correlator/match.go:534` (match), `:554` (match
 re-ask, once, on an unparseable response),
-`reconciler/draft.go:92`, `:339`, `reconciler/create.go:254`, and `rules/distill.go:126` (`learn`).
+`reconciler/draft.go:92`, `:339`, `reconciler/create.go:283`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
 
 Store-mediation is what makes a failed pass cost a retry and nothing else: a stage that dies has
@@ -266,7 +266,7 @@ doc comments. Every other consumer takes `TaskReader`. GitHub has no edge from t
 it cannot have one: its backend implements only `TaskReader`, and its client sends only GET, so
 `tasktracker.Resolver` has no writer to hand out for a GitHub scope.
 
-`reconciler/create.go:107` is worth reading as a design statement: it takes no tracker at all, and
+`reconciler/create.go:128` is worth reading as a design statement: it takes no tracker at all, and
 its comment says *"the parameter's absence is the guarantee."*
 
 Each gate is independently load-bearing, per `docs/design-notes.md` incident 16 — a gate that
@@ -325,14 +325,14 @@ stateDiagram-v2
     note right of declined
         Distinct from rejected:
         no human ruled.
-        reconciler/create.go:67
+        reconciler/create.go:51
     end note
 ```
 
 Reading the transitions, since some distinctions matter more than an edge label can carry:
 
 - **`declined`** is the model judging work not worth a ticket — creates only, and **distinct from
-  `rejected`, which is a human's ruling** (`reconciler/create.go:67`). Conflating them would teach
+  `rejected`, which is a human's ruling** (`reconciler/create.go:51`). Conflating them would teach
   slice 7's distiller that unjira's own taste and a reviewer's are the same signal.
 - **`reject / retarget`** are both recorded `rejected`, but only retarget produces a replacement row:
   the old action named the wrong issue, so it was ruled against rather than reworded
@@ -435,7 +435,7 @@ trade-off was weighed.
 | Principle / pattern | Where | Evidence |
 |---|---|---|
 | **Interface Segregation** | every interface in `internal/` | **14 interfaces, all 1–3 methods.** `llm.Client` has one. No fat interface anywhere in the tree. |
-| **Dependency Inversion, used for safety** | `tasktracker.TaskReader` / `TaskWriter` | The split exists so "this code cannot write" is a compile error. `reconciler/create.go:107` states it outright: *"this takes no TaskReader — the parameter's absence is the guarantee."* DIP for a security property, not for testability. |
+| **Dependency Inversion, used for safety** | `tasktracker.TaskReader` / `TaskWriter` | The split exists so "this code cannot write" is a compile error. `reconciler/create.go:124` states it outright: *"this takes no TaskReader — the parameter's absence is the guarantee."* DIP for a security property, not for testability. |
 | **Liskov substitution** | `clients/jira` vs `clients/local` | Both satisfy the full `TaskTracker` *and* `workflow.GraphProvider`, asserted at compile time (`_ workflow.GraphProvider = (*Tracker)(nil)`, `local/local.go:36`, `jira/tracker.go:27`). `local`'s graph is static, `jira`'s is mined — same postcondition, no weakening. |
 | **Strategy + registry (OCP)** | `cmd/unjira/main.go:59` | Adding a collector is one map entry. Verified: **nothing downstream switches on collector name.** |
 | **Adapter** | `internal/clients/*` | Thin facades, business logic one layer up. `clients/local` adapts two SQLite tables to a tracker interface. |

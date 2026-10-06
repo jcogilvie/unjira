@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS narrative_events (
     -- decides whether a link is newer than an examination or an action (finding
     -- F30). Every such comparison is link_seq against a high-water mark recorded
     -- by linkSeqHighWater: match_examinations.examined_link_seq,
-    -- reconcile_examinations.examined_link_seq, actions.created_link_seq (the
+    -- reconcile_examinations.examined_link_seq,
+    -- create_examinations.examined_link_seq, actions.created_link_seq (the
     -- reconciler's delta) and actions.executed_link_seq (the freeze rule).
     --
     -- AUTOINCREMENT, not a plain INTEGER PRIMARY KEY, because links are deleted
@@ -374,7 +375,8 @@ func Open(dbPath string) (*Store, error) {
 		return nil, err
 	}
 
-	if _, err := db.Exec(schema + localIssuesSchema + matchExaminationsSchema + reconcileExaminationsSchema); err != nil {
+	if _, err := db.Exec(schema + localIssuesSchema + matchExaminationsSchema + reconcileExaminationsSchema +
+		createExaminationsSchema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}

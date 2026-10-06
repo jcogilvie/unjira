@@ -190,18 +190,19 @@ narrative's prompt.
 
 ### F50 — a split narrative is still read by the create path and the review queue
 
-`StatusSplit` is honored by one reader, `NarrativesOverlapping` (`internal/store/narratives.go:291`), so
+`StatusSplit` is honored by one reader, `NarrativesOverlapping` (`internal/store/narratives.go:293`), so
 a narrative emptied of its work (`Tx.MarkSplitIfEmptied`, `internal/store/narrativestatus.go:57`, from a
 clustering pass, a triage split or a triage merge) stops being clustering context and nothing else
 changes. Two other readers still see it:
 
-- **The create path.** `NarrativesWithNoIssueLink` (`internal/store/narrativeissues.go:523`) has no
-  status predicate, so a split narrative with no issue link is selected on every pass and takes one of
-  `reconciler.max_narratives_per_pass`' slots. `proposeCreateOne` finds no member events and suppresses it
-  with a false reason, "every event is unjira's own output" (`internal/reconciler/create.go:185`). Nothing
-  records the examination, so it is selected again next pass. Probed with a cap of 1, one split narrative
-  ahead of one real untracked narrative by `window_start`: the split one was examined in all three
-  passes and the real one in none.
+- **The create path, once.** `NarrativesAwaitingCreate` (`internal/store/createbacklog.go:88`) has no
+  status predicate, so a split narrative with no issue link is selected by the next create pass.
+  `proposeCreateOne` finds no member events and suppresses it with a false reason, "every event is
+  unjira's own output" (`internal/reconciler/create.go:203`). It no longer holds the slot: that branch
+  now records a create examination (`store.RecordCreateExamined`), which excludes the narrative until a
+  member event is linked to it again. So the cost is one slot on one pass, no model call, and a
+  misleading line in that pass's summary (`TestProposeCreates_AnEmptiedNarrativeYieldsItsSlot`: cap 1,
+  the split narrative examined on pass 1, the real one behind it reached on pass 2).
 - **The review queue.** A proposed action drafted for the narrative before its work moved stays at
   `proposed` (`ActionsByStatus`, `internal/store/actions.go:102`, filters on action status alone; probed),
   so triage presents text describing work now attributed elsewhere. By reading, not probed: while it is
@@ -209,12 +210,33 @@ changes. Two other readers still see it:
   proposal on the same issue, because neither `NarrativesForIssue` nor `openProposalFromAnother` reads
   narrative status.
 
-**Consequence:** each emptied narrative costs a create slot forever, so enough of them starve real
-untracked work behind them (F12's and F26's shape), and a reviewer can approve a comment on behalf of a
-narrative that holds nothing. Pre-existing for triage split's sources, which have been marked `split`
-since that verb landed. Not fixed here: what a split narrative's pending actions should become (superseded,
-rejected, left for the reviewer) is an action-lifecycle decision, and the create-path predicate should be
-decided with it. Frequency on real data is unmeasured.
+**Consequence:** a reviewer can approve a comment on behalf of a narrative that holds nothing, and each
+emptied narrative is reported once as unjira's own output when it is not. Pre-existing for triage split's
+sources, which have been marked `split` since that verb landed. Not fixed here: what a split narrative's
+pending actions should become (superseded, rejected, left for the reviewer) is an action-lifecycle
+decision, and whether the create selector should name `split` outright should be decided with it.
+Frequency on real data is unmeasured.
+
+### F59 — a rejected create is re-asked on the next pass whether or not anything changed
+
+`openOrAppliedCreate` (`internal/reconciler/create.go:466`) deliberately does not treat a `rejected` create
+as a blocker, on the grounds that "a later pass with more events may be right". Nothing checks for more
+events. `awaitingCreate` (`internal/store/createbacklog.go:54`) counts a proposed, approved, applied
+or declined create, or a suppression, as a decision that stands until new member work arrives, but not a
+rejected one, so a narrative whose create a reviewer just rejected is selected by the very next create pass, and the model is asked again about exactly the events the reviewer ruled on.
+`TestProposeCreates_ARejectedCreateDoesNotBlockForever` (`internal/reconciler/create_test.go:162`) pins
+it: no event linked after the rejection, one model call, one fresh proposal. Contrast `DeltaEvents`
+(`internal/store/narratives.go:429`), which bounds on the latest action of any status precisely so that a
+rejected action is not re-proposed identically and the reviewer's "no" carries weight.
+
+**Consequence:** every rejected create costs a model call on the next pass and, usually, puts a
+near-identical proposal back in the review queue, so a reviewer who says no to a ticket says it again.
+Bounded at one re-ask per rejection rather than per pass, because the re-proposal is itself a `proposed`
+create and excludes the narrative, so it does not starve the create backlog. A `failed` create is re-asked
+the same way, which is defensible, since nothing was written. Not fixed here: the shape is a selector clause
+(a rejected create with no member link since the narrative's latest action) plus the matching backstop, but
+it changes what a rejection means on the create path, which is a review-semantics decision. Frequency on
+real data is unmeasured.
 
 ### F52 — a single dispute too large for the context window fails the pass
 
@@ -680,7 +702,8 @@ narrative.
 | F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
-| F50 — a split narrative is still read by the create path and the review queue | open. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed: a split narrative held a create slot for 3 of 3 passes at cap 1 |
+| F50 — a split narrative is still read by the create path and the review queue | open, narrowed: the create path examines a split narrative once and its create examination then excludes it, so it no longer holds a slot (`TestProposeCreates_AnEmptiedNarrativeYieldsItsSlot`); it is still reported with a false reason, and the review-queue half is untouched. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed before the create backlog fix: a split narrative held a create slot for 3 of 3 passes at cap 1 |
+| F59 — a rejected create is re-asked on the next pass whether or not anything changed | open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |
@@ -701,6 +724,7 @@ narrative.
 | F24 — write scope was invisible until approval | **resolved**: `config.ProjectWritability` is one shared predicate; `gate.Applier` defers to it and triage consults it per action. `[a]pprove` is dropped from the prompt for an unappliable action and the Session refuses the verb regardless. Verified live: the header reports "17 of them cannot be applied" and each names its remedy |
 | F25 — a summary named its message count while withholding the messages | **resolved**: `sessionFacts` extracts bounded deterministic phrases from the same tool calls `scmKeys` reads, and `segmentSummary` appends a "Did: …" clause. Fixed-size by construction (40 commits -> one phrase), +3.7% prompt cost. Verified on the motivating case: the rationale went from "no PR or completion evidence yet" to "commit + PR opened + tests run", escalating a comment to an In Review transition |
 | F26 — a self-authored delta is selected, emptied, writes nothing | **resolved**: `reconcile_examinations` (`store.RecordReconcileExamined`) is a watermark table, F22's mechanism applied to the reconciler's Go-side `dropSelfAuthored` filter rather than a SQL predicate duplicating it. `NarrativesWithActionableLinks`/`CountNarrativesWithDelta` share one predicate (`hasUnexaminedDelta`) so the two cannot drift. Verified: a 2-narrative repro where the older, self-authored-only narrative previously starved a real one behind it under a cap of 1 now yields the real narrative on pass 2 |
+| F12/F26 on the create path — handled untracked narratives held every create slot | **resolved**: `store.NarrativesAwaitingCreate` (renamed from `NarrativesWithNoIssueLink` as its meaning narrowed) excludes in SQL everything `proposeCreateOne` would skip without a model call: a narrative whose create-path decision stands (a proposed, approved, applied or declined create, or a suppression such as "no allowed destination", with no member link since), and a narrative examined and found to hold only unjira's own output, now recorded in its own `create_examinations` watermark table. With new member work a narrative is examined again, and destinations block a taken scope per destination. `CountNarrativesAwaitingCreate` shares the predicate (`awaitingCreate`) and is rendered as "N narrative(s) still awaiting a create decision", silent at zero and absent when creates were deferred. Found on a real 30-day store: 129 untracked narratives, a cap of 20; pass 1 proposed 11 and declined 9, every later pass proposed nothing, and the other 109 were never examined. Verified by `TestProposeCreates_HandledNarrativesYieldTheirSlots` and `TestRunReconcile_CreatePassesDrainPastHandledNarratives` (cap N, the oldest N handled, N+1 reached on the next pass) |
 | F19 — a co-clustered link is recorded at 0.98–1.0 confidence | **resolved by F18**, verified: zero `jira_event` primary links remain (branch 2, corroborated 4, prose_first 4, scm_command 5). The provenance can no longer be manufactured, because the Jira event is not in the cluster for a key to be read out of |
 | F20 — the claudecode collector discards SCM commands | **resolved**: `scmKeys` extracts from authoring commands only, carried on `ArtifactSCMKeys`, consumed as `ProvenanceSCMCommand` (below branch, above jira_event). Verified live: 13 events, 34 keys. The value is RE-RANKING not new keys — one event's 18 prose candidates collapse to 2 authoritative ones — which corrected the finding's own framing |
 | F21 — artifacts are frozen at first collection | **open, designed**: `docs/superpowers/specs/2026-09-17-artifact-rederivation-design.md` resolves the shape (artifact-key-scoped, recompute-and-diff, no new schema) and the invalidation question, but recommends deferring — no real store currently depends on it, and `claude_code` re-derivation has an unresolved segment-boundary hazard the spec surfaces but does not close |

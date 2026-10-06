@@ -89,8 +89,9 @@ func TestProposeCreates_AnEmptySetIsNotRerecordedWhileNothingChanges(t *testing.
 
 	second := proposeWithPolicy(t, s, client)
 
-	require.Len(t, second, 1)
-	assert.Empty(t, second[0].Suppressed, "nothing new since the recorded suppression")
+	assert.Empty(t, second, "nothing new since the recorded suppression: the narrative is not even "+
+		"selected, so it neither re-records nor holds a slot (store.NarrativesAwaitingCreate)")
+	assert.Empty(t, client.prompts)
 }
 
 func TestProposeCreates_UnscopedWorkGoesToDefaultTicketIn(t *testing.T) {
