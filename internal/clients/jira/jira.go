@@ -39,6 +39,17 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("Jira API %d: %s", e.Status, e.Message)
 }
 
+// IsTransport classifies this error for tasktracker.IsTransportError: true when Jira
+// itself was unreachable or failed the request, false when it answered (a 404 chief
+// among them, which is a real "not found").
+//
+// Status 0 means the request never got an HTTP response at all (connection refused,
+// DNS failure, timeout). 429 and 5xx mean Jira rejected or failed the request, which
+// says nothing about whether the issue exists.
+func (e *Error) IsTransport() bool {
+	return e.Status == 0 || e.Status == 429 || e.Status >= 500
+}
+
 // Client is a facade over go-jira, exposing only the surface unjira needs.
 type Client struct {
 	upstream *jiracloud.Client

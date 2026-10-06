@@ -212,7 +212,7 @@ flowchart LR
     subgraph readers["Hold TaskReader"]
         R1["reconciler.Reconcile"]
         R2["reconciler.Rework"]
-        R3["correlator.Match<br/>(via TrackerResolver)"]
+        R3["correlator.Match<br/>(via tasktracker.Routed)"]
         R4["triage.restructure"]
         R5["pipeline.RunReconcile"]
     end
@@ -259,7 +259,13 @@ action trusted" but "is this project one we may write to at all."
 kind and endpoint, `internal/config/trackers.go`) from a *tracker* (`config.Tracker`: the scopes it
 owns on one connection, and the `writable_scopes` subset unjira may write). `config.ProjectWritability`
 finds the one tracker whose scopes cover a project and asks whether that scope is writable; both
-`gate.Applier` and triage read it. `config.Load` runs `ValidateTrackers` before any command does work,
+`gate.Applier` and triage read it. Every read and write routes through one `tasktracker.Resolver` (`internal/tasktracker/resolve.go`),
+built in `cmd/unjira` from the trackers: a key's scope is parsed by syntax, the one tracker whose
+scopes cover it answers, and a `TaskWriter` is handed out only for a writable scope on a backend that
+has one. `tasktracker.Routed` adapts it to the `TaskReader`/`TaskWriter` interfaces the reconciler,
+matching and `gate.Applier` already take, so the write path holds two independent refusals: the
+config check that names the remedy, and a routed writer that cannot reach a read-only scope at all.
+`config.Load` runs `ValidateTrackers` before any command does work,
 so the statically-checkable half of write scope fails at startup: a writable scope the tracker cannot
 read, a writable scope on a kind with no writer (`github`), overlapping scopes across trackers, and a
 `default_ticket_in` tracker that is not writable or names no `default_scope`.
@@ -375,14 +381,13 @@ flowchart TB
 
     CMD --> PIPE & TRIAGE & GATE & CORR & STORE & CONFIG
     CMD --> CJIRA & CGH & CLOCAL & COAI & COLLJ & COLLC & COLLGH
-    PIPE --> RECON & CORR & GATE & STORE & CONFIG
+    PIPE --> RECON & CORR & GATE & STORE & CONFIG & TT
     TRIAGE --> RECON & CORR & STORE
     RECON --> CORR & STORE & CONFIG & WF & LLM & RULES & EVENTS & TT
     CORR --> STORE & CONFIG & LLM & RULES & EVENTS & TT
-    CORR -.->|"F3: concrete backend"| CJIRA
     GATE --> STORE & CONFIG & TT
     STORE --> EVENTS
-    CONFIG --> EVENTS
+    CONFIG --> EVENTS & TT
     CJIRA --> TT & WF
     CLOCAL --> STORE & TT & WF
     COAI --> LLM
@@ -453,8 +458,8 @@ would change the answer, so a later reader can check whether that condition now 
 re-deriving the analysis from scratch. Where a note says "revisit when X," X arriving is a reason to
 act, not a reason to argue.
 
-**A registry for tracker backends.** Today it is a `switch` on the tracker's connection kind
-(`appContext.taskTracker`, `cmd/unjira/main.go:137`), with the other kind-aware sites confined to `cmd`
+**A registry for tracker backends.** Today it is a `switch` on the connection kind
+(`appContext.backend`, `cmd/unjira/main.go:140`), with the other kind-aware sites confined to `cmd`
 and `config`. That is an asymmetry with the collector
 registry, and a defensible one at two backends — one of which exists only for tests. Registries start
 paying off around three variants. *Revisit when a third tracker lands*, or if backend-aware sites

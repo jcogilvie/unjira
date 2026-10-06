@@ -5,6 +5,7 @@
 package local
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/jcogilvie/unjira/internal/store"
@@ -97,7 +98,7 @@ func (t *Tracker) AvailableTransitions(_ string) ([]tasktracker.Transition, erro
 func (t *Tracker) GetIssue(key string) (tasktracker.Issue, error) {
 	issue, err := t.store.GetLocalIssue(key)
 	if err != nil {
-		return tasktracker.Issue{}, fmt.Errorf("getting local issue %s: %w", key, err)
+		return tasktracker.Issue{}, fmt.Errorf("getting local issue %s: %w", key, classify(err))
 	}
 
 	return toIssue(issue), nil
@@ -165,4 +166,15 @@ func localStatusCategory(name string) tasktracker.StatusCategory {
 	default:
 		return ""
 	}
+}
+
+// classify marks a missing local issue as tasktracker.ErrNotFound, so
+// tasktracker.IsTransportError reads it as a real "not found" without learning this
+// backend's store error. The store's own error stays in the chain.
+func classify(err error) error {
+	if errors.Is(err, store.ErrLocalIssueNotFound) {
+		return fmt.Errorf("%w: %w", tasktracker.ErrNotFound, err)
+	}
+
+	return err
 }

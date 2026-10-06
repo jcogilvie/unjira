@@ -355,7 +355,7 @@ func dropSelfAuthored(evts []events.Event) []events.Event {
 // transitions in the same pass.
 //
 // A not-found key is recorded as unverified and skipped; a transport error
-// aborts this narrative so the next pass retries it. correlator.IsTransportError
+// aborts this narrative so the next pass retries it. tasktracker.IsTransportError
 // makes that distinction and is reused rather than reimplemented — getting it
 // backwards in either direction is a real failure mode documented at length on
 // that function.
@@ -369,7 +369,7 @@ func verifyLinks(
 	for _, l := range links {
 		issue, getErr := tracker.GetIssue(l.IssueKey)
 		if getErr != nil {
-			if correlator.IsTransportError(getErr) {
+			if tasktracker.IsTransportError(getErr) {
 				return nil, unverified, fmt.Errorf(
 					"verifying link %s for narrative %d: %w", l.IssueKey, narrativeID, getErr,
 				)
@@ -381,7 +381,7 @@ func verifyLinks(
 
 		transitions, transErr := tracker.AvailableTransitions(l.IssueKey)
 		if transErr != nil {
-			if correlator.IsTransportError(transErr) {
+			if tasktracker.IsTransportError(transErr) {
 				return nil, unverified, fmt.Errorf(
 					"reading transitions for %s on narrative %d: %w", l.IssueKey, narrativeID, transErr,
 				)

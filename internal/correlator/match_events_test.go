@@ -147,7 +147,7 @@ func TestMatch_PromptCarriesTheNarrativesEvents(t *testing.T) {
 	client := &promptCapturingLLM{response: `[{"issue_key":"PAAS-4038","role":"primary",` +
 		`"confidence":0.95,"rationale":"two events are status changes on this ticket"}]`}
 
-	_, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client, narrative19Config())
+	_, _, err := correlator.Match(context.Background(), s, tracker, client, narrative19Config())
 	require.NoError(t, err)
 
 	require.Equal(t, 1, client.calls, "one classifier call for a four-candidate narrative")
@@ -171,7 +171,7 @@ func TestMatch_LinksTheJiraEventCandidate(t *testing.T) {
 		`{"issue_key":"PAAS-4038","role":"primary","confidence":0.95,"rationale":"r"},` +
 		`{"issue_key":"SUMO-287220","role":"mentioned","confidence":0.3,"rationale":"r"}]`}
 
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client, narrative19Config())
+	results, _, err := correlator.Match(context.Background(), s, tracker, client, narrative19Config())
 	require.NoError(t, err)
 
 	require.Len(t, results, 1)
@@ -215,7 +215,7 @@ func TestMatch_EmptyClassifierResponseIsLoggedNotSilent(t *testing.T) {
 	tracker := &narrative19Tracker{}
 	client := &promptCapturingLLM{response: "[]"}
 
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client,
+	results, _, err := correlator.Match(context.Background(), s, tracker, client,
 		narrative19Config(), correlator.WithMatchLogger(log))
 
 	require.NoError(t, err, "an empty response must not fail the pass")
@@ -255,7 +255,7 @@ func TestMatch_SingleCandidateStillSkipsTheClassifier(t *testing.T) {
 	tracker := &narrative19Tracker{}
 	client := &promptCapturingLLM{response: "[]"}
 
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client, narrative19Config())
+	results, _, err := correlator.Match(context.Background(), s, tracker, client, narrative19Config())
 
 	require.NoError(t, err)
 	assert.Zero(t, client.calls, "a lone candidate needs no model judgment")
@@ -308,7 +308,7 @@ func TestMatch_LoneJiraEventCandidateLinksDeterministically(t *testing.T) {
 	tracker := &narrative19Tracker{}
 	client := &promptCapturingLLM{response: "[]"}
 
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client, narrative19Config())
+	results, _, err := correlator.Match(context.Background(), s, tracker, client, narrative19Config())
 	require.NoError(t, err)
 
 	t.Logf("tracker fetched: %v", tracker.fetched)
@@ -368,7 +368,7 @@ func TestMatch_NarrativeCapIsSeparateFromCandidateCap(t *testing.T) {
 	client := &promptCapturingLLM{response: "[]"}
 
 	// The old bug: a small candidate cap silently capped narratives too.
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(tracker), client,
+	results, _, err := correlator.Match(context.Background(), s, tracker, client,
 		config.MatchConfig{
 			MaxCandidatesPerNarrative: 2, // small on purpose
 			ConfidenceFloor:           0.7,
@@ -417,7 +417,7 @@ func TestMatch_NarrativeCapIsHonouredAndLogged(t *testing.T) {
 	log, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
 	require.NoError(t, lerr)
 
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(&anyKeyTracker{}),
+	results, _, err := correlator.Match(context.Background(), s, &anyKeyTracker{},
 		&promptCapturingLLM{response: "[]"},
 		config.MatchConfig{MaxNarrativesPerPass: 3, ConfidenceFloor: 0.7},
 		correlator.WithMatchLogger(log))
@@ -461,7 +461,7 @@ func TestMatch_ExactlyFullBatchDoesNotWarn(t *testing.T) {
 	log, lerr := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
 	require.NoError(t, lerr)
 
-	results, _, err := correlator.Match(context.Background(), s, correlator.SingleTracker(&anyKeyTracker{}),
+	results, _, err := correlator.Match(context.Background(), s, &anyKeyTracker{},
 		&promptCapturingLLM{response: "[]"},
 		config.MatchConfig{MaxNarrativesPerPass: total, ConfidenceFloor: 0.7},
 		correlator.WithMatchLogger(log))

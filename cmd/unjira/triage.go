@@ -23,6 +23,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/triage"
 )
 
@@ -387,25 +388,19 @@ func (c *triageCmd) Run(app *appContext) error {
 // to open a review queue because no default project is configured would be a
 // worse outcome than a session where three verbs say they are unavailable.
 //
-// The tracker is passed as a TaskReader. taskTracker returns the full
+// The tracker is passed as a TaskReader. routedTracker returns the full
 // TaskTracker, so this narrowing is what makes a write from the handler fail to
-// compile — the same guarantee RunReconcile relies on.
+// compile — the same guarantee RunReconcile relies on. It routes per key, so a
+// reviewer retargeting to an issue on another tracker reads it from there.
 func (a *appContext) triageHandler() (triage.Handler, error) {
-	project, err := a.projectKey("")
-	if err != nil {
-		noteUnavailable("no default project is configured (default_ticket_in, and that tracker's default_scope)")
+	if len(a.config.Trackers) == 0 {
+		noteUnavailable("no trackers are configured")
 
 		return triage.NewStoreHandler(
 			a.store, nil, nil, nil, a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
 	}
 
-	tracker, err := a.taskTracker(project)
-	if err != nil {
-		noteUnavailable("the tracker could not be resolved (check its connection and credentials)")
-
-		return triage.NewStoreHandler(
-			a.store, nil, nil, nil, a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
-	}
+	var tracker tasktracker.TaskReader = a.routedTracker()
 
 	client, err := a.llmClient()
 	if err != nil {
@@ -536,11 +531,11 @@ func approveVerb(appliable bool) string {
 func unappliableCount(cfg config.Config, batch []store.ActionRow) int {
 	n := 0
 	for _, a := range batch {
-		project, _, found := strings.Cut(a.IssueKey, "-")
-		if !found {
+		// A create has no key yet; gate.Applier checks its default scope at apply time.
+		if a.IssueKey == "" {
 			continue
 		}
-		if !cfg.ProjectWritability(project).Writable {
+		if !cfg.IssueWritability(a.IssueKey).Writable {
 			n++
 		}
 	}

@@ -430,12 +430,17 @@ data/                   SQLite database lives here (gitignored)
   **connections** (a system kind and endpoint) from **trackers** (scopes and write authority on one
   connection), so one project set can span more than one Jira instance (a migration, an
   acquisition), several trackers can share one site and credential, and no tracker is special by
-  name. Scopes may not overlap across trackers, so every issue routes to exactly one. Matching resolves a tracker **per candidate** from the
-  connection its provenance recorded (`correlator.TrackerResolver`), so a cross-site candidate is
-  verified against the site that actually holds it rather than whichever one the default project
-  selects; a candidate naming an unconfigured connection is reported with the reason rather than
-  silently falling back, since falling back is how it used to check the wrong site. The reconciler
-  still reads through a single tracker — same gap, tracked separately. Credentials come from one
+  name. Scopes may not overlap across trackers, so every issue routes to exactly one. **Routing is a
+  pure function of the key and config** (`tasktracker.Resolver`): the key's scope is read off its
+  native syntax (`PAAS-123` → `PAAS`, `owner/repo#N` → `owner/repo`, case-folded), and the one
+  tracker whose scopes cover it answers. Matching, the reconciler and `gate.Applier` all read and
+  write through it, so a candidate or link is verified on the tracker that owns it rather than on a
+  default chosen for the pass, and a writer is handed out only for a writable scope. A key in a
+  project no tracker lists is still *read* through the tracker covering the first project scope, as
+  every candidate used to be, so work on another team's ticket stays linked instead of drawing a
+  duplicate create; it is never written. Routing is not stored, so a stored key a config change
+  strands is reported at startup (`watch`, `dev narrate`) and kept. Each backend classifies its own
+  errors (`IsTransport`), so `internal/correlator` imports no backend. Credentials come from one
   JSON-blob env var
   (`UNJIRA_JIRA_CREDENTIALS`, keyed by connection name) rather than scaling env-var count with
   connection count.

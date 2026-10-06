@@ -350,18 +350,18 @@ func (a *Applier) linkCreatedIssue(narrativeID int64, key string) error {
 }
 
 // checkWritable is applyComment/applyTransition's entry into the write-scope
-// choke point: it derives the project from issueKey via
-// tasktracker.ProjectFromIssueKey (the only place in the repo that parses one
-// — see that function's own doc comment) and defers to checkProjectWritable.
-// Neither comment nor transition has a project as an input field on its own
-// — only an issue key — so deriving it is this method's whole job.
+// choke point: it reads the scope off issueKey by syntax via
+// tasktracker.ParseIssueKey (the one parser routing also uses) and defers to
+// checkProjectWritable. Neither comment nor transition has a scope as an
+// input field on its own — only an issue key — so deriving it is this
+// method's whole job.
 func (a *Applier) checkWritable(issueKey string) error {
-	project, err := tasktracker.ProjectFromIssueKey(issueKey)
+	ref, err := tasktracker.ParseIssueKey(issueKey)
 	if err != nil {
 		return fmt.Errorf("determining write scope for %s: %w", issueKey, err)
 	}
 
-	return a.checkProjectWritable(project)
+	return a.checkProjectWritable(ref.Scope)
 }
 
 // checkProjectWritable is the write-scope choke point itself: a project must

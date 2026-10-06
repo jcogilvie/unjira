@@ -1,6 +1,10 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/jcogilvie/unjira/internal/tasktracker"
+)
 
 // Writability is whether unjira may write to a project, and if not, why — the
 // single answer both gate.Applier (at apply time) and triage (at review time) read.
@@ -37,7 +41,23 @@ type Writability struct {
 	Reason string
 }
 
-// ProjectWritability answers whether projectKey may be written to.
+// IssueWritability answers whether the issue issueKey may be written to, reading its scope
+// off the key by syntax (tasktracker.ParseIssueKey). A malformed key is untracked: no
+// tracker can own it.
+func (c Config) IssueWritability(issueKey string) Writability {
+	ref, err := tasktracker.ParseIssueKey(issueKey)
+	if err != nil {
+		return Writability{
+			Untracked: true,
+			Reason:    fmt.Sprintf("%v, so no tracker can own it: retarget the action to a tracked issue", err),
+		}
+	}
+
+	return c.ProjectWritability(ref.Scope)
+}
+
+// ProjectWritability answers whether a scope — a project key, or a repository — may be
+// written to.
 //
 // Deny-by-default at both layers: a project no tracker covers is untracked, and a
 // covered project absent from writable_scopes is refused. A fresh clone configures

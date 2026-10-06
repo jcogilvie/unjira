@@ -39,7 +39,6 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/clients/local"
 	"github.com/jcogilvie/unjira/internal/config"
-	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/llm"
@@ -133,7 +132,7 @@ func seedReconcilableNarrative(
 
 // transportFailingTracker wraps local.Tracker, failing GetIssue for exactly
 // one key with a transport-shaped error (mirroring jira.Error{Status: 503},
-// which correlator.IsTransportError treats as transport) — so a test can
+// which tasktracker.IsTransportError treats as transport) — so a test can
 // force reconciler.Reconcile's per-narrative transport-error path without a
 // real Jira connection. Every other call passes through to the embedded
 // local.Tracker unchanged.
@@ -172,7 +171,7 @@ func TestRunWatchPass_HappyPathAppliesAGraduatedHighConfidenceComment(t *testing
 	app := &appContext{config: cfg, store: s}
 	applier := gate.NewApplier(s, tracker, "PROJ", watchPassWritableTrackers())
 
-	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, correlator.SingleTracker(tracker), 24*time.Hour, false)
+	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, 24*time.Hour, false)
 	require.NoError(t, err)
 
 	comments, err := s.LocalIssueComments(issueKey)
@@ -216,7 +215,7 @@ func TestRunWatchPass_WriteScopeRefusesAnUnwritableProject(t *testing.T) {
 	unwritable := []config.Tracker{{Name: "test", Scopes: []string{"PROJ"}}}
 	applier := gate.NewApplier(s, tracker, "PROJ", unwritable)
 
-	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, correlator.SingleTracker(tracker), 24*time.Hour, false)
+	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, 24*time.Hour, false)
 	require.Error(t, err, "PROJ is not writable: the pass must surface a refusal")
 
 	comments, err := s.LocalIssueComments(issueKey)
@@ -254,7 +253,7 @@ func TestRunWatchPass_DefaultConfigAutoCommitsNothing(t *testing.T) {
 	app := &appContext{config: cfg, store: s}
 	applier := gate.NewApplier(s, tracker, "PROJ", watchPassWritableTrackers())
 
-	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, correlator.SingleTracker(tracker), 24*time.Hour, false)
+	err = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, 24*time.Hour, false)
 	require.NoError(t, err)
 
 	comments, err := s.LocalIssueComments(issueKey)
@@ -300,7 +299,7 @@ func TestRunWatchPass_PartialReconcileAutoCommitsNothing(t *testing.T) {
 	app := &appContext{config: cfg, store: s}
 	applier := gate.NewApplier(s, failing, "PROJ", watchPassWritableTrackers())
 
-	err = app.runWatchPass(t.Context(), client, failing, applier, nil, nil, correlator.SingleTracker(failing), 24*time.Hour, false)
+	err = app.runWatchPass(t.Context(), client, failing, applier, nil, nil, 24*time.Hour, false)
 	require.Error(t, err, "the unreachable narrative's transport error must surface")
 
 	// The healthy narrative's action WAS persisted (Reconcile/Persist's own
@@ -371,7 +370,7 @@ func TestRunWatchPass_OneApplyFailureDoesNotBlockTheOthers(t *testing.T) {
 	failingWriter := &writeFailingTracker{Tracker: baseTracker, failKey: firstKey}
 	applier := gate.NewApplier(s, failingWriter, "PROJ", watchPassWritableTrackers())
 
-	err = app.runWatchPass(t.Context(), client, baseTracker, applier, nil, nil, correlator.SingleTracker(baseTracker), 24*time.Hour, false)
+	err = app.runWatchPass(t.Context(), client, baseTracker, applier, nil, nil, 24*time.Hour, false)
 	require.Error(t, err, "one action's write failure is surfaced by the pass, not swallowed")
 
 	firstActions, err := s.ActionsForNarrative(1)
@@ -439,7 +438,7 @@ func TestRunWatchPass_DryRunSkipsMatchReconcileAndAutoCommit(t *testing.T) {
 
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, correlator.SingleTracker(tracker), 24*time.Hour, true)
+		runErr = app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, 24*time.Hour, true)
 	})
 	require.NoError(t, runErr)
 

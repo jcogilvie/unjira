@@ -291,3 +291,33 @@ Decisions the design left open:
   converted config keeps its watermarks. Two trackers on one connection may not reuse a query name.
 - **Endpoints.** Required for `jira` and `github` connections, refused on `local`.
 
+### Slice 2, resolver: landed 2026-10-06
+
+`tasktracker.ParseIssueKey`, `ScopeMatches`, `Resolver` (`Resolve`, `ResolveScope`, `Locate`) and
+`Routed`, in `internal/tasktracker/key.go` and `resolve.go`. `correlator.TrackerResolver` and
+`SingleTracker` are removed. Matching, the reconciler and `gate.Applier` all read and write through one
+resolver built in `cmd/unjira` (`appContext.resolver`). `IsTransportError` moved to `tasktracker` and
+asks the error: `*jira.Error` and `*tasktracker.UnroutedError` implement `IsTransport()`, the local
+backend wraps `tasktracker.ErrNotFound`, so `internal/correlator` imports no backend (F3, F8 deleted).
+`store.StoredIssueKeys` and `pipeline.UnroutedStoredKeys` report stranded keys at the start of `watch`
+and `dev narrate`.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. 26 break-it drills, each failing a named test (see the slice's commit message).
+
+Decisions the design left open:
+- **`Routed` adapts the resolver to `TaskReader`/`TaskWriter`,** so `correlator.Match`,
+  `reconciler.Reconcile` and `gate.Applier` keep their signatures and route per call. The write path
+  then holds two independent refusals: config's writability check, which names the remedy, and a
+  routed writer that has no writer to give for a read-only scope.
+- **A read fallback, kept on purpose (F55).** A project-syntax key no tracker covers is still read
+  through the tracker covering the first project scope, the tracker every candidate used to be
+  verified against. Removing it would turn work on an unlisted project's ticket into a duplicate create
+  proposal, a behaviour change this refactor slice should not make. A fallback read never writes, and
+  every key that depends on it is in the startup report.
+- **Reported keys come from both tables:** `narrative_issues` and `actions`. Routing uses `Locate`, so
+  the report opens no backend and needs no credential.
+- **Writability reads the key, not a "-" split.** `config.IssueWritability` parses by syntax, so
+  `crossplane-contrib/x#1` is scope `crossplane-contrib/x`, not project `crossplane`. A malformed key
+  is untracked in triage now, where a key without a "-" used to read as appliable.
+

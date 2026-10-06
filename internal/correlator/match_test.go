@@ -136,7 +136,7 @@ func TestMatch_SingleCandidateNeedsNoLLM(t *testing.T) {
 	}}
 	llmFake := &fakeLLM{}
 
-	results, stats, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	results, stats, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -155,7 +155,7 @@ func TestMatch_ZeroCandidatesTouchesNothing(t *testing.T) {
 	tracker := &fakeTracker{issues: map[string]tasktracker.Issue{}}
 	llmFake := &fakeLLM{}
 
-	results, stats, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	results, stats, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -177,7 +177,7 @@ func TestMatch_VerifiesEveryCandidateAndDropsUnresolvable(t *testing.T) {
 	}}
 	llmFake := &fakeLLM{}
 
-	results, _, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	results, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -202,7 +202,7 @@ func TestMatch_MultipleCandidatesClassifiedByLLM(t *testing.T) {
 			`{"issue_key":"NOPE-3","role":"mentioned","confidence":0.6,"rationale":"just referenced"}]`,
 	}}
 
-	results, stats, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	results, stats, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -247,7 +247,7 @@ func TestMatch_RulesReachTheClassificationSystemPrompt(t *testing.T) {
 		{Name: "sumo-change-tasks", Scope: rules.ScopeCorrelator, Confidence: rules.ConfidenceHigh, Body: "Sentinel matching rule body."},
 	}
 
-	_, _, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg(), correlator.WithRules(learnedRules))
+	_, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg(), correlator.WithRules(learnedRules))
 	require.NoError(t, err)
 
 	require.Len(t, llmFake.systemPrompts, 1)
@@ -269,7 +269,7 @@ func TestMatch_NoRulesOptionLeavesClassificationSystemPromptUnchanged(t *testing
 			`{"issue_key":"SUMO-2","role":"same_work","confidence":0.8,"rationale":"r"}]`,
 	}}
 
-	_, _, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	_, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 
 	require.Len(t, llmFake.systemPrompts, 1)
@@ -296,7 +296,7 @@ func TestMatch_PromptCarriesSummaryAndDescription(t *testing.T) {
 			`{"issue_key":"SUMO-2","role":"same_work","confidence":0.8,"rationale":"r"}]`,
 	}}
 
-	_, _, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	_, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 
 	require.Len(t, llmFake.prompts, 1)
@@ -323,7 +323,7 @@ func TestMatch_ConfidenceFloorWithholdsTheAssertionNotTheRecord(t *testing.T) {
 	}}
 
 	cfg := config.MatchConfig{ConfidenceFloor: 0.5}
-	results, _, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, cfg)
+	results, _, err := correlator.Match(t.Context(), s, tracker, llmFake, cfg)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -364,7 +364,7 @@ func TestMatch_ExcludedKeysAreRecordedNotSilentlyDropped(t *testing.T) {
 	llmFake := &fakeLLM{}
 
 	results, _, err := correlator.Match(
-		t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg(), correlator.WithLinkExclusions(compiled),
+		t.Context(), s, tracker, llmFake, matchCfg(), correlator.WithLinkExclusions(compiled),
 	)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
@@ -391,7 +391,7 @@ func TestMatch_OneNarrativeFailingDoesNotStopTheOthers(t *testing.T) {
 	}
 	llmFake := &fakeLLM{}
 
-	_, _, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	_, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "BOOM-1")
 
@@ -409,10 +409,10 @@ func TestMatch_IsIdempotent(t *testing.T) {
 	}}
 	llmFake := &fakeLLM{}
 
-	_, _, err := correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	_, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 
-	_, _, err = correlator.Match(t.Context(), s, correlator.SingleTracker(tracker), llmFake, matchCfg())
+	_, _, err = correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 
 	links, err := s.NarrativeIssues(id)

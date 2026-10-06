@@ -20,10 +20,9 @@ package store
 // StatusOpen/StatusSplit (narrativestatus.go) already live here for the
 // narrative-status enum, which is schema-owned in exactly the same way.
 //
-// This is the same reasoning internal/correlator/match.go documents for
-// IsTransportError: name the cycle-free option and say why the "more
-// natural" home was rejected, rather than silently picking somewhere that
-// merely happens to compile.
+// Name the cycle-free option and say why the "more natural" home was
+// rejected, rather than silently picking somewhere that merely happens to
+// compile.
 const (
 	// StatusProposed is the actions.status value every freshly drafted action
 	// lands at.

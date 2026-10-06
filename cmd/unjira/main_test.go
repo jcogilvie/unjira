@@ -113,7 +113,7 @@ func openTestStore(t *testing.T) *store.Store {
 	return s
 }
 
-func TestTaskTracker_JiraBackendReturnsJiraTracker(t *testing.T) {
+func TestTrackerReader_JiraBackendReturnsJiraTracker(t *testing.T) {
 	app := &appContext{
 		config: jiraSites(jiraSite{"default", "https://yourorg.atlassian.net", []string{"PROJ"}}),
 		store:  openTestStore(t),
@@ -122,19 +122,19 @@ func TestTaskTracker_JiraBackendReturnsJiraTracker(t *testing.T) {
 		}),
 	}
 
-	tracker, err := app.taskTracker("PROJ")
+	tracker, err := app.trackerReader("PROJ")
 
 	require.NoError(t, err)
 	assert.IsType(t, &jira.Tracker{}, tracker)
 }
 
-func TestTaskTracker_LocalBackendReturnsLocalTracker(t *testing.T) {
+func TestTrackerReader_LocalBackendReturnsLocalTracker(t *testing.T) {
 	app := &appContext{
 		config: localTracker("PROJ"),
 		store:  openTestStore(t),
 	}
 
-	tracker, err := app.taskTracker("PROJ")
+	tracker, err := app.trackerReader("PROJ")
 
 	require.NoError(t, err)
 	assert.IsType(t, &local.Tracker{}, tracker)
@@ -228,10 +228,10 @@ func TestWarnIfNoStatusHistorySource_SilentWithNoTrackers(t *testing.T) {
 	assert.Empty(t, logged.String())
 }
 
-func TestTaskTracker_UncoveredProjectErrors(t *testing.T) {
+func TestTrackerReader_UncoveredProjectErrors(t *testing.T) {
 	app := &appContext{config: localTracker("PROJ"), store: openTestStore(t)}
 
-	_, err := app.taskTracker("GHOST")
+	_, err := app.trackerReader("GHOST")
 
 	require.ErrorContains(t, err, "GHOST")
 }
@@ -239,7 +239,7 @@ func TestTaskTracker_UncoveredProjectErrors(t *testing.T) {
 // TestTaskTracker_GitHubTrackerHasNoBackendYet: a github tracker is configurable, but
 // nothing reads or writes it in this build, so resolving one is a named error rather
 // than a silent fallback to some other backend.
-func TestTaskTracker_GitHubTrackerHasNoBackendYet(t *testing.T) {
+func TestTrackerReader_GitHubTrackerHasNoBackendYet(t *testing.T) {
 	app := &appContext{
 		config: config.Config{
 			Connections: []config.Connection{{Name: "gh", Kind: config.KindGitHub, Endpoint: "https://api.github.com"}},
@@ -248,7 +248,7 @@ func TestTaskTracker_GitHubTrackerHasNoBackendYet(t *testing.T) {
 		store: openTestStore(t),
 	}
 
-	_, err := app.taskTracker("o/r")
+	_, err := app.trackerReader("o/r")
 
 	require.ErrorContains(t, err, "upstream")
 }

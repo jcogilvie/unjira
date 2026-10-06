@@ -26,7 +26,6 @@ import (
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	collectorjira "github.com/jcogilvie/unjira/internal/collector/jira"
 	"github.com/jcogilvie/unjira/internal/config"
-	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/credentials"
 	"github.com/jcogilvie/unjira/internal/envfile"
 	"github.com/jcogilvie/unjira/internal/events"
@@ -652,7 +651,7 @@ func TestLiveGetIssueUsesAStringDescriptionAPI(t *testing.T) {
 //
 // A stale branch name or a hallucinated key must DROP the candidate (recorded
 // as unresolved, pass continues), not fail the narrative. That hinges on
-// correlator.IsTransportError reading a real Jira 404 as not-found. The offline
+// tasktracker.IsTransportError reading a real Jira 404 as not-found. The offline
 // tests assert this against a hand-built &jira.Error{Status: 404}; only a live
 // call proves the real client produces that shape.
 func TestLiveUnresolvableKeyIsNotTransport(t *testing.T) {
@@ -662,7 +661,7 @@ func TestLiveUnresolvableKeyIsNotTransport(t *testing.T) {
 	_, err := tracker.GetIssue(testProject() + "-99999999")
 
 	require.Error(t, err, "a nonexistent key must error rather than returning a zero Issue")
-	assert.False(t, correlator.IsTransportError(err),
+	assert.False(t, tasktracker.IsTransportError(err),
 		"a 404 must classify as not-found: misread as transport, a stale branch name would fail "+
 			"its narrative on every pass instead of being reported unresolved")
 }
