@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for the full pipeline, run unattended (macOS).
+
+  `unjira watch` is a long-running loop, not a single pass: it ticks on its
+  own --interval forever until the process exits, so this template starts it
+  once and keeps it running rather than re-invoking it on a schedule. That is
+  why it uses RunAtLoad + KeepAlive instead of StartInterval (contrast
+  com.unjira.collect.plist, which wraps a single-pass command and does use
+  StartInterval). KeepAlive restarts watch if it ever exits — a crash, a
+  machine-wide shutdown of the user session — with ThrottleInterval capping
+  how often launchd will do that, so a persistently broken config fails
+  loudly on a slow retry cadence instead of spinning.
+
+  Credentials: launchd does NOT inherit your login shell's environment, so
+  UNJIRA_JIRA_CREDENTIALS / UNJIRA_GITHUB_CREDENTIALS / UNJIRA_LLM_API_KEY
+  (or llm.api_key_helper) must reach the process some other way. unjira's
+  own fix for this is `internal/envfile`: every command, watch included,
+  loads a repo-root .env before Kong parses anything, and a real env var
+  always wins over the file. So the credentials belong in the repo's
+  .env (gitignored; see .env.example) — NOT in this plist. Do not add an
+  EnvironmentVariables block here with secrets in it; a plist installed
+  under ~/Library/LaunchAgents is plain XML on disk, readable by anything
+  running as the same user, and (unlike .env) not gitignored by default.
+
+  Install:
+    1. Build the binary: go build -o unjira ./cmd/unjira
+    2. Replace /PATH/TO/unjira below with the absolute repo path (four
+       occurrences: WorkingDirectory, the binary in ProgramArguments, and
+       the two log paths).
+    3. Make sure unjira.config.json and .env exist in the repo root (see
+       Quickstart in README.md) — watch validates config at startup and
+       exits if either is missing or invalid, and KeepAlive will keep
+       retrying it on the throttle interval below until you fix that.
+    4. cp ops/com.unjira.watch.plist ~/Library/LaunchAgents/
+    5. launchctl load ~/Library/LaunchAgents/com.unjira.watch.plist
+
+  Uninstall:
+    1. launchctl unload ~/Library/LaunchAgents/com.unjira.watch.plist
+    2. rm ~/Library/LaunchAgents/com.unjira.watch.plist
+
+  Logs land in the repo's data/ directory (gitignored).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.unjira.watch</string>
+    <key>WorkingDirectory</key>
+    <string>/PATH/TO/unjira</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/PATH/TO/unjira/unjira</string>
+        <string>watch</string>
+        <string>--interval=1h</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>/PATH/TO/unjira/data/watch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/PATH/TO/unjira/data/watch.err.log</string>
+</dict>
+</plist>

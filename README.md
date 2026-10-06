@@ -196,8 +196,13 @@ and an LLM — `UNJIRA_LLM_API_KEY`, or better, `llm.api_key_helper`, a command 
 a fresh token. A `watch` loop against a gateway issuing short-lived credentials needs the helper;
 a captured token expires mid-pass, after earlier stages have already cost money.
 
-Schedule the batch pass on macOS with the launchd template in `ops/` (see comments in the
-plist for install steps).
+Run it unattended on macOS with `ops/com.unjira.watch.plist` — `watch` already loops on its
+own `--interval`, so the template starts it once via `RunAtLoad`/`KeepAlive` rather than
+re-invoking it on a schedule (see the comments in the plist for install steps and how
+credentials reach a launchd job, which does not inherit your login shell's environment).
+`ops/com.unjira.collect.plist` is still there for the narrower case of scheduling bare
+`unjira collect` — a single pass with no narrate/match/reconcile/apply — on its own
+`StartInterval`; most setups want the watch template.
 
 Dev-instance tools (need credentials in `.env`): `unjira dev seed` creates labeled test
 issues and walks them through transitions to generate changelog history; `unjira dev reset`
@@ -268,7 +273,8 @@ internal/
   live/                 live-Jira integration tests (build tag "live")
 rules/                  learned rules as human-auditable markdown (see rules/README.md)
 config/                 example configuration
-ops/                    launchd template for the scheduled batch pass
+ops/                    launchd templates: com.unjira.watch.plist (the full pipeline,
+                        unattended) and com.unjira.collect.plist (collect alone)
 data/                   SQLite database lives here (gitignored)
 ```
 
