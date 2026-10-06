@@ -350,3 +350,20 @@ func TestRenderMatchResult_ReportsReasksOnlyWhenTheyHappened(t *testing.T) {
 	})
 	assert.NotContains(t, quiet, "re-asked")
 }
+
+// No candidate given the primary role is a different outcome from a primary below the
+// floor, and the summary must not blame the floor for it: raising or lowering the floor
+// changes nothing when the model named no primary at all.
+func TestRenderMatchResult_NoPrimaryAssignedIsNotBlamedOnTheFloor(t *testing.T) {
+	out := pipeline.RenderMatchResult(pipeline.MatchRunResult{
+		Matched: []correlator.MatchResult{{
+			NarrativeID: 14,
+			Links: []store.NarrativeIssue{
+				{IssueKey: "PAAS-1", Role: "mentioned", Provenance: "scm_command", Confidence: 0.9},
+			},
+		}},
+	})
+
+	assert.Contains(t, out, "no candidate judged the primary record")
+	assert.NotContains(t, out, "confidence floor")
+}

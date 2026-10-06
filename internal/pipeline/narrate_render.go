@@ -7,6 +7,7 @@ import (
 
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/reconciler"
+	"github.com/jcogilvie/unjira/internal/store"
 )
 
 // RenderNarrateResult formats one pass for a human deciding whether the
@@ -357,10 +358,14 @@ func writeMatchHeader(b *strings.Builder, r MatchRunResult) {
 func writeMatchedNarrative(b *strings.Builder, m correlator.MatchResult) {
 	b.WriteString("\n")
 	fmt.Fprintf(b, "[narrative #%d]", m.NarrativeID)
-	if m.Primary != "" {
+	switch {
+	case m.Primary != "":
 		fmt.Fprintf(b, " primary: %s\n", m.Primary)
-	} else {
+	case hasPrimaryRole(m.Links):
 		b.WriteString(" primary: (no primary promoted — below confidence floor)\n")
+	default:
+		// Not the floor's doing, so the message must not send an operator to tune it.
+		b.WriteString(" primary: (none — no candidate judged the primary record)\n")
 	}
 
 	for _, link := range m.Links {
@@ -373,6 +378,18 @@ func writeMatchedNarrative(b *strings.Builder, m correlator.MatchResult) {
 	if m.Rationale != "" {
 		fmt.Fprintf(b, "  rationale: %s\n", m.Rationale)
 	}
+}
+
+// hasPrimaryRole reports whether any link was given the primary role, whatever its
+// confidence.
+func hasPrimaryRole(links []store.NarrativeIssue) bool {
+	for _, l := range links {
+		if l.Role == store.RolePrimary {
+			return true
+		}
+	}
+
+	return false
 }
 
 // writeUnmatchedNarrative writes one narrative with no surviving links,
