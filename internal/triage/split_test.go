@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/store"
 )
@@ -74,6 +75,27 @@ func TestSplitNarrative_ProducesSeparateNarratives(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, count, "narrative %d must hold its own events", n.ID)
 	}
+}
+
+// A split re-clusters, so the configured re-ask budgets govern it as they govern a
+// narration pass: with the omission budget at 0, an event the model leaves out fails
+// the split with no follow-up call, and nothing is changed.
+func TestSplitNarrative_HonoursTheConfiguredReaskBudgets(t *testing.T) {
+	s, nid, _ := splitStore(t, 2)
+	client := &wireLLM{responses: []string{
+		`[{"kind":"new","title":"story A","summary":"s","confidence":0.9,"event_indices":[0]}]`,
+		`[{"kind":"new","title":"story B","summary":"s","confidence":0.9,"event_indices":[1]}]`,
+	}}
+	h := splitHandler(s, client)
+	h.SetReaskBudgets(config.ReaskBudgets{Match: 1, Omission: 0, Dispute: 1})
+
+	_, err := h.SplitNarrative(context.Background(), nid)
+
+	require.ErrorContains(t, err, "llm.max_omission_reasks")
+	assert.Len(t, client.prompts, 1, "no omission re-ask at a budget of 0")
+	count, err := s.NarrativeEventCount(nid)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "a failed split moves nothing")
 }
 
 // TestSplitNarrative_MarksTheEmptiedSourceSplit: without this the source stays

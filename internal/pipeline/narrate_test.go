@@ -98,6 +98,77 @@ func TestRunNarrate_PersistsNewNarrative(t *testing.T) {
 	assert.Equal(t, 2, linked)
 }
 
+// The configured clustering budgets reach correlator.Cluster, each resolved through
+// config's tiers: the omission budget bounds the rounds asking for an event the model
+// left out, and the dispute budget bounds the calls resolving a double placement.
+func TestRunNarrate_HonoursTheConfiguredClusterReaskBudgets(t *testing.T) {
+	const (
+		omitsSecond = `[{"kind":"new","title":"W","summary":"s","confidence":0.9,"event_indices":[0]}]`
+		placesNone  = `[]`
+		placesBoth  = `[{"kind":"earlier","cluster_position":0,"confidence":0.9,"event_indices":[1]}]`
+		doubles     = `[{"kind":"new","title":"A","summary":"s","confidence":0.9,"event_indices":[0,1]},` +
+			`{"kind":"new","title":"B","summary":"s","confidence":0.9,"event_indices":[1]}]`
+	)
+	zero, two, negative := 0, 2, -1
+
+	tests := []struct {
+		name      string
+		cfg       func(*config.Config)
+		responses []string
+		wantCalls int
+		wantErr   string
+	}{
+		{
+			name:      "omission budget zero, per use",
+			cfg:       func(c *config.Config) { c.LLM.MaxOmissionReasks = &zero },
+			responses: []string{omitsSecond, placesBoth},
+			wantCalls: 1, wantErr: "llm.max_omission_reasks",
+		},
+		{
+			name:      "omission budget two, per model",
+			cfg:       func(c *config.Config) { c.LLM.MaxReasks = &two },
+			responses: []string{omitsSecond, placesNone, placesBoth},
+			wantCalls: 3,
+		},
+		{
+			name:      "dispute budget zero, across all models",
+			cfg:       func(c *config.Config) { c.LLMDefaults.MaxReasks = &zero },
+			responses: []string{doubles},
+			wantCalls: 1, wantErr: "llm.max_dispute_reasks",
+		},
+		{
+			name:      "a negative budget fails before any call",
+			cfg:       func(c *config.Config) { c.LLM.MaxDisputeReasks = &negative },
+			responses: []string{doubles},
+			wantCalls: 0, wantErr: "llm.max_dispute_reasks is -1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := narrateStore(t)
+			base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+			seedNarrateEvent(t, s, "e1", "started the work", base)
+			seedNarrateEvent(t, s, "e2", "finished the work", base.Add(time.Minute))
+			client := &narrateLLM{responses: tt.responses}
+			cfg := narrateConfig()
+			tt.cfg(&cfg)
+
+			got, err := pipeline.RunNarrate(t.Context(), s, client, cfg,
+				correlator.TimeRange{Start: base, End: base.Add(time.Hour)}, pipeline.NarrateOptions{DryRun: true})
+
+			assert.Len(t, client.prompts, tt.wantCalls)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, 2, got.Stats.OmissionReasks)
+		})
+	}
+}
+
 func TestRunNarrate_LoadsRulesAndAppendsThemToClustersSystemPrompt(t *testing.T) {
 	s := narrateStore(t)
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)

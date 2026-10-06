@@ -196,6 +196,62 @@ Sentinel match-time rule body.
 	assert.Contains(t, llmFake.systemPrompts[0], "sentinel")
 }
 
+// The configured match budget reaches correlator.Match: with llm.max_match_reasks at
+// 0, a refused response fails the narrative with no follow-up call; at 2, two
+// follow-ups are made. A negative budget fails before any call.
+func TestRunMatch_HonoursTheConfiguredMatchReaskBudget(t *testing.T) {
+	const (
+		prose = `Looking at this narrative, it describes recurring automated work.`
+		valid = `[{"issue_key":"PAAS-1","role":"primary","confidence":0.9,"rationale":"r"},` +
+			`{"issue_key":"SUMO-2","role":"same_work","confidence":0.8,"rationale":"r"}]`
+	)
+	zero, two, negative := 0, 2, -1
+
+	tests := []struct {
+		name      string
+		llm       config.LLMConfig
+		responses []string
+		wantCalls int
+		wantErr   string
+	}{
+		{"zero", config.LLMConfig{MaxMatchReasks: &zero}, []string{prose, valid}, 1, "llm.max_match_reasks"},
+		{"two, from the per-model tier", config.LLMConfig{MaxReasks: &two}, []string{prose, prose, valid}, 3, ""},
+		{"negative", config.LLMConfig{MaxMatchReasks: &negative}, []string{valid}, 0, "llm.max_match_reasks is -1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := matchPipelineStore(t)
+			e := events.NewEvent("claude_code", "s1",
+				time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC), "session summary")
+			e.Artifacts["git_branch"] = "feature/PAAS-1"
+			e.Artifacts["ticket_keys"] = []any{"SUMO-2"}
+			seedMatchNarrative(t, s, "Feature + change task", "engineering plus change management", e)
+
+			tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+				"PAAS-1": {Key: "PAAS-1", Summary: "Feature work", StatusName: "In Progress"},
+				"SUMO-2": {Key: "SUMO-2", Summary: "Change task", StatusName: "To Do"},
+			}}
+			llmFake := &pipelineFakeLLM{responses: tt.responses}
+			cfg := config.Config{
+				LLM:   tt.llm,
+				Match: config.MatchConfig{MaxCandidatesPerNarrative: 10, ConfidenceFloor: 0.5},
+			}
+
+			got, err := pipeline.RunMatch(t.Context(), s, tracker, llmFake, cfg, pipeline.MatchOptions{})
+
+			assert.Len(t, llmFake.prompts, tt.wantCalls)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, 2, got.Stats.MatchReasks)
+		})
+	}
+}
+
 func TestRunMatch_MissingRulesDirIsANoOpNotAnError(t *testing.T) {
 	s := matchPipelineStore(t)
 
@@ -334,8 +390,8 @@ func TestRenderMatchResult_MarksAnUnpromotedPrimary(t *testing.T) {
 	assert.Contains(t, out, "no primary promoted")
 }
 
-// A recovered re-ask is reported, and only when one happened: the one re-ask is all
-// that stands between a malformed response and a narrative left unmatched, so an
+// A re-ask is reported, and only when one happened: the re-ask budget is all that
+// stands between a malformed response and a narrative left unmatched, so an
 // operator should see how often it fires (finding F44).
 func TestRenderMatchResult_ReportsReasksOnlyWhenTheyHappened(t *testing.T) {
 	out := pipeline.RenderMatchResult(pipeline.MatchRunResult{

@@ -234,6 +234,27 @@ and an LLM — `UNJIRA_LLM_API_KEY`, or better, `llm.api_key_helper`, a command 
 a fresh token. A `watch` loop against a gateway issuing short-lived credentials needs the helper;
 a captured token expires mid-pass, after earlier stages have already cost money.
 
+**Re-ask budgets bound how often a model is asked again.** Three call sites follow up on a
+response that cannot be used as it stands: matching re-asks a response its parser refused, quoting
+the reason; clustering re-asks for in-window events the response left in no cluster (in rounds,
+each showing the clusters merged so far); and clustering asks which cluster owns an event two of them
+claimed, re-asking a batch whose answer was refused. A re-ask is any call after the original one for
+the same problem, so `0` means never ask again and fail loudly. The most specific key that is set
+wins:
+
+| key | applies to |
+|---|---|
+| `llm.max_match_reasks`, `llm.max_omission_reasks`, `llm.max_dispute_reasks` | one use, for this model |
+| `llm.max_reasks` | every use, for this model |
+| `llm_defaults.max_reasks` | every use, every model block (one exists today) |
+| built in | `1` |
+
+For the dispute budget the first dispute call counts, because it is itself a re-ask of the
+clustering response: `0` makes any double placement an error, and `2` allows one more call per
+batch after a refused answer. A spent budget is always a loud error, never a partial result, and a
+negative value is refused when the config loads. A clustering re-ask repeats the whole clustering
+prompt, so each round costs about as much as the first call.
+
 Run it unattended on macOS with `ops/com.unjira.watch.plist` — `watch` already loops on its
 own `--interval`, so the template starts it once via `RunAtLoad`/`KeepAlive` rather than
 re-invoking it on a schedule (see the comments in the plist for install steps and how

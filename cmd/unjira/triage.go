@@ -418,9 +418,20 @@ func (a *appContext) triageHandler() (triage.Handler, error) {
 		return nil, err
 	}
 
-	return triage.NewStoreHandler(
+	// The same budgets too: split re-clusters, and a split bounded differently from
+	// the pass that produced the narrative would make the config key lie. Only on
+	// this path, the one with a client; without one, split is unavailable anyway.
+	budgets, err := a.config.ReaskBudgets()
+	if err != nil {
+		return nil, err
+	}
+
+	h := triage.NewStoreHandler(
 		a.store, tracker, client, learnedRules,
-		a.config.Correlator, a.config.LLM.ContextWindowTokens), nil
+		a.config.Correlator, a.config.LLM.ContextWindowTokens)
+	h.SetReaskBudgets(budgets)
+
+	return h, nil
 }
 
 // noteUnavailable tells the reviewer that edit and target will not work this

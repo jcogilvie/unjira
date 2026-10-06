@@ -51,7 +51,7 @@ import (
 // when every clustering call fitted — most likely after a bisection, whose claimants
 // span both halves. When the disputes do not fit together, the pass splits them, in
 // order, into batches that each fit, one call per batch. Still ONE dispute pass per
-// Cluster call: every disputed event is asked about exactly once, and no answer is
+// Cluster call: every disputed event is in exactly one batch, and no answer is
 // applied until every batch has answered. Splitting is sound because each dispute is
 // an independent question — "which of THESE claimants is this event the work of" —
 // and nothing in the prompt or the parser relates one dispute to another: each block
@@ -69,6 +69,25 @@ import (
 //
 // A single dispute too large on its own is the one case batching cannot fit, and it
 // refuses loudly rather than cut a claimant's description (finding F52).
+//
+// The dispute call is itself a re-ask of the clustering response, so its budget
+// (llm.max_dispute_reasks, default 1) counts it: 0 makes any double placement a loud
+// error with no call, and N allows each batch up to N calls. A batch is asked again
+// only when the parser refused its answer, repeating the batch's prompt verbatim and
+// quoting the latest refused response with the reason, and every attempt is checked
+// against the context window before it is sent. A spent budget is a loud error naming
+// every refusal. Rejected bounds:
+//
+//   - Re-asking a refused batch until it answers. Unbounded cost on a model that keeps
+//     refusing; the bound is configuration's, and by default allows no call beyond
+//     the dispute call itself.
+//   - Re-asking the whole pass when one batch is refused. The other batches' answers
+//     were accepted, and nothing relates one dispute to another, so asking them again
+//     buys nothing and could only change an answer already given.
+//   - Re-asking when applyDisputeAnswers rejects the answers (a new cluster left with
+//     no member, F37). Not ruled out on its merits, only not built: that check runs
+//     over every batch's answers together, so no single batch's response is the one
+//     to quote, and it has not been seen to fire on a real pass.
 
 // disputeRequest is what one dispute pass needs.
 type disputeRequest struct {
@@ -76,6 +95,9 @@ type disputeRequest struct {
 	results     []ClusterResult
 	rules       []rules.Rule
 	instruction string
+	// maxCalls is the budget: how many dispute calls each batch may take, the first
+	// included. 0 (or less) makes any dispute an error with no call.
+	maxCalls int
 
 	contextWindowTokens int
 	log                 *slog.Logger
@@ -135,6 +157,13 @@ func resolveDisputes(ctx context.Context, client llm.Client, req disputeRequest)
 
 	stats := Stats{DisputedEvents: len(disputes)}
 
+	if req.maxCalls <= 0 {
+		return nil, stats, fmt.Errorf(
+			"clustering events in window [%s, %s): %d event(s) were placed in more than one cluster (%s), and the "+
+				"dispute re-ask budget (llm.max_dispute_reasks) is 0, so the model was not asked which owns them",
+			req.window.Start, req.window.End, len(disputes), describeDisputes(req.results, disputes))
+	}
+
 	batches := batchDisputes(req, disputes)
 	prompts := make([]disputePrompt, len(batches))
 	for i, batch := range batches {
@@ -162,8 +191,6 @@ func resolveDisputes(ctx context.Context, client llm.Client, req disputeRequest)
 
 	answers := make([]disputeAnswer, 0, len(disputes))
 	for i, batch := range batches {
-		systemPrompt, userPrompt := prompts[i].system, prompts[i].user
-
 		// A batched pass names which call failed; a single call's errors read as they
 		// always have.
 		inCall := func(err error) error {
@@ -174,15 +201,7 @@ func resolveDisputes(ctx context.Context, client llm.Client, req disputeRequest)
 			return fmt.Errorf("%s: %w", disputeCallLabel(i, len(batches)), err)
 		}
 
-		raw, usage, err := client.Complete(ctx, systemPrompt, userPrompt)
-		if err != nil {
-			return nil, stats, inCall(fmt.Errorf("re-asking which cluster owns %d disputed event(s) in window [%s, %s): %w",
-				len(batch), req.window.Start, req.window.End, err))
-		}
-		stats.AddUsage(usage)
-		stats.DisputeCalls++
-
-		batchAnswers, err := parseDisputeResponse(raw, batch)
+		batchAnswers, err := askDisputeBatch(ctx, client, req, batch, prompts[i], &stats)
 		if err != nil {
 			return nil, stats, inCall(err)
 		}
@@ -196,9 +215,83 @@ func resolveDisputes(ctx context.Context, client llm.Client, req disputeRequest)
 	stats.Disputes = resolutions
 
 	logging.For(req.log, "correlator").InfoContext(ctx, "dispute re-ask gave every disputed event one home",
-		"disputed_events", len(disputes))
+		"disputed_events", len(disputes), "calls", stats.DisputeCalls)
 
 	return resolved, stats, nil
+}
+
+// askDisputeBatch asks one batch which claimant owns each of its disputes, asking
+// again while the parser refuses the answer and the budget (req.maxCalls calls for
+// this batch, the first included) allows. Each re-ask repeats the batch's prompt
+// verbatim, so event_index keeps its meaning, and quotes the latest refused response
+// with the parser's reason. The first prompt was checked against the context window
+// with every other batch's; each re-ask, larger by the refusal it quotes, is checked
+// before it is sent. A transport error is not a refusal and ends the pass at once.
+func askDisputeBatch(
+	ctx context.Context, client llm.Client, req disputeRequest, batch []dispute, p disputePrompt, stats *Stats,
+) ([]disputeAnswer, error) {
+	var (
+		refusals []error
+		refused  string
+	)
+
+	for call := 1; call <= req.maxCalls; call++ {
+		userPrompt := p.user
+		if call > 1 {
+			latest := refusals[len(refusals)-1]
+			userPrompt = buildDisputeReaskPrompt(p.user, refused, latest)
+			estimated := estimateTokens(p.system + userPrompt)
+			stats.EstimatedTokens += estimated
+
+			logging.For(req.log, "correlator").WarnContext(ctx, "dispute response refused; re-asking",
+				"call", call, "max_calls", req.maxCalls, "disputed_events", len(batch),
+				"reason", latest.Error(), "est_tokens", estimated)
+
+			if estimated > req.contextWindowTokens {
+				return nil, fmt.Errorf(
+					"clustering events in window [%s, %s): the dispute re-ask for %d event(s) (%s), repeated after a "+
+						"refused response, is estimated at %d tokens, over the %d-token context window; the refusal "+
+						"was: %w",
+					req.window.Start, req.window.End, len(batch), describeDisputes(req.results, batch),
+					estimated, req.contextWindowTokens, latest)
+			}
+		}
+
+		raw, usage, err := client.Complete(ctx, p.system, userPrompt)
+		if err != nil {
+			return nil, fmt.Errorf("re-asking which cluster owns %d disputed event(s) in window [%s, %s): %w",
+				len(batch), req.window.Start, req.window.End, err)
+		}
+		stats.AddUsage(usage)
+		stats.DisputeCalls++
+		if call > 1 {
+			stats.DisputeReasks++
+		}
+
+		answers, err := parseDisputeResponse(raw, batch)
+		if err == nil {
+			return answers, nil
+		}
+		refusals = append(refusals, err)
+		refused = raw
+	}
+
+	return nil, &refusalsError{
+		what: "dispute response", key: "llm.max_dispute_reasks", budget: req.maxCalls, reasons: refusals,
+	}
+}
+
+// buildDisputeReaskPrompt repeats a batch's dispute prompt verbatim, then quotes the
+// latest refused response and the parser's reason.
+func buildDisputeReaskPrompt(userPrompt, refused string, reason error) string {
+	var b strings.Builder
+
+	b.WriteString(userPrompt)
+	writeRefusal(&b, refused, reason)
+	b.WriteString("\n\nAnswer again. Return ONLY the JSON array the system prompt specifies, with one element " +
+		"per disputed event above, no prose and no markdown fences.\n")
+
+	return b.String()
 }
 
 const clusterDisputeSystemPrompt = `You clustered events into narratives, and placed some events in the event_indices of more than one cluster. An event's event_indices placement is its home: the ONE narrative whose work it is, which is where its effort is attributed and what that narrative's ticket will describe. An event can be relevant background to several narratives, but it is the work of only one.

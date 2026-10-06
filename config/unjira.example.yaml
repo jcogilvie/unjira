@@ -89,6 +89,13 @@ llm:
   base_url: http://localhost:4000/v1
   context_window_tokens: 200000
   max_output_tokens: 32000
+  # Re-ask budgets: how many follow-up calls a refused or incomplete model answer may
+  # cost before it is a loud error. The most specific setting that is set wins:
+  # max_match_reasks / max_omission_reasks / max_dispute_reasks, then max_reasks here,
+  # then llm_defaults.max_reasks, then 1. 0 never re-asks. A matching re-ask resends
+  # one narrative's prompt; an omission or dispute re-ask resends a clustering prompt.
+  max_reasks: 1
+  max_omission_reasks: 1
 
 correlator:
   tail_summarize_threshold_tokens: 6000

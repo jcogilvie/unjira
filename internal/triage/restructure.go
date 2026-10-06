@@ -109,6 +109,31 @@ type StoreHandler struct {
 	// packages below it see only what they use.
 	correlator    config.CorrelatorConfig
 	contextTokens int
+	// reasks is split's re-ask budgets, set by SetReaskBudgets. nil means none was
+	// set, and Cluster applies its own default of one re-ask per use.
+	reasks *config.ReaskBudgets
+}
+
+// SetReaskBudgets supplies the resolved re-ask budgets (config.Config.ReaskBudgets)
+// split's re-clustering spends, so a split is bounded exactly as a narration pass
+// is. A setter rather than a NewStoreHandler parameter for the reason store.Store
+// has SetLogger: the constructor is called from dozens of tests with no interest in
+// budgets, and leaving it unset keeps Cluster's default.
+func (h *StoreHandler) SetReaskBudgets(b config.ReaskBudgets) {
+	h.reasks = &b
+}
+
+// clusterReaskOptions renders the budgets SetReaskBudgets supplied as Cluster
+// options, none when it was never called.
+func (h *StoreHandler) clusterReaskOptions() []correlator.ClusterOption {
+	if h.reasks == nil {
+		return nil
+	}
+
+	return []correlator.ClusterOption{
+		correlator.WithOmissionReasks(h.reasks.Omission),
+		correlator.WithDisputeReasks(h.reasks.Dispute),
+	}
 }
 
 // NewStoreHandler builds the production Handler.

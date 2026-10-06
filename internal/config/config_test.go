@@ -602,3 +602,159 @@ func TestLoad_MissingAutoCommitBlockDefaultsToNilMap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, cfg.AutoCommit)
 }
+
+// Re-ask budgets resolve per use, most specific SET tier first: the per-use key in
+// the llm block, then llm.max_reasks, then llm_defaults.max_reasks, then 1. A *int
+// is what lets an explicit 0 ("never re-ask") differ from unset ("inherit").
+func TestConfig_ReaskBudgetsResolveTheMostSpecificSetTier(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want config.ReaskBudgets
+	}{
+		{
+			name: "nothing set is the built-in default of one everywhere",
+			want: config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1},
+		},
+		{
+			name: "llm_defaults.max_reasks overrides the built-in default",
+			cfg:  config.Config{LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)}},
+			want: config.ReaskBudgets{Match: 3, Omission: 3, Dispute: 3},
+		},
+		{
+			name: "llm.max_reasks overrides llm_defaults.max_reasks",
+			cfg: config.Config{
+				LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)},
+				LLM:         config.LLMConfig{MaxReasks: new(2)},
+			},
+			want: config.ReaskBudgets{Match: 2, Omission: 2, Dispute: 2},
+		},
+		{
+			name: "a per-use key overrides llm.max_reasks for that use only",
+			cfg: config.Config{
+				LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)},
+				LLM: config.LLMConfig{
+					MaxReasks: new(2), MaxMatchReasks: new(5),
+					MaxOmissionReasks: new(4), MaxDisputeReasks: new(6),
+				},
+			},
+			want: config.ReaskBudgets{Match: 5, Omission: 4, Dispute: 6},
+		},
+		{
+			name: "an unset per-use key falls through to the tier below",
+			cfg: config.Config{
+				LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)},
+				LLM:         config.LLMConfig{MaxOmissionReasks: new(4)},
+			},
+			want: config.ReaskBudgets{Match: 3, Omission: 4, Dispute: 3},
+		},
+		{
+			name: "an explicit zero in llm_defaults is honoured, not treated as unset",
+			cfg:  config.Config{LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(0)}},
+			want: config.ReaskBudgets{},
+		},
+		{
+			name: "an explicit zero in llm.max_reasks overrides a non-zero llm_defaults",
+			cfg: config.Config{
+				LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)},
+				LLM:         config.LLMConfig{MaxReasks: new(0)},
+			},
+			want: config.ReaskBudgets{},
+		},
+		{
+			name: "an explicit zero per use overrides a non-zero llm.max_reasks for that use",
+			cfg: config.Config{LLM: config.LLMConfig{
+				MaxReasks: new(2), MaxMatchReasks: new(0),
+				MaxOmissionReasks: new(0), MaxDisputeReasks: new(0),
+			}},
+			want: config.ReaskBudgets{},
+		},
+		{
+			name: "a non-zero per-use key overrides an explicit zero below it",
+			cfg: config.Config{
+				LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(0)},
+				LLM:         config.LLMConfig{MaxReasks: new(0), MaxDisputeReasks: new(2)},
+			},
+			want: config.ReaskBudgets{Match: 0, Omission: 0, Dispute: 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.cfg.ReaskBudgets()
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// A negative budget is always a mistake — most likely someone reaching for
+// "unlimited", which this deliberately does not offer — so it is an error naming
+// the key, at every tier, rather than a silent zero.
+func TestConfig_ReaskBudgetsRejectNegativeAtEveryTier(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		wantKey string
+	}{
+		{"llm_defaults", config.Config{LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(-1)}}, "llm_defaults.max_reasks"},
+		{"per model", config.Config{LLM: config.LLMConfig{MaxReasks: new(-1)}}, "llm.max_reasks"},
+		{"match", config.Config{LLM: config.LLMConfig{MaxMatchReasks: new(-2)}}, "llm.max_match_reasks"},
+		{"omission", config.Config{LLM: config.LLMConfig{MaxOmissionReasks: new(-1)}}, "llm.max_omission_reasks"},
+		{"dispute", config.Config{LLM: config.LLMConfig{MaxDisputeReasks: new(-1)}}, "llm.max_dispute_reasks"},
+		{
+			// Shadowed by a valid per-use key for every use, and still an error: a
+			// negative value is a typo wherever it sits, and accepting it would leave
+			// it to bite whoever later removes the key above it.
+			"shadowed",
+			config.Config{LLM: config.LLMConfig{
+				MaxReasks: new(-1), MaxMatchReasks: new(1),
+				MaxOmissionReasks: new(1), MaxDisputeReasks: new(1),
+			}},
+			"llm.max_reasks",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.cfg.ReaskBudgets()
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, tt.wantKey)
+			require.ErrorContains(t, err, "must be zero or positive")
+		})
+	}
+}
+
+func TestLoad_ParsesReaskBudgetsAndRejectsNegative(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unjira.config.json")
+	body := `{"llm_defaults": {"max_reasks": 2},
+		"llm": {"model": "m", "context_window_tokens": 1000, "max_reasks": 0, "max_omission_reasks": 3}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := config.Load(path)
+	require.NoError(t, err)
+	got, err := cfg.ReaskBudgets()
+	require.NoError(t, err)
+	assert.Equal(t, config.ReaskBudgets{Match: 0, Omission: 3, Dispute: 0}, got)
+
+	bad := filepath.Join(dir, "bad.json")
+	require.NoError(t, os.WriteFile(bad, []byte(`{"llm": {"max_dispute_reasks": -1}}`), 0o600))
+	_, err = config.Load(bad)
+	require.Error(t, err, "a negative budget fails at load, before any command runs")
+	require.ErrorContains(t, err, "llm.max_dispute_reasks")
+	require.ErrorContains(t, err, bad)
+}
+
+// The shipped example must load: it is what a new user copies.
+func TestLoad_ShippedExampleConfigLoads(t *testing.T) {
+	cfg, err := config.Load(filepath.Join("..", "..", "config", "unjira.example.yaml"))
+	require.NoError(t, err)
+	require.NoError(t, cfg.LLM.Validate())
+
+	got, err := cfg.ReaskBudgets()
+	require.NoError(t, err)
+	assert.Equal(t, config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1}, got)
+}
