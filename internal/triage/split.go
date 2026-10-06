@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/jcogilvie/unjira/internal/correlator"
-	"github.com/jcogilvie/unjira/internal/store"
 )
 
 // splitInstruction is what the reviewer's "this is two stories" becomes in the
@@ -44,7 +43,7 @@ const splitInstruction = `A reviewer has judged that the events below do NOT bel
 // pulled in unrelated neighbours.
 //
 // Returns the narratives the split produced. The source is marked
-// store.StatusSplit when it ends up empty — see markSourceIfEmptied.
+// store.StatusSplit when it ends up empty — see sourceContextOutcome.
 //
 // MEMBER events only (shared-context spec §6). The split re-clusters the source's
 // work; its Cluster call gets no context narratives, so everything numbered is the
@@ -108,14 +107,14 @@ func (h *StoreHandler) SplitNarrative(
 		results[i].NarrativeID = 0
 	}
 
-	touched, _, err := correlator.Persist(
+	touched, stats, err := correlator.Persist(
 		ctx, h.store, h.client, results, h.correlator)
 	if err != nil {
 		return SplitResult{}, fmt.Errorf("persisting the split of narrative %d: %w", narrativeID, err)
 	}
 
 	out := SplitResult{Narratives: touched}
-	if out.SourceContextLinks, out.SourceContextLinksDeleted, err = h.markSourceIfEmptied(narrativeID); err != nil {
+	if out.SourceContextLinks, out.SourceContextLinksDeleted, err = h.sourceContextOutcome(narrativeID, stats); err != nil {
 		return SplitResult{}, err
 	}
 
@@ -133,24 +132,26 @@ type SplitResult struct {
 	SourceContextLinksDeleted bool
 }
 
-// markSourceIfEmptied sets the source narrative to StatusSplit once every MEMBER
-// event has moved off it, deleting its context links in that case, and reports how
-// many context links it held and whether they went.
+// sourceContextOutcome reports how many context links the source held after the split
+// moved its members, and whether they were deleted because the split emptied it.
 //
-// Members, not links of any kind: a source left holding only background holds no
-// work, and if it were not marked split it would sit in every later prompt as a
-// narrative with no work (shared-context spec §6). Its context links are deleted
-// rather than left on a split narrative nothing reads; no data is lost, since every
-// linked event keeps its member home elsewhere.
+// The marking itself is Persist's, inside the split's own transaction: the source is
+// the narrative the split's results take every eligible member from, so Persist checks
+// it with store.Tx.MarkSplitIfEmptied once the members have moved, as it does for any
+// narrative a pass empties (F40). That function is also where the rule lives — members
+// are what count, so a source left holding only background holds no work (shared-
+// context spec §6), and deleting its context links loses nothing, since every linked
+// event keeps its member home elsewhere.
 //
-// Conditional, not unconditional: a narrative that kept its committed events is
-// still a live story with a tracker mutation describing it, and marking it split
-// would hide it from future clustering while its issue is still being worked. Its
-// context links stay with it.
-func (h *StoreHandler) markSourceIfEmptied(narrativeID int64) (contextLinks int, deleted bool, err error) {
-	remaining, err := h.store.MemberEventCount(narrativeID)
-	if err != nil {
-		return 0, false, fmt.Errorf("counting member events left on narrative %d after a split: %w", narrativeID, err)
+// Conditional, not unconditional: a narrative that kept its committed events is still
+// a live story with a tracker mutation describing it, and marking it split would hide
+// it from future clustering while its issue is still being worked. Its context links
+// stay with it, and are counted here.
+func (h *StoreHandler) sourceContextOutcome(narrativeID int64, stats correlator.Stats) (contextLinks int, deleted bool, err error) {
+	for _, e := range stats.Emptied {
+		if e.NarrativeID == narrativeID {
+			return e.ContextLinksDeleted, true, nil
+		}
 	}
 
 	background, err := h.store.ContextEventIDs(narrativeID)
@@ -158,21 +159,7 @@ func (h *StoreHandler) markSourceIfEmptied(narrativeID int64) (contextLinks int,
 		return 0, false, fmt.Errorf("reading context links left on narrative %d after a split: %w", narrativeID, err)
 	}
 
-	if remaining > 0 {
-		return len(background), false, nil
-	}
-
-	if err := h.store.WithTx(func(tx *store.Tx) error {
-		if err := tx.UnlinkNarrativeEvents(narrativeID, background); err != nil {
-			return err
-		}
-
-		return tx.SetNarrativeStatus(narrativeID, store.StatusSplit)
-	}); err != nil {
-		return 0, false, fmt.Errorf("marking emptied narrative %d split: %w", narrativeID, err)
-	}
-
-	return len(background), true, nil
+	return len(background), false, nil
 }
 
 // windowSpanning returns the smallest TimeRange covering evts.

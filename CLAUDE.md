@@ -86,7 +86,9 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   filters — `AnyWorkEvidence`, `suppressTrackerEcho`, `dropSelfAuthored` all stay, because narratives
   linked before the filter existed still hold tracker records — `narrative_events` rows are never
   garbage-collected. They ARE deleted when a member link moves or a context link is upgraded to a
-  member (`Tx.MoveMember`), and by `UnlinkNarrativeEvents` in a triage merge/split. That is why
+  member (`Tx.MoveMember`), by `UnlinkNarrativeEvents` in a triage merge, and when a narrative left
+  with no member is marked `split` and loses its context links (`Tx.MarkSplitIfEmptied`, after a
+  clustering pass, a triage merge or a triage split). That is why
   `link_seq` is `AUTOINCREMENT`: a plain rowid would reissue a deleted newest number and make an
   old position look new. Entrance stops the pipeline *paying*; exit stops it *speaking*.
 - **Every linked event has exactly one member home, and only member links reach a tracker path.**

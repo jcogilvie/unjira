@@ -122,19 +122,21 @@ in this repo's transcripts came from a subagent; unmeasured elsewhere.
 The PR identity join (`internal/pipeline/preassign.go`, `planPRIdentity` at `:76`) places only
 UNPLACED events. A narrative's eligible members, the PR's `:opened` among them, are still numbered in
 the clustering prompt whenever that narrative is context, and `Persist` moves any the model puts in
-another cluster (`moveMembers`, `internal/correlator/correlator.go:1536`). The join makes this more
+another cluster (`moveMembers`, `internal/correlator/correlator.go:1620`). The join makes this more
 likely to be offered, though not more likely to be taken: placing a merge extends its narrative's
 `window_end` into the current window, so the narrative becomes context in the very pass that placed
 it (`hidePreAssigned`, `preassign.go:235`, hides only the placed event). A reshuffle that moves
 `:opened` away splits the PR again, with the merge left where identity put it, and a later event for
 that PR then finds two holders and falls back to the model (`PRSeveralHolders`).
 
-Not introduced by the join. Every eligible member has always been open to reshuffling, and the
-single-pass acceptance reps held M3 at 26/26, so the model does not appear to do this. Unmeasured
-since the join landed: the two-pass reps will show it as an M3 split whose identity half was placed
-by `identity` (`narrative_events.member_placement`). If it occurs, the remedy is to number no eligible
-member whose PR an open narrative already holds by identity. That is a prompt-shape decision, and is
-not taken here.
+Not introduced by the join. Every eligible member has always been open to reshuffling. Measured since
+the join landed, in six two-pass acceptance reps (`SHARED_CUT=2026-09-21`, window 2026-09-16 to
+2026-10-02): 24 identity placements in total, M3 PR integrity 26/26 in every rep, and 0 identity-placed
+members moved by the model. So the model has not been observed doing this. It stays open because the
+mechanism is still there, and six reps of one window bound how often it happens, not whether it can.
+If it occurs, it shows as an M3 split whose identity half was placed by `identity`
+(`narrative_events.member_placement`), and the remedy is to number no eligible member whose PR an open
+narrative already holds by identity. That is a prompt-shape decision, and is not taken here.
 
 ### F53 — stored timestamps keep their source's UTC offset, and window queries compare them as strings
 
@@ -188,22 +190,33 @@ calls, because the model returned a NEW cluster with a title and no event in it,
 summary. By then Cluster's omission re-ask has given every in-window event a member home, so nothing
 is lost. A NEW cluster holding only context is still refused (F37).
 
-### F40 — a reshuffle can empty a context narrative of its members, leaving it open
+### F50 — a split narrative is still read by the create path and the review queue
 
-A context narrative's eligible members are numbered in the clustering prompt, so the model may place
-every one of them in other clusters. `Persist` then moves each away (`Tx.MoveMember`,
-`internal/store/linkkind.go:66`, via `moveMembers`, `internal/correlator/correlator.go:1536`). Nothing
-then checks whether the narrative they left still holds any work. It stays `open`, with a title and
-summary describing events it no longer holds, and `NarrativesOverlapping`
-(`internal/store/narratives.go:291`) keeps returning it, so it rides into every later prompt as context.
-Only triage's split marks an emptied source `split`. This is F37's empty-narrative shape, reached by a
-reshuffle instead of a double assignment.
+`StatusSplit` is honored by one reader, `NarrativesOverlapping` (`internal/store/narratives.go:291`), so
+a narrative emptied of its work (`Tx.MarkSplitIfEmptied`, `internal/store/narrativestatus.go:57`, from a
+clustering pass, a triage split or a triage merge) stops being clustering context and nothing else
+changes. Two other readers still see it:
 
-It predates the shared-context slice: `relinkEvents` emptied narratives the same way. The slice's
-acceptance probe reports such narratives as violations (`loadWorklessNarratives`), so M4 will show
-whether it happens on real data. Not fixed here because the remedy is a lifecycle decision the spec does
-not make. A narrative whose work all moved could be marked `split` like triage's source, or kept open
-for its context links, or have those context links re-homed. Frequency is unmeasured.
+- **The create path.** `NarrativesWithNoIssueLink` (`internal/store/narrativeissues.go:523`) has no
+  status predicate, so a split narrative with no issue link is selected on every pass and takes one of
+  `reconciler.max_narratives_per_pass`' slots. `proposeCreateOne` finds no member events and suppresses it
+  with a false reason, "every event is unjira's own output" (`internal/reconciler/create.go:185`). Nothing
+  records the examination, so it is selected again next pass. Probed with a cap of 1, one split narrative
+  ahead of one real untracked narrative by `window_start`: the split one was examined in all three
+  passes and the real one in none.
+- **The review queue.** A proposed action drafted for the narrative before its work moved stays at
+  `proposed` (`ActionsByStatus`, `internal/store/actions.go:102`, filters on action status alone; probed),
+  so triage presents text describing work now attributed elsewhere. By reading, not probed: while it is
+  open, `suppressDuplicates` (`internal/reconciler/reconciler.go:429`) drops the receiving narrative's own
+  proposal on the same issue, because neither `NarrativesForIssue` nor `openProposalFromAnother` reads
+  narrative status.
+
+**Consequence:** each emptied narrative costs a create slot forever, so enough of them starve real
+untracked work behind them (F12's and F26's shape), and a reviewer can approve a comment on behalf of a
+narrative that holds nothing. Pre-existing for triage split's sources, which have been marked `split`
+since that verb landed. Not fixed here: what a split narrative's pending actions should become (superseded,
+rejected, left for the reviewer) is an action-lifecycle decision, and the create-path predicate should be
+decided with it. Frequency on real data is unmeasured.
 
 ### F52 — a single dispute too large for the context window fails the pass
 
@@ -707,7 +720,7 @@ yet; noted while writing the template, not found as a live incident.
 | F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
 | F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
 | F43 — cross-pass PR split | **resolved**: PR-identity pre-assignment before clustering (`pipeline/preassign.go`). An unplaced event whose host-qualified `ArtifactPullRequest` matches a member of exactly one open narrative joins it, unseen by the model; ambiguity falls back to the model and is reported. Drills: removing the exactly-one, open-status and host guards each fail a named test. Two-pass M3 re-measured 2026-10-02 on real data: 24/26 -> 26/26 in all three reps |
-| F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Unmeasured |
+| F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Measured in six two-pass reps after the join: 24 identity placements, M3 26/26 in every rep, 0 identity-placed members moved by the model |
 | F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
 | F53 — stored timestamps keep their offset; window queries compare strings | open. Jira timestamps are stored with the account's offset, everything else `Z`; unmeasured |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
@@ -715,8 +728,8 @@ yet; noted while writing the template, not found as a live incident.
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
-| F40 — a reshuffle can empty a context narrative of its members, leaving it open | open. Predates slice 1. Found while writing slice 1's invariant checks |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
+| F50 — a split narrative is still read by the create path and the review queue | open. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed: a split narrative held a create slot for 3 of 3 passes at cap 1 |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178** — see F28, which makes this a multi-tracker blocker rather than a tidiness question |
 | F8 — resolver's home | **#177** |

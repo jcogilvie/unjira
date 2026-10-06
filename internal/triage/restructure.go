@@ -145,9 +145,14 @@ func NewStoreHandler(
 
 // MergeResult is what a merge moved: the source's eligible member events, now the
 // target's members, and the source's eligible context links, now the target's.
+// SourceEmptied is whether the source was left holding no member, and so was marked
+// store.StatusSplit; DeletedContextLinks is how many context links it still held
+// then (frozen ones, since every eligible one moved), all deleted with it.
 type MergeResult struct {
-	Members []int64
-	Context []int64
+	Members             []int64
+	Context             []int64
+	SourceEmptied       bool
+	DeletedContextLinks int
 }
 
 // MergeNarratives moves the source narrative's eligible links onto the target,
@@ -173,6 +178,12 @@ type MergeResult struct {
 // which is a human attribution, not the model's original guess about a different
 // narrative.
 //
+// A source left holding no member — every member of an uncommitted source is eligible,
+// so that is the ordinary case — is marked store.StatusSplit by Tx.MarkSplitIfEmptied,
+// as a split's emptied source is. Left open, it would sit in every later clustering
+// prompt as a titled narrative with no work in it. A source that keeps a frozen member
+// is still a live story and stays open.
+//
 // Runs in one transaction. A crash part-way would leave links on both narratives or
 // on neither.
 func (h *StoreHandler) MergeNarratives(targetID, sourceID int64) (MergeResult, error) {
@@ -191,6 +202,10 @@ func (h *StoreHandler) MergeNarratives(targetID, sourceID int64) (MergeResult, e
 				"described by a tracker mutation and cannot be reattributed", sourceID)
 	}
 
+	var (
+		leftover int
+		emptied  bool
+	)
 	if err := h.store.WithTx(func(tx *store.Tx) error {
 		for _, eid := range members {
 			if err := tx.MoveMember(targetID, eid, store.ReviewerMemberConfidence, store.PlacedByReviewer); err != nil {
@@ -203,12 +218,24 @@ func (h *StoreHandler) MergeNarratives(targetID, sourceID int64) (MergeResult, e
 			}
 		}
 
-		return tx.UnlinkNarrativeEvents(sourceID, background)
+		if err := tx.UnlinkNarrativeEvents(sourceID, background); err != nil {
+			return err
+		}
+
+		var err error
+		leftover, emptied, err = tx.MarkSplitIfEmptied(sourceID)
+
+		return err
 	}); err != nil {
 		return MergeResult{}, fmt.Errorf("merging narrative %d into %d: %w", sourceID, targetID, err)
 	}
 
-	return MergeResult{Members: members, Context: background}, nil
+	out := MergeResult{Members: members, Context: background, SourceEmptied: emptied}
+	if emptied {
+		out.DeletedContextLinks = leftover
+	}
+
+	return out, nil
 }
 
 // ResolveMergeTarget reads both narratives' commit state and returns which

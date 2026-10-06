@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jcogilvie/unjira/internal/events"
 )
@@ -196,6 +197,37 @@ func (t *Tx) EventsWithoutMemberHome(eventIDs []int64) ([]int64, error) {
 			out = append(out, id)
 		}
 	}
+
+	return out, nil
+}
+
+// MemberHolders returns, ascending and each once, the narratives holding any of
+// eventIDs as a member. An event with no member link contributes nothing, and a context
+// link never makes its narrative a holder.
+//
+// Persist reads it before moving a pass's members: a narrative can only be emptied by
+// the pass that moves a member off it, so these are the narratives it must check
+// afterwards (MarkSplitIfEmptied).
+func (t *Tx) MemberHolders(eventIDs []int64) ([]int64, error) {
+	seen := make(map[int64]bool)
+	var out []int64
+	for _, id := range eventIDs {
+		var holder int64
+		err := t.tx.QueryRow(
+			`SELECT ne.narrative_id FROM narrative_events ne WHERE ne.event_id = ? AND `+memberLink, id,
+		).Scan(&holder)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("reading the member home of event %d: %w", id, err)
+		}
+		if !seen[holder] {
+			seen[holder] = true
+			out = append(out, holder)
+		}
+	}
+	slices.Sort(out)
 
 	return out, nil
 }
@@ -397,9 +429,10 @@ func (s *Store) MembersBelowConfidence(narrativeID int64, floor float64) ([]Memb
 	return out, rows.Err()
 }
 
-// MemberEventCount is how many member links narrativeID has — the question triage's
-// split asks to decide whether it emptied its source (a narrative holding only
-// background holds no work, so it is emptied).
+// MemberEventCount is how many member links narrativeID has: whether it still holds
+// any work, which a narrative holding only background does not. A test-support
+// accessor; the production form of the question is asked inside the transaction that
+// moved the members, by Tx.MarkSplitIfEmptied.
 func (s *Store) MemberEventCount(narrativeID int64) (int, error) {
 	var n int
 	if err := s.db.QueryRow(
