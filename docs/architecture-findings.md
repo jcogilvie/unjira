@@ -621,6 +621,24 @@ yet; noted while writing the template, not found as a live incident.
 
 ---
 
+### F60 — upstream work done for an internal ticket is routed by repository, not by purpose
+
+Destinations route untracked work by the repository it happened in, which is right for the common case.
+But some upstream work exists to serve an internal ticket: a design review that unblocks an internal
+story, an upstream fix for an internal blocker, or a regression analysis behind an internal rollout. If
+that upstream repository's tracker mirrors nowhere, the work is ticketed nowhere, and it never reaches
+the internal ticket it serves.
+
+On a real 30-day store, under a policy that mirrored the upstream repositories the operator does ticket,
+three of the five narratives sent nowhere were exactly this. Each had an internal ticket it plausibly
+belonged to, and matching linked none of them.
+
+The fix is not a routing rule, since "serves ticket X" is semantic. It is matching: an upstream
+narrative that matches an internal ticket is linked work, so it is commented on that ticket rather than
+proposed as a create anywhere. Two things are not measured yet: how often an internally motivated
+upstream narrative names its internal ticket at all, and whether the candidate ranking reaches the
+ticket when it does.
+
 ## Task cross-references
 
 | Finding | Task |
@@ -639,6 +657,7 @@ yet; noted while writing the template, not found as a live incident.
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
+| F60 — upstream work done for an internal ticket is routed by repository, not by purpose | open. Matching's job, not routing's. 3 of 5 measured cases |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson). 0 other deaths in 32 passes; re-ask-once-then-fail is the shape if one appears |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F50 — a split narrative is still read by the create path and the review queue | open. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed: a split narrative held a create slot for 3 of 3 passes at cap 1 |

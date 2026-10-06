@@ -116,7 +116,8 @@ Reader`, read-only) but not collected.
 `internal/reconciler/destinations.go`). `collector/claudecode` records where each segment's work
 happened: the repositories its own SCM actions sent work to (`events.ArtifactWorkRepos`: a `git push`
 remote, a created PR, a `gh -R`, a GitHub MCP write), and the remotes of its working copy, read with
-go-git (`events.ArtifactCwdRemotes`). At reconcile time the first, else the second, is matched against
+go-git (`events.ArtifactCwdRemotes`). `collector/github` records each PR event's own repository as
+`events.ArtifactWorkRepos`, so a narrative made only of PR events is located too. At reconcile time the first, else the second, is matched against
 tracker scopes (`config.UntrackedDestinations`): work in one tracker's scope goes to that tracker if it
 is writable plus its `mirror_to`, work in no scope (or in several, which is ambiguous and reported) to
 `default_ticket_in`. An empty set proposes nothing and is recorded as a suppression. A link on a
