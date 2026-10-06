@@ -79,7 +79,7 @@ func EventFromIssueBody(
 	// The marker deliberately does not hide it from gatherCandidates, which walks
 	// artifacts regardless: the cross-reference is still available for ATTRIBUTION.
 	// Usable for matching, unusable for narration.
-	events.SetTrackerRecord(&evt)
+	ic.markTrackerRecord(&evt)
 
 	return evt, true
 }

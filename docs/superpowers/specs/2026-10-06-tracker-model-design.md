@@ -321,3 +321,31 @@ Decisions the design left open:
   `crossplane-contrib/x#1` is scope `crossplane-contrib/x`, not project `crossplane`. A malformed key
   is untracked in triage now, where a key without a "-" used to read as appliable.
 
+### Slice 3, classification and self-authorship: landed 2026-10-06
+
+`pipeline.CollectContext.TrackerFor(kind, scope)` returns the configured tracker whose scope covers an
+artifact's scope on a connection of that kind. The Jira collector marks an issue's events as tracker
+records only when `TrackerFor(jira, project)` answers, which query scoping makes every issue it reads,
+so behaviour is unchanged. `tasktracker.SelfIdentifier` is the requirement on writers:
+`jira.Tracker.SelfIdentity` returns the `Myself()` accountId, and the local backend reports `unjira`.
+`Resolver.CheckWriters` refuses a writable route whose writer is not one, and runs at the start of
+`watch` and `dev narrate` before the store is touched. F28 deleted.
+
+Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
+./...` 0 issues. Break-it drills in the slice's commit message.
+
+Decisions the design left open:
+- **The identity check is by type, at the backend.** Config cannot know what a backend implements, so
+  the check opens each writable route's writer (building a client, sending nothing) and asserts the
+  interface. The resolver also refuses to hand out a writer without it, so `actions decide` and
+  `triage`, which skip the startup check, still cannot write anonymously.
+- **The local backend reports a constant.** Every local write is unjira's and nothing collects the
+  local store back, so there is no echo to tag; reporting `unjira` lets a writable local tracker meet
+  the same rule as any other writer rather than being an exception.
+- **The Jira collector's scoping stays per tracker.** Each query is bounded by its own tracker's
+  scopes (slice 1), which is a subset of "the trackers on its connection" and narrower than their
+  union. An issue the search returns outside that scope is now work evidence rather than a tracker
+  record.
+- **A zero-value `IssueContext` still marks tracker records** (`ScopeUntracked` is the opt-out), so
+  the pure event builders keep their behaviour for every caller that does not classify.
+

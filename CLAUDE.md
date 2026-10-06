@@ -82,7 +82,11 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   function's — that separation is what keeps the review queue signal-rich.
 - **Work evidence and tracker state are different kinds, and only one is clusterable.** A collector
   declares a tracker record with `events.SetTrackerRecord` (its doc comment says why the producer is
-  the only party that can know). The exclusion at clustering does *not* replace the reconciler's exit
+  the only party that can know), and decides by asking the config — `CollectContext.TrackerFor(kind,
+  scope)` — never by its own package identity: the same artifact is a tracker record where its
+  system tracks the work and evidence where it does not. A writable tracker must sit on a backend
+  that reports unjira's own identity (`tasktracker.SelfIdentifier`), or unjira's writes return as
+  new work. The exclusion at clustering does *not* replace the reconciler's exit
   filters — `AnyWorkEvidence`, `suppressTrackerEcho`, `dropSelfAuthored` all stay, because narratives
   linked before the filter existed still hold tracker records — `narrative_events` rows are never
   garbage-collected. They ARE deleted when a member link moves or a context link is upgraded to a

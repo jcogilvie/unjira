@@ -245,7 +245,7 @@ func (c *Collector) collectQuery(
 	}
 
 	for _, issue := range issues {
-		updated, err := c.collectIssue(conn, issue, client, selfAccountID, visit)
+		updated, err := c.collectIssue(cc, conn, issue, client, selfAccountID, visit)
 		if err != nil {
 			// One issue's failure fails its query. Advancing past an issue we
 			// could not read would step over it permanently.
@@ -332,6 +332,7 @@ func watermarkClause(watermark time.Time, accountZone, connName string, log *slo
 // collectIssue emits every event for one issue and returns its updated time,
 // which feeds the query's watermark.
 func (c *Collector) collectIssue(
+	cc pipeline.CollectContext,
 	conn config.Connection,
 	issue map[string]any,
 	client *jiraclient.Client,
@@ -360,6 +361,12 @@ func (c *Collector) collectIssue(
 		Connection:    conn.Name,
 		Site:          conn.Endpoint,
 		SelfAccountID: selfAccountID,
+	}
+
+	// Classified by the config, not by this collector's identity: the project is a
+	// tracker record source only if it is a Jira tracker's scope here (F28).
+	if _, tracked := cc.TrackerFor(config.KindJira, projectKey); !tracked {
+		ic.ScopeUntracked = true
 	}
 
 	// The issue's own body, emitted BEFORE the changelog and comments — finding F14.

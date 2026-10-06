@@ -178,3 +178,12 @@ func classify(err error) error {
 
 	return err
 }
+
+// LocalSelfIdentity is the identity the local backend reports for unjira. Every write to
+// a local issue is unjira's own, and no collector reads the local store back, so there is
+// no echo to tag; it is reported so a writable local tracker meets the same requirement
+// as any other writer (tasktracker.SelfIdentifier).
+const LocalSelfIdentity = "unjira"
+
+// SelfIdentity reports LocalSelfIdentity.
+func (t *Tracker) SelfIdentity() (string, error) { return LocalSelfIdentity, nil }

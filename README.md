@@ -504,7 +504,12 @@ data/                   SQLite database lives here (gitignored)
   (`reconciler.suppressTrackerEcho` over `events.AnyWorkEvidence`). The signal is a marker the
   **producing collector** declares (`events.SetTrackerRecord`) — not a source name (incident 21) and
   not the presence of an issue key, which a CI run or commit can carry while being real work
-  evidence. Transitions and creates are untouched: a transition asserts no prose and has its own
+  evidence. The collector decides by asking the config, `CollectContext.TrackerFor(kind, scope)`:
+  a record is a tracker's own only where its scope is a configured tracker's, so a Jira comment is
+  a tracker record where Jira tracks the work and evidence where it does not. A writable tracker
+  must sit on a backend that can report unjira's own identity (`tasktracker.SelfIdentifier`, Jira's
+  `Myself()`), checked at the start of `watch` and `dev narrate` and again whenever a writer is
+  handed out, because otherwise unjira's own writes come back through the collector as new work. Transitions and creates are untouched: a transition asserts no prose and has its own
   guard above, and a create concerns work with no issue to restate. Suppressions are reported, never
   silent. See `docs/design-notes.md` incident 24.
 
@@ -513,5 +518,8 @@ data/                   SQLite database lives here (gitignored)
 Implement the `Collector` interface in `internal/pipeline/collect.go` (`Name() string`,
 `Collect(s *store.Store, options map[string]any, visit func(events.Event) error) error`):
 read your source since the last cursor, emit normalized `Event`s, update the cursor. Register
-it in `cmd/unjira/main.go`'s `registry` map and enable it in config.
+it in `cmd/unjira/main.go`'s `registry` map and enable it in config. A collector for a system that
+can be a tracker marks an event with `events.SetTrackerRecord` only when
+`CollectContext.TrackerFor(kind, scope)` says the event's scope is a configured tracker's here;
+never because of which collector it is.
 `internal/collector/claudecode` is the reference implementation.
