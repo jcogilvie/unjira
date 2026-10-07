@@ -34,9 +34,10 @@ func TestDraftProducesOneActionPerActionableLinkWithDistinctBodies(t *testing.T)
 		},
 	}
 
-	got, stats, err := draft(t.Context(), client, narrative,
+	out, stats, err := draft(t.Context(), client, narrative,
 		[]events.Event{codeEvent("e1", "added retry logic")}, verified, nil, nil, nil)
 	require.NoError(t, err)
+	got := out.Actions
 
 	require.Len(t, got, 2)
 	assert.Equal(t, 1, stats.Calls, "one LLM call per narrative, not per link")
@@ -60,9 +61,10 @@ func TestDraftFloorsConfidenceForAnIllegalTransition(t *testing.T) {
 		},
 	}}
 
-	got, _, err := draft(t.Context(), client, narrative,
+	out, _, err := draft(t.Context(), client, narrative,
 		[]events.Event{codeEvent("e1", "finished it")}, verified, nil, nil, nil)
 	require.NoError(t, err)
+	got := out.Actions
 
 	require.Len(t, got, 1)
 	assert.Zero(t, got[0].Confidence,
@@ -83,9 +85,10 @@ func TestDraftIgnoresAnUnrecognizedIssueKey(t *testing.T) {
 		Issue: tasktracker.Issue{Key: "PROJ-1"},
 	}}
 
-	got, _, err := draft(t.Context(), client, narrative,
+	out, _, err := draft(t.Context(), client, narrative,
 		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
+	got := out.Actions
 
 	assert.Empty(t, got,
 		"a key this pass never verified must not receive an action, whatever confidence "+
@@ -154,9 +157,10 @@ func TestDraftToleratesAMarkdownFenceDespiteTheSystemPromptForbiddingIt(t *testi
 		Issue: tasktracker.Issue{Key: "PROJ-1"},
 	}}
 
-	got, _, err := draft(t.Context(), client, narrative,
+	out, _, err := draft(t.Context(), client, narrative,
 		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
+	got := out.Actions
 	require.Len(t, got, 1)
 }
 
@@ -171,9 +175,10 @@ func TestDraftClampsAnOutOfRangeConfidence(t *testing.T) {
 		Issue: tasktracker.Issue{Key: "PROJ-1"},
 	}}
 
-	got, _, err := draft(t.Context(), client, narrative,
+	out, _, err := draft(t.Context(), client, narrative,
 		[]events.Event{codeEvent("e1", "did work")}, verified, nil, nil, nil)
 	require.NoError(t, err)
+	got := out.Actions
 	require.Len(t, got, 1)
 	assert.LessOrEqual(t, got[0].Confidence, 1.0, "a model confidence above 1 must be clamped, never trusted verbatim")
 }

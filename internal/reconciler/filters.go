@@ -74,10 +74,14 @@ type suppressionFilter struct {
 //
 //  1. unroutable — an action whose target cannot be reached is not a proposal at
 //     all. Nothing downstream should weigh in on something that cannot happen.
-//  2. tracker-echo — asks whether the narrative had anything to say AT ALL,
+//  2. settled-status — the issue's live status already settles the transition: it
+//     is there already, or it is done and leaving done is a human's call. A fact
+//     about one action, needing no history, so it runs before anything weighs the
+//     narrative as a whole.
+//  3. tracker-echo — asks whether the narrative had anything to say AT ALL,
 //     before anything asks whether this particular thing is stale.
-//  3. stale-transition — a fact about the world: the tracker moved past us.
-//  4. duplicate — a fact about unjira's own queue, worth reporting only for an
+//  4. stale-transition — a fact about the world: the tracker moved past us.
+//  5. duplicate — a fact about unjira's own queue, worth reporting only for an
 //     action that should exist in the first place.
 //
 // Order flows from cheapest-and-most-fundamental to most-contingent, and from
@@ -92,6 +96,12 @@ var suppressionChain = []suppressionFilter{
 		name: "unroutable",
 		apply: func(fctx filterContext, drafted []ProposedAction) ([]ProposedAction, []string) {
 			return dropUnroutable(fctx.Verified, drafted)
+		},
+	},
+	{
+		name: "settled-status",
+		apply: func(fctx filterContext, drafted []ProposedAction) ([]ProposedAction, []string) {
+			return suppressSettledStatus(fctx.Verified, drafted)
 		},
 	},
 	{

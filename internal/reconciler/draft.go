@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -25,12 +26,13 @@ const draftSystemPrompt = `You are drafting proposed updates to tracker issues f
 
 You will be shown WHAT'S NEW since a reviewer last saw this work (the delta — never the full history), and every issue the work is attributed to, each with its role and its CURRENT live state.
 
-Draft exactly one action per issue shown. Roles:
+Draft at most one action per issue shown, and answer "none" for an issue the delta gives you nothing to say about. Roles:
 - "primary": the record the work is principally tracked in. Write for an engineering audience.
 - "same_work": the same body of work recorded again for a different audience (for example a change-management ticket paired with an engineering one). Write for THAT audience — do not repeat the primary's text.
 
 Action types:
 - "comment": post prose describing what changed. The default.
+- "none": nothing in the delta is this issue's news. Put the reason in rationale and leave body empty. Prefer "none" to a comment saying there is nothing to report: a comment is something a person will read, and one that says nothing wastes their time.
 - "transition": move the issue to a different status. ONLY propose a target listed under "reachable statuses" for that issue, spelled EXACTLY as listed. If the status you believe is correct is not listed, propose a comment instead. Some listed statuses are several workflow steps away; propose the one the evidence supports and unjira will walk the intermediate steps itself.
 
 When to propose a transition. A transition needs evidence in the delta that the WORK reached a new stage:
@@ -45,7 +47,13 @@ Do not restate a status change somebody else already made. If the delta contains
 Report confidence honestly in 0.0-1.0. Do not describe work that is not evidenced in the delta.
 
 Return ONLY a bare JSON array, no prose, no markdown fences:
-[{"issue_key":"...","type":"comment"|"transition","body":"...","target_status":"<exact status name from legal transitions>","confidence":0.0-1.0,"rationale":"..."}]`
+[{"issue_key":"...","type":"comment"|"transition"|"none","body":"...","target_status":"<exact status name from legal transitions>","confidence":0.0-1.0,"rationale":"..."}]`
+
+// verdictNone is the drafter's answer for an issue the delta gives it nothing to say
+// about. It is a verdict, never an ActionType: actionsFromVerdicts drops it, and draft
+// returns its rationale as a suppression reason, so a "none" can never reach
+// persistence or the applier as an action.
+const verdictNone = "none"
 
 // draftVerdict is one entry of the model's response.
 type draftVerdict struct {
@@ -79,7 +87,7 @@ func draft(
 	learnedRules []rules.Rule,
 	graph *workflow.Graph,
 	log *slog.Logger,
-) ([]ProposedAction, correlator.Stats, error) {
+) (drafted, correlator.Stats, error) {
 	var stats correlator.Stats
 
 	prompt := buildDraftPrompt(narrative, delta, verified, graph)
@@ -91,7 +99,7 @@ func draft(
 
 	raw, usage, err := client.Complete(ctx, systemPrompt, prompt)
 	if err != nil {
-		return nil, stats, fmt.Errorf("drafting actions for narrative %d: %w", narrative.ID, err)
+		return drafted{}, stats, fmt.Errorf("drafting actions for narrative %d: %w", narrative.ID, err)
 	}
 	// AddUsage already counts the call (s.Calls++ is inside it) — an
 	// additional stats.Calls++ here would double-count a single completion.
@@ -99,10 +107,43 @@ func draft(
 
 	verdicts, err := parseDraftResponse(raw)
 	if err != nil {
-		return nil, stats, err
+		return drafted{}, stats, err
 	}
 
-	return actionsFromVerdicts(narrative.ID, verdicts, verified, "draft", graph, log), stats, nil
+	return drafted{
+		Actions:      actionsFromVerdicts(narrative.ID, verdicts, verified, "draft", graph, log),
+		NothingToSay: noneReasons(verdicts, verified),
+	}, stats, nil
+}
+
+// drafted is one drafting call's outcome: the actions, and a suppression reason per
+// issue the model answered "none" for.
+type drafted struct {
+	Actions      []ProposedAction
+	NothingToSay []string
+}
+
+// noneReasons renders each "none" verdict on a verified issue as a suppression reason,
+// carrying the model's rationale, because that rationale is the only record of why the
+// issue drew nothing. Recorded like any suppression, it is also the watermark that stops
+// the next pass drafting the same delta again. A "none" naming an issue this pass did
+// not verify is dropped, as actionsFromVerdicts drops any such verdict.
+func noneReasons(verdicts []draftVerdict, verified []verifiedLink) []string {
+	var reasons []string
+
+	for _, v := range verdicts {
+		if v.Type != verdictNone {
+			continue
+		}
+
+		if !slices.ContainsFunc(verified, func(l verifiedLink) bool { return l.Link.IssueKey == v.IssueKey }) {
+			continue
+		}
+
+		reasons = append(reasons, fmt.Sprintf("nothing to propose on %s: %s", v.IssueKey, strings.TrimSpace(v.Rationale)))
+	}
+
+	return reasons
 }
 
 // toProposedAction converts one verdict, flooring its confidence against
@@ -205,11 +246,19 @@ func parseDraftResponse(raw string) ([]draftVerdict, error) {
 	}
 
 	for i, v := range verdicts {
+		if v.Type == verdictNone {
+			if v.IssueKey == "" {
+				return nil, fmt.Errorf("draft response entry %d is a %q with no issue_key", i, verdictNone)
+			}
+
+			continue
+		}
+
 		switch ActionType(v.Type) {
 		case ActionComment, ActionTransition, ActionCreate:
 		default:
 			return nil, fmt.Errorf(
-				"draft response entry %d has unknown action type %q: must be one of comment, transition, create",
+				"draft response entry %d has unknown action type %q: must be one of comment, transition, create, none",
 				i, v.Type,
 			)
 		}
@@ -358,7 +407,17 @@ func Redraft(
 	// unattended watch-pass caller. An unrecognized issue_key here surfaces to the
 	// reviewer directly via the returned actions, so silence costs nothing draft's
 	// silence would.
-	return actionsFromVerdicts(narrative.ID, verdicts, verified, "redraft", nil, nil), stats, nil
+	actions := actionsFromVerdicts(narrative.ID, verdicts, verified, "redraft", nil, nil)
+
+	// A "none" is fine in a pass unjira started, where it is recorded and the reviewer
+	// never waits on it. Here a reviewer asked for a replacement, and ReworkOne's rule is
+	// that an explicit request is never answered with silence.
+	if reasons := noneReasons(verdicts, verified); len(actions) == 0 && len(reasons) > 0 {
+		return nil, stats, fmt.Errorf("redrafting narrative %d: the model proposed nothing (%s); "+
+			"reject the action if nothing should be proposed", narrative.ID, strings.Join(reasons, "; "))
+	}
+
+	return actions, stats, nil
 }
 
 // actionsFromVerdicts maps the model's verdicts onto ProposedActions, dropping
@@ -385,6 +444,10 @@ func actionsFromVerdicts(
 
 	var out []ProposedAction
 	for _, verdict := range verdicts {
+		if verdict.Type == verdictNone {
+			continue
+		}
+
 		v, ok := byKey[verdict.IssueKey]
 		if !ok {
 			logging.For(log, "reconciler").Warn("narrative named an unrecognized issue_key, ignoring",

@@ -286,10 +286,12 @@ func reconcileOne(
 		return result, correlator.Stats{}, nil
 	}
 
-	drafted, stats, err := draft(ctx, client, narrative, delta, verified, learnedRules, graph, log)
+	out, stats, err := draft(ctx, client, narrative, delta, verified, learnedRules, graph, log)
 	if err != nil {
 		return result, stats, fmt.Errorf("drafting for narrative %d: %w", narrative.ID, err)
 	}
+
+	result.Suppressed = append(result.Suppressed, out.NothingToSay...)
 
 	// The suppression chain — four filters in a load-bearing order, defined as
 	// data in filters.go rather than hand-wired here. Ordering used to live in the
@@ -302,7 +304,7 @@ func reconcileOne(
 		Delta:       delta,
 		Verified:    verified,
 		Log:         log,
-	}, drafted)
+	}, out.Actions)
 
 	result.Proposed = kept
 	result.Suppressed = append(result.Suppressed, suppressed...)
