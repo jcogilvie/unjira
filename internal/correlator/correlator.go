@@ -250,6 +250,13 @@ type Stats struct {
 	// loudly and stays unmatched for a later pass; the other narratives are
 	// unaffected. Already counted in Calls.
 	MatchReasks int
+	// PRIdentityJoins counts clusters folded into another cluster of the same pass
+	// because their member events share an exact pull-request identity (finding F61:
+	// a bisected window shows one PR's :opened and :merged to two calls that cannot
+	// see each other). PRIdentityConflicts lists the groups the join left apart because
+	// they extend two or more different stored narratives. See joinByPullRequest.
+	PRIdentityJoins     int
+	PRIdentityConflicts []PRIdentityConflict
 	// Emptied lists the narratives Persist moved every remaining member off — a
 	// context narrative whose eligible members the model placed in other clusters —
 	// and so marked store.StatusSplit (finding F40). Reported because nothing else
@@ -317,6 +324,8 @@ func (s *Stats) Add(other Stats) {
 	s.MaxContextFanOut = max(s.MaxContextFanOut, other.MaxContextFanOut)
 	s.MembersBelowFloor += other.MembersBelowFloor
 	s.MatchReasks += other.MatchReasks
+	s.PRIdentityJoins += other.PRIdentityJoins
+	s.PRIdentityConflicts = append(s.PRIdentityConflicts, other.PRIdentityConflicts...)
 	s.Emptied = append(s.Emptied, other.Emptied...)
 	s.PromptTokens += other.PromptTokens
 	s.CompletionTokens += other.CompletionTokens
@@ -461,6 +470,11 @@ func WithInstruction(instruction string) ClusterOption {
 // about once either way. Not by response order: membership drives token attribution,
 // and which cluster the model happened to write first says nothing about whose work
 // an event is.
+//
+// Before the dispute pass, results whose undisputed member events share an exact
+// pull-request identity are joined into one (joinByPullRequest, finding F61), unless
+// that would merge two stored narratives, which is reported in
+// Stats.PRIdentityConflicts instead.
 func Cluster(
 	ctx context.Context,
 	evts []Event,
@@ -475,6 +489,18 @@ func Cluster(
 	results, stats, err := clusterWindow(ctx, evts, existing, client, window, contextWindowTokens, opts...)
 	if err != nil {
 		return nil, stats, err
+	}
+
+	// After the halves are merged, so that one PR's events clustered by two calls that
+	// could not see each other are compared (F61), and before the dispute pass, whose
+	// positions must index the results Persist will write. See joinByPullRequest.
+	results, joinStats := joinByPullRequest(results)
+	stats.Add(joinStats)
+	for _, c := range joinStats.PRIdentityConflicts {
+		logging.For(o.log, "correlator").WarnContext(ctx, "pull request held by several stored narratives in one pass",
+			"pull_requests", strings.Join(c.PullRequests, ", "),
+			"clusters", strings.Join(c.Clusters, ", "),
+			"consequence", "left apart; merging stored narratives is a reviewer's call")
 	}
 
 	resolved, disputeStats, err := resolveDisputes(ctx, client, disputeRequest{
@@ -1065,6 +1091,12 @@ func irreducibleUnitError(window TimeRange, filtered []Event) error {
 // stated confidence for the members it placed. An event the two halves placed in
 // two DIFFERENT clusters stays in both here; the top-level Cluster's dispute re-ask
 // resolves it (F36).
+//
+// Nothing here compares pull-request identities. Clusters from either side of any seam
+// that share one are joined once, over the whole merged tree, by the top-level
+// Cluster's joinByPullRequest (F61). That includes a seam pair the same-story check
+// answered no for: the check reads only two titles and summaries, and exact identity
+// outranks it.
 func mergeSplitResults(ctx context.Context, client llm.Client, first, second []ClusterResult) ([]ClusterResult, Stats, error) {
 	var stats Stats
 	merged := make([]ClusterResult, 0, len(first)+len(second))

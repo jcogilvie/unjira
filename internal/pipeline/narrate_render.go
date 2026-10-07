@@ -160,8 +160,9 @@ func writeNarratedNarrative(b *strings.Builder, n NarratedNarrative) {
 	}
 }
 
-// writePRIdentityLines reports the pull-request identity join (F43), each line only when
-// non-zero, as the other pre-filters' exclusions are.
+// writePRIdentityLines reports both pull-request identity joins, each line only when
+// non-zero, as the other pre-filters' exclusions are: the pre-assignment join before
+// clustering (F43), and correlator's join over the clustering results (F61).
 //
 // Placements are listed one per event, with the narrative and the PR: the model never
 // saw these, so this is the only place a reader judging the pass can see where they
@@ -204,6 +205,21 @@ func writePRIdentityLines(b *strings.Builder, r NarrateResult) {
 			}
 			fmt.Fprintf(b, "         %s/%s (%s): %s — narrative(s) %s\n",
 				f.Event.Source, f.Event.ExternalID, f.PullRequest, f.Reason, strings.Join(holders, ", "))
+		}
+	}
+
+	// The same identity, applied after clustering to the model's own results (F61):
+	// silent at zero, and never silent about a group it left apart, since that is a
+	// pull request this pass split across stored narratives.
+	if n := r.Stats.PRIdentityJoins; n > 0 {
+		fmt.Fprintf(b, "identity %d cluster(s) joined another cluster holding the same pull request's work "+
+			"by exact identity\n", n)
+	}
+
+	if cs := r.Stats.PRIdentityConflicts; len(cs) > 0 {
+		fmt.Fprintf(b, "identity %d pull-request group(s) span several stored narratives — left apart:\n", len(cs))
+		for _, c := range cs {
+			fmt.Fprintf(b, "         %s: %s\n", strings.Join(c.PullRequests, ", "), strings.Join(c.Clusters, ", "))
 		}
 	}
 }

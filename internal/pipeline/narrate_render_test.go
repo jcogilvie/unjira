@@ -152,6 +152,35 @@ func TestRenderNarrateResult(t *testing.T) {
 		assert.NotContains(t, out, "by one re-ask")
 	})
 
+	t.Run("clusters joined by pull-request identity are reported", func(t *testing.T) {
+		joined := full
+		joined.Stats.PRIdentityJoins = 2
+
+		out := pipeline.RenderNarrateResult(joined)
+
+		assert.Contains(t, out, "identity 2 cluster(s) joined another cluster holding the same pull request's work")
+	})
+
+	t.Run("a pull request two stored narratives hold in one pass is reported, not joined", func(t *testing.T) {
+		conflict := full
+		conflict.Stats.PRIdentityConflicts = []correlator.PRIdentityConflict{{
+			PullRequests: []string{"github.com/o/r#1"},
+			Clusters:     []string{"narrative 9", `new "New bit"`, "narrative 12"},
+		}}
+
+		out := pipeline.RenderNarrateResult(conflict)
+
+		assert.Contains(t, out, "identity 1 pull-request group(s) span several stored narratives — left apart:")
+		assert.Contains(t, out, `github.com/o/r#1: narrative 9, new "New bit", narrative 12`)
+	})
+
+	t.Run("no pull-request identity join prints nothing extra", func(t *testing.T) {
+		out := pipeline.RenderNarrateResult(full)
+
+		assert.NotContains(t, out, "joined another cluster", "silent at zero, like the other lines")
+		assert.NotContains(t, out, "span several stored narratives")
+	})
+
 	t.Run("zero omitted events prints nothing extra", func(t *testing.T) {
 		out := pipeline.RenderNarrateResult(full)
 

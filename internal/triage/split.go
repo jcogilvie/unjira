@@ -82,11 +82,23 @@ func (h *StoreHandler) SplitNarrative(
 		correlator.WithClusterRules(h.rules),
 		correlator.WithInstruction(splitInstruction),
 	}, h.clusterReaskOptions()...)
-	results, _, err := correlator.Cluster(
+	results, clusterStats, err := correlator.Cluster(
 		ctx, eligible, nil, h.client,
 		windowSpanning(eligible), h.contextTokens, opts...)
 	if err != nil {
 		return SplitResult{}, fmt.Errorf("re-clustering narrative %d for a split: %w", narrativeID, err)
+	}
+
+	if len(results) < 2 && clusterStats.PRIdentityJoins > 0 {
+		// The model did split, along a seam that cut one pull request's work apart,
+		// and Cluster's identity join (F61) put the halves back together: exact PR
+		// identity outranks the model's choice of seam, here as in a narration pass,
+		// where a PR split across two narratives would stay split for every later
+		// event. The reviewer judged the stories, not the seam, so this is reported as
+		// what happened rather than as the model declining.
+		return SplitResult{}, fmt.Errorf(
+			"the model split narrative %d, but its clusters share a pull request, so they were joined "+
+				"back into one by exact identity; nothing was changed", narrativeID)
 	}
 
 	if len(results) < 2 {

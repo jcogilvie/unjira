@@ -117,49 +117,37 @@ cross-transcript lineage (the subagent's `session_id` is its parent's, and the d
 is in the root's lines): the shared-context spec's slice 2. Frequency: 0 of the 70 created-PR anchors
 in this repo's transcripts came from a subagent; unmeasured elsewhere.
 
-### F61 — a bisected pass splits a pull request whose events fall either side of the seam
+### F61 — one pass can still extend two stored narratives with one pull request's work
 
-The PR identity join (`preassignByPullRequest`, `internal/pipeline/preassign.go:152`) places an event
-only into a narrative the store already holds. Events in the same window are left to the model, on the
-premise that "a PR's :opened and :merged arriving together, with no narrative holding either, go to the
-model together" (`preassign.go:21`). A bisected window breaks that premise. `clusterWithSplit` clusters
-each half from that half's events alone (`internal/correlator/correlator.go:1019`, `:1025`), so a PR
-opened in one half and merged in the other is shown to two calls that cannot see each other, and each
-makes a NEW cluster for its part. `mergeSplitResults` (`:1068`) then joins halves in two cases only:
-results that extend the same existing narrative, and, once per seam, the last NEW of the first half
-with the first NEW of the second, if the same-story check agrees (`:1106`, `:1115`). That is one pair,
-chosen by response order. Nothing compares the halves' PR identities. The dispute pass does not help
-either, since it resolves one event placed twice, not two clusters holding different events of one PR.
+A bisected window clusters each half from its own events, so a PR opened in one half and merged in the
+other used to become two NEW clusters. On a real 30-day store's first pass (eight clustering calls), 19
+of the 99 PRs with two or more member events ended in two narratives, every one of them straddling a
+seam. `joinByPullRequest` (`internal/correlator/cluster_prjoin.go:90`) now joins, after the halves are
+merged and before the dispute re-ask, every group of results whose undisputed member events share an
+exact `events.PullRequestOf` value: NEW with NEW, and NEW into the one stored narrative a group extends.
 
-Measured on a real 30-day store whose first narration pass had 573 candidate events and wrote 160
-narratives in one `Persist`. Re-running the bisection's size test (`estimateTokens` against
-`llm.context_window_tokens`) over that pass's candidates gives an estimate of 691k tokens against a
-200k window, eight clustering calls, and seams at six points. Of the 99 pull requests with two or more
-member events, 19 ended in two narratives, and **all 19 have events on both sides of a seam**. None of
-the 80 that stayed in one narrative straddles a seam, and the same-story check joined no straddling PR.
-In each split the PR's `:opened` (with its `gh pr create` anchor, where there is one) is in one
-narrative and its `:merged` or `:closed` in the other.
+What it leaves is a group that extends two or more DIFFERENT stored narratives (`:115`). Joining those
+would merge stored narratives, which is a triage merge's call, so the group is left exactly as it is,
+NEW members included, and reported (`Stats.PRIdentityConflicts`, a warning log, and a pass-summary line).
+A disputed member is also left to the model by design: a member two results claim drives no join, so
+if the dispute re-ask gives it to a result holding none of that PR's other work, the PR is in two
+clusters after the pass, as the model decided with the PR shown to it as evidence.
 
-**Consequence:** from the first pass on, a PR whose lifetime crosses a seam is two narratives, and
-matching and the reconciler treat one PR's work as two stories, each with its own proposals. The join
-cannot repair it later. A PR two narratives hold is `PRSeveralHolders` (`preassign.go:98`), so its
-later events go to the model. A wide first pass bisects as a matter of course, so this is not an edge
-case. The same seams also separated narratives that share only an upstream issue number and no PR
-identity, which an identity rule could not join. That pairing is matching's question.
-
-Possible remedies, none chosen: a deterministic union of NEW clusters from the two halves that share an
-exact `events.ArtifactPullRequest`, which is the same fact the join already treats as structure rather
-than judgment; or choosing split points that do not cut a PR's events apart.
+**Consequence:** the PR is held by two narratives from that pass on, which is `PRSeveralHolders`
+(`internal/pipeline/preassign.go:102`) for every later event, so those go to the model. Arises only where
+two stored narratives already hold the PR's work or the model places its events under two of them; the
+pre-assignment join places a later event into a single open holder before the model is called.
+Unmeasured: the pass summary's conflict line is what would count it.
 
 ### F45 — the model can still reshuffle a PR's placed members apart
 
-The PR identity join (`internal/pipeline/preassign.go`, `planPRIdentity` at `:76`) places only
+The PR identity join (`internal/pipeline/preassign.go`, `planPRIdentity` at `:83`) places only
 UNPLACED events. A narrative's eligible members, the PR's `:opened` among them, are still numbered in
 the clustering prompt whenever that narrative is context, and `Persist` moves any the model puts in
-another cluster (`moveMembers`, `internal/correlator/correlator.go:1620`). The join makes this more
+another cluster (`moveMembers`, `internal/correlator/correlator.go:1704`). The join makes this more
 likely to be offered, though not more likely to be taken: placing a merge extends its narrative's
 `window_end` into the current window, so the narrative becomes context in the very pass that placed
-it (`hidePreAssigned`, `preassign.go:235`, hides only the placed event). A reshuffle that moves
+it (`hidePreAssigned`, `preassign.go:277`, hides only the placed event). A reshuffle that moves
 `:opened` away splits the PR again, with the merge left where identity put it, and a later event for
 that PR then finds two holders and falls back to the model (`PRSeveralHolders`).
 
@@ -773,7 +761,7 @@ The issue's assignee is not yet on `tasktracker.Issue`.
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Measured in six two-pass reps after the join: 24 identity placements, M3 26/26 in every rep, 0 identity-placed members moved by the model |
 | F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
 | F53 — stored timestamps keep their offset; window queries compare strings | open. Jira timestamps are stored with the account's offset, everything else `Z`; unmeasured |
-| F61 — a bisected pass splits a PR whose events fall either side of the seam | open. The join places only into narratives already stored, and `mergeSplitResults` compares no PR identity. On a real 30-day first pass: 19 of 99 multi-event PRs split, all 19 straddle a seam, none of the 80 unsplit ones does |
+| F61 — one pass can still extend two stored narratives with one PR's work | open, narrowed: `joinByPullRequest` joins results sharing an exact PR identity after clustering (on a real 30-day first pass, 19 of 99 multi-event PRs had split across bisection seams). Left apart and reported: a group extending two different stored narratives, and a disputed member the re-ask gives to a result holding none of its PR's other work. Unmeasured |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |

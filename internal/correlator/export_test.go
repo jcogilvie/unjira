@@ -8,6 +8,12 @@ import (
 // This file exposes internals to the correlator_test package. It compiles only
 // under `go test`, so nothing here widens the package's real API.
 
+// JoinByPullRequestForTest exposes the pull-request identity join, a pure function
+// whose cases are worth testing apart from a Cluster call that would reach them.
+func JoinByPullRequestForTest(results []ClusterResult) ([]ClusterResult, Stats) {
+	return joinByPullRequest(results)
+}
+
 // EstimateTokensForTest lets tests size contextWindowTokens budgets from the
 // same estimator Cluster uses, instead of hard-coding numbers that silently
 // encode the current chars-per-token ratio.
