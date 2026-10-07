@@ -374,7 +374,8 @@ data/                   SQLite database lives here (gitignored)
   disjoint selections: linked narratives "carrying unexamined work", and untracked narratives
   "awaiting a create decision". A cap counts only narratives that still need a decision — one
   already proposed for, declined, or found to have no allowed destination, each with nothing new
-  since, or holding only unjira's own output, does not take a slot. A drained pass says nothing, so the line means something when it appears. `correlator.max_context_narratives` bounds clustering's OTHER input —
+  since, or holding only unjira's own output, or linked only to tickets it cites (`mentioned`),
+  does not take a slot. A drained pass says nothing, so the line means something when it appears. `correlator.max_context_narratives` bounds clustering's OTHER input —
   not the window's own events, but how many pre-existing narratives are hydrated as context — zero
   (unlimited) by default, ranked (a narrative sharing an issue key with the window, then
   most-recent-first) rather than truncated by insertion order, and its exclusions reported the same

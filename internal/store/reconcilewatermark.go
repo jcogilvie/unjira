@@ -3,8 +3,11 @@ package store
 import "fmt"
 
 // reconcileExaminationsSchema records that a reconcile pass looked at a narrative and
-// found its whole delta self-authored — the watermark that keeps that backlog
-// draining (finding F26).
+// could act on nothing in its delta — the watermark that keeps that backlog draining.
+// Two outcomes write it, each naming itself in reason: the whole delta was
+// self-authored (finding F26), or every link the narrative has is `mentioned`, so no
+// link may receive an action. Both are decided in Go after selection, so neither is
+// visible to the selector's SQL without this row.
 //
 // This is F22's mechanism applied to the reconciler side. F12 fixed the reconciler's
 // first outcome-leaves-no-trace path (a drafted-then-suppressed action) by writing a
@@ -34,8 +37,8 @@ CREATE TABLE IF NOT EXISTS reconcile_examinations (
 );`
 
 // reconcileExaminationPredicate excludes narratives the reconciler already examined
-// and found entirely self-authored, UNLESS an event has been linked since — the
-// watermark half of F26's fix.
+// and could act on nothing in (see reconcileExaminationsSchema), UNLESS an event has
+// been linked since — the watermark half of F26's fix.
 //
 // A shared const, interpolated into both NarrativesWithActionableLinks and
 // CountNarrativesWithDelta, for the reason matchExaminationPredicate is shared
@@ -64,8 +67,14 @@ const reconcileExaminationPredicate = `
 		 )`
 
 // RecordReconcileExamined marks narrativeID as examined by a reconcile pass at a
-// moment when its entire delta was self-authored, so the selector yields to the
-// narratives behind it.
+// moment when it could act on nothing in its delta — the delta was entirely
+// self-authored, or every link was `mentioned` — so the selector yields to the
+// narratives behind it. reason says which.
+//
+// The mentioned-only case is the same shape one step earlier: SelectionRoles selects
+// such a narrative deliberately, so it gets a result row, and reconcileOne then finds
+// no actionable link. Unrecorded, one narrative citing two tickets was re-selected and
+// counted as unexamined work on every pass of a real 30-day store.
 //
 // WHY THIS EXISTS. NarrativesWithActionableLinks already filters out narratives with
 // no unexamined delta at the SQL level (hasUnexaminedDelta), but

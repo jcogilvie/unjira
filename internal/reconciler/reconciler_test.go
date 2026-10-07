@@ -206,6 +206,69 @@ func TestReconcileProposesNothingForAMentionedOnlyNarrative(t *testing.T) {
 	assert.Empty(t, llmClient.prompts, "and no LLM spend")
 }
 
+// A mentioned-only narrative is selected (SelectionRoles includes `mentioned`, so it
+// gets a result row) and then has nothing actionable, and before this was recorded
+// that outcome left no trace: the same livelock as F26, design-notes #29's shape a
+// fourth time. Under the stable (window_start, id) order it held a slot every pass and
+// the backlog count reported it as "carrying unexamined work" forever — on a real
+// 30-day store, one narrative citing two tickets, re-reported on every pass while
+// nothing happened.
+//
+// A watermark, not a tombstone: a member event linked after the examination re-admits
+// it, because matching re-examines on exactly that and may then promote a primary.
+func TestReconcile_MentionedOnlyNarrativeYieldsUntilNewWorkIsLinked(t *testing.T) {
+	s := reconcileStore(t)
+	tracker := &fakeTracker{issues: map[string]tasktracker.Issue{
+		"PROJ-2": {Key: "PROJ-2", Summary: "the ticket"},
+	}}
+
+	base := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+
+	// Older, so a cap of 1 picks it first.
+	citesOnly, err := s.InsertNarrative(base, base.Add(time.Hour), "cites a ticket", "s")
+	require.NoError(t, err)
+	linkEventToNarrative(t, s, citesOnly, codeEvent("m:1", "work that only cites PROJ-9"))
+	require.NoError(t, s.AddNarrativeIssues(citesOnly, []store.NarrativeIssue{
+		{IssueKey: "PROJ-9", Role: store.Role("mentioned"), Provenance: "scm_command", Confidence: 0.9},
+	}))
+
+	realWork, err := s.InsertNarrative(base.Add(time.Minute), base.Add(time.Hour), "real work", "s")
+	require.NoError(t, err)
+	linkEventToNarrative(t, s, realWork, codeEvent("r:1", "wrote real code"))
+	require.NoError(t, s.AddNarrativeIssues(realWork, []store.NarrativeIssue{
+		{IssueKey: "PROJ-2", Role: store.RolePrimary, Provenance: "branch", Confidence: 0.9},
+	}))
+
+	cfg := config.ReconcilerConfig{MaxNarrativesPerPass: 1, MinConfidenceToPropose: 0.5}
+	llmClient := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-2","type":"comment","body":"real work landed","confidence":0.8,"rationale":"r"}]`,
+	}}
+
+	results, _, err := Reconcile(t.Context(), s, tracker, llmClient, cfg)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, citesOnly, results[0].NarrativeID, "considered once, so it still gets its result row")
+	assert.Empty(t, results[0].Proposed)
+
+	remaining, err := s.CountNarrativesWithDelta(SelectionRoles)
+	require.NoError(t, err)
+	assert.Equal(t, 1, remaining, "only the real narrative still carries unexamined work")
+
+	results, _, err = Reconcile(t.Context(), s, tracker, llmClient, cfg)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, realWork, results[0].NarrativeID,
+		"the examined mentioned-only narrative must yield its slot to the narrative behind it")
+
+	// New member work re-admits it, ahead of realWork again in the stable order.
+	linkEventToNarrative(t, s, citesOnly, codeEvent("m:2", "more work"))
+
+	results, _, err = Reconcile(t.Context(), s, tracker, llmClient, cfg)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, citesOnly, results[0].NarrativeID, "a watermark, not a tombstone")
+}
+
 func TestReconcileSkipsANarrativeWithNoLinks(t *testing.T) {
 	// A genuinely link-free narrative is matching's backlog, not the
 	// reconciler's: it must simply not appear in results at all, since

@@ -90,7 +90,7 @@ func RunMatch(
 	matched, stats, err := correlator.Match(
 		ctx, s, tracker, client, cfg.Match,
 		correlator.WithLinkExclusions(compiled), correlator.WithRules(correlatorRules),
-		correlator.WithMatchReasks(budgets.Match))
+		correlator.WithMatchReasks(budgets.Match), correlator.WithMatchLogger(opts.Log))
 	result := MatchRunResult{Matched: matched, Stats: stats}
 	if err != nil {
 		return result, fmt.Errorf("matching narratives: %w", err)

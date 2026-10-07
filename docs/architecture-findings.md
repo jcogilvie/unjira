@@ -117,6 +117,40 @@ cross-transcript lineage (the subagent's `session_id` is its parent's, and the d
 is in the root's lines): the shared-context spec's slice 2. Frequency: 0 of the 70 created-PR anchors
 in this repo's transcripts came from a subagent; unmeasured elsewhere.
 
+### F61 — a bisected pass splits a pull request whose events fall either side of the seam
+
+The PR identity join (`preassignByPullRequest`, `internal/pipeline/preassign.go:152`) places an event
+only into a narrative the store already holds. Events in the same window are left to the model, on the
+premise that "a PR's :opened and :merged arriving together, with no narrative holding either, go to the
+model together" (`preassign.go:21`). A bisected window breaks that premise. `clusterWithSplit` clusters
+each half from that half's events alone (`internal/correlator/correlator.go:1019`, `:1025`), so a PR
+opened in one half and merged in the other is shown to two calls that cannot see each other, and each
+makes a NEW cluster for its part. `mergeSplitResults` (`:1068`) then joins halves in two cases only:
+results that extend the same existing narrative, and, once per seam, the last NEW of the first half
+with the first NEW of the second, if the same-story check agrees (`:1106`, `:1115`). That is one pair,
+chosen by response order. Nothing compares the halves' PR identities. The dispute pass does not help
+either, since it resolves one event placed twice, not two clusters holding different events of one PR.
+
+Measured on a real 30-day store whose first narration pass had 573 candidate events and wrote 160
+narratives in one `Persist`. Re-running the bisection's size test (`estimateTokens` against
+`llm.context_window_tokens`) over that pass's candidates gives an estimate of 691k tokens against a
+200k window, eight clustering calls, and seams at six points. Of the 99 pull requests with two or more
+member events, 19 ended in two narratives, and **all 19 have events on both sides of a seam**. None of
+the 80 that stayed in one narrative straddles a seam, and the same-story check joined no straddling PR.
+In each split the PR's `:opened` (with its `gh pr create` anchor, where there is one) is in one
+narrative and its `:merged` or `:closed` in the other.
+
+**Consequence:** from the first pass on, a PR whose lifetime crosses a seam is two narratives, and
+matching and the reconciler treat one PR's work as two stories, each with its own proposals. The join
+cannot repair it later. A PR two narratives hold is `PRSeveralHolders` (`preassign.go:98`), so its
+later events go to the model. A wide first pass bisects as a matter of course, so this is not an edge
+case. The same seams also separated narratives that share only an upstream issue number and no PR
+identity, which an identity rule could not join. That pairing is matching's question.
+
+Possible remedies, none chosen: a deterministic union of NEW clusters from the two halves that share an
+exact `events.ArtifactPullRequest`, which is the same fact the join already treats as structure rather
+than judgment; or choosing split points that do not cut a PR's events apart.
+
 ### F45 — the model can still reshuffle a PR's placed members apart
 
 The PR identity join (`internal/pipeline/preassign.go`, `planPRIdentity` at `:76`) places only
@@ -240,6 +274,25 @@ the same way, which is defensible, since nothing was written. Not fixed here: th
 (a rejected create with no member link since the narrative's latest action) plus the matching backstop, but
 it changes what a rejection means on the create path, which is a review-semantics decision. Frequency on
 real data is unmeasured.
+
+### F62 — a draft that yields no action leaves no trace, so it is drafted again every pass
+
+When drafting yields no action, `reconcileOne` returns a result with neither a proposal nor a
+suppression (`internal/reconciler/reconciler.go:289` onward). That happens when the model returns an
+empty array, or names only keys that `actionsFromVerdicts` does not recognize, which it logs and drops
+(`internal/reconciler/draft.go:390`). `Persist` writes nothing for such a result, so no action row
+bounds the delta. The narrative is selected again next pass, a model call each time, and the backlog
+count reports it as unexamined work throughout. This is design-notes #29's livelock, with spend. Every
+other "nothing to do" exit in `reconcileOne` records something: a suppression row, or a
+`reconcile_examinations` watermark for a self-authored delta or a narrative whose every link is
+`mentioned`.
+
+It is not closed the same way, because this outcome may be a malformed answer rather than a verdict.
+The prompt requires exactly one action per issue shown (`draft.go:28`), so an empty array contradicts
+it. F58 records the same disagreement on the matching side. Whether to re-ask, as matching does for an
+unparseable response, or to record the examination is the open question. **Consequence:** a model that
+declines to draft for a narrative is billed for that narrative on every pass for as long as it keeps
+declining. Unmeasured: no narrative in a real 30-day store's backlog is in this state.
 
 ### F52 — a single dispute too large for the context window fails the pass
 
@@ -670,8 +723,13 @@ examination, so it no longer re-selects the narrative. But no other path picks i
 
 - **The reconciler** drafts comments and transitions onto a narrative's linked issue, and a `mentioned`
   link is not the work, so drafting onto it would put one narrative's story on a ticket it only cites.
-- **The create path** selects on `NarrativesWithNoIssueLink`
-  (`internal/store/narrativeissues.go:523`), which treats a link of any role as tracked.
+  It selects the narrative, finds no actionable link, and records that in `reconcile_examinations`,
+  so the narrative holds no slot and is not counted as unexamined work until a member event is
+  linked after it. Only a member link re-admits it. A role that changes without one, such as an
+  applied create adding a primary to a narrative examined while it was mentioned-only, waits for the
+  next member link before the reconciler drafts for it.
+- **The create path** selects on `NarrativesAwaitingCreate` (`internal/store/createbacklog.go:88`),
+  whose predicate (`awaitingCreate`, `:54`) treats a link of any role as tracked.
 
 So the work is untracked, and unjira can say nothing about it. Seen on a real 30-day store: narrative
 14, citing two tickets at confidence 0.80–0.92, both `mentioned`. Two inputs disagree here as well.
@@ -697,16 +755,18 @@ narrative.
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Measured in six two-pass reps after the join: 24 identity placements, M3 26/26 in every rep, 0 identity-placed members moved by the model |
 | F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
 | F53 — stored timestamps keep their offset; window queries compare strings | open. Jira timestamps are stored with the account's offset, everything else `Z`; unmeasured |
+| F61 — a bisected pass splits a PR whose events fall either side of the seam | open. The join places only into narratives already stored, and `mergeSplitResults` compares no PR identity. On a real 30-day first pass: 19 of 99 multi-event PRs split, all 19 straddle a seam, none of the 80 unsplit ones does |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
 | F60 — upstream work done for an internal ticket is routed by repository, not by purpose | open. Matching's job, not routing's. 3 of 5 measured cases |
-| F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance |
+| F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance. Narrowed: the reconciler examines such a narrative once and records it (`reconcile_examinations`), where before it held a slot and was counted as unexamined work on every pass (`TestReconcile_MentionedOnlyNarrativeYieldsUntilNewWorkIsLinked`) |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson); matching, omission-round and dispute responses are re-asked within configurable budgets. Only the first clustering response is still never retried. 0 such deaths in 32 passes; a budgeted re-ask is the shape if one appears |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F50 — a split narrative is still read by the create path and the review queue | open, narrowed: the create path examines a split narrative once and its create examination then excludes it, so it no longer holds a slot (`TestProposeCreates_AnEmptiedNarrativeYieldsItsSlot`); it is still reported with a false reason, and the review-queue half is untouched. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed before the create backlog fix: a split narrative held a create slot for 3 of 3 passes at cap 1 |
 | F59 — a rejected create is re-asked on the next pass whether or not anything changed | open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data |
+| F62 — a draft that yields no action leaves no trace, so it is drafted again every pass | open, policy question: re-ask (an empty array breaks the prompt's one-action-per-issue rule) or record an examination? Found closing the mentioned-only path, the last silent exit in `reconcileOne`. 0 in a real 30-day store's backlog |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |
 | F30 — match/reconcile watermarks use a strict `>` on millisecond timestamps | **resolved**: every link comparison is now sequence-vs-sequence — `narrative_events.link_seq` (AUTOINCREMENT, since restructures delete links) against a high-water mark recorded at examination, action creation and execution. The scope was **six** comparisons, not the two the finding named: both watermarks, the reconciler delta (`DeltaEvents`, `hasUnexaminedDelta`) and the freeze rule (`EligibleEventIDs`, `EligibleEvents`, against a different table's `executed_at`). Timestamps kept as display-only. Requires a fresh store; an old one is refused at `Open`. Formerly flaky test: 100/100 |

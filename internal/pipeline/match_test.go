@@ -12,6 +12,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/correlator"
 	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
@@ -301,6 +303,40 @@ func TestRunMatch_AppliesConfiguredLinkExclusions(t *testing.T) {
 	require.Len(t, got.Matched, 1)
 	assert.Equal(t, []string{"NOJIRA-1"}, got.Matched[0].Excluded)
 	assert.Empty(t, tracker.getCalls, "an excluded placeholder must never be verified")
+}
+
+// MatchOptions.Log reaches correlator.Match. Every log line Match writes (the cap
+// warning, a failed activity read, the confidence-floor and classifier notes) is
+// otherwise silent from the CLI: the option existed on both sides and nothing
+// connected them. The cap warning is the cheapest of those lines to provoke.
+func TestRunMatch_LogsThroughTheInjectedLogger(t *testing.T) {
+	s := matchPipelineStore(t)
+
+	for i, ext := range []string{"s1", "s2"} {
+		e := events.NewEvent("claude_code", ext,
+			time.Date(2026, 8, 24, 10+i, 0, 0, 0, time.UTC), "session summary")
+		e.Artifacts["git_branch"] = "feature/PROJ-42"
+		seedMatchNarrative(t, s, "Implement feature", "did the feature work", e)
+	}
+
+	tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+		"PROJ-42": {Key: "PROJ-42", Summary: "Feature work", StatusName: "In Progress"},
+	}}
+	cfg := config.Config{Match: config.MatchConfig{
+		MaxCandidatesPerNarrative: 10, ConfidenceFloor: 0.5, MaxNarrativesPerPass: 1,
+	}}
+
+	var logged strings.Builder
+	log, err := logging.New(logging.Options{Format: "text", Level: "info", Out: &logged})
+	require.NoError(t, err)
+
+	got, err := pipeline.RunMatch(t.Context(), s, tracker, &pipelineFakeLLM{}, cfg, pipeline.MatchOptions{Log: log})
+
+	require.NoError(t, err)
+	assert.Len(t, got.Matched, 1, "the cap bounds the pass")
+	assert.Contains(t, logged.String(), "narrative cap reached",
+		"correlator.Match's warning must reach the logger the caller supplied")
+	assert.Contains(t, logged.String(), "component=correlator")
 }
 
 func TestRunMatch_RejectsInvalidMatchConfig(t *testing.T) {

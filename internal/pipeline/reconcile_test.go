@@ -124,6 +124,75 @@ func TestRunReconcilePersistsWhenNotDryRun(t *testing.T) {
 	assert.Equal(t, "proposed", got[0].Status)
 }
 
+// The linked backlog is counted after Persist, as the create backlog is: a narrative
+// this pass proposed for now has an action, so its delta is examined and it no
+// longer carries unexamined work. Counted before Persist, the one narrative here was
+// reported as still outstanding by the very pass that handled it.
+func TestRunReconcile_RemainingExcludesWhatThisPassProposed(t *testing.T) {
+	s := matchPipelineStore(t)
+	seedReconcilableNarrative(t, s, "PROJ-1")
+
+	tracker := &pipelineFakeTracker{issues: map[string]tasktracker.Issue{
+		"PROJ-1": {Key: "PROJ-1", Summary: "the ticket", StatusName: "In Progress"},
+	}}
+	cfg := config.Config{Reconciler: config.ReconcilerConfig{
+		MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5,
+	}}
+
+	for _, tt := range []struct {
+		name          string
+		dryRun        bool
+		wantRemaining int
+		why           string
+	}{
+		// Dry run first: it persists nothing, so the store is unchanged for the real pass.
+		{"dry run", true, 1, "a dry run persists nothing, so in the store the narrative still carries its delta"},
+		{"real pass", false, 0, "the proposal this pass persisted examined the narrative's whole delta"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			llmFake := &pipelineFakeLLM{responses: []string{
+				`[{"issue_key":"PROJ-1","type":"comment","body":"the work landed","confidence":0.9,"rationale":"r"}]`,
+			}}
+
+			got, err := pipeline.RunReconcile(t.Context(), s, tracker, llmFake, cfg,
+				pipeline.ReconcileOptions{DryRun: tt.dryRun})
+
+			require.NoError(t, err)
+			require.Len(t, got.Results, 1)
+			require.Len(t, got.Results[0].Proposed, 1, "the narrative was drafted for")
+			assert.Equal(t, tt.wantRemaining, got.Remaining, tt.why)
+		})
+	}
+}
+
+// A narrative whose only links are `mentioned` is examined once and then no longer
+// reported as carrying unexamined work. On a real 30-day store one such narrative was
+// reported as "1 narrative(s) still carrying unexamined work" on every pass, though no
+// pass could ever do anything with it.
+func TestRunReconcile_AMentionedOnlyNarrativeIsNotABacklogForever(t *testing.T) {
+	s := matchPipelineStore(t)
+	nid := seedMatchNarrative(t, s, "cites two tickets", "work that only cites them",
+		events.NewEvent("claude_code", "m1", time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC), "did work"))
+	require.NoError(t, s.AddNarrativeIssues(nid, []store.NarrativeIssue{
+		{IssueKey: "PROJ-1", Role: correlator.RoleMentioned, Provenance: "scm_command", Confidence: 0.9},
+		{IssueKey: "PROJ-2", Role: correlator.RoleMentioned, Provenance: "scm_command", Confidence: 0.9},
+	}))
+
+	llmFake := &pipelineFakeLLM{}
+	cfg := config.Config{Reconciler: config.ReconcilerConfig{
+		MaxNarrativesPerPass: 10, MinConfidenceToPropose: 0.5,
+	}}
+
+	for pass := 1; pass <= 2; pass++ {
+		got, err := pipeline.RunReconcile(t.Context(), s, &pipelineFakeTracker{}, llmFake, cfg,
+			pipeline.ReconcileOptions{})
+
+		require.NoError(t, err)
+		assert.Equal(t, 0, got.Remaining, "pass %d: nothing actionable is not outstanding work", pass)
+	}
+	assert.Empty(t, llmFake.prompts, "a mentioned-only narrative is never drafted for")
+}
+
 // TestRunReconcile_LoadsReconcilerRulesAndAppendsThemToTheDraftingSystemPrompt
 // is the fix's end-to-end proof: a scope:reconciler rule file on disk must
 // reach the actual system prompt RunReconcile's LLM call sends — not merely
