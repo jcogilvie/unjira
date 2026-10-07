@@ -23,8 +23,9 @@ const ActionTypeCreate = "create"
 //
 // ITS OWN TABLE, not a row in reconcile_examinations, because the two record different
 // facts and a shared row would let one stand in for the other. A reconcile examination
-// says a linked narrative's DELTA (the links after its latest action) was all unjira's
-// own; its earlier member events may be real work. A create examination says EVERY
+// says the reconciler could act on nothing in a linked narrative's DELTA (the links
+// after its latest action): it was all unjira's own, or the narrative's every link was
+// `mentioned`. Its earlier member events may be real work. A create examination says EVERY
 // member event was. reconcile_examinations is keyed on narrative_id alone, so a
 // narrative that was reconciled while linked and later lost its links (a triage
 // retarget, a merge) would be skipped by the create path on the strength of a

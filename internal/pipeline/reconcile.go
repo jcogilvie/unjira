@@ -78,6 +78,10 @@ type ReconcileRunResult struct {
 	// Covers the ACTIONABLE-LINK cap only, not ProposeCreates' separate untracked
 	// cap. Two numbers in one field would be a lie, and the create backlog drains
 	// on its own schedule; CreatesRemaining reports that one.
+	//
+	// Counted after Persist, as CreatesRemaining is, so a narrative this pass proposed
+	// for is no longer counted. Under DryRun nothing is persisted, so it is: in the
+	// store its delta is still unexamined.
 	Remaining int
 	// CreatesRemaining is how many untracked narratives STILL await a create decision
 	// after this pass (store.CountNarrativesAwaitingCreate, the create selector's own
@@ -196,29 +200,19 @@ func RunReconcile(
 		CreatesDeferred: createsDeferred,
 	}
 
-	// Before the DryRun early return, so a dry run reports its backlog too — that
-	// is the mode an operator uses to ask "how far behind am I", and answering only
-	// on the writing path would withhold it exactly when it is most wanted.
-	//
-	// A count failure does not fail the pass: reconciling happened. Remaining stays
-	// 0, which reads as caught-up — wrong, but quieter than discarding a completed
-	// pass over a COUNT(*).
-	// CountNarrativesWithDelta, not CountNarrativesWithActionableLinks: the latter is
-	// what a pass SELECTS, and reconcileOne skips a selected narrative whose delta is
-	// empty. Counting the selection reported 55 where 20 had nothing new (finding
-	// F12), telling an operator to re-run for work that did not exist — and each
-	// re-run bills for the sweep. The count now mirrors the skip.
-	if remaining, countErr := s.CountNarrativesWithDelta(reconciler.SelectionRoles); countErr != nil {
-		logging.For(opts.Log, "pipeline").Warn(
-			"could not count the narratives with unexamined work",
-			"err", countErr, "consequence", "this pass's summary will not report a backlog")
-	} else {
-		result.Remaining = remaining
-	}
-
 	createsRan := createsDeferred == 0
 
+	// Both backlogs are counted where the pass ends, never before Persist: once Persist
+	// commits, a narrative this pass proposed for has an action whose link sequence
+	// bounds its delta, so it no longer carries unexamined work. Counted before Persist,
+	// Remaining reported every narrative the pass had just handled as still outstanding.
+	//
+	// A dry run reports both too — that is the mode an operator uses to ask "how far
+	// behind am I", and answering only on the writing path would withhold it exactly
+	// when it is most wanted. It persists nothing, so its counts are the store as the
+	// pass found it, which is the true answer: nothing it drafted was recorded.
 	if opts.DryRun {
+		result.Remaining = countDeltaBacklog(s, opts.Log)
 		if createsRan {
 			result.CreatesRemaining = countCreateBacklog(s, opts.Log)
 		}
@@ -227,6 +221,12 @@ func RunReconcile(
 	}
 
 	persisted, err := reconciler.Persist(s, results)
+
+	// Counted whether or not Persist succeeded. Persist is all-or-nothing, so after a
+	// failure the store is as the pass found it and the count is still true; the CLI
+	// renders the summary alongside the error, and a 0 there would read as caught up.
+	result.Remaining = countDeltaBacklog(s, opts.Log)
+
 	if err != nil {
 		return result, fmt.Errorf("persisting proposed actions: %w", err)
 	}
@@ -239,9 +239,31 @@ func RunReconcile(
 	return result, reconcileErr
 }
 
+// countDeltaBacklog is ReconcileRunResult.Remaining. A count failure does not fail the
+// pass: reconciling happened, and 0 — which reads as caught up — is wrong but quieter
+// than discarding a completed pass over a COUNT(*).
+//
+// CountNarrativesWithDelta, not CountNarrativesWithActionableLinks: the latter is what a
+// pass SELECTS, and reconcileOne skips a selected narrative whose delta is empty.
+// Counting the selection reported 55 where 20 had nothing new (finding F12), telling an
+// operator to re-run for work that did not exist — and each re-run bills for the sweep.
+// The count mirrors the skip.
+func countDeltaBacklog(s *store.Store, log *slog.Logger) int {
+	n, err := s.CountNarrativesWithDelta(reconciler.SelectionRoles)
+	if err != nil {
+		logging.For(log, "pipeline").Warn(
+			"could not count the narratives with unexamined work",
+			"err", err, "consequence", "this pass's summary will not report a backlog")
+
+		return 0
+	}
+
+	return n
+}
+
 // countCreateBacklog is ReconcileRunResult.CreatesRemaining. A count failure does not
-// fail the pass, for the reason given at the Remaining count above: the work happened,
-// and 0 is the quieter wrong answer.
+// fail the pass, for the reason countDeltaBacklog gives: the work happened, and 0 is the
+// quieter wrong answer.
 func countCreateBacklog(s *store.Store, log *slog.Logger) int {
 	n, err := s.CountNarrativesAwaitingCreate()
 	if err != nil {

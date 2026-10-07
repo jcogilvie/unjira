@@ -21,7 +21,9 @@ import (
 // selects on this superset — NOT the narrower actionable set actionableLinks
 // filters to — so a `mentioned`-only narrative still gets a ReconcileResult
 // row documenting "considered, nothing to do", distinguishing it from a
-// narrative with no link at all. A genuinely unlinked narrative has no
+// narrative with no link at all. Once per delta: reconcileOne records that
+// examination, so the narrative is not selected again until a member event is
+// linked after it. A genuinely unlinked narrative has no
 // narrative_issues row of any role, so NarrativesWithActionableLinks excludes
 // it regardless of which roles are passed: it is matching's backlog, not the
 // reconciler's, and must not appear in results at all.
@@ -211,8 +213,20 @@ func reconcileOne(
 
 	actionable := actionableLinks(links)
 	if len(actionable) == 0 {
-		// Either no links at all (matching's concern) or only `mentioned`
-		// links, which by definition get nothing.
+		// Only `mentioned` links, which by definition get nothing (a narrative with no
+		// link at all is never selected). Recorded, for the reason the self-authored
+		// branch below is: SelectionRoles selects this narrative on purpose, so it gets
+		// this result row, and an outcome that writes nothing under the stable
+		// (window_start, id) order is design-notes #29's livelock. Unrecorded, it held a
+		// slot every pass and CountNarrativesWithDelta reported it as unexamined work
+		// forever. A member event linked later re-admits it, which is also when matching
+		// re-examines it and may promote a primary.
+		if err := s.RecordReconcileExamined(
+			narrative.ID, "no actionable link: every link is mentioned"); err != nil {
+			return result, correlator.Stats{}, fmt.Errorf(
+				"recording reconcile examination for narrative %d: %w", narrative.ID, err)
+		}
+
 		return result, correlator.Stats{}, nil
 	}
 
