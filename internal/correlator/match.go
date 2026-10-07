@@ -356,9 +356,13 @@ func verifyCandidates(
 	return verified, unresolved, nil
 }
 
-// resolveVerified decides roles for verified candidates: a lone survivor is
-// primary deterministically (Confidence 1.0, no LLM spend — one survivor is
-// not a judgment call), while 2+ survivors go through classifyCandidates.
+// resolveVerified decides roles for verified candidates. A lone survivor whose
+// provenance names the work (Provenance.NamesTheWork: a branch, an SCM authoring
+// command, a Jira event about the issue) is primary deterministically (Confidence
+// 1.0, no LLM spend — one named ticket is not a judgment call). Every other case goes
+// through classifyCandidates, including a lone survivor that was only mentioned: that
+// it is the only key mentioned says nothing about whether it is the work, and the
+// model may answer that it is not.
 // Every returned store.NarrativeIssue carries Provenance/Connection from
 // the verifiedCandidate that produced it, not from the model — provenance
 // is a fact this package already determined and must not be something an
@@ -373,7 +377,7 @@ func resolveVerified(
 	maxReasks int,
 	log *slog.Logger,
 ) (links []store.NarrativeIssue, primaryKey string, primaryConfidence float64, rationale string, stats Stats, err error) {
-	if len(verified) == 1 {
+	if len(verified) == 1 && verified[0].Provenance.NamesTheWork() {
 		v := verified[0]
 		links = []store.NarrativeIssue{{
 			IssueKey:   v.IssueKey,
@@ -392,6 +396,7 @@ func resolveVerified(
 	// saw them. See match_events_test.go for the reproduction.
 	n := Narrative{
 		ID: narrative.ID, Title: narrative.Title, Summary: narrative.Summary, Events: evts,
+		WindowStart: narrative.WindowStart, WindowEnd: narrative.WindowEnd,
 	}
 
 	verdicts, callStats, callErr := classifyCandidates(ctx, client, n, verified, learnedRules, maxReasks)
@@ -529,10 +534,12 @@ func persistLinks(
 // classifySystemPrompt instructs the model to assign each verified
 // candidate one of the three closed roles defined in match_types.go —
 // worded to match that file's doc comments so the two never drift apart.
-const classifySystemPrompt = `You are attributing one work narrative to the tracker issues it might belong to. Every candidate shown already exists — verified against the live tracker — and each is shown with its provenance (where its key was found) as a stated PRIOR, not a verdict: even a key found in a branch name can be a stale reference, so judge from each candidate's summary, description, and status, not from provenance strength alone.
+const classifySystemPrompt = `You are attributing one work narrative to the tracker issues it might belong to. Every candidate shown already exists — verified against the live tracker — and each is shown with its provenance (where its key was found) as a stated PRIOR, not a verdict: even a key found in a branch name can be a stale reference, so judge from each candidate's summary, description, status and dates, not from provenance strength alone.
+
+A candidate's dates are shown against the narrative's window. A ticket resolved well before the work began is rarely where new work is tracked: a follow-up on recently finished work can belong there, but new work that only shares a topic with an old closed ticket cites it at most.
 
 Assign each candidate exactly one role:
-- "primary": the record the work is principally tracked in. Exactly one candidate must receive this role.
+- "primary": the record the work is principally tracked in. At most one candidate may receive this role. If no candidate is where this work is tracked (each is only cited, or tracks some other body of work), give none of them this role: that is the honest answer, not a failure, even when there is only one candidate.
 - "same_work": a co-representation of the same body of work in another tracking context — not a dependency. One body of work recorded twice for two audiences (for example, an engineering ticket and a paired change-management ticket for the same deploy), not two separate bodies of work related to each other.
 - "mentioned": the issue was referenced in the narrative's events but is not itself the work — the correct role for a citation, a "caused by", or a "discovered while" reference alike.
 
@@ -643,10 +650,23 @@ func buildMatchReaskPrompt(userPrompt, refused string, reason error) string {
 //
 // Rendered in the same shape buildDraftPrompt and buildClusterPrompt use, so all
 // three prompts describe an event identically.
+//
+// Each candidate's status category and dates are rendered against the narrative's
+// window, with the arithmetic done (datedAgainstWindow). Before, the model saw
+// "status: Done" and nothing that said when: a ticket closed the day before a
+// follow-up and one closed a year before new work on the same topic read alike, and on
+// a real 30-day store long-closed tickets were accepted as where new work was tracked.
+// The facts are rendered rather than turned into a rule, because a closed ticket can
+// legitimately be where a follow-up belongs, and how long after closing that stops
+// being plausible is a judgment about the work, not a constant.
 func buildMatchPrompt(n Narrative, candidates []verifiedCandidate) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Narrative: title=%q\nsummary: %q\n", n.Title, n.Summary)
+	if !n.WindowStart.IsZero() {
+		fmt.Fprintf(&b, "window: %s to %s\n",
+			n.WindowStart.UTC().Format(time.RFC3339), n.WindowEnd.UTC().Format(time.RFC3339))
+	}
 
 	if len(n.Events) > 0 {
 		b.WriteString("\nEvents in this narrative:\n")
@@ -664,10 +684,63 @@ func buildMatchPrompt(n Narrative, candidates []verifiedCandidate) string {
 
 	for _, c := range candidates {
 		fmt.Fprintf(&b, "- issue_key=%s provenance=%s\n", c.IssueKey, c.Provenance)
-		fmt.Fprintf(&b, "  status: %s\n", c.Issue.StatusName)
+		if c.Issue.StatusCategory != "" {
+			fmt.Fprintf(&b, "  status: %s (category: %s)\n", c.Issue.StatusName, c.Issue.StatusCategory)
+		} else {
+			fmt.Fprintf(&b, "  status: %s\n", c.Issue.StatusName)
+		}
+		if !c.Issue.Resolved.IsZero() {
+			fmt.Fprintf(&b, "  resolved: %s\n", datedAgainstWindow(c.Issue.Resolved, n.WindowStart, n.WindowEnd))
+		}
+		if !c.Issue.Updated.IsZero() {
+			fmt.Fprintf(&b, "  last updated: %s\n", datedAgainstWindow(c.Issue.Updated, n.WindowStart, n.WindowEnd))
+		}
 		fmt.Fprintf(&b, "  summary: %q\n", c.Issue.Summary)
 		fmt.Fprintf(&b, "  description: %q\n", c.Issue.Description)
 	}
 
 	return b.String()
+}
+
+// datedAgainstWindow renders at as a UTC date and where it falls against the window
+// [start, end], in whole calendar days: "2025-03-04 (580 days before this narrative's
+// window began)". Calendar days, counted between UTC dates, because the date is what
+// is shown, and an elapsed-hours count could disagree with it by one. A zero start
+// (a narrative with no window) renders the date alone.
+func datedAgainstWindow(at, start, end time.Time) string {
+	const day = 24 * time.Hour
+
+	date := at.UTC().Format(time.DateOnly)
+	if start.IsZero() {
+		return date
+	}
+
+	calendarDays := func(from, to time.Time) int {
+		return int(to.UTC().Truncate(day).Sub(from.UTC().Truncate(day)) / day)
+	}
+
+	plural := func(n int) string {
+		if n == 1 {
+			return "1 day"
+		}
+
+		return fmt.Sprintf("%d days", n)
+	}
+
+	switch {
+	case at.Before(start):
+		if n := calendarDays(at, start); n > 0 {
+			return fmt.Sprintf("%s (%s before this narrative's window began)", date, plural(n))
+		}
+
+		return date + " (the same day, before this narrative's window began)"
+	case at.After(end):
+		if n := calendarDays(end, at); n > 0 {
+			return fmt.Sprintf("%s (%s after this narrative's window ended)", date, plural(n))
+		}
+
+		return date + " (the same day, after this narrative's window ended)"
+	default:
+		return date + " (during this narrative's window)"
+	}
 }

@@ -2,6 +2,7 @@ package jira
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -93,4 +94,43 @@ func TestNormalizeIssue_UnrecognizedDescriptionShapeIsEmpty(t *testing.T) {
 	}
 
 	assert.Empty(t, normalizeIssue(raw).Description)
+}
+
+// TestNormalizeIssue_CarriesResolutionAndUpdateDates: matching shows the model when a
+// candidate was resolved and last touched, set against the narrative's own window, so
+// a ticket closed long before the work began is visibly that. Jira's own timestamp
+// format, as GET /issue returns it.
+func TestNormalizeIssue_CarriesResolutionAndUpdateDates(t *testing.T) {
+	raw := map[string]any{
+		"key": "PAAS-2710",
+		"fields": map[string]any{
+			"summary":        "CVEs: ArgoCD",
+			"resolutiondate": "2025-03-04T10:15:30.000+0000",
+			"updated":        "2025-03-05T08:00:00.000-0700",
+		},
+	}
+
+	got := normalizeIssue(raw)
+
+	assert.True(t, got.Resolved.Equal(time.Date(2025, 3, 4, 10, 15, 30, 0, time.UTC)), "resolved: %v", got.Resolved)
+	assert.True(t, got.Updated.Equal(time.Date(2025, 3, 5, 15, 0, 0, 0, time.UTC)), "updated: %v", got.Updated)
+}
+
+// TestNormalizeIssue_AnUnresolvedIssueHasNoResolutionDate: Jira sends null for an
+// unresolved issue. A field it did not send, or sent in a shape this cannot read, is
+// unknown, never a guessed date.
+func TestNormalizeIssue_AnUnresolvedIssueHasNoResolutionDate(t *testing.T) {
+	raw := map[string]any{
+		"key": "PAAS-1",
+		"fields": map[string]any{
+			"summary":        "open work",
+			"resolutiondate": nil,
+			"updated":        "yesterday",
+		},
+	}
+
+	got := normalizeIssue(raw)
+
+	assert.True(t, got.Resolved.IsZero())
+	assert.True(t, got.Updated.IsZero())
 }

@@ -335,12 +335,13 @@ type MatchConfig struct {
 	// which then reached the create path as untracked work and drew proposals for
 	// new tickets duplicating issues those narratives already named.
 	MaxNarrativesPerPass int `json:"max_narratives_per_pass"`
-	// ConfidenceFloor governs only whether a primary is promoted into the
-	// denormalized narratives.issue_key. Below it, every narrative_issues row
-	// is still written — including the primary — but narratives.issue_key stays
-	// NULL. The floor governs what unjira asserts, not what it records:
-	// dropping the rows would make a low-confidence match indistinguishable
-	// from finding nothing at all.
+	// ConfidenceFloor governs only whether matching reports a primary as
+	// promoted in its pass result (correlator.MatchResult.Primary). Below it,
+	// every narrative_issues row is still written, including the primary. The
+	// floor governs what unjira asserts, not what it records: dropping the rows
+	// would make a low-confidence match indistinguishable from finding nothing
+	// at all. Nothing downstream reads it, though, so the reconciler drafts onto
+	// a primary at any confidence (finding F64).
 	ConfidenceFloor float64 `json:"confidence_floor"`
 }
 

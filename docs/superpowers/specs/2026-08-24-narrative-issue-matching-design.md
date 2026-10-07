@@ -6,6 +6,23 @@ unreachable, every narrative is unlinked forever, and every drafted action would
 
 `README.md` assigns matching to the **correlator**, not the reconciler.
 
+## Amendment: one survivor is primary unasked only when the work named it (2026-10-07)
+
+Resolution step 4 below ("One survivor → `primary`, deterministically") now holds only for a survivor
+whose provenance records someone naming the ticket for this work: a reviewer's target, a branch, an
+SCM authoring command, a Jira event about the issue (`Provenance.NamesTheWork`). A lone prose
+mention, corroborated or not, goes to the classifier, whose prompt now permits giving no candidate
+the primary role, and which sees each candidate's status category and resolution and update dates set
+against the narrative's window.
+
+Why: on a real 30-day store, 16 narratives had a lone verified candidate promoted at confidence 1.0
+with no model call. 15 of them drew a comment proposal, most onto a ticket the work had only mentioned: a
+closed CVE ticket a new ArgoCD investigation cited, a composition ticket closed months before a new
+composition, keys quoted in pull-request bodies. After this change and the github collector's
+PR-body change, 1 of the 16 is still promoted unasked. Verified by unit tests and break-it drills
+(`match_lone_test.go`, `match_dates_test.go`); the model's answers on the other 15 were not measured,
+since no model was run.
+
 ## Amendment: per-candidate tracker resolution (landed 2026-09-02, task #130)
 
 As shipped, `Match` took ONE `tasktracker.TaskReader` for a whole pass, resolved by the caller from a

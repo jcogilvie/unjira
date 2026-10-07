@@ -40,3 +40,31 @@ func TestExtractGitHubIssueRefs(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractGitHubClosingRefs: a reference after one of GitHub's closing keywords,
+// one keyword per reference, as GitHub itself reads them. A reference with no keyword
+// is a citation and is not returned.
+func TestExtractGitHubClosingRefs(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"fixes", "Fixes o/r#1", []string{"o/r#1"}},
+		{"any case, with a colon", "RESOLVED: o/r#2", []string{"o/r#2"}},
+		{
+			"every keyword form", "close o/r#1, closes o/r#2, closed o/r#3, fix o/r#4, fixed o/r#5, resolve o/r#6",
+			[]string{"o/r#1", "o/r#2", "o/r#3", "o/r#4", "o/r#5", "o/r#6"},
+		},
+		{"an issue URL", "Closes https://github.com/o/r/issues/9.", []string{"o/r#9"}},
+		{"a citation is not a closing reference", "see o/r#1, which hit the same bug", nil},
+		{"one keyword covers one reference", "Fixes o/r#1 and o/r#2", []string{"o/r#1"}},
+		{"a keyword inside a word is not a keyword", "prefixes o/r#1", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, events.ExtractGitHubClosingRefs(tt.text))
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Issue is the subset of GitHub's issue JSON shape the reader uses.
@@ -19,6 +20,9 @@ type Issue struct {
 	// it does: GitHub models every pull request as an issue too.
 	PullRequest   *struct{} `json:"pull_request"`
 	RepositoryURL string    `json:"repository_url"`
+	// ClosedAt is nil for an open issue.
+	ClosedAt  *time.Time `json:"closed_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 // IsPullRequest reports whether this "issue" is a pull request.

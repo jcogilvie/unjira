@@ -148,8 +148,8 @@ func gatherCandidates(
 			upsert(key, provenance, "")
 		}
 
-		for i, key := range githubCandidates(e) {
-			upsert(key, githubProvenance(e, i, len(ticketKeys)), "")
+		for _, ref := range githubCandidates(e, len(ticketKeys)) {
+			upsert(ref.key, ref.provenance, "")
 		}
 	}
 
@@ -170,39 +170,73 @@ func gatherCandidates(
 	return out
 }
 
+// githubRef is one qualified GitHub issue reference found in an event, and the tier it
+// ranks at.
+type githubRef struct {
+	key        string
+	provenance Provenance
+}
+
 // githubCandidates returns the qualified GitHub issue references in e's summary
-// (events.ExtractGitHubIssueRefs), minus the pull request e is itself about: a pull
-// request's summary opens with its own owner/repo#N, and a pull request is work
-// evidence, never the issue it is tracked in.
+// (events.ExtractGitHubIssueRefs) with their provenance, minus the pull request e is
+// itself about: a pull request's summary opens with its own owner/repo#N, and a pull
+// request is work evidence, never the issue it is tracked in.
+//
+// On an event about a pull request (one carrying events.ArtifactPullRequest), the
+// summary is the pull request's title line, then its body, and the two rank apart for
+// the reason the github collector splits their Jira keys. A reference in the title, or
+// after one of GitHub's closing keywords in the body ("Fixes owner/repo#N", which
+// GitHub itself acts on), is the author linking the work, so it ranks with SCM
+// authoring commands. Any other reference in the body is a citation, so it ranks as
+// prose. One inside Markdown code in the body is quoted data and no candidate
+// (events.BlankMarkdownCode).
+//
+// Elsewhere every reference is prose. ticketKeys is how many Jira keys the event names:
+// the first reference is the first mention only when there are none, since the order
+// between the two kinds of key is not recorded.
 //
 // Read from the summary rather than from a collector artifact, so every stored event
 // yields them, including ones collected before this extraction existed (F21).
-func githubCandidates(e Event) []string {
-	refs := events.ExtractGitHubIssueRefs(e.Summary)
-
+func githubCandidates(e Event, ticketKeys int) []githubRef {
 	own := events.PullRequestOf(e)
 	if own == "" {
-		return refs
+		return proseRefs(events.ExtractGitHubIssueRefs(e.Summary), ticketKeys)
 	}
 
-	return slices.DeleteFunc(refs, func(ref string) bool { return strings.HasSuffix(own, "/"+ref) })
+	notOwn := func(refs []string) []string {
+		return slices.DeleteFunc(refs, func(ref string) bool { return strings.HasSuffix(own, "/"+ref) })
+	}
+
+	title, body, _ := strings.Cut(e.Summary, "\n")
+	body = events.BlankMarkdownCode(body)
+
+	authored := notOwn(append(events.ExtractGitHubIssueRefs(title), events.ExtractGitHubClosingRefs(body)...))
+	cited := slices.DeleteFunc(notOwn(events.ExtractGitHubIssueRefs(body)), func(ref string) bool {
+		return slices.Contains(authored, ref)
+	})
+
+	out := make([]githubRef, 0, len(authored)+len(cited))
+	for _, ref := range authored {
+		out = append(out, githubRef{key: ref, provenance: ProvenanceSCMCommand})
+	}
+
+	return append(out, proseRefs(cited, ticketKeys)...)
 }
 
-// githubProvenance ranks the i-th GitHub reference of e. On an event about a pull
-// request (one carrying events.ArtifactPullRequest), the text is the pull request's own
-// title and body, which are authored, so a "Fixes owner/repo#N" there ranks with SCM
-// authoring commands. Elsewhere it is prose: the first reference is the first mention
-// only when the event names no Jira key, since the order between the two kinds of key
-// is not recorded.
-func githubProvenance(e Event, i, ticketKeys int) Provenance {
-	switch {
-	case events.PullRequestOf(e) != "":
-		return ProvenanceSCMCommand
-	case i == 0 && ticketKeys == 0:
-		return ProvenanceProseFirst
-	default:
-		return ProvenanceProseLater
+// proseRefs ranks references found in prose: the first is the first mention only when
+// the event names no Jira key, every other one a later mention.
+func proseRefs(refs []string, ticketKeys int) []githubRef {
+	out := make([]githubRef, 0, len(refs))
+	for i, ref := range refs {
+		provenance := ProvenanceProseLater
+		if i == 0 && ticketKeys == 0 {
+			provenance = ProvenanceProseFirst
+		}
+
+		out = append(out, githubRef{key: ref, provenance: provenance})
 	}
+
+	return out
 }
 
 // promoteCorroborated relabels prose-tier candidates whose issue has collected

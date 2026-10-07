@@ -33,9 +33,10 @@ import (
 type Role = store.Role
 
 const (
-	// RolePrimary is the record the work is principally tracked in. Exactly
+	// RolePrimary is the record the work is principally tracked in. At most
 	// one per narrative — enforced both by parseMatchResponse (see the "two
-	// primaries" case) and by a partial unique index at the store layer.
+	// primaries" case) and by a partial unique index at the store layer. None
+	// is a valid answer: every candidate may be a citation.
 	RolePrimary Role = "primary"
 	// RoleSameWork is a co-representation of the same body of work elsewhere
 	// (see the package doc comment on Role for the motivating PAAS/SUMO
@@ -171,6 +172,31 @@ func (p Provenance) Rank() int {
 		return 5
 	default:
 		return 6
+	}
+}
+
+// NamesTheWork reports whether p records someone naming the ticket for this work,
+// rather than mentioning it: a reviewer's target, a branch name, an SCM authoring
+// command (a commit, a PR title), or a Jira event that is about the issue. Those are
+// facts about where the work is tracked. A prose mention, corroborated or not, is an
+// inference about it.
+//
+// It decides whether a lone verified candidate may be primary without asking the
+// model (resolveVerified). Being the only key a session happened to mention is not a
+// fact about where its work is tracked: on a real 30-day store, four narratives took a
+// lone prose mention as primary at confidence 1.0, including a closed CVE ticket a new
+// ArgoCD investigation cited and a June-closed composition ticket a new composition
+// cited, and each drew a comment proposal.
+func (p Provenance) NamesTheWork() bool {
+	switch p {
+	case ProvenanceReviewer, ProvenanceBranch, ProvenanceSCMCommand, ProvenanceJiraEvent:
+		return true
+	case ProvenanceCorroborated, ProvenanceProseFirst, ProvenanceProseLater:
+		return false
+	default:
+		// An unrecognized provenance is not a recorded naming act, so the model
+		// judges it: the cautious direction, unlike Rank's, costs one call.
+		return false
 	}
 }
 

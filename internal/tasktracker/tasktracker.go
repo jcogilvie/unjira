@@ -12,6 +12,8 @@
 // IsTransportError, so no consumer learns a backend's error shapes.
 package tasktracker
 
+import "time"
+
 // StatusCategory is a normalized status bucket every backend maps into, for
 // REPORTING current state and for coarse direction checks (a done -> todo move
 // is a suspicious reopen whatever the two statuses are named).
@@ -80,6 +82,18 @@ type Issue struct {
 	// on the whole live path while looking supported. Empty now means the backend
 	// genuinely has none, or the shape was neither text nor a document.
 	Description string
+
+	// Resolved is when the issue was resolved (Jira's resolutiondate, GitHub's
+	// closed_at), and Updated is when it last changed. Zero means unresolved, or that
+	// the backend did not say: never a guessed date.
+	//
+	// Matching renders both against the narrative's window, because a status of
+	// Done alone cannot tell a ticket closed the day before a follow-up from one
+	// closed a year before new work that only shares its topic. On a real 30-day
+	// store, a CVE ticket closed the year before became the primary for a new
+	// performance investigation that cited it.
+	Resolved time.Time
+	Updated  time.Time
 }
 
 // TaskReader is the read-only surface: everything needed to verify a proposed

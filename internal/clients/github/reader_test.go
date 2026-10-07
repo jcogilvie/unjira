@@ -3,6 +3,7 @@ package github_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,24 @@ func TestReader_GetIssue_ClosedIsDone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, tasktracker.StatusDone, issue.StatusCategory)
 	assert.Equal(t, "closed", issue.StatusName)
+}
+
+// TestReader_GetIssue_CarriesClosedAndUpdatedDates: closed_at is GitHub's resolution
+// date, and updated_at its last change. Matching sets both against a narrative's
+// window. An open issue has no closed_at.
+func TestReader_GetIssue_CarriesClosedAndUpdatedDates(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"number": 1, "title": "t", "state": "closed",
+			"closed_at": "2025-03-04T10:15:30Z", "updated_at": "2025-03-05T08:00:00Z",
+		})
+	})
+
+	issue, err := github.NewReader(client).GetIssue("o/r#1")
+
+	require.NoError(t, err)
+	assert.True(t, issue.Resolved.Equal(time.Date(2025, 3, 4, 10, 15, 30, 0, time.UTC)), "resolved: %v", issue.Resolved)
+	assert.True(t, issue.Updated.Equal(time.Date(2025, 3, 5, 8, 0, 0, 0, time.UTC)), "updated: %v", issue.Updated)
 }
 
 // TestReader_GetIssue_APullRequestIsNotAnIssue: GitHub serves pull requests from the

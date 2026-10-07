@@ -115,7 +115,7 @@ func TestArtifactKeyContract_ClaudeCodeCollectorToCorrelator_BranchAndTicketKeys
 	assert.Contains(t, keys, "PROJ-205")
 }
 
-// TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchAndSCMKeys is the
+// TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchTitleAndBodyKeys is the
 // same end-to-end guard for the github collector, driving its REAL
 // OpenedEvent constructor (not a hand-built events.Event) into the REAL
 // correlator gatherer — mirroring
@@ -123,16 +123,16 @@ func TestArtifactKeyContract_ClaudeCodeCollectorToCorrelator_BranchAndTicketKeys
 //
 // This collector reuses claudecode's ArtifactGitBranch key verbatim (§2 of
 // the design), so the branch candidate must rank as ProvenanceBranch exactly
-// as it does for a claude_code-sourced event, with zero gatherCandidates
-// changes. The title/body keys land on ArtifactSCMKeys (ProvenanceSCMCommand),
-// not ArtifactTicketKeys — a different tier than claudecode's own prose keys,
-// which is the collector's own deliberate §5 decision.
-func TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchAndSCMKeys(t *testing.T) {
+// as it does for a claude_code-sourced event. A title key lands on ArtifactSCMKeys
+// (ProvenanceSCMCommand): the title is where the author names the ticket. A body key
+// lands on ArtifactTicketKeys, a prose tier: the body cites. A key quoted as code in
+// the body is no candidate at all.
+func TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchTitleAndBodyKeys(t *testing.T) {
 	ref, err := ghclient.ParseRepoRef("o/r")
 	require.NoError(t, err)
 
 	pull := ghclient.PullRequest{
-		Number: 7, Title: "Fix PROJ-42 crash", Body: "Also touches PROJ-100.",
+		Number: 7, Title: "Fix PROJ-42 crash, see PROJ-9", Body: "Also touches PROJ-100. Not `PROJ-5`.",
 		CreatedAt: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC),
 	}
 	pull.Head.Ref = "feature/PROJ-42"
@@ -152,9 +152,15 @@ func TestArtifactKeyContract_GitHubCollectorToCorrelator_BranchAndSCMKeys(t *tes
 	assert.Equal(t, correlator.ProvenanceBranch, byKey["PROJ-42"].Provenance,
 		"the branch candidate, re-derived from events.ArtifactGitBranch, must outrank the SCM-command tier")
 
+	require.Contains(t, keys, "PROJ-9")
+	assert.Equal(t, correlator.ProvenanceSCMCommand, byKey["PROJ-9"].Provenance,
+		"a title key read via events.SCMKeysOf must land on ProvenanceSCMCommand")
+
 	require.Contains(t, keys, "PROJ-100")
-	assert.Equal(t, correlator.ProvenanceSCMCommand, byKey["PROJ-100"].Provenance,
-		"a title/body key read via events.SCMKeysOf must land on ProvenanceSCMCommand, not a prose tier")
+	assert.Equal(t, correlator.ProvenanceProseFirst, byKey["PROJ-100"].Provenance,
+		"a body key read via events.TicketKeysOf must land on a prose tier, not ProvenanceSCMCommand")
+
+	assert.NotContains(t, keys, "PROJ-5", "a key quoted as code in the body is data, not a candidate")
 }
 
 // TestArtifactKeyContract_PRAnchorAndGitHubOpenedAgreeOnArtifactPullRequest guards the

@@ -82,14 +82,37 @@ func TestOpenedEvent_ArtifactGitBranchIsHeadRef(t *testing.T) {
 	assert.Equal(t, "feature/PROJ-1", evt.Artifacts[events.ArtifactGitBranch])
 }
 
-// TestOpenedEvent_ArtifactSCMKeysFromTitleAndBody pins that title+body keys
-// land on ArtifactSCMKeys (the ProvenanceSCMCommand tier), not
-// ArtifactTicketKeys or ArtifactIssueKey — this collector's own §2/§5
-// decision to reuse the existing authoring-tier rather than invent a new one.
-func TestOpenedEvent_ArtifactSCMKeysFromTitleAndBody(t *testing.T) {
+// TestOpenedEvent_TitleKeysAreSCMAndBodyKeysAreProse pins where a PR's keys land. The
+// title is where its author names the ticket, so its keys are ArtifactSCMKeys (the
+// ProvenanceSCMCommand tier). The body is prose that cites tickets, so its keys are
+// ArtifactTicketKeys, the prose tiers. Neither is ArtifactIssueKey, which means the
+// event is about that issue.
+func TestOpenedEvent_TitleKeysAreSCMAndBodyKeysAreProse(t *testing.T) {
 	evt := collectorgithub.OpenedEvent(testRef(t), samplePR())
 
-	assert.ElementsMatch(t, []string{"PROJ-1", "PROJ-2"}, events.SCMKeysOf(evt))
+	assert.Equal(t, []string{"PROJ-1"}, events.SCMKeysOf(evt), "the title names PROJ-1")
+	assert.Equal(t, []string{"PROJ-1", "PROJ-2"}, events.TicketKeysOf(evt),
+		"the body cites both, in order of appearance")
+	assert.NotContains(t, evt.Artifacts, events.ArtifactIssueKey)
+}
+
+// TestOpenedEvent_KeysQuotedAsCodeInTheBodyAreNotCandidates is the failure a real
+// 30-day store showed: a PR body quoting keys as data, in a code span or a block of
+// test output, made each quoted key an SCM-tier candidate, and narratives took one as
+// their primary and drew a comment proposal on a ticket the work never touched.
+func TestOpenedEvent_KeysQuotedAsCodeInTheBodyAreNotCandidates(t *testing.T) {
+	pr := samplePR()
+	pr.Title = "store: ask the link table"
+	pr.Head.Ref = "finding-issue-key-drift"
+	pr.Body = "Found by a crash:\n\n```\nadding issue link PAAS-3899 (primary)\n```\n\n" +
+		"`PAAS-3905`'s description was never ingested. Relates to PROJ-7."
+
+	evt := collectorgithub.OpenedEvent(testRef(t), pr)
+
+	assert.Empty(t, events.SCMKeysOf(evt), "the title names no key")
+	assert.Equal(t, []string{"PROJ-7"}, events.TicketKeysOf(evt),
+		"only the key written in prose is a candidate; the quoted ones are data")
+	assert.Contains(t, evt.Summary, "PAAS-3899", "the quoted text itself is kept for the model to read")
 }
 
 // TestNoGitHubEventIsEverMarkedATrackerRecord is the regression test the
@@ -309,7 +332,8 @@ func TestCompletionEvents_ArtifactsMatchOpenedEvent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, evts, 1)
 	assert.Equal(t, "feature/PROJ-1", evts[0].Artifacts[events.ArtifactGitBranch])
-	assert.ElementsMatch(t, []string{"PROJ-1", "PROJ-2"}, events.SCMKeysOf(evts[0]))
+	assert.Equal(t, []string{"PROJ-1"}, events.SCMKeysOf(evts[0]))
+	assert.Equal(t, []string{"PROJ-1", "PROJ-2"}, events.TicketKeysOf(evts[0]))
 	assert.False(t, events.IsTrackerRecord(evts[0]))
 }
 

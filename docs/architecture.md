@@ -113,6 +113,16 @@ scope)`), never by which collector it is: the Jira collector marks an issue's ev
 project is a configured Jira tracker's scope. GitHub Issues are read as a tracker (`clients/github.
 Reader`, read-only) but not collected.
 
+**A pull request's title names its ticket; its body cites.** `collector/github` writes the title's
+keys as `events.ArtifactSCMKeys` (the SCM authoring tier) and the body's as `events.ArtifactTicketKeys`
+(the prose tiers), and a key inside Markdown code in the body is no candidate at all
+(`events.BlankMarkdownCode`). `gatherCandidates` ranks a PR event's GitHub issue references the same
+way, except that a body reference after one of GitHub's closing keywords ranks with the title.
+Matching promotes a lone verified candidate without a model call only when its provenance names the
+work (`Provenance.NamesTheWork`: reviewer, branch, SCM authoring, Jira event). A lone prose mention
+goes to the model, which may give no candidate the primary role, and sees each candidate's status
+category and resolution and update dates set against the narrative's window.
+
 **Where untracked work may be ticketed is decided before any drafting call** (`DEST`,
 `internal/reconciler/destinations.go`). `collector/claudecode` records where each segment's work
 happened: the repositories its own SCM actions sent work to (`events.ArtifactWorkRepos`: a `git push`
@@ -227,7 +237,7 @@ the next clustering prompt (rendered under each context narrative as background,
 **Eleven LLM call sites**, in three packages — `correlator/correlator.go:585` (cluster), `:1203` (same-story
 check at a bisection seam), `:1880` (compaction), `correlator/cluster_reask.go:162` (omission re-ask, one
 call per round), `correlator/cluster_dispute.go:260` (dispute re-ask, per batch, again after a refused
-answer), `correlator/match.go:567` (match), `:593` (match re-ask, after an unparseable response),
+answer), `correlator/match.go:574` (match), `:600` (match re-ask, after an unparseable response),
 `reconciler/draft.go:100`, `:388`, `reconciler/create.go:283`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
 
