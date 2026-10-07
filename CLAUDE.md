@@ -82,7 +82,7 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   the model unchanged and is reported. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
   issue-key candidates by provenance (branch name > SCM authoring command > Jira event > corroborated
   prose > first-mention prose > later-mention prose). In the reconciler it is `runSuppression`'s
-  four-filter chain, plus route resolution. Keep judgment the model's job and extraction a pure
+  five-filter chain, plus route resolution. Keep judgment the model's job and extraction a pure
   function's — that separation is what keeps the review queue signal-rich.
 - **Work evidence and tracker state are different kinds, and only one is clusterable.** A collector
   declares a tracker record with `events.SetTrackerRecord` (its doc comment says why the producer is

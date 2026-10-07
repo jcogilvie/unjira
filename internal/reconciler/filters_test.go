@@ -50,6 +50,7 @@ func TestSuppressionChain_OrderIsExplicitAndLoadBearing(t *testing.T) {
 
 	assert.Equal(t, []string{
 		"unroutable",
+		"settled-status",
 		"tracker-echo",
 		"stale-transition",
 		"duplicate",

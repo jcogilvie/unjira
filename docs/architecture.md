@@ -75,7 +75,7 @@ flowchart TB
         DEST["destinations<br/>deterministic · allowed set before drafting:<br/>work location × trackers' mirror_to"]
         VERIFY["verifyLinks<br/>live tracker read"]
         DRAFT["draft / Redraft / create<br/>LLM · proposes actions"]
-        FILTERS["runSuppression · ordered chain<br/>1 unroutable · 2 tracker-echo<br/>3 stale-transition · 4 duplicate"]
+        FILTERS["runSuppression · ordered chain<br/>1 unroutable · 2 settled-status · 3 tracker-echo<br/>4 stale-transition · 5 duplicate"]
     end
 
     TRIAGE["internal/triage<br/>approve · reject · edit<br/>merge · split · target"]
@@ -211,7 +211,7 @@ the next clustering prompt (rendered under each context narrative as background,
 check at a bisection seam), `:1848` (compaction), `correlator/cluster_reask.go:162` (omission re-ask, one
 call per round), `correlator/cluster_dispute.go:260` (dispute re-ask, per batch, again after a refused
 answer), `correlator/match.go:567` (match), `:593` (match re-ask, after an unparseable response),
-`reconciler/draft.go:92`, `:339`, `reconciler/create.go:283`, and `rules/distill.go:126` (`learn`).
+`reconciler/draft.go:100`, `:388`, `reconciler/create.go:283`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
 
 Store-mediation is what makes a failed pass cost a retry and nothing else: a stage that dies has
@@ -451,15 +451,22 @@ trade-off was weighed.
 | **Adapter** | `internal/clients/*` | Thin facades, business logic one layer up. `clients/local` adapts two SQLite tables to a tracker interface. |
 | **Bass: "limit access to critical resources"** | `gate.Applier` | Exactly one `TaskWriter` holder in the tree, behind three independent gates. The tactic implemented as a type constraint rather than a review convention. |
 | **Command + audit log** | the `actions` table | Each action is a reified request carrying its own lifecycle and `actions.error`. Retry is re-execution on the next pass, not a separate path. |
-| **Chain of Responsibility** | `reconciler.suppressionChain` | Four filters, uniform contract, order asserted as data — see below. |
+| **Chain of Responsibility** | `reconciler.suppressionChain` | Five filters, uniform contract, order asserted as data — see below. |
 | **Marker interface for optional capability** | `pipeline.StatusHistorySource`, `workflow.GraphProvider` | Type-asserted, not name-checked. `status_history.go:25-34` explains why the marker returns nothing: a `bool` would let the assertion and the value disagree. |
 
 ### Chain of Responsibility, and why the chain is data
 
 `internal/reconciler/filters.go` defines `filterContext`, `suppressionFilter`, and
-`suppressionChain`; `runSuppression` walks it, feeding each filter what survived the last. All four
-filters share one context type and one return contract, so the chain is a slice rather than four
-hand-wired calls.
+`suppressionChain`; `runSuppression` walks it, feeding each filter what survived the last. All five
+filters share one context type and one return contract, so the chain is a slice rather than five
+hand-wired calls. `settled-status` judges a transition from the issue's live status alone: one to the
+status the issue already has, or out of a done status, is suppressed. It needs no collected status
+history, which is what `stale-transition` needs and lacks for a ticket outside the collected scopes.
+
+**The drafter may answer "none" for an issue** the delta gives it nothing to say about. A "none" is a
+verdict, never an action: it becomes a suppression reason carrying the model's rationale, recorded like
+any other. In triage's `Redraft`, a "none" that leaves nothing to propose is an error, because a
+reviewer's explicit request is never answered with silence.
 
 **A suppression is recorded, not merely reported.** `Persist` writes one `StatusSuppressed` row per
 narrative per pass that suppressed anything. That row is the watermark `DeltaEvents` reads, so the

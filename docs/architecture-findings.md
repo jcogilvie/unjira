@@ -741,6 +741,24 @@ candidate, with the cited tickets named in the proposal so a reviewer can link i
 backstop (`applyCreate` refusing once a primary exists) would still hold. Unmeasured beyond the one
 narrative.
 
+### F63 — a transition on someone else's ticket is proposed like one on your own
+
+The reconciler proposes a status move on whichever issue a narrative's work is linked to, whoever owns
+it. On a real 30-day store, upstream work that a teammate's blocked ticket was waiting on drew a proposal
+to move that teammate's ticket to In Review. The work was real and the link was defensible, but moving
+another person's ticket is a statement about their work. A comment would carry the same news without
+making it.
+
+This needs a decision, not just a guard, so none is built. The options:
+
+- **Never transition** an issue assigned to someone other than unjira's operator, and draft a comment
+  instead.
+- **Make it a per-tracker rule**, defaulting to the above.
+- **Leave it to review**, as today.
+
+The operator's identity is already available on every writable tracker (slice 3's self-identity check).
+The issue's assignee is not yet on `tasktracker.Issue`.
+
 ## Task cross-references
 
 | Finding | Task |
@@ -760,6 +778,7 @@ narrative.
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
 | F49 — only macOS-written transcripts have been tested | open, action item: fixture transcripts from Windows and Linux |
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
+| F63 — a transition on someone else's ticket is proposed like one on your own | open, policy question: never, per-tracker rule, or leave to review. One real instance |
 | F60 — upstream work done for an internal ticket is routed by repository, not by purpose | open. Matching's job, not routing's. 3 of 5 measured cases |
 | F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance. Narrowed: the reconciler examines such a narrative once and records it (`reconcile_examinations`), where before it held a slot and was counted as unexamined work on every pass (`TestReconcile_MentionedOnlyNarrativeYieldsUntilNewWorkIsLinked`) |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson); matching, omission-round and dispute responses are re-asked within configurable budgets. Only the first clustering response is still never retried. 0 such deaths in 32 passes; a budgeted re-ask is the shape if one appears |
