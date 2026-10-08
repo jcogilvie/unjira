@@ -99,8 +99,9 @@ func TestRunNarrate_PersistsNewNarrative(t *testing.T) {
 }
 
 // The configured clustering budgets reach correlator.Cluster, each resolved through
-// config's tiers: the omission budget bounds the rounds asking for an event the model
-// left out, and the dispute budget bounds the calls resolving a double placement.
+// config's tiers: the cluster budget bounds the calls re-asking a refused clustering
+// response, the omission budget bounds the rounds asking for an event the model left
+// out, and the dispute budget bounds the calls resolving a double placement.
 func TestRunNarrate_HonoursTheConfiguredClusterReaskBudgets(t *testing.T) {
 	const (
 		omitsSecond = `[{"kind":"new","title":"W","summary":"s","confidence":0.9,"event_indices":[0]}]`
@@ -108,6 +109,8 @@ func TestRunNarrate_HonoursTheConfiguredClusterReaskBudgets(t *testing.T) {
 		placesBoth  = `[{"kind":"earlier","cluster_position":0,"confidence":0.9,"event_indices":[1]}]`
 		doubles     = `[{"kind":"new","title":"A","summary":"s","confidence":0.9,"event_indices":[0,1]},` +
 			`{"kind":"new","title":"B","summary":"s","confidence":0.9,"event_indices":[1]}]`
+		prose       = `I grouped both events into one narrative.`
+		clustersAll = `[{"kind":"new","title":"W","summary":"s","confidence":0.9,"event_indices":[0,1]}]`
 	)
 	zero, two, negative := 0, 2, -1
 
@@ -117,6 +120,8 @@ func TestRunNarrate_HonoursTheConfiguredClusterReaskBudgets(t *testing.T) {
 		responses []string
 		wantCalls int
 		wantErr   string
+		// On success, the follow-up calls each budget allowed.
+		wantClusterReasks, wantOmissionReasks int
 	}{
 		{
 			name:      "omission budget zero, per use",
@@ -128,7 +133,19 @@ func TestRunNarrate_HonoursTheConfiguredClusterReaskBudgets(t *testing.T) {
 			name:      "omission budget two, per model",
 			cfg:       func(c *config.Config) { c.LLM.MaxReasks = &two },
 			responses: []string{omitsSecond, placesNone, placesBoth},
-			wantCalls: 3,
+			wantCalls: 3, wantOmissionReasks: 2,
+		},
+		{
+			name:      "cluster budget zero, per use",
+			cfg:       func(c *config.Config) { c.LLM.MaxClusterReasks = &zero },
+			responses: []string{prose, clustersAll},
+			wantCalls: 1, wantErr: "llm.max_cluster_reasks",
+		},
+		{
+			name:      "cluster budget two, per use",
+			cfg:       func(c *config.Config) { c.LLM.MaxClusterReasks = &two },
+			responses: []string{prose, prose, clustersAll},
+			wantCalls: 3, wantClusterReasks: 2,
 		},
 		{
 			name:      "dispute budget zero, across all models",
@@ -164,7 +181,8 @@ func TestRunNarrate_HonoursTheConfiguredClusterReaskBudgets(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, 2, got.Stats.OmissionReasks)
+			assert.Equal(t, tt.wantClusterReasks, got.Stats.ClusterReasks)
+			assert.Equal(t, tt.wantOmissionReasks, got.Stats.OmissionReasks)
 		})
 	}
 }

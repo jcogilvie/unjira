@@ -614,12 +614,12 @@ func TestConfig_ReaskBudgetsResolveTheMostSpecificSetTier(t *testing.T) {
 	}{
 		{
 			name: "nothing set is the built-in default of one everywhere",
-			want: config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1},
+			want: config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1, Cluster: 1},
 		},
 		{
 			name: "llm_defaults.max_reasks overrides the built-in default",
 			cfg:  config.Config{LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)}},
-			want: config.ReaskBudgets{Match: 3, Omission: 3, Dispute: 3},
+			want: config.ReaskBudgets{Match: 3, Omission: 3, Dispute: 3, Cluster: 3},
 		},
 		{
 			name: "llm.max_reasks overrides llm_defaults.max_reasks",
@@ -627,7 +627,7 @@ func TestConfig_ReaskBudgetsResolveTheMostSpecificSetTier(t *testing.T) {
 				LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)},
 				LLM:         config.LLMConfig{MaxReasks: new(2)},
 			},
-			want: config.ReaskBudgets{Match: 2, Omission: 2, Dispute: 2},
+			want: config.ReaskBudgets{Match: 2, Omission: 2, Dispute: 2, Cluster: 2},
 		},
 		{
 			name: "a per-use key overrides llm.max_reasks for that use only",
@@ -636,9 +636,10 @@ func TestConfig_ReaskBudgetsResolveTheMostSpecificSetTier(t *testing.T) {
 				LLM: config.LLMConfig{
 					MaxReasks: new(2), MaxMatchReasks: new(5),
 					MaxOmissionReasks: new(4), MaxDisputeReasks: new(6),
+					MaxClusterReasks: new(7),
 				},
 			},
-			want: config.ReaskBudgets{Match: 5, Omission: 4, Dispute: 6},
+			want: config.ReaskBudgets{Match: 5, Omission: 4, Dispute: 6, Cluster: 7},
 		},
 		{
 			name: "an unset per-use key falls through to the tier below",
@@ -646,7 +647,7 @@ func TestConfig_ReaskBudgetsResolveTheMostSpecificSetTier(t *testing.T) {
 				LLMDefaults: config.LLMDefaultsConfig{MaxReasks: new(3)},
 				LLM:         config.LLMConfig{MaxOmissionReasks: new(4)},
 			},
-			want: config.ReaskBudgets{Match: 3, Omission: 4, Dispute: 3},
+			want: config.ReaskBudgets{Match: 3, Omission: 4, Dispute: 3, Cluster: 3},
 		},
 		{
 			name: "an explicit zero in llm_defaults is honoured, not treated as unset",
@@ -666,6 +667,7 @@ func TestConfig_ReaskBudgetsResolveTheMostSpecificSetTier(t *testing.T) {
 			cfg: config.Config{LLM: config.LLMConfig{
 				MaxReasks: new(2), MaxMatchReasks: new(0),
 				MaxOmissionReasks: new(0), MaxDisputeReasks: new(0),
+				MaxClusterReasks: new(0),
 			}},
 			want: config.ReaskBudgets{},
 		},
@@ -703,6 +705,7 @@ func TestConfig_ReaskBudgetsRejectNegativeAtEveryTier(t *testing.T) {
 		{"match", config.Config{LLM: config.LLMConfig{MaxMatchReasks: new(-2)}}, "llm.max_match_reasks"},
 		{"omission", config.Config{LLM: config.LLMConfig{MaxOmissionReasks: new(-1)}}, "llm.max_omission_reasks"},
 		{"dispute", config.Config{LLM: config.LLMConfig{MaxDisputeReasks: new(-1)}}, "llm.max_dispute_reasks"},
+		{"cluster", config.Config{LLM: config.LLMConfig{MaxClusterReasks: new(-1)}}, "llm.max_cluster_reasks"},
 		{
 			// Shadowed by a valid per-use key for every use, and still an error: a
 			// negative value is a typo wherever it sits, and accepting it would leave
@@ -711,6 +714,7 @@ func TestConfig_ReaskBudgetsRejectNegativeAtEveryTier(t *testing.T) {
 			config.Config{LLM: config.LLMConfig{
 				MaxReasks: new(-1), MaxMatchReasks: new(1),
 				MaxOmissionReasks: new(1), MaxDisputeReasks: new(1),
+				MaxClusterReasks: new(1),
 			}},
 			"llm.max_reasks",
 		},
@@ -731,14 +735,14 @@ func TestLoad_ParsesReaskBudgetsAndRejectsNegative(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "unjira.config.json")
 	body := `{"llm_defaults": {"max_reasks": 2},
-		"llm": {"model": "m", "context_window_tokens": 1000, "max_reasks": 0, "max_omission_reasks": 3}}`
+		"llm": {"model": "m", "context_window_tokens": 1000, "max_reasks": 0, "max_omission_reasks": 3, "max_cluster_reasks": 2}}`
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 
 	cfg, err := config.Load(path)
 	require.NoError(t, err)
 	got, err := cfg.ReaskBudgets()
 	require.NoError(t, err)
-	assert.Equal(t, config.ReaskBudgets{Match: 0, Omission: 3, Dispute: 0}, got)
+	assert.Equal(t, config.ReaskBudgets{Match: 0, Omission: 3, Dispute: 0, Cluster: 2}, got)
 
 	bad := filepath.Join(dir, "bad.json")
 	require.NoError(t, os.WriteFile(bad, []byte(`{"llm": {"max_dispute_reasks": -1}}`), 0o600))
@@ -756,5 +760,5 @@ func TestLoad_ShippedExampleConfigLoads(t *testing.T) {
 
 	got, err := cfg.ReaskBudgets()
 	require.NoError(t, err)
-	assert.Equal(t, config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1}, got)
+	assert.Equal(t, config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1, Cluster: 1}, got)
 }

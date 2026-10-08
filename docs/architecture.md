@@ -204,11 +204,14 @@ quoting the refusal, up to `llm.max_dispute_reasks` calls per batch (the first d
 so `0` makes any double placement an error). One dispute too large alone fails the pass (F52).
 
 **Every follow-up call is bounded by a re-ask budget, resolved once in config.** Matching re-asks an
-unparseable response, the omission re-ask asks in rounds for in-window events a clustering response
-left in no cluster, and the dispute re-ask is above. `config.Config.ReaskBudgets` resolves each
-use's budget from the most specific tier set (`llm.max_<use>_reasks`, then `llm.max_reasks`, then
-`llm_defaults.max_reasks`, then 1), and `internal/pipeline` and triage's split pass the resulting
-ints in as options (`WithMatchReasks`, `WithOmissionReasks`, `WithDisputeReasks`); `correlator`
+unparseable response; the cluster re-ask asks a clustering call again when the parser refused its
+response, repeating that call's prompt verbatim and quoting the refusal, per clustering call (each
+bisected half has its own), and is not sent when it would exceed the context window; the omission
+re-ask asks in rounds for in-window events an accepted clustering response left in no cluster; and the
+dispute re-ask is above. `config.Config.ReaskBudgets` resolves each use's budget from the most
+specific tier set (`llm.max_<use>_reasks`, then `llm.max_reasks`, then `llm_defaults.max_reasks`,
+then 1), and `internal/pipeline` and triage's split pass the resulting ints in as options
+(`WithMatchReasks`, `WithClusterReasks`, `WithOmissionReasks`, `WithDisputeReasks`); `correlator`
 never sees the tiers. A spent budget is a loud error. `Persist` writes members with `Tx.MoveMember` (moves the one home, refuses a
 frozen one, upgrades a context row to a member with a new `link_seq`), then context with
 `Tx.AddContext` (never deletes). Windows, summaries and compaction come from members only. Every
@@ -234,8 +237,9 @@ context link re-admits no narrative and reaches no prompt that drafts or matches
 the next clustering prompt (rendered under each context narrative as background, a numbered event as
 `-> #N`), by the pass summary, and by nothing else.
 
-**Eleven LLM call sites**, in three packages — `correlator/correlator.go:585` (cluster), `:1203` (same-story
-check at a bisection seam), `:1880` (compaction), `correlator/cluster_reask.go:162` (omission re-ask, one
+**Twelve LLM call sites**, in three packages — `correlator/correlator.go:605` (cluster), `:1238` (same-story
+check at a bisection seam), `:1915` (compaction), `correlator/cluster_parse_reask.go:89` (cluster re-ask,
+after a refused clustering response), `correlator/cluster_reask.go:162` (omission re-ask, one
 call per round), `correlator/cluster_dispute.go:260` (dispute re-ask, per batch, again after a refused
 answer), `correlator/match.go:574` (match), `:600` (match re-ask, after an unparseable response),
 `reconciler/draft.go:100`, `:388`, `reconciler/create.go:283`, and `rules/distill.go:126` (`learn`).
