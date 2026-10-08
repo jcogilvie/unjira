@@ -88,6 +88,8 @@ llm:
   model: claude-sonnet-5
   base_url: http://localhost:4000/v1
   context_window_tokens: 200000
+  # The reply's ceiling. It comes off context_window_tokens before a clustering prompt is
+  # fitted, so it must be less than the window. Unset sends no ceiling and reserves nothing.
   max_output_tokens: 32000
   # Re-ask budgets: how many follow-up calls a refused or incomplete model answer may
   # cost before it is a loud error. The most specific setting that is set wins:
@@ -101,6 +103,9 @@ correlator:
   tail_summarize_threshold_tokens: 6000
   recent_events_kept: 20
   max_event_summary_chars: 0
+  # Optional cap on the existing narratives hydrated as clustering context; 0 is no cap.
+  # Context is already fitted to the prompt budget by default. A cap leaves narratives out
+  # that would have fit, which fragments them (F16): set it only if a pass fails without it.
   max_context_narratives: 0
   member_confidence_floor: 0
 

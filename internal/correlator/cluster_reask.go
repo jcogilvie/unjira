@@ -62,8 +62,10 @@ type reaskRequest struct {
 	// makes any omission an error with no call.
 	maxRounds int
 
-	contextWindowTokens int
-	log                 *slog.Logger
+	// promptBudgetTokens is the context window less the reply's reserve (promptBudget):
+	// every round is checked against it before it is sent.
+	promptBudgetTokens int
+	log                *slog.Logger
 }
 
 // reaskRound is the state one round's prompt is built from: the clusters as merged
@@ -150,12 +152,12 @@ func recoverOmittedEvents(ctx context.Context, client llm.Client, req reaskReque
 		// far (and, after a refusal, the refused response). Sent over budget it would
 		// be rejected part-way through the pass; there is nothing to bisect, because
 		// the clusters span the whole window.
-		if estimated > req.contextWindowTokens {
+		if estimated > req.promptBudgetTokens {
 			return nil, stats, withLastRefusal(fmt.Errorf(
 				"clustering events in window [%s, %s): the model left %d event(s) unassigned (%s), and re-ask "+
-					"round %d of %d for them is estimated at %d tokens, over the %d-token context window",
+					"round %d of %d for them is estimated at %d tokens, over the %d-token prompt budget (the context window less the reply's reserve)",
 				req.window.Start, req.window.End, len(round.missing), describeIndices(req.assignable, round.missing),
-				round.number, req.maxRounds, estimated, req.contextWindowTokens), round.reason)
+				round.number, req.maxRounds, estimated, req.promptBudgetTokens), round.reason)
 		}
 
 		stats.OmissionReasks++

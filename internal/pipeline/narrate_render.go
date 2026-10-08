@@ -53,15 +53,21 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 			r.ExcludedTrackerRecords)
 	}
 
-	// Only when the bound actually fired (finding F16). Silent at zero for the same
+	// Only when a bound actually fired (finding F16). Silent at zero for the same
 	// reason ExcludedTrackerRecords is: an unreported exclusion reads as "nothing was
-	// left out", and this bound is deliberately unmeasured, so an operator needs the
-	// count to tune it against evidence rather than guessing blind.
+	// left out", and a narrative the model could not see is one an event may fragment.
+	// Two lines because the remedies differ: the cap is raised, the budget is not.
 	if r.ExcludedContextNarratives > 0 {
 		fmt.Fprintf(b,
 			"excluded %d existing narrative(s) as context — "+
 				"raise correlator.max_context_narratives to keep more\n",
 			r.ExcludedContextNarratives)
+	}
+	if r.UnfittedContextNarratives > 0 {
+		fmt.Fprintf(b,
+			"context  left %d existing narrative(s) out of at least one clustering call to fit "+
+				"llm.context_window_tokens less llm.max_output_tokens — a narrower window keeps more of each\n",
+			r.UnfittedContextNarratives)
 	}
 
 	writePRIdentityLines(b, r)

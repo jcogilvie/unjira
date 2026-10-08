@@ -121,3 +121,8 @@ func BuildDisputePromptForTest(results []ClusterResult, ordinals ...int) (system
 
 	return buildDisputePrompt(disputeRequest{results: results}, disputes)
 }
+
+// FollowupTokensPerContextNarrativeForTest is the follow-up headroom each kept context
+// narrative is charged, so a test can size a budget at which exactly the narratives it
+// names fit.
+const FollowupTokensPerContextNarrativeForTest = followupTokensPerContextNarrative

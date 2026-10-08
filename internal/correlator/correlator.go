@@ -262,10 +262,17 @@ type Stats struct {
 	// and so marked store.StatusSplit (finding F40). Reported because nothing else
 	// would show it: the narrative is in no cluster of this pass, and from the next
 	// pass on it is no longer context.
-	Emptied          []EmptiedNarrative
-	PromptTokens     int64
-	CompletionTokens int64
-	EstimatedTokens  int
+	Emptied []EmptiedNarrative
+	// UnfittedContextNarratives are the ids of the context narratives left out of at
+	// least one clustering call, whole, because adding them would have taken that
+	// call's prompt over its budget (context_fit.go, finding F16). Each id appears
+	// once however many bisected calls left it out. Reported because a left-out
+	// narrative is a story the model could not see, so an event that extends it may
+	// open a new narrative instead.
+	UnfittedContextNarratives []int64
+	PromptTokens              int64
+	CompletionTokens          int64
+	EstimatedTokens           int
 }
 
 // EmptiedNarrative is one narrative a Persist call left holding no member link.
@@ -327,6 +334,8 @@ func (s *Stats) Add(other Stats) {
 	s.PRIdentityJoins += other.PRIdentityJoins
 	s.PRIdentityConflicts = append(s.PRIdentityConflicts, other.PRIdentityConflicts...)
 	s.Emptied = append(s.Emptied, other.Emptied...)
+	// A union, not a sum: both halves of a bisection can leave out the same narrative.
+	s.UnfittedContextNarratives = mergeNarrativeIDs(s.UnfittedContextNarratives, other.UnfittedContextNarratives)
 	s.PromptTokens += other.PromptTokens
 	s.CompletionTokens += other.CompletionTokens
 	s.EstimatedTokens += other.EstimatedTokens
@@ -355,6 +364,9 @@ type clusterOptions struct {
 	// WithDisputeReasks). defaultReasks unless an option sets them.
 	omissionReasks int
 	disputeReasks  int
+	// responseReserve is the context window kept for the reply (WithResponseReserve).
+	// Zero reserves nothing.
+	responseReserve int
 }
 
 // defaultReasks is each re-ask budget when its option is not given: one follow-up
@@ -475,6 +487,14 @@ func WithInstruction(instruction string) ClusterOption {
 // pull-request identity are joined into one (joinByPullRequest, finding F61), unless
 // that would merge two stored narratives, which is reported in
 // Stats.PRIdentityConflicts instead.
+//
+// existing is in the caller's priority order. Every call's prompt is held to
+// contextWindowTokens less the reply's reserve (WithResponseReserve). When the
+// context narratives overlapping a call's window do not all fit, the window bisects
+// while it can be split; a call that cannot be split keeps the earliest-listed that
+// fit and leaves the rest out whole, reported in Stats.UnfittedContextNarratives
+// (context_fit.go). A left-out narrative's eligible events are not numbered in that
+// call, so they keep the member link they have.
 func Cluster(
 	ctx context.Context,
 	evts []Event,
@@ -486,7 +506,12 @@ func Cluster(
 ) ([]ClusterResult, Stats, error) {
 	o := newClusterOptions(opts)
 
-	results, stats, err := clusterWindow(ctx, evts, existing, client, window, contextWindowTokens, opts...)
+	budget, err := promptBudget(contextWindowTokens, o.responseReserve)
+	if err != nil {
+		return nil, Stats{}, err
+	}
+
+	results, stats, err := clusterWindow(ctx, evts, existing, client, window, budget, opts...)
 	if err != nil {
 		return nil, stats, err
 	}
@@ -504,13 +529,13 @@ func Cluster(
 	}
 
 	resolved, disputeStats, err := resolveDisputes(ctx, client, disputeRequest{
-		window:              window,
-		results:             results,
-		rules:               o.rules,
-		instruction:         o.instruction,
-		maxCalls:            o.disputeReasks,
-		contextWindowTokens: contextWindowTokens,
-		log:                 o.log,
+		window:             window,
+		results:            results,
+		rules:              o.rules,
+		instruction:        o.instruction,
+		maxCalls:           o.disputeReasks,
+		promptBudgetTokens: budget,
+		log:                o.log,
 	})
 	stats.Add(disputeStats)
 	if err != nil {
@@ -530,7 +555,7 @@ func clusterWindow(
 	existing []Narrative,
 	client llm.Client,
 	window TimeRange,
-	contextWindowTokens int,
+	promptBudgetTokens int,
 	opts ...ClusterOption,
 ) ([]ClusterResult, Stats, error) {
 	o := newClusterOptions(opts)
@@ -549,17 +574,42 @@ func clusterWindow(
 	// the prompt numbered a longer slice would make an eligible event's index
 	// resolve to the wrong event, silently.
 	var stats Stats
+	stats.Truncation = truncation
+
+	// Context is fitted per call (context_fit.go). Over budget, the window bisects
+	// while bisection can make progress, as it always has, and only a window that
+	// cannot be split further leaves narratives out: a half sees the narratives near
+	// its own events, so bisecting keeps every story visible to some call, where
+	// fitting the whole window at once would keep only the top-ranked ones (measured in
+	// context_fit.go). A window whose own events do not fit bisects or, irreducible,
+	// fails, as before.
+	fit := fitContextNarratives(
+		withRulesAndInstruction(clusterSystemPrompt, o.rules, o.instruction), filtered, relevant, promptBudgetTokens)
+	if fit.baseTokens > promptBudgetTokens || (len(fit.unfitted) > 0 && bisectable(window, filtered)) {
+		stats.EstimatedTokens = fit.fullTokens
+
+		return clusterWithSplit(ctx, evts, existing, client, window, promptBudgetTokens, filtered, stats, opts...)
+	}
+	relevant = fit.kept
+	stats.UnfittedContextNarratives = fit.unfitted
+
 	assignable, err := assignableEvents(filtered, relevant)
 	if err != nil {
 		return nil, stats, fmt.Errorf("clustering events in window [%s, %s): %w", window.Start, window.End, err)
 	}
 	systemPrompt, userPrompt := buildClusterPrompt(assignable, relevant, o.rules, o.instruction)
 
-	stats.Truncation = truncation
 	estimated := estimateTokens(systemPrompt + userPrompt)
 	stats.EstimatedTokens = estimated
-	if estimated > contextWindowTokens {
-		return clusterWithSplit(ctx, evts, existing, client, window, contextWindowTokens, filtered, stats, opts...)
+
+	if len(fit.unfitted) > 0 {
+		logging.For(o.log, "correlator").WarnContext(ctx, "context narratives left out to fit the prompt budget",
+			"unfitted_context_narratives", len(fit.unfitted),
+			"kept_context_narratives", len(fit.kept),
+			"prompt_budget_tokens", promptBudgetTokens,
+			"window_start", window.Start,
+			"window_end", window.End,
+			"consequence", "an event extending a left-out narrative may open a new one instead")
 	}
 
 	// BEFORE the call, not after — finding F17. This is the pipeline's slowest step and
@@ -616,17 +666,17 @@ func clusterWindow(
 	}
 
 	recovered, reaskStats, err := recoverOmittedEvents(ctx, client, reaskRequest{
-		window:              window,
-		userPrompt:          userPrompt,
-		assignable:          assignable,
-		first:               results,
-		firstIndices:        indices,
-		omitted:             omitted,
-		rules:               o.rules,
-		instruction:         o.instruction,
-		maxRounds:           o.omissionReasks,
-		contextWindowTokens: contextWindowTokens,
-		log:                 o.log,
+		window:             window,
+		userPrompt:         userPrompt,
+		assignable:         assignable,
+		first:              results,
+		firstIndices:       indices,
+		omitted:            omitted,
+		rules:              o.rules,
+		instruction:        o.instruction,
+		maxRounds:          o.omissionReasks,
+		promptBudgetTokens: promptBudgetTokens,
+		log:                o.log,
 	})
 	stats.Add(reaskStats)
 	if err != nil {
@@ -756,36 +806,55 @@ func buildClusterPrompt(
 	number := make(map[string]int, len(evts))
 
 	var b strings.Builder
-	b.WriteString("Events to cluster:\n")
+	b.WriteString(eventsHeading)
 	for i, e := range evts {
 		number[EventKey(e)] = i
-		// %q on Summary (not %s): event summaries come from arbitrary
-		// upstream session/commit text, so an embedded newline or a
-		// fabricated "N. [source] ..." line could otherwise inject a
-		// spurious entry into this numbered list as the model reads it.
-		// Quoting escapes those, matching the %q already used for the
-		// narrative fields below.
-		fmt.Fprintf(&b, "%d. [%s] %q (occurred_at=%s)\n", i, e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+		writeNumberedEvent(&b, i, e)
 	}
 
-	b.WriteString("\nExisting narratives (CONTEXT ONLY):\n")
+	b.WriteString(contextHeading)
 	if len(existing) == 0 {
-		b.WriteString("(none)\n")
+		b.WriteString(noContextNarratives)
 	}
 	for _, n := range existing {
-		fmt.Fprintf(&b, "narrative_id=%d title=%q window=[%s, %s)\n",
-			n.ID, n.Title, n.WindowStart.Format(time.RFC3339), n.WindowEnd.Format(time.RFC3339))
-		fmt.Fprintf(&b, "  summary: %q\n", n.Summary)
-		if len(n.Events) > 0 {
-			b.WriteString("  events:\n")
-			for _, e := range n.Events {
-				fmt.Fprintf(&b, "    - [%s] %q (occurred_at=%s)\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
-			}
-		}
-		writeContextSection(&b, n.ContextEvents, number)
+		writeNarrativeBlock(&b, n, number)
 	}
 
 	return systemPrompt, b.String()
+}
+
+// The fixed parts of a clustering user prompt. Named because fitContextNarratives
+// sizes a prompt from its parts and must count exactly what buildClusterPrompt writes.
+const (
+	eventsHeading       = "Events to cluster:\n"
+	contextHeading      = "\nExisting narratives (CONTEXT ONLY):\n"
+	noContextNarratives = "(none)\n"
+)
+
+// writeNumberedEvent writes one entry of the numbered "Events to cluster" list.
+//
+// %q on Summary (not %s): event summaries come from arbitrary upstream session/commit
+// text, so an embedded newline or a fabricated "N. [source] ..." line could otherwise
+// inject a spurious entry into this numbered list as the model reads it. Quoting
+// escapes those, matching the %q used for the narrative fields.
+func writeNumberedEvent(b *strings.Builder, i int, e Event) {
+	fmt.Fprintf(b, "%d. [%s] %q (occurred_at=%s)\n", i, e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+}
+
+// writeNarrativeBlock writes one context narrative's block: its header, summary,
+// frozen events and background. Its eligible events are not here; they are numbered
+// in the events list.
+func writeNarrativeBlock(b *strings.Builder, n Narrative, number map[string]int) {
+	fmt.Fprintf(b, "narrative_id=%d title=%q window=[%s, %s)\n",
+		n.ID, n.Title, n.WindowStart.Format(time.RFC3339), n.WindowEnd.Format(time.RFC3339))
+	fmt.Fprintf(b, "  summary: %q\n", n.Summary)
+	if len(n.Events) > 0 {
+		b.WriteString("  events:\n")
+		for _, e := range n.Events {
+			fmt.Fprintf(b, "    - [%s] %q (occurred_at=%s)\n", e.Source, e.Summary, e.OccurredAt.Format(time.RFC3339))
+		}
+	}
+	writeContextSection(b, n.ContextEvents, number)
 }
 
 // writeContextSection renders a context narrative's context links under their own
@@ -1014,41 +1083,29 @@ func clusterWithSplit(
 	existing []Narrative,
 	client llm.Client,
 	window TimeRange,
-	contextWindowTokens int,
+	promptBudgetTokens int,
 	filtered []Event,
 	stats Stats,
 	opts ...ClusterOption,
 ) ([]ClusterResult, Stats, error) {
-	if len(filtered) <= 1 {
+	if !bisectable(window, filtered) {
 		return nil, stats, irreducibleUnitError(window, filtered)
 	}
 
-	mid := window.Start.Add(window.End.Sub(window.Start) / 2)
-	firstHalf := TimeRange{Start: window.Start, End: mid}
-	secondHalf := TimeRange{Start: mid, End: window.End}
-
-	firstFiltered := filterEventsInWindow(filtered, firstHalf)
-	secondFiltered := filterEventsInWindow(filtered, secondHalf)
-
-	if len(firstFiltered) == len(filtered) || len(secondFiltered) == len(filtered) {
-		// Bisection made no progress (e.g. every remaining event shares the
-		// same timestamp) — recursing again would loop forever on an
-		// unchanged set. Treat as irreducible now.
-		return nil, stats, irreducibleUnitError(window, filtered)
-	}
+	firstHalf, secondHalf := bisect(window)
 
 	stats.Splits++
 
 	// clusterWindow, not Cluster: disputes are resolved once, by the top-level call,
 	// over the merged halves. Resolving per half would miss an eligible event both
 	// halves numbered and placed differently (F36), and spend a call per level.
-	firstResults, firstStats, err := clusterWindow(ctx, evts, existing, client, firstHalf, contextWindowTokens, opts...)
+	firstResults, firstStats, err := clusterWindow(ctx, evts, existing, client, firstHalf, promptBudgetTokens, opts...)
 	stats.Add(firstStats)
 	if err != nil {
 		return nil, stats, err
 	}
 
-	secondResults, secondStats, err := clusterWindow(ctx, evts, existing, client, secondHalf, contextWindowTokens, opts...)
+	secondResults, secondStats, err := clusterWindow(ctx, evts, existing, client, secondHalf, promptBudgetTokens, opts...)
 	stats.Add(secondStats)
 	if err != nil {
 		return nil, stats, err
@@ -1063,13 +1120,38 @@ func clusterWithSplit(
 	return merged, stats, nil
 }
 
+// bisect halves window by time.
+func bisect(window TimeRange) (first, second TimeRange) {
+	mid := window.Start.Add(window.End.Sub(window.Start) / 2)
+
+	return TimeRange{Start: window.Start, End: mid}, TimeRange{Start: mid, End: window.End}
+}
+
+// bisectable reports whether splitting window makes progress on filtered, its
+// in-window events: each half must hold fewer events than the whole. A single event,
+// or events that all share one timestamp, cannot be split, and recursing on an
+// unchanged set would loop forever.
+func bisectable(window TimeRange, filtered []Event) bool {
+	if len(filtered) <= 1 {
+		return false
+	}
+
+	first, second := bisect(window)
+
+	return len(filterEventsInWindow(filtered, first)) < len(filtered) &&
+		len(filterEventsInWindow(filtered, second)) < len(filtered)
+}
+
 // irreducibleUnitError reports a window that cannot be split further and
 // still doesn't fit the configured budget — the "error loudly rather than
-// silently drop" floor for this overflow path.
+// silently drop" floor for this overflow path. Context narratives never reach it:
+// they are fitted to the budget, so only the window's own events, or the system
+// prompt itself, can be what does not fit.
 func irreducibleUnitError(window TimeRange, filtered []Event) error {
 	if len(filtered) == 0 {
 		return fmt.Errorf(
-			"context budget exceeded for window [%s, %s) with existing-narrative context alone (no events): cannot split further",
+			"context budget exceeded for window [%s, %s) by the system prompt and rules alone (no events, "+
+				"no context narratives): cannot split further",
 			window.Start, window.End,
 		)
 	}

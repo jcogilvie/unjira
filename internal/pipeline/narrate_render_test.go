@@ -99,6 +99,19 @@ func TestRenderNarrateResult(t *testing.T) {
 			"names the knob an operator would raise, matching the truncation line's own convention")
 	})
 
+	t.Run("context narratives left out to fit the prompt budget are reported", func(t *testing.T) {
+		fitted := full
+		fitted.UnfittedContextNarratives = 4
+
+		out := pipeline.RenderNarrateResult(fitted)
+
+		assert.Contains(t, out, "left 4 existing narrative(s) out of at least one clustering call",
+			"the count reaches stdout")
+		assert.Contains(t, out, "llm.context_window_tokens", "names what bounded it")
+		assert.NotContains(t, out, "raise correlator.max_context_narratives",
+			"raising the cap cannot keep what the budget left out")
+	})
+
 	t.Run("events the model omitted and a re-ask recovered are reported", func(t *testing.T) {
 		reasked := full
 		reasked.Stats.OmittedEvents = 5
@@ -192,5 +205,6 @@ func TestRenderNarrateResult(t *testing.T) {
 
 		assert.NotContains(t, out, "max_context_narratives",
 			"silent at zero: a line on every ordinary pass trains an operator to skip it")
+		assert.NotContains(t, out, "clustering call", "nor the prompt budget's line")
 	})
 }

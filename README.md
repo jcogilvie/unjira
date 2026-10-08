@@ -376,15 +376,17 @@ data/                   SQLite database lives here (gitignored)
   "awaiting a create decision". A cap counts only narratives that still need a decision — one
   already proposed for, declined, or found to have no allowed destination, each with nothing new
   since, or holding only unjira's own output, or linked only to tickets it cites (`mentioned`),
-  does not take a slot. A drained pass says nothing, so the line means something when it appears. `correlator.max_context_narratives` bounds clustering's OTHER input —
-  not the window's own events, but how many pre-existing narratives are hydrated as context — zero
-  (unlimited) by default, ranked (a narrative sharing an issue key with the window, then
-  most-recent-first) rather than truncated by insertion order, and its exclusions reported the same
-  way. **Measured as an escape hatch, not a tuning knob:** at a bound of 12 on a real store, cluster
-  count fell 37 → 25 but `NEW` clusters more than doubled, every extra one duplicating a narrative
-  that already existed but was dropped from context — and completion tokens did not measurably
-  improve. Set it only where the alternative is a pass that fails outright on the response ceiling;
-  see `docs/architecture-findings.md` F16.
+  does not take a slot. A drained pass says nothing, so the line means something when it appears.
+  Clustering's OTHER input, the pre-existing narratives hydrated as context, is bounded by default
+  and needs no setting: every clustering call's prompt is held to `llm.context_window_tokens` less
+  `llm.max_output_tokens`. The narratives are ranked (one sharing an issue key with the window, then
+  most-recent-first). A call over budget bisects the window first, and only a window that cannot be
+  split leaves whole narratives out, reported on stdout. `correlator.max_context_narratives` is an
+  optional cap on top, zero (no cap) by default. **Measured as an escape hatch, not a tuning knob:** at
+  a bound of 12 on a real store, cluster count fell 37 → 25 but `NEW` clusters more than doubled, every
+  extra one duplicating a narrative that already existed but was dropped from context — and completion
+  tokens did not measurably improve. Set it only where the alternative is a pass that fails outright on
+  the response ceiling; see `docs/architecture-findings.md` F16.
 - **An event is one narrative's work, and may be other narratives' context.** Subagent-first work
   reuses one investigation for several fixes, so clustering links an event to several narratives,
   as two kinds of link. A **member** link says the event is this narrative's work. Each event has

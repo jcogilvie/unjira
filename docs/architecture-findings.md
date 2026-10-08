@@ -326,10 +326,55 @@ capping each listed member summary or listing at most N members per claimant, tr
 of a claimant for the call fitting. That is the trade F16 measured for context narratives, and
 deciding it needs those numbers first.
 
-### F16 — the prompt is unbounded in the window, and the response ceiling binds first
+### F16 — a wide window still leaves context out, and nothing bounds completion by cluster count
 
-A 90-day `dev narrate` ran ~18 minutes and died on a 504. The window is the only lever an operator has
-and the cost is unbounded in it.
+A 90-day `dev narrate` ran ~18 minutes and died on a 504, and a 30-day re-run died because every
+overlapping narrative was hydrated into a prompt bisection could not shrink. The prompt half of that
+is now bounded by default; what remains is which context a bounded prompt leaves out, and the
+response ceiling.
+
+**What bounds the prompt now** (`correlator/context_fit.go`, `fitContextNarratives`;
+`correlator.go`, `clusterWindow`). Every clustering-family call is held to `llm.context_window_tokens`
+less `llm.max_output_tokens` (`WithResponseReserve`, `promptBudget`). Context narratives arrive ranked
+(`pipeline.selectContextNarratives`, now applied with or without a cap) and are added while they fit,
+each charged `followupTokensPerContextNarrative` (401) so its own omission re-ask fits: 334 completion
+tokens per cluster, the most measured below, × 2.4 / 2 for the estimator's chars-per-token. A call over
+budget bisects first while `bisectable`; only a window that cannot be split leaves narratives out,
+whole, reported as `Stats.UnfittedContextNarratives` and a `context` line in the pass summary.
+`correlator.max_context_narratives` is an optional cap on top, applied before hydration.
+
+Measured with no model call on a real 30-day store, each window ending at its latest event, at a
+200,000-token window and a 32,000-token ceiling. "Before" is the old path: the whole context, bisected
+while over 200,000 tokens. "Fit only" is the fit without bisecting first, the shape that was not kept:
+
+| window | candidates | overlapping | before: one prompt | before: outcome | after: calls | after: largest prompt | after: left out | fit only: left out |
+|---|---|---|---|---|---|---|---|---|
+| 1h | 4 | 2 | 25,629 | 1 call | 1 | 25,629 | 0 | 0 |
+| 24h | 37 | 18 | 93,040 | 1 call | 1 | 93,040 | 0 | 0 |
+| 7d | 69 | 71 | 309,529 | 2 calls, largest 160,044 | 2 | 150,960 | 1 | 35 |
+| 30d | 71 | 163 | 740,171 | **fails**: a 15-day half with 2 events at ~359,317, irreducible | 2 | 152,501 | 85 | 123 |
+
+Fitting is the floor, not the first resort, because leaving a narrative out is the damage measured
+below (a bound of 12 more than doubled `NEW` clusters) while a split only costs a call. The 7-day
+narrative left out is the headroom's price: the old path's 160,044-token half fits a 200,000-token
+window but not 168,000 less 401 per narrative.
+
+**What is still open:**
+
+- **A half whose events all fall in one of its own halves cannot be bisected**, so it is fitted. That
+  is the whole 30-day remainder: 85 of 163 narratives left out of at least one call, each one a story
+  an event in that call could fragment. A split that narrows the window around its events, rather than
+  at the time midpoint, would let such a half shed context instead; so would the branch/repo relevance
+  tier below, which would rank what is left out better. Neither is built.
+- **Completion is still bounded by nothing but `max_output_tokens`.** The fit bounds the narratives
+  each call shows, which bounds its EXTENDS clusters, but not its `NEW` ones. On the store above it
+  holds: at most 43 narratives in a call, at ~334 tokens a cluster, is ~14,400 of 32,000. The ceiling
+  binds first only when narratives average under ~1,750 estimated tokens
+  (168,000 / (32,000 / 334)); this store's average is ~4,500.
+- **With `llm.max_output_tokens` unset, nothing is reserved**: unjira sends no ceiling and cannot know
+  the gateway's.
+- **The 401-token headroom predates shared context.** `context_indices` adds completion per cluster,
+  unmeasured, so the per-cluster figure it is derived from may now be low.
 
 **RE-MEASURED after F18 landed, and the finding's original diagnosis no longer holds.** Attribution by
 zeroing each payload site, on the current store:
@@ -418,10 +463,11 @@ measurement here reported a "25% drop" from one run per arm; it was entirely ins
 Replicate before attributing a completion delta to a change.
 
 Attacking the ceiling means reducing the count of *hydrated context narratives*
-(`pipeline.hydrateContextNarratives` → `store.NarrativesOverlapping`), and that lever now exists:
-`correlator.max_context_narratives` (`config.go`), zero (unlimited) by default so the knob ships
-inert. `pipeline.boundContextNarratives` applies it BEFORE the per-narrative event/eligibility
-queries, so an excluded narrative's hydration cost is excluded too, not merely its prompt bytes.
+(`pipeline.hydrateContextNarratives` → `store.NarrativesOverlapping`). The explicit lever is
+`correlator.max_context_narratives` (`config.go`), zero (no cap) by default.
+`pipeline.boundContextNarratives` applies it BEFORE the per-narrative event/eligibility queries, so an
+excluded narrative's hydration cost is excluded too, not merely its prompt bytes. The prompt budget's
+fit (top of this finding) bounds the count per call by default, but only as far as the prompt needs.
 
 **Ranking, not a bare `LIMIT`, is the load-bearing half.** `store.NarrativesOverlapping` orders
 `(window_start, id)`, so a bare `LIMIT` keeps the OLDEST rows — close to the worst choice, since the
@@ -458,8 +504,8 @@ measurable.
 
 Therefore the knob is documented as settable **only where the alternative is a pass that fails
 outright** — the 365-day window that dies on the response ceiling, where a fragmented narrative beats
-no narrative. Not for trimming a pass that already completes. It ships inert (zero = unlimited) and
-nothing enables it.
+no narrative. Not for trimming a pass that already completes. Zero is no cap, and nothing sets one.
+The same measurement is why the default fit bisects before it leaves anything out.
 
 **Why the damage lands where it does, which is the useful part.** The shared-issue-key tier cannot
 rescue an *unmatched* narrative, and the dropped ones mostly had no issue key yet — so they fell
@@ -474,11 +520,13 @@ by insertion, a shared issue key outranks recency, ties break deterministically 
 frozen/eligible partition (`hydrateContextNarratives`'s commit-watermark split) still holds for
 whatever survives the cut.
 
-**F16 stays open, and its remaining lever is now none of the ones tried.** Every candidate that
-reduces what the model sees has been measured: window splitting costs more, the per-event cap is
-inert, grouping instructions change nothing, and bounding context corrupts narratives. The honest
-remaining options are a higher response ceiling (blocked on the gateway's own 32000 limit) or the
-untried relevance tier above.
+**F16 stays open on what the bounded prompt leaves out and on the response ceiling.** Every candidate
+that reduces what the model sees has been measured: window splitting costs more, the per-event cap is
+inert, grouping instructions change nothing, and bounding context corrupts narratives. The prompt
+budget's fit is the one bound that holds by default, because it binds only where bisection cannot help
+and the call would otherwise leave its reply or its own re-ask no room. The remaining options are a higher
+response ceiling (blocked on the gateway's own 32000 limit), the untried relevance tier above, and an
+event-aware split for the halves bisection cannot divide.
 
 Per-cluster output was the other candidate and is now smaller: the prompt asked for a `title` on every
 cluster while `ExtendNarrative`'s `UPDATE` has no title column, so ~32 titles per pass were generated
@@ -877,7 +925,7 @@ measurement.
 | F14 — an issue's own body is never ingested | **resolved**: `EventFromIssueBody` emits summary+description per issue, with ADF flattening (the live shape) and an `updated`-keyed ExternalID for idempotence. Found while reviewing a create proposal. The collector derives events only from CHANGES, so 70 of 99 collected issues have no description text. Corrects an earlier "no path exists" conclusion and reorders #29 behind it |
 | F15 — a session is one event dated to its last message | **resolved**: `segments()` slices on branch change with a message floor, each event dated to its own run and carrying the full branch set plus `ended_at`. Verified on the motivating transcript (3 events, middle dated 2026-07-09). 42 of 79 multi-day sessions are single-branch and remain one event — see the README's onboarding-backfill entry. Originally: found by tracing a create proposal back to its transcript. A 71-day session across 3 branches became one event dated 7 days after the merge it describes, discarding the branch that names the ticket |
 | F17 — the slowest stage is silent while it runs | **resolved**: `log/slog` adopted (stdlib, no dependency), injected via each package's existing seam, all 35 call sites migrated, `--log-level`/`--log-format` with text default and JSON first-class, and `Cluster` announces its plan before calling the model. Found rebuilding the store; the fix silently reintroduced the finding once via an uncalled `SetLogger`, hence "prove it fires" in go-conventions.md |
-| F16 — nothing bounds event text entering a prompt | **open**: completion tokens track EXTENDS-cluster count, which equalled the context-narrative count in all nine measured runs. `correlator.max_context_narratives` bounds that count, ranking a narrative sharing an issue key with the window above the rest by recency (not `NarrativesOverlapping`'s own oldest-first order) — available and unit-tested, but UNMEASURED end to end: no worktree has Jira credentials, so no before/after token number is claimed (design-notes #37/#38). Six candidates falsified by measurement, including window-splitting at 1.37× and a coarser-grouping instruction saving zero clusters |
+| F16 — a wide window still leaves context out, and nothing bounds completion by cluster count | **open, narrowed**: every clustering call's context is fitted to `llm.context_window_tokens` less `llm.max_output_tokens`, ranked (shared issue key, then recency), bisecting first and leaving whole narratives out only where a window cannot be split. Measured with no model call on a real 30-day store: the old path failed the 30-day window (an irreducible half at ~359,000 estimated tokens); the fit completes it in 2 calls, largest 152,501, leaving 85 of 163 narratives out of at least one call. What remains: those 85, completion for `NEW` clusters, and no reserve when `max_output_tokens` is unset. `correlator.max_context_narratives` stays an optional cap. Six candidates falsified by measurement, including window-splitting at 1.37× and a coarser-grouping instruction saving zero clusters |
 | F22 — matching livelocks on narratives that name no ticket | **resolved**: `match_examinations` records "examined, nothing to match against" and `matchExaminationPredicate` (one shared const, so the selector and its count cannot drift) skips those until an event is linked past the watermark. Verified live: a store stuck at 49 for eleven passes moved to **30 in one pass**; 29 watermarks written, both reasons firing. `examined_at` must use `%f` millisecond format — the first attempt used whole seconds and the comparison silently inverted |
 | F23 — the Jira client has no retry | **resolved**: a `retryTransport` retries GET/HEAD on transport errors, 429 (honoring `Retry-After`) and 5xx, capped at 4 attempts / 30s, with an explicit 20s client timeout. Writes are never retried — a single early return, since Jira has no idempotency key and a retried POST means a duplicate comment. 404 deliberately passes through, because `verifyCandidates` prunes on it |
 | F24 — write scope was invisible until approval | **resolved**: `config.ProjectWritability` is one shared predicate; `gate.Applier` defers to it and triage consults it per action. `[a]pprove` is dropped from the prompt for an unappliable action and the Session refuses the verb regardless. Verified live: the header reports "17 of them cannot be applied" and each names its remedy |

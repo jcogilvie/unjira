@@ -99,8 +99,10 @@ type disputeRequest struct {
 	// included. 0 (or less) makes any dispute an error with no call.
 	maxCalls int
 
-	contextWindowTokens int
-	log                 *slog.Logger
+	// promptBudgetTokens is the context window less the reply's reserve (promptBudget):
+	// every dispute call is packed to and checked against it.
+	promptBudgetTokens int
+	log                *slog.Logger
 }
 
 // dispute is one event with more than one member placement: the event, and the
@@ -247,13 +249,13 @@ func askDisputeBatch(
 				"call", call, "max_calls", req.maxCalls, "disputed_events", len(batch),
 				"reason", latest.Error(), "est_tokens", estimated)
 
-			if estimated > req.contextWindowTokens {
+			if estimated > req.promptBudgetTokens {
 				return nil, fmt.Errorf(
 					"clustering events in window [%s, %s): the dispute re-ask for %d event(s) (%s), repeated after a "+
-						"refused response, is estimated at %d tokens, over the %d-token context window; the refusal "+
+						"refused response, is estimated at %d tokens, over the %d-token prompt budget (the context window less the reply's reserve); the refusal "+
 						"was: %w",
 					req.window.Start, req.window.End, len(batch), describeDisputes(req.results, batch),
-					estimated, req.contextWindowTokens, latest)
+					estimated, req.promptBudgetTokens, latest)
 			}
 		}
 
@@ -347,7 +349,7 @@ type disputePrompt struct {
 }
 
 // batchDisputes splits disputes, in order, into contiguous batches whose dispute
-// prompt each fits req.contextWindowTokens: one batch, the whole set, whenever it
+// prompt each fits req.promptBudgetTokens: one batch, the whole set, whenever it
 // fits. Greedy: a dispute joins the current batch unless that would take it over
 // budget, and then starts the next. Never drops or splits a dispute — a dispute too
 // large on its own still gets a batch of its own, which requireDisputeFits refuses.
@@ -372,7 +374,7 @@ func batchDisputes(req disputeRequest, disputes []dispute) [][]dispute {
 	start, size := 0, fixed
 	for i, d := range disputes {
 		n := blockLen(i-start, d)
-		if i > start && estimateTokensOfLen(size+n) > req.contextWindowTokens {
+		if i > start && estimateTokensOfLen(size+n) > req.promptBudgetTokens {
 			batches = append(batches, disputes[start:i])
 			start, size = i, fixed
 			n = blockLen(0, d)
@@ -390,24 +392,24 @@ func batchDisputes(req disputeRequest, disputes []dispute) [][]dispute {
 // of a claimant for the call fitting (finding F52).
 func requireDisputeFits(req disputeRequest, batch []dispute, p disputePrompt, call, calls int) error {
 	estimated := estimateTokens(p.system + p.user)
-	if estimated <= req.contextWindowTokens {
+	if estimated <= req.promptBudgetTokens {
 		return nil
 	}
 
 	if len(batch) == 1 {
 		return fmt.Errorf(
 			"clustering events in window [%s, %s): an event was placed in more than one cluster (%s), and the "+
-				"re-ask resolving it alone is estimated at %d tokens, over the %d-token context window. The re-ask "+
+				"re-ask resolving it alone is estimated at %d tokens, over the %d-token prompt budget (the context window less the reply's reserve). The re-ask "+
 				"lists each claimant's member events in full and never truncates them (finding F52)",
 			req.window.Start, req.window.End, describeDisputes(req.results, batch),
-			estimated, req.contextWindowTokens)
+			estimated, req.promptBudgetTokens)
 	}
 
 	return fmt.Errorf(
 		"clustering events in window [%s, %s): %s: %d event(s) were placed in more than one cluster (%s), and the "+
-			"re-ask resolving them is estimated at %d tokens, over the %d-token context window",
+			"re-ask resolving them is estimated at %d tokens, over the %d-token prompt budget (the context window less the reply's reserve)",
 		req.window.Start, req.window.End, disputeCallLabel(call, calls), len(batch),
-		describeDisputes(req.results, batch), estimated, req.contextWindowTokens)
+		describeDisputes(req.results, batch), estimated, req.promptBudgetTokens)
 }
 
 // disputeCallLabel names one call of the dispute pass in an error, 1-based.
