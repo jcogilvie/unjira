@@ -103,7 +103,8 @@ type LLMConfig struct {
 	// surprise.
 	APIKeyHelper string `json:"api_key_helper"`
 	// MaxReasks is this model's re-ask budget for every use that does not set its
-	// own; MaxMatchReasks, MaxOmissionReasks and MaxDisputeReasks set one use's.
+	// own; MaxMatchReasks, MaxOmissionReasks, MaxDisputeReasks and MaxClusterReasks
+	// set one use's.
 	// Pointers, because unset (inherit the tier below) and an explicit 0 (never
 	// re-ask) must differ. Resolved by Config.ReaskBudgets, which documents the
 	// tiers and what a re-ask is at each use.
@@ -111,6 +112,7 @@ type LLMConfig struct {
 	MaxMatchReasks    *int `json:"max_match_reasks"`
 	MaxOmissionReasks *int `json:"max_omission_reasks"`
 	MaxDisputeReasks  *int `json:"max_dispute_reasks"`
+	MaxClusterReasks  *int `json:"max_cluster_reasks"`
 }
 
 // ResolvedAPIKeyHelper returns APIKeyHelper with a leading ~ expanded to the

@@ -203,6 +203,7 @@ func RunNarrate(
 		ctx, candidates, existing, client, window, cfg.LLM.ContextWindowTokens,
 		correlator.WithClusterRules(correlatorRules),
 		correlator.WithMaxEventSummaryChars(cfg.Correlator.MaxEventSummaryChars),
+		correlator.WithClusterReasks(budgets.Cluster),
 		correlator.WithOmissionReasks(budgets.Omission),
 		correlator.WithDisputeReasks(budgets.Dispute),
 		correlator.WithLogger(opts.Log))

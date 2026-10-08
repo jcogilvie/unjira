@@ -87,12 +87,33 @@ func TestSplitNarrative_HonoursTheConfiguredReaskBudgets(t *testing.T) {
 		`[{"kind":"new","title":"story B","summary":"s","confidence":0.9,"event_indices":[1]}]`,
 	}}
 	h := splitHandler(s, client)
-	h.SetReaskBudgets(config.ReaskBudgets{Match: 1, Omission: 0, Dispute: 1})
+	h.SetReaskBudgets(config.ReaskBudgets{Match: 1, Omission: 0, Dispute: 1, Cluster: 1})
 
 	_, err := h.SplitNarrative(context.Background(), nid)
 
 	require.ErrorContains(t, err, "llm.max_omission_reasks")
 	assert.Len(t, client.prompts, 1, "no omission re-ask at a budget of 0")
+	count, err := s.NarrativeEventCount(nid)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "a failed split moves nothing")
+}
+
+// The cluster budget reaches a split too: at 0, a refused clustering response fails
+// the split with no follow-up call.
+func TestSplitNarrative_HonoursTheConfiguredClusterReaskBudget(t *testing.T) {
+	s, nid, _ := splitStore(t, 2)
+	client := &wireLLM{responses: []string{
+		`These are two stories.`,
+		`[{"kind":"new","title":"story A","summary":"s","confidence":0.9,"event_indices":[0]},` +
+			`{"kind":"new","title":"story B","summary":"s","confidence":0.9,"event_indices":[1]}]`,
+	}}
+	h := splitHandler(s, client)
+	h.SetReaskBudgets(config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1, Cluster: 0})
+
+	_, err := h.SplitNarrative(context.Background(), nid)
+
+	require.ErrorContains(t, err, "llm.max_cluster_reasks")
+	assert.Len(t, client.prompts, 1, "no cluster re-ask at a budget of 0")
 	count, err := s.NarrativeEventCount(nid)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count, "a failed split moves nothing")
