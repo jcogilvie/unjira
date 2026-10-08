@@ -131,6 +131,7 @@ func (h *StoreHandler) clusterReaskOptions() []correlator.ClusterOption {
 	}
 
 	return []correlator.ClusterOption{
+		correlator.WithClusterReasks(h.reasks.Cluster),
 		correlator.WithOmissionReasks(h.reasks.Omission),
 		correlator.WithDisputeReasks(h.reasks.Dispute),
 	}

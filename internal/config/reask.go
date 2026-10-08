@@ -24,18 +24,23 @@ type LLMDefaultsConfig struct {
 //   - Dispute: calls per batch asking which cluster owns an event placed in two.
 //     The first dispute call is itself the first re-ask of the clustering response,
 //     so 0 makes any double placement a loud error.
+//   - Cluster: follow-ups to a clustering call whose response the parser refused
+//     (an out-of-range index, an unknown kind, a missing confidence, prose). Each
+//     re-sends the whole clustering prompt, so one costs about what the first call
+//     did; the alternative is a failed pass, whose retry re-sends it anyway.
 //
 // Exhausting a budget is always a loud error, never a partial result.
 type ReaskBudgets struct {
 	Match    int
 	Omission int
 	Dispute  int
+	Cluster  int
 }
 
 // ReaskBudgets resolves each use's budget from the most specific tier that is SET:
 //
 //  1. per use, in the model block (llm.max_match_reasks, llm.max_omission_reasks,
-//     llm.max_dispute_reasks);
+//     llm.max_dispute_reasks, llm.max_cluster_reasks);
 //  2. per model (llm.max_reasks);
 //  3. across all models (llm_defaults.max_reasks);
 //  4. DefaultMaxReasks.
@@ -58,6 +63,7 @@ func (c Config) ReaskBudgets() (ReaskBudgets, error) {
 		{"llm.max_match_reasks", c.LLM.MaxMatchReasks},
 		{"llm.max_omission_reasks", c.LLM.MaxOmissionReasks},
 		{"llm.max_dispute_reasks", c.LLM.MaxDisputeReasks},
+		{"llm.max_cluster_reasks", c.LLM.MaxClusterReasks},
 	}
 	for _, t := range tiers {
 		if t.val != nil && *t.val < 0 {
@@ -73,6 +79,7 @@ func (c Config) ReaskBudgets() (ReaskBudgets, error) {
 		Match:    firstSet(c.LLM.MaxMatchReasks, perModel, global),
 		Omission: firstSet(c.LLM.MaxOmissionReasks, perModel, global),
 		Dispute:  firstSet(c.LLM.MaxDisputeReasks, perModel, global),
+		Cluster:  firstSet(c.LLM.MaxClusterReasks, perModel, global),
 	}, nil
 }
 

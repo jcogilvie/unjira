@@ -250,6 +250,12 @@ type Stats struct {
 	// loudly and stays unmatched for a later pass; the other narratives are
 	// unaffected. Already counted in Calls.
 	MatchReasks int
+	// ClusterReasks counts follow-up clustering calls: each re-asks a clustering call
+	// whose response the parser refused (an out-of-range index, an unknown kind, a
+	// missing confidence, prose), quoting the reason (finding F44), up to
+	// llm.max_cluster_reasks per clustering call — each bisected half has its own.
+	// Already counted in Calls. Each one re-sends that call's whole prompt.
+	ClusterReasks int
 	// PRIdentityJoins counts clusters folded into another cluster of the same pass
 	// because their member events share an exact pull-request identity (finding F61:
 	// a bisected window shows one PR's :opened and :merged to two calls that cannot
@@ -324,6 +330,7 @@ func (s *Stats) Add(other Stats) {
 	s.MaxContextFanOut = max(s.MaxContextFanOut, other.MaxContextFanOut)
 	s.MembersBelowFloor += other.MembersBelowFloor
 	s.MatchReasks += other.MatchReasks
+	s.ClusterReasks += other.ClusterReasks
 	s.PRIdentityJoins += other.PRIdentityJoins
 	s.PRIdentityConflicts = append(s.PRIdentityConflicts, other.PRIdentityConflicts...)
 	s.Emptied = append(s.Emptied, other.Emptied...)
@@ -351,8 +358,10 @@ type clusterOptions struct {
 	// maxEventSummaryChars caps each context event's summary. Zero is unlimited,
 	// which keeps every existing caller and test unchanged (finding F16).
 	maxEventSummaryChars int
-	// omissionReasks and disputeReasks are the re-ask budgets (WithOmissionReasks,
-	// WithDisputeReasks). defaultReasks unless an option sets them.
+	// clusterReasks, omissionReasks and disputeReasks are the re-ask budgets
+	// (WithClusterReasks, WithOmissionReasks, WithDisputeReasks). defaultReasks unless
+	// an option sets them.
+	clusterReasks  int
 	omissionReasks int
 	disputeReasks  int
 }
@@ -370,12 +379,23 @@ type ClusterOption func(*clusterOptions)
 // builds it here, so a default cannot be the zero value in one place and something
 // else in another.
 func newClusterOptions(opts []ClusterOption) clusterOptions {
-	o := clusterOptions{omissionReasks: defaultReasks, disputeReasks: defaultReasks}
+	o := clusterOptions{clusterReasks: defaultReasks, omissionReasks: defaultReasks, disputeReasks: defaultReasks}
 	for _, opt := range opts {
 		opt(&o)
 	}
 
 	return o
+}
+
+// WithClusterReasks sets how many follow-up calls Cluster may make, per clustering
+// call, after a response the parser refused (reaskRefusedCluster). 0 makes a refused
+// response a loud error with no follow-up call; a negative value behaves as 0.
+// Absent, the budget is one call. The caller resolves the number from config
+// (config.Config.ReaskBudgets); this package never reads the tiers itself.
+func WithClusterReasks(n int) ClusterOption {
+	return func(o *clusterOptions) {
+		o.clusterReasks = n
+	}
 }
 
 // WithOmissionReasks sets how many rounds Cluster may spend asking for the in-window
@@ -590,7 +610,22 @@ func clusterWindow(
 
 	results, indices, err := parseClusterResponse(raw, assignable)
 	if err != nil {
-		return nil, stats, err
+		var reaskStats Stats
+		results, indices, reaskStats, err = reaskRefusedCluster(ctx, client, parseReaskRequest{
+			window:              window,
+			systemPrompt:        systemPrompt,
+			userPrompt:          userPrompt,
+			assignable:          assignable,
+			refused:             raw,
+			reason:              err,
+			maxReasks:           o.clusterReasks,
+			contextWindowTokens: contextWindowTokens,
+			log:                 o.log,
+		})
+		stats.Add(reaskStats)
+		if err != nil {
+			return nil, stats, err
+		}
 	}
 
 	// Coverage is checked HERE, per model call, and not after clusterWithSplit
