@@ -814,14 +814,26 @@ on the shell words `simpleCommands` already parses.
 
 ### F66 — key-shaped tokens that are not keys are candidates until verification
 
-`events.TicketKeyRegexp` (`internal/events/events.go:45`) accepts any `[A-Z][A-Z0-9]{1,9}-\d+`, so
-line ranges (`L242-276`), encodings (`UTF-8`), digests (`SHA-256`), model names (`GPT-4`) and
-labels such as `AC1-3` are extracted. On a real 30-day store, 11 narratives carried
-one among their capped candidates. None survived verification and none pushed a real key past the
-candidate cap, so the cost is a tracker read each and an `Unresolved` entry. Left to
-`exclude_from_linking`, because the shapes are Jira-legal (`internal/config/trackers.go:58`'s `projectScopeRE`
-accepts a project `L310`), so refusing them in the extractor would silently hide a key some
-configuration is entitled to.
+`events.TicketKeyRegexp` (`internal/events/events.go:45`) accepts any `[A-Z][A-Z0-9]{1,9}-\d+`, so line
+ranges (`L242-276`), encodings (`UTF-8`), digests (`SHA-256`), model names (`GPT-4`) and labels such as
+`AC1-3` are extracted. A key in a project no tracker scopes is still read, through the resolver's read
+fallback (`tasktracker.Resolver.WithReadFallback`), so each such token costs a tracker read that returns
+not-found and an `Unresolved` entry. On a real 30-day store, 11 narratives carried one among their capped
+candidates. None survived verification, and none pushed a real key past the candidate cap.
+
+**Not a pattern list.** The shapes are legal keys: `projectScopeRE` (`internal/config/trackers.go:58`)
+accepts a project `L310`, and a site can have a project `HTTP`. A built-in or recommended regex would
+silently hide those keys, and it would only fit `PROJ-N` syntax, not a GitHub tracker's `owner/repo#N`.
+`exclude_from_linking` stays for its purpose, keys that are real-looking and in scope but should never
+be linked.
+
+**Planned fix: ask the tracker which scopes exist.** Each backend reports its existing scopes, cached
+once per pass (Jira: `GET /rest/api/3/project`). Matching's verify step then drops a candidate whose
+scope does not exist on its tracker, as "not a project on this tracker", before any per-key read. That
+is exact, needs no config, keeps a real `HTTP-12`, works per tracker syntax, and stays in verification,
+where network checks belong. It also replaces one read per junk key with one call per pass. **Deferred:**
+build it when a junk key first displaces a real one at the cap, or when the wasted reads show up in a
+measurement.
 
 ## Task cross-references
 
@@ -834,6 +846,7 @@ configuration is entitled to.
 | F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
 | F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
 | F43 — cross-pass PR split | **resolved**: PR-identity pre-assignment before clustering (`pipeline/preassign.go`). An unplaced event whose host-qualified `ArtifactPullRequest` matches a member of exactly one open narrative joins it, unseen by the model; ambiguity falls back to the model and is reported. Drills: removing the exactly-one, open-status and host guards each fail a named test. Two-pass M3 re-measured 2026-10-02 on real data: 24/26 -> 26/26 in all three reps |
+| F66 — key-shaped tokens that are not keys are candidates until verification | open, deferred. Fix planned: each tracker reports its existing scopes, and verification drops a candidate in a scope that doesn't exist. Not a pattern list. 11 narratives affected, 0 real keys displaced |
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Measured in six two-pass reps after the join: 24 identity placements, M3 26/26 in every rep, 0 identity-placed members moved by the model |
 | F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
 | F53 — stored timestamps keep their offset; window queries compare strings | open. Jira timestamps are stored with the account's offset, everything else `Z`; unmeasured |
