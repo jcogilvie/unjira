@@ -486,11 +486,17 @@ func (h *StoreHandler) Retarget(
 		return store.ActionRow{}, err
 	}
 
+	feedback := fmt.Sprintf("The reviewer reattributed this work from %s to %s. Draft for %s.",
+		action.IssueKey, newKey, newKey)
+	if action.IssueKey == "" {
+		// A create names no ticket. Retargeting one is the reviewer's "link instead": the
+		// work belongs on a ticket that exists, so it gets no new one.
+		feedback = fmt.Sprintf("The reviewer linked this work to %s instead of opening a new "+
+			"ticket for it. Draft for %s.", newKey, newKey)
+	}
+
 	drafted, _, err := reconciler.ReworkOne(
-		ctx, h.store, h.tracker, h.client, action.NarrativeID,
-		fmt.Sprintf("The reviewer reattributed this work from %s to %s. Draft for %s.",
-			action.IssueKey, newKey, newKey),
-		h.rules)
+		ctx, h.store, h.tracker, h.client, action.NarrativeID, feedback, h.rules)
 	if err != nil {
 		return store.ActionRow{}, err
 	}
@@ -509,10 +515,37 @@ func (h *StoreHandler) Retarget(
 }
 
 // relinkPrimary swaps the narrative's primary link, in one transaction.
+//
+// With no oldKey the action was a create, proposed because the narrative had no
+// CONFIDENT primary, so it may still hold a doubted one (below match.confidence_floor).
+// one_primary_per_narrative admits one primary, so a doubted primary other than newKey
+// is demoted to `mentioned` first, keeping its provenance and confidence: the reviewer
+// has just said the work's home is newKey, and the doubted ticket stays on record as
+// one the work names. newKey itself is upserted below, whatever role it held.
+//
+// The doubted primary is read before the transaction opens. A primary linked between
+// that read and the write would be a second primary, which the index refuses loudly.
 func (h *StoreHandler) relinkPrimary(narrativeID int64, oldKey, newKey string) error {
+	var demote []store.NarrativeIssue
+
+	if oldKey == "" {
+		doubted, err := otherPrimary(h.store, narrativeID, newKey)
+		if err != nil {
+			return fmt.Errorf("reading the links of narrative %d: %w", narrativeID, err)
+		}
+
+		demote = doubted
+	}
+
 	if err := h.store.WithTx(func(tx *store.Tx) error {
 		if oldKey != "" {
 			if err := tx.RemoveNarrativeIssue(narrativeID, oldKey); err != nil {
+				return err
+			}
+		}
+
+		if len(demote) > 0 {
+			if err := tx.AddNarrativeIssues(narrativeID, demote); err != nil {
 				return err
 			}
 		}
@@ -530,6 +563,26 @@ func (h *StoreHandler) relinkPrimary(narrativeID int64, oldKey, newKey string) e
 	}
 
 	return nil
+}
+
+// otherPrimary returns narrativeID's primary re-recorded as `mentioned`, when it has a
+// primary that is not keepKey: the row that must be demoted before keepKey can become
+// the primary. Empty when there is nothing to demote.
+func otherPrimary(s *store.Store, narrativeID int64, keepKey string) ([]store.NarrativeIssue, error) {
+	links, err := s.NarrativeIssues(narrativeID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, l := range links {
+		if l.Role == correlator.RolePrimary && l.IssueKey != keepKey {
+			l.Role = correlator.RoleMentioned
+
+			return []store.NarrativeIssue{l}, nil
+		}
+	}
+
+	return nil, nil
 }
 
 // Restructure satisfies Handler, dispatching merge and split.

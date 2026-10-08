@@ -22,6 +22,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
+	"github.com/jcogilvie/unjira/internal/reconciler"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/triage"
@@ -169,6 +170,23 @@ func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
 			len(item.Narrative.ToConfirm))
 		for _, at := range item.Narrative.ToConfirm {
 			fmt.Printf("             - [%s] %s  (confidence %.2f)\n", at.Source, at.Summary, at.Confidence)
+		}
+	}
+
+	// A create proposed for work with no confident primary: the tickets the work is
+	// linked to without one of them being its home. Shown so the reviewer can choose
+	// between the new ticket and one of these, and [t]arget is how to choose the latter.
+	if candidates := reconciler.CreateCandidatesOf(a.Payload); len(candidates) > 0 {
+		fmt.Printf("  candidates: no ticket is confidently this work's home; [t]arget one to link the work there instead:\n")
+		for _, c := range candidates {
+			fmt.Printf("             - %s (%s, confidence %.2f, %s)", c.IssueKey, c.Role, c.Confidence, c.Provenance)
+			switch {
+			case c.Summary != "" || c.Status != "":
+				fmt.Printf(": %s [%s]", c.Summary, c.Status)
+			case c.Unread != "":
+				fmt.Printf(": could not be read (%s)", c.Unread)
+			}
+			fmt.Println()
 		}
 	}
 

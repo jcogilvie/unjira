@@ -99,6 +99,39 @@ type createPayload struct {
 	// Absent on every create persisted before destinations existed, which land in the
 	// configured default.
 	Scope string `json:"scope,omitempty"`
+	// Candidates are the links the create was proposed over (reconciler.CreateCandidate's
+	// link half): a narrative with no confident primary names every link it holds.
+	// Absent on a create for work with no link, and on every create persisted before
+	// candidates existed.
+	Candidates []createCandidate `json:"candidates,omitempty"`
+}
+
+// createCandidate mirrors the link half of reconciler.CreateCandidate's JSON. The
+// summary and status it also carries are for the reviewer; the backstop reads only the
+// link.
+type createCandidate struct {
+	Key        string     `json:"key"`
+	Role       store.Role `json:"role"`
+	Confidence float64    `json:"confidence"`
+	Provenance string     `json:"provenance"`
+}
+
+// proposedOver reports whether primary is exactly the primary this create was proposed
+// over: the payload names it, as a primary, with the same confidence and provenance it
+// has now. Every field, because each one changing means something happened that the
+// reviewer did not see: another key is another ticket, a provenance of reviewer is a
+// human's link, and a new confidence is a re-judgment. Confidence is compared exactly,
+// which is sound because both sides are the same stored float, written to the payload
+// by encoding/json, which round-trips a float64 exactly.
+func (p createPayload) proposedOver(primary store.NarrativeIssue) bool {
+	for _, c := range p.Candidates {
+		if c.Key == primary.IssueKey && c.Role == store.RolePrimary &&
+			c.Confidence == primary.Confidence && c.Provenance == primary.Provenance {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Apply performs exactly one action's tracker write and records the outcome
@@ -295,8 +328,8 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 	}
 
 	// Re-check that the work is still untracked. A create is proposed from a
-	// SNAPSHOT — at propose time the narrative had no link — and matching can link it
-	// afterwards, in the observed case three hours later at confidence 1.0, to an
+	// SNAPSHOT — at propose time the narrative had no confident primary — and matching
+	// can link it afterwards, in the observed case three hours later at confidence 1.0, to an
 	// issue that was already Done (finding F13). Nothing between proposal and write
 	// re-checked: openOrAppliedCreate inspects only other ACTIONS, never links.
 	//
@@ -313,16 +346,27 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 	// And only one in the SAME tracker as this create's destination. One narrative may
 	// be ticketed in several trackers (destinations); the first create's link sits in
 	// another tracker and says nothing about whether this one is a duplicate there.
-	primary, err := a.primaryLinkFor(action.NarrativeID)
+	//
+	// And not the primary the create was PROPOSED OVER. Work whose primary the model
+	// doubted (below match.confidence_floor) has no confident home, so it is proposed as
+	// a create naming that primary, and the reviewer approved the new ticket with it in
+	// view. Refusing on it would refuse the very creates that rule proposes. Any other
+	// primary, or that one changed in any field, arrived after the proposal and is
+	// refused as before (see createPayload.proposedOver). The floor is not consulted:
+	// it was applied when the proposal was drafted, and what the reviewer saw is the
+	// payload.
+	primary, hasPrimary, err := a.primaryLinkFor(action.NarrativeID)
 	if err != nil {
 		return fmt.Errorf("action %d: %w", action.ID, err)
 	}
 
-	if primary != "" && a.sameTracker(primary, target) {
+	doubted := hasPrimary && p.proposedOver(primary)
+
+	if hasPrimary && !doubted && a.sameTracker(primary.IssueKey, target) {
 		return fmt.Errorf(
 			"action %d: narrative %d is already tracked by %s, so creating an issue would "+
-				"duplicate it; the link was made after this action was proposed (reject it rather "+
-				"than retrying)", action.ID, action.NarrativeID, primary,
+				"duplicate it; the link was made or changed after this action was proposed (reject "+
+				"it rather than retrying)", action.ID, action.NarrativeID, primary.IssueKey,
 		)
 	}
 
@@ -343,12 +387,21 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 
 	// The narrative's first ticket is its primary; a ticket in a further destination is
 	// the same work represented again (one primary per narrative is a schema invariant).
-	role := store.Role("primary")
-	if primary != "" {
+	// A doubted primary is not a first ticket: the new one replaces it as primary, and
+	// it is demoted to `mentioned`, which keeps the row (its provenance and confidence)
+	// and is what one_primary_per_narrative requires. Its original role stays on record
+	// in this action's payload.
+	role := store.RolePrimary
+	var demote *store.NarrativeIssue
+
+	switch {
+	case doubted:
+		demote = &primary
+	case hasPrimary:
 		role = "same_work"
 	}
 
-	if err := a.linkCreatedIssue(action.NarrativeID, key, role); err != nil {
+	if err := a.linkCreatedIssue(action.NarrativeID, key, role, demote); err != nil {
 		return fmt.Errorf("created %s but could not link it to narrative %d (%w); link it by hand "+
 			"before the next pass proposes another", key, action.NarrativeID, err)
 	}
@@ -357,13 +410,25 @@ func (a *Applier) applyCreate(action store.ActionRow) error {
 }
 
 // linkCreatedIssue records the new issue on the narrative: as its primary, or as
-// same_work when a create in another destination already supplied the primary.
+// same_work when a create in another destination already supplied the primary. A
+// non-nil demote is the doubted primary the new issue replaces; it is re-recorded as
+// `mentioned` in the same transaction, first, since the partial unique index admits one
+// primary at a time.
 //
 // provenance is "unjira_created": distinct from every matching provenance because
 // this is not an inference about where work belongs — unjira put it there.
 // Confidence 1.0 for the same reason.
-func (a *Applier) linkCreatedIssue(narrativeID int64, key string, role store.Role) error {
+func (a *Applier) linkCreatedIssue(narrativeID int64, key string, role store.Role, demote *store.NarrativeIssue) error {
 	return a.store.WithTx(func(tx *store.Tx) error {
+		if demote != nil {
+			cited := *demote
+			cited.Role = "mentioned"
+
+			if err := tx.AddNarrativeIssues(narrativeID, []store.NarrativeIssue{cited}); err != nil {
+				return fmt.Errorf("demoting the doubted primary %s: %w", demote.IssueKey, err)
+			}
+		}
+
 		return tx.AddNarrativeIssues(narrativeID, []store.NarrativeIssue{{
 			IssueKey:   key,
 			Role:       role,
@@ -468,25 +533,25 @@ func (a *Applier) sameTracker(issueKey, scope string) bool {
 	return !ok || !okDestination || owner.Name == destination.Name
 }
 
-// primaryLinkFor returns the issue key of narrativeID's primary link, or "" when it
-// has none. A read, on the write-authority package's one narrow exception: refusing
+// primaryLinkFor returns narrativeID's primary link, and false when it has none. A read, on the write-authority package's one narrow exception: refusing
 // a duplicate needs to know what already tracks the work, and the alternative —
 // passing the answer in from the caller — would put the check somewhere that does not
 // write, where it could be bypassed by a second write path.
-func (a *Applier) primaryLinkFor(narrativeID int64) (string, error) {
+func (a *Applier) primaryLinkFor(narrativeID int64) (store.NarrativeIssue, bool, error) {
 	links, err := a.store.NarrativeIssues(narrativeID)
 	if err != nil {
 		// Refuse rather than assume untracked: guessing wrong here opens a duplicate
 		// ticket, and the failure mode of guessing the other way is one unapplied
 		// action with a stated reason.
-		return "", fmt.Errorf("checking existing links for narrative %d: %w", narrativeID, err)
+		return store.NarrativeIssue{}, false, fmt.Errorf(
+			"checking existing links for narrative %d: %w", narrativeID, err)
 	}
 
 	for _, l := range links {
 		if l.Role == store.RolePrimary {
-			return l.IssueKey, nil
+			return l, true, nil
 		}
 	}
 
-	return "", nil
+	return store.NarrativeIssue{}, false, nil
 }

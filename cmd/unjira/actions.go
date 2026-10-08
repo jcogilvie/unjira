@@ -13,8 +13,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jcogilvie/unjira/internal/gate"
+	"github.com/jcogilvie/unjira/internal/reconciler"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -90,6 +92,17 @@ func renderActionsList(rows []store.ActionRow, status string) {
 
 		if a.Error != "" {
 			fmt.Printf(" error=%q", a.Error)
+		}
+
+		// A create proposed for work with no confident primary names the tickets it was
+		// proposed over; a reviewer may link the work to one instead (triage's [t]arget).
+		if candidates := reconciler.CreateCandidatesOf(a.Payload); len(candidates) > 0 {
+			named := make([]string, 0, len(candidates))
+			for _, c := range candidates {
+				named = append(named, fmt.Sprintf("%s(%s %.2f)", c.IssueKey, c.Role, c.Confidence))
+			}
+
+			fmt.Printf(" candidates=%s", strings.Join(named, ","))
 		}
 
 		fmt.Println()

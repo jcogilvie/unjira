@@ -335,13 +335,23 @@ type MatchConfig struct {
 	// which then reached the create path as untracked work and drew proposals for
 	// new tickets duplicating issues those narratives already named.
 	MaxNarrativesPerPass int `json:"max_narratives_per_pass"`
-	// ConfidenceFloor governs only whether matching reports a primary as
-	// promoted in its pass result (correlator.MatchResult.Primary). Below it,
-	// every narrative_issues row is still written, including the primary. The
-	// floor governs what unjira asserts, not what it records: dropping the rows
-	// would make a low-confidence match indistinguishable from finding nothing
-	// at all. Nothing downstream reads it, though, so the reconciler drafts onto
-	// a primary at any confidence (finding F64).
+	// ConfidenceFloor is the confidence a primary link must reach to be the
+	// narrative's confident home. The floor governs what unjira asserts, not what
+	// it records: below it, every narrative_issues row is still written, including
+	// the primary, because dropping the rows would make a low-confidence match
+	// indistinguishable from finding nothing at all.
+	//
+	// What it governs, at or above versus below:
+	//   - matching reports the primary as promoted (correlator.MatchResult.Primary)
+	//     or as recorded but not asserted;
+	//   - the reconciler drafts comments and transitions onto the narrative's
+	//     primary and same_work links, or onto none of them;
+	//   - the create path leaves the narrative alone, or proposes a ticket for it
+	//     naming every link as a candidate, so a reviewer can link the work to one
+	//     instead (store.NarrativesAwaitingCreate).
+	//
+	// A narrative with no primary at all is treated as one below the floor. Zero,
+	// the unset value, makes every primary confident.
 	ConfidenceFloor float64 `json:"confidence_floor"`
 }
 
