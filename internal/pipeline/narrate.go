@@ -46,11 +46,18 @@ type NarrateResult struct {
 	// population never exceeded it.
 	//
 	// Reported for the same reason ExcludedTrackerRecords is: an unreported
-	// exclusion reads as "nothing was left out", and this bound is deliberately
-	// unmeasured (docs/architecture-findings.md F16) — an operator needs the
-	// count to tune correlator.max_context_narratives against evidence rather
-	// than guessing blind.
+	// exclusion reads as "nothing was left out", and this bound fragments
+	// narratives when it binds (docs/architecture-findings.md F16) — an operator
+	// needs the count to see what the cap traded away.
 	ExcludedContextNarratives int
+	// UnfittedContextNarratives counts hydrated context narratives (so included in
+	// ContextNarratives) that at least one clustering call left out, whole, because
+	// they did not fit its prompt budget: llm.context_window_tokens less
+	// llm.max_output_tokens (correlator.Stats.UnfittedContextNarratives). This is the
+	// bound that holds by default; ExcludedContextNarratives is the optional cap on
+	// top. Separate from it because the remedy differs: raising the cap keeps none of
+	// these, and a narrower window or a larger context window does.
+	UnfittedContextNarratives int
 	// PreAssigned are the unplaced events this pass joined to an existing narrative by
 	// exact pull-request identity, BEFORE clustering — so the model never saw them
 	// (F43). Under DryRun, what would have been joined; nothing was written.
@@ -205,8 +212,10 @@ func RunNarrate(
 		correlator.WithMaxEventSummaryChars(cfg.Correlator.MaxEventSummaryChars),
 		correlator.WithOmissionReasks(budgets.Omission),
 		correlator.WithDisputeReasks(budgets.Dispute),
+		correlator.WithResponseReserve(cfg.LLM.MaxOutputTokens),
 		correlator.WithLogger(opts.Log))
 	result.Stats.Add(clusterStats)
+	result.UnfittedContextNarratives = len(clusterStats.UnfittedContextNarratives)
 	if err != nil {
 		return NarrateResult{}, fmt.Errorf("clustering: %w", err)
 	}
@@ -326,6 +335,9 @@ func requireNonEmptyClusters(clustered []correlator.ClusterResult) error {
 // overlapping rows were excluded, which the caller must report (never
 // silently drop data).
 //
+// The narratives are returned in ranked order, the priority correlator.Cluster
+// keeps them by when a call's prompt budget cannot hold them all.
+//
 // extendTo is the window_end each narrative the pull-request identity join placed
 // into will hold (plannedWindowEnds). Overlap and the bound's recency ranking are
 // both read against it, so a dry run, which has not written the extension, sees the
@@ -411,15 +423,16 @@ func hydrateContextNarratives(
 	return out, excluded, nil
 }
 
-// boundContextNarratives applies config.CorrelatorConfig.MaxContextNarratives to
-// rows before any per-row hydration query runs, so an excluded narrative's cost
-// is excluded too. Loads NarrativeIssueKeysByNarrative only when maxContext will
-// actually bind (selectContextNarratives is itself a no-op past that point) —
-// skipping a store round trip that a zero or oversized bound would throw away.
+// boundContextNarratives ranks rows (selectContextNarratives) and applies
+// config.CorrelatorConfig.MaxContextNarratives to them before any per-row hydration
+// query runs, so a narrative the cap excludes costs nothing. The ranking is applied
+// whether or not a cap is set: it is the priority order correlator.Cluster fits each
+// call's prompt budget by, which is the bound that holds by default. A single row
+// has nothing to rank against, so it skips the store round trip.
 func boundContextNarratives(
 	s *store.Store, rows []store.NarrativeRow, candidates []events.Event, maxContext int,
 ) ([]store.NarrativeRow, int, error) {
-	if maxContext <= 0 || len(rows) <= maxContext {
+	if len(rows) <= 1 {
 		return rows, 0, nil
 	}
 

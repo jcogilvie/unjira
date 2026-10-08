@@ -356,6 +356,73 @@ func TestRunNarrate_BoundsContextNarrativesAndReportsWhatWasExcluded(t *testing.
 		"the oldest overlapping narrative is the one dropped, not the first by insertion order")
 }
 
+// TestRunNarrate_FitsContextToThePromptBudgetAndReportsWhatWasLeftOut pins the
+// default bound (finding F16): with no max_context_narratives set, the context set is
+// fitted to llm.context_window_tokens less llm.max_output_tokens, the narratives that
+// do not fit are left out whole and counted, and the pass completes instead of
+// overflowing.
+func TestRunNarrate_FitsContextToThePromptBudgetAndReportsWhatWasLeftOut(t *testing.T) {
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	window := correlator.TimeRange{Start: base, End: base.Add(time.Hour)}
+
+	// Two narratives of ~20,000 estimated tokens each and one small one, all
+	// overlapping the window. The small one is the oldest, so recency ranks it last:
+	// it is kept because it fits, not because it ranks first.
+	seed := func(t *testing.T) *store.Store {
+		t.Helper()
+		s := narrateStore(t)
+		for i, n := range []struct{ label, summary string }{
+			{"small", "small summary"},
+			{"bigolder", "bigolder summary " + strings.Repeat("x", 40000)},
+			{"bignewer", "bignewer summary " + strings.Repeat("y", 40000)},
+		} {
+			windowEnd := base.Add(time.Duration(i) * 5 * time.Minute)
+			extID := fmt.Sprintf("old%d", i)
+			seedNarrateEvent(t, s, extID, n.label+" work", windowEnd.Add(-time.Minute))
+			eid, err := s.EventIDByExternalID("claude_code", extID)
+			require.NoError(t, err)
+			nid, err := s.InsertNarrative(windowEnd.Add(-time.Hour), windowEnd, n.label, n.summary)
+			require.NoError(t, err)
+			require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
+		}
+		seedNarrateEvent(t, s, "new", "new work", base.Add(30*time.Minute))
+
+		return s
+	}
+	response := `[{"kind":"new","title":"T","summary":"s","confidence":0.9,"event_indices":[0]}]`
+
+	t.Run("the reply's reserve comes off the window", func(t *testing.T) {
+		client := &narrateLLM{responses: []string{response}}
+		cfg := narrateConfig()
+		cfg.LLM.ContextWindowTokens = 60000
+		cfg.LLM.MaxOutputTokens = 40000
+
+		got, err := pipeline.RunNarrate(t.Context(), seed(t), client, cfg, window, pipeline.NarrateOptions{})
+
+		require.NoError(t, err)
+		require.Len(t, client.prompts, 1, "a window holding one event cannot bisect, so it is fitted")
+		assert.Equal(t, 3, got.ContextNarratives, "every overlapping narrative was hydrated")
+		assert.Zero(t, got.ExcludedContextNarratives, "no max_context_narratives is set")
+		assert.Equal(t, 2, got.UnfittedContextNarratives, "the two that do not fit are reported")
+		assert.Contains(t, client.prompts[0], "small summary")
+		assert.NotContains(t, client.prompts[0], "bigolder summary")
+		assert.NotContains(t, client.prompts[0], "bignewer summary")
+	})
+
+	t.Run("with room for everything nothing is left out", func(t *testing.T) {
+		client := &narrateLLM{responses: []string{response}}
+		cfg := narrateConfig()
+		cfg.LLM.ContextWindowTokens = 60000
+
+		got, err := pipeline.RunNarrate(t.Context(), seed(t), client, cfg, window, pipeline.NarrateOptions{})
+
+		require.NoError(t, err)
+		assert.Zero(t, got.UnfittedContextNarratives)
+		assert.Contains(t, client.prompts[0], "bigolder summary")
+		assert.Contains(t, client.prompts[0], "bignewer summary")
+	})
+}
+
 // TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited pins the default: the knob
 // ships inert until an operator opts in, matching MaxEventSummaryChars.
 func TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited(t *testing.T) {
@@ -384,6 +451,12 @@ func TestRunNarrate_ZeroMaxContextNarrativesIsUnlimited(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, got.ContextNarratives, "config default is zero — unlimited")
 	assert.Zero(t, got.ExcludedContextNarratives)
+	// Ranked with no cap set: the order is the priority Cluster fits its prompt
+	// budget by, so the most recently active narrative is listed first.
+	require.Len(t, client.prompts, 1)
+	a, b, c := strings.Index(client.prompts[0], "a summary"), strings.Index(client.prompts[0], "b summary"),
+		strings.Index(client.prompts[0], "c summary")
+	assert.True(t, c < b && b < a, "context is listed most recent first: c=%d b=%d a=%d", c, b, a)
 }
 
 // TestRunNarrate_EventsFoldedCountsOnlyThisPassNotLifetimeTotal proves

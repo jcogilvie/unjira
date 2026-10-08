@@ -171,6 +171,20 @@ for it the query is plain `NarrativesOverlapping`. A dry run has not, and the qu
 holder that the join brings into the window. Without that, a dry run would cluster against fewer
 narratives than the real pass.
 
+**Every clustering call's context is fitted to a prompt budget** (`correlator/context_fit.go`). The
+budget is `llm.context_window_tokens` less `llm.max_output_tokens`, since a server holds the prompt
+and the reply's ceiling together, and the omission re-ask and the dispute re-ask are checked against
+the same number. `pipeline.hydrateContextNarratives` returns the overlapping narratives ranked
+(`selectContextNarratives`: a narrative sharing an issue key with the window's candidates first, then
+most recent `window_end`), with `correlator.max_context_narratives` as an optional cap applied before
+hydration. `Cluster` adds them in that order while the estimated prompt stays within the budget, each
+charged a fixed follow-up headroom so its own omission re-ask still fits. A narrative that does not fit
+is left out whole, never cut, and a smaller one ranked below it may still fit. A call over budget
+bisects first while the window can be split by time, because each half sees the narratives near its
+own events. Only a window that cannot be split leaves narratives out, which
+`Stats.UnfittedContextNarratives` reports and the pass summary prints. A window whose own events do not
+fit with no context at all bisects, or fails if it cannot.
+
 **After clustering, the same identity joins the model's own results**
 (`correlator/cluster_prjoin.go`, `joinByPullRequest`). A window too big for one call is bisected by
 time, each half clustered from its own events, and `mergeSplitResults` joins only results extending the

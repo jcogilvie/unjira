@@ -82,6 +82,11 @@ type LLMConfig struct {
 	// gateways reject a cap above their own ceiling, so unjira must be able to
 	// send none. openai.Complete errors loudly if a response is truncated, so
 	// an unset cap degrades to a clear failure rather than silent data loss.
+	//
+	// Also the reply's reserve: clustering fits each prompt to ContextWindowTokens
+	// less this (correlator.WithResponseReserve), since a server holds the prompt and
+	// the reply's ceiling together. Unset reserves nothing, so Validate requires it
+	// to be less than ContextWindowTokens only when set.
 	MaxOutputTokens int `json:"max_output_tokens"`
 	// APIKeyHelper is a command whose stdout is the LLM credential. When set it
 	// takes precedence over UNJIRA_LLM_API_KEY, and is run again whenever the
@@ -158,6 +163,15 @@ func (c LLMConfig) Validate() error {
 			c.MaxOutputTokens,
 		)
 	}
+	// A server sizes the prompt and the reply's ceiling together, so clustering
+	// fits its prompt to the window less this (correlator.WithResponseReserve). A
+	// ceiling at or above the window would leave no prompt at all.
+	if c.MaxOutputTokens >= c.ContextWindowTokens {
+		return fmt.Errorf(
+			"llm.max_output_tokens is %d: must be less than llm.context_window_tokens (%d), "+
+				"which holds the prompt and the reply together",
+			c.MaxOutputTokens, c.ContextWindowTokens)
+	}
 
 	return nil
 }
@@ -195,8 +209,13 @@ type CorrelatorConfig struct {
 	MaxEventSummaryChars int `json:"max_event_summary_chars"`
 	// MaxContextNarratives caps how many EXISTING narratives one narration pass
 	// hydrates as clustering context (pipeline.hydrateContextNarratives, fed by
-	// store.NarrativesOverlapping). Zero means unlimited, and zero is the default
-	// so the knob ships inert — nobody's behaviour shifts until they choose a value.
+	// store.NarrativesOverlapping). Zero means no cap, and zero is the default.
+	//
+	// It is a cap on top of the bound that always holds: every clustering call fits
+	// its context to llm.context_window_tokens less llm.max_output_tokens, bisecting
+	// first and leaving whole narratives out only where the window cannot be split
+	// (correlator/context_fit.go). So no value is needed to keep a prompt from
+	// overflowing; this exists for the response ceiling, below.
 	//
 	// Finding F16, re-measured after the per-event summary cap and the tracker-
 	// record exclusion both landed: completion tokens track EXTENDS-cluster count,

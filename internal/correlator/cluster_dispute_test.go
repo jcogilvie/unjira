@@ -265,8 +265,11 @@ func TestCluster_DisputeAcrossBisectedHalvesIsResolved(t *testing.T) {
 		`[{"rationale":"r","event_index":0,"member":{"cluster_position":1},"confidence":0.6}]`,
 	}}
 
-	sys, user := correlator.BuildClusterPromptForTest(append(evts[:3:3], spanning), existing)
-	budget := correlator.EstimateTokensForTest(sys + user)
+	// A half's prompt, with the follow-up headroom its one context narrative is charged
+	// (context_fit.go): the halves fit their context, and the whole window's own four
+	// events do not fit, so it bisects rather than leaving the narrative out.
+	sys, user := correlator.BuildClusterPromptForTest(append(evts[:2:2], spanning), existing)
+	budget := correlator.EstimateTokensForTest(sys+user) + correlator.FollowupTokensPerContextNarrativeForTest
 
 	results, stats, err := correlator.Cluster(t.Context(), evts, existing, client,
 		correlator.TimeRange{Start: base, End: base.Add(2 * time.Hour)}, budget)
