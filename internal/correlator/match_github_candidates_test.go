@@ -37,10 +37,11 @@ func TestGatherCandidates_QualifiedGitHubReferenceInProseIsACandidate(t *testing
 	assert.Equal(t, correlator.ProvenanceProseLater, byKey["o/r#2"].Provenance)
 }
 
-// TestGatherCandidates_FixesInAPullRequestBodyIsAnAuthoringCandidate: a pull request's
-// title and body are authored, so "Fixes owner/repo#N" there ranks with SCM authoring
-// commands — and the pull request's own reference, which heads its summary, is not a
-// candidate: a pull request is not an issue.
+// TestGatherCandidates_FixesInAPullRequestBodyIsAnAuthoringCandidate: "Fixes
+// owner/repo#N" in a pull request's body is GitHub's own closing keyword, which links
+// the pull request to the issue, so it ranks with SCM authoring commands — and the pull
+// request's own reference, which heads its summary, is not a candidate: a pull request
+// is not an issue.
 func TestGatherCandidates_FixesInAPullRequestBodyIsAnAuthoringCandidate(t *testing.T) {
 	pr := summaryEvent(t, "github", "o/r#7:opened", "o/r#7: Fix the thing\n\nFixes upstream/proj#99")
 	pr.Artifacts[events.ArtifactPullRequest] = events.PullRequestRef("github.com", "o", "r", 7)
@@ -63,4 +64,29 @@ func TestGatherCandidates_JiraKeysStillOutrankGitHubReferencesInATier(t *testing
 
 	require.Len(t, got, 2)
 	assert.Equal(t, "PROJ-1", got[0].IssueKey)
+}
+
+// TestGatherCandidates_APullRequestBodyCitesWhereItsTitleNames: a reference in a pull
+// request's title names the issue, like a commit subject. One in its body with no
+// closing keyword is a citation, so it is prose and the model judges it. One quoted as
+// code in the body is data, not a candidate. The same split the github collector makes
+// for Jira keys.
+func TestGatherCandidates_APullRequestBodyCitesWhereItsTitleNames(t *testing.T) {
+	pr := summaryEvent(t, "github", "o/r#7:opened",
+		"o/r#7: Port the fix for up/a#1\n\nSee also up/b#2, which hit the same thing.\n\n"+
+			"Fixes: up/c#3\n\n```\nerror: up/d#4 still open\n```\n")
+	pr.Artifacts[events.ArtifactPullRequest] = events.PullRequestRef("github.com", "o", "r", 7)
+
+	got := correlator.GatherCandidatesForTest([]events.Event{pr}, nil, 10, nil)
+
+	byKey := map[string]correlator.Provenance{}
+	for _, c := range got {
+		byKey[c.IssueKey] = c.Provenance
+	}
+
+	assert.Equal(t, map[string]correlator.Provenance{
+		"up/a#1": correlator.ProvenanceSCMCommand,
+		"up/b#2": correlator.ProvenanceProseFirst,
+		"up/c#3": correlator.ProvenanceSCMCommand,
+	}, byKey)
 }

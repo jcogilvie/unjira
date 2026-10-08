@@ -27,7 +27,13 @@ func TestMatch_AnUpstreamIssueIsVerifiedOnItsOwnTracker(t *testing.T) {
 		routeTo("upstream", upstream, "crossplane/*"),
 	).WithReadFallback("work"))
 
-	results, _, err := correlator.Match(t.Context(), s, routed, &fakeLLM{}, matchCfg())
+	// A lone prose mention is judged by the model (Provenance.NamesTheWork), which here
+	// says it is the work.
+	llmFake := &fakeLLM{responses: []string{
+		`[{"issue_key":"crossplane/crossplane#6812","role":"primary","confidence":0.9,"rationale":"the work"}]`,
+	}}
+
+	results, _, err := correlator.Match(t.Context(), s, routed, llmFake, matchCfg())
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 

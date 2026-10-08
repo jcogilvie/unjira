@@ -57,3 +57,29 @@ func ExtractGitHubIssueRefs(text string) []string {
 
 	return keys
 }
+
+// githubClosingRE is one of GitHub's closing keywords and the token after it. GitHub
+// links a pull request to an issue when its body says "Fixes owner/repo#N" (or close,
+// closes, closed, fix, fixed, resolve, resolves, resolved, any case, an optional
+// colon), one keyword per reference.
+var githubClosingRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?[ \t]+(\S+)`)
+
+// ExtractGitHubClosingRefs returns the GitHub issue references in text that follow a
+// closing keyword, in ExtractGitHubIssueRefs' form and order.
+//
+// A closing reference in a pull request's body is the author linking the pull request
+// to the issue, which GitHub itself acts on, so it is an authoring fact. Any other
+// reference in the body is a citation.
+func ExtractGitHubClosingRefs(text string) []string {
+	var keys []string
+
+	for _, m := range githubClosingRE.FindAllStringSubmatch(text, -1) {
+		for _, key := range ExtractGitHubIssueRefs(m[1]) {
+			if !slices.Contains(keys, key) {
+				keys = append(keys, key)
+			}
+		}
+	}
+
+	return keys
+}

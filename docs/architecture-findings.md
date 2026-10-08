@@ -28,6 +28,33 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
+### F64 — the reconciler drafts onto a primary the model itself doubted
+
+`match.confidence_floor` is documented as governing "what unjira asserts, not what it records"
+(`internal/config/config.go`, `MatchConfig.ConfidenceFloor`). Matching honours that: a sub-floor
+primary is written and reported as not promoted (`persistLinks`, `internal/correlator/match.go:486`).
+Nothing downstream reads the floor. `actionableLinks` (`internal/reconciler/reconciler.go:349`) takes
+every primary and `same_work` link at any confidence, so the reconciler drafts a comment onto a
+ticket the model put at 0.15, and the drafter's own confidence is unrelated: one such comment was
+drafted at 0.95.
+
+On a real 30-day store, 12 primaries sat below the example config's floor of 0.7. Every one was
+drafted for: 8 proposed comments (narratives 2, 30, 32, 49, 53, 66, 87, 124) and 4 suppressed drafts
+(20, 88, 107, 126). That is 8 of the 24 proposed comments a sweep reviewed, which judged about 20 of
+the 24 unwarranted. Four of the eight (2, 30, 53, 66) were sessions that only scanned a journal (F67).
+
+Not fixed here, because it reverses a decision rather than repairing a bug. The reconciler spec chose
+to select low-confidence primaries so the reconciler is not "blind to exactly the narratives it most
+needs", and a gate would leave such a narrative with nothing at all: not re-matched (a primary at any
+confidence takes it out of matching's backlog), not drafted, not proposed for creation (F58's
+predicate treats any link as tracked). The options:
+
+- **Gate `actionableLinks` on the floor** and record the examination with its reason, accepting F58's
+  silence for these narratives.
+- **Show the drafter the link's confidence** and floor the action's confidence by it, the way
+  `floorConfidence` (`internal/reconciler/draft.go:196`) already floors by deterministic facts.
+- **Re-admit a sub-floor narrative to matching** when new member evidence arrives.
+
 ### F21 — an event's artifacts are frozen at first collection, so a collector fix never reaches old rows
 
 Events are keyed `(source, external_id)` with `INSERT OR IGNORE`, so re-collecting never updates an
@@ -720,14 +747,18 @@ examination, so it no longer re-selects the narrative. But no other path picks i
   whose predicate (`awaitingCreate`, `:54`) treats a link of any role as tracked.
 
 So the work is untracked, and unjira can say nothing about it. Seen on a real 30-day store: narrative
-14, citing two tickets at confidence 0.80–0.92, both `mentioned`. Two inputs disagree here as well.
-`classifySystemPrompt` says exactly one candidate must be primary, while `parseMatchResponse` accepts
-zero, and zero is the honest answer when every candidate is a citation.
+14, citing two tickets at confidence 0.80–0.92, both `mentioned`.
+
+This outcome is now reached more often, by design. `classifySystemPrompt` permits no primary, and a
+lone candidate that was only mentioned goes to the model instead of being promoted at confidence 1.0
+(`Provenance.NamesTheWork`, `internal/correlator/match_types.go`). On that store, 9 narratives had a
+lone verified prose candidate after the PR-body change; every one the model judges `mentioned` lands
+here. Silence is the better failure, since the alternative was a comment drafted onto a ticket the
+work only cited, but it is still silence.
 
 The open question is policy, not mechanism: should a narrative with only `mentioned` links be a create
 candidate, with the cited tickets named in the proposal so a reviewer can link instead? The F13
-backstop (`applyCreate` refusing once a primary exists) would still hold. Unmeasured beyond the one
-narrative.
+backstop (`applyCreate` refusing once a primary exists) would still hold.
 
 ### F63 — a transition on someone else's ticket is proposed like one on your own
 
@@ -747,6 +778,63 @@ This needs a decision, not just a guard, so none is built. The options:
 The operator's identity is already available on every writable tracker (slice 3's self-identity check).
 The issue's assignee is not yet on `tasktracker.Issue`.
 
+### F67 — a session that reads a corpus of other work is narrated as work, linked by every key it read
+
+A Claude Code session whose job is to read other sessions (a journal scan, a transcript audit)
+repeats in its own text the keys of everything it read. The collector cannot tell that from work:
+both are a session in a directory, with prose that names tickets. On a real 30-day store, every such
+session ran in one directory, a journal repository: 76 events, of which 14 were clustered into 6
+narratives ("meta-claude self-tracking automated scans", "claude-files jsonl journal scan", ...: 2,
+30, 53, 66, 88, 107). They hold 48 issue links between them (5 to 10 each), and drew 4 proposed
+comments and 2 suppressed drafts. 42 of the 76 events open with the same scripted instruction to run
+one scan command; one long session in that directory carries 72 SCM-tier keys, from commits to the
+journal itself.
+
+Excluding the directory (`collectors.claude_code.exclude_cwds`) removes all of it, and is the operator's
+call: it is a configuration fact about which directories hold work. What no configuration can say is
+which session in a work directory is reading rather than working, so the class recurs wherever such a
+session runs elsewhere. Matching's prompt does say a candidate may be only cited, and F64 is why a
+model that doubted these links still produced comments. Unmeasured beyond the one directory.
+
+### F65 — a claude_code SCM command's whole text is authoring, so a PR or commit body's citations rank as SCM
+
+`authoringText` (`internal/collector/claudecode/scm.go:147`) searches the whole source of an authoring
+command, heredoc included, and the whole input of a GitHub MCP write. A `gh pr create` body or a
+multi-paragraph commit message therefore puts every key it cites on `ArtifactSCMKeys`, the tier for
+the author naming the ticket. The github collector draws that line for the same PR (title keys SCM,
+body keys prose, code no candidate), so the two sides of one PR now disagree. On a real 30-day store,
+31 claude_code events carry more than one SCM key, at most 72. Narrative 7 shows the disagreement:
+PAAS-3939, cited only in the body of two helm-charts PRs, is prose on their GitHub events and
+SCM-tier on the transcript segments that opened them. The model judged it `mentioned`, so nothing
+went wrong there, but a lone such key would now be promoted without a model call.
+
+Fixing it means reading the title flag apart from the body (`--title`/`-t` against `--body`/`-b`/
+`--body-file`) and a commit's subject apart from its body (the first `-m`, or the first line of `-F`),
+on the shell words `simpleCommands` already parses.
+
+### F66 — key-shaped tokens that are not keys are candidates until verification
+
+`events.TicketKeyRegexp` (`internal/events/events.go:45`) accepts any `[A-Z][A-Z0-9]{1,9}-\d+`, so line
+ranges (`L242-276`), encodings (`UTF-8`), digests (`SHA-256`), model names (`GPT-4`) and labels such as
+`AC1-3` are extracted. A key in a project no tracker scopes is still read, through the resolver's read
+fallback (`tasktracker.Resolver.WithReadFallback`), so each such token costs a tracker read that returns
+not-found and an `Unresolved` entry. On a real 30-day store, 11 narratives carried one among their capped
+candidates. None survived verification, and none pushed a real key past the candidate cap.
+
+**Not a pattern list.** The shapes are legal keys: `projectScopeRE` (`internal/config/trackers.go:58`)
+accepts a project `L310`, and a site can have a project `HTTP`. A built-in or recommended regex would
+silently hide those keys, and it would only fit `PROJ-N` syntax, not a GitHub tracker's `owner/repo#N`.
+`exclude_from_linking` stays for its purpose, keys that are real-looking and in scope but should never
+be linked.
+
+**Planned fix: ask the tracker which scopes exist.** Each backend reports its existing scopes, cached
+once per pass (Jira: `GET /rest/api/3/project`). Matching's verify step then drops a candidate whose
+scope does not exist on its tracker, as "not a project on this tracker", before any per-key read. That
+is exact, needs no config, keeps a real `HTTP-12`, works per tracker syntax, and stays in verification,
+where network checks belong. It also replaces one read per junk key with one call per pass. **Deferred:**
+build it when a junk key first displaces a real one at the cap, or when the wasted reads show up in a
+measurement.
+
 ## Task cross-references
 
 | Finding | Task |
@@ -758,6 +846,7 @@ The issue's assignee is not yet on `tasktracker.Issue`.
 | F36 — a bisected window numbers a spanning narrative's eligible events in both halves | **resolved** by shared-context slice 1: the dispute re-ask runs once per `Cluster` call, after `mergeSplitResults`, so an eligible event both halves placed differently is a dispute the model resolves (`TestCluster_DisputeAcrossBisectedHalvesIsResolved`), and `Persist` refuses an event two results claim as a member rather than keeping the last |
 | F37 — a double-assigned event persists in one narrative, possibly leaving an empty one | **resolved** by shared-context slice 1: one member home per event (index + commit check), the dispute re-ask instead of last-writer-wins, a NEW left memberless is a loud error, and the pass summary reads members and context back from the store. Drill: restoring last-writer-wins left the new narrative with 0 members (`TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`) |
 | F43 — cross-pass PR split | **resolved**: PR-identity pre-assignment before clustering (`pipeline/preassign.go`). An unplaced event whose host-qualified `ArtifactPullRequest` matches a member of exactly one open narrative joins it, unseen by the model; ambiguity falls back to the model and is reported. Drills: removing the exactly-one, open-status and host guards each fail a named test. Two-pass M3 re-measured 2026-10-02 on real data: 24/26 -> 26/26 in all three reps |
+| F66 — key-shaped tokens that are not keys are candidates until verification | open, deferred. Fix planned: each tracker reports its existing scopes, and verification drops a candidate in a scope that doesn't exist. Not a pattern list. 11 narratives affected, 0 real keys displaced |
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Measured in six two-pass reps after the join: 24 identity placements, M3 26/26 in every rep, 0 identity-placed members moved by the model |
 | F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
 | F53 — stored timestamps keep their offset; window queries compare strings | open. Jira timestamps are stored with the account's offset, everything else `Z`; unmeasured |

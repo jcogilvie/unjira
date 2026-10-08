@@ -86,7 +86,11 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   and disputed members drive no join, and a group that would merge two stored narratives is left apart
   and reported, since merging stored narratives is a reviewer's call. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
   issue-key candidates by provenance (branch name > SCM authoring command > Jira event > corroborated
-  prose > first-mention prose > later-mention prose). In the reconciler it is `runSuppression`'s
+  prose > first-mention prose > later-mention prose). A pull request's title is SCM authoring and its
+  body is prose, and a key quoted as Markdown code in the body is no candidate: a body cites, and code
+  quotes data. Only a lone candidate whose provenance names the work (`Provenance.NamesTheWork`) is
+  primary without a model call; a lone prose mention is the model's to judge, and it may answer none.
+  In the reconciler it is `runSuppression`'s
   five-filter chain, plus route resolution. Keep judgment the model's job and extraction a pure
   function's — that separation is what keeps the review queue signal-rich.
 - **Work evidence and tracker state are different kinds, and only one is clusterable.** A collector

@@ -366,8 +366,9 @@ data/                   SQLite database lives here (gitignored)
   `PROJ-100` as "placeholders".
 - **Every stage caps its own batch, and says when it hits the cap.** `match.max_narratives_per_pass`
   and `reconciler.max_narratives_per_pass` are separate numbers because the per-narrative costs
-  differ — matching resolves a lone candidate for free and only calls a model when two or more
-  survive, while the reconciler drafts for everything it examines. Both report the remainder in
+  differ — matching resolves a lone candidate for free when the work named it (a branch, a commit
+  or PR title, a Jira event about the issue) and calls a model otherwise, while the reconciler
+  drafts for everything it examines. Both report the remainder in
   the pass summary on stdout — not only in a stderr log line — and say to re-run: a stage that
   truncates silently makes unexamined work look like failed work, which is exactly how a matching
   batch limit once read as a matching bug. The reconciler reports two, because its cap bounds two

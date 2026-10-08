@@ -3,6 +3,7 @@ package jira
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/workflow"
@@ -122,6 +123,9 @@ func normalizeIssue(raw map[string]any) tasktracker.Issue {
 		}
 	}
 
+	issue.Resolved = issueTime(fields["resolutiondate"])
+	issue.Updated = issueTime(fields["updated"])
+
 	if rawLabels, ok := fields["labels"].([]string); ok {
 		issue.Labels = rawLabels
 	} else if rawLabels, ok := fields["labels"].([]any); ok {
@@ -135,6 +139,29 @@ func normalizeIssue(raw map[string]any) tasktracker.Issue {
 	}
 
 	return issue
+}
+
+// issueTimeFormat is Jira's timestamp format, as GET /issue returns resolutiondate
+// and updated: 2025-03-04T10:15:30.000+0000.
+const issueTimeFormat = "2006-01-02T15:04:05.000-0700"
+
+// issueTime reads one of an issue's timestamp fields. Null (an unresolved issue's
+// resolutiondate), absent, or unparseable is the zero time, which tasktracker.Issue
+// defines as "the backend did not say": like normalizeIssue's other fields, a
+// best-effort snapshot that degrades to unknown rather than failing a read or
+// guessing a date.
+func issueTime(raw any) time.Time {
+	s, ok := raw.(string)
+	if !ok {
+		return time.Time{}
+	}
+
+	at, err := time.Parse(issueTimeFormat, s)
+	if err != nil {
+		return time.Time{}
+	}
+
+	return at
 }
 
 // GetIssue resolves key to its current normalized state.

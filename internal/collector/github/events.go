@@ -62,10 +62,22 @@ func prSummary(ref ghclient.RepoRef, pr ghclient.PullRequest) string {
 // annotate sets the artifacts both event kinds share: the head branch (reused
 // verbatim as events.ArtifactGitBranch, the identical signal
 // collector/claudecode already writes — see the design's §2), and the ticket
-// keys named in the PR's title/body (events.ArtifactSCMKeys,
-// ProvenanceSCMCommand's tier — a PR title/body is, by construction, an
-// authoring artifact: nobody opens a PR to investigate, only to propose a
-// change).
+// keys the PR names.
+//
+// The title and the body are different acts, so their keys land on different
+// artifacts. The title is where the author names the ticket for the change, the
+// same act as a commit subject, so its keys are events.ArtifactSCMKeys
+// (ProvenanceSCMCommand's tier). The body is prose about the change, and prose cites:
+// related tickets, the ticket a bug was found under, keys quoted as examples. Its keys
+// are events.ArtifactTicketKeys, the prose tiers, so a body citation is a candidate
+// the model judges, not an authoring fact. Keys inside Markdown code in the body are
+// not candidates at all (events.BlankMarkdownCode): code is the author quoting text
+// as data. On a real 30-day store, title and body were one SCM-tier list, and 12
+// narratives about this repository's own pull requests took a key quoted in a body
+// as their primary. Ten were the lone candidate, so were linked at confidence 1.0
+// with no model call, and each drew a comment proposal on a ticket the work never
+// touched. On the same store, every pull request in the other repositories that
+// named a ticket named it in the title.
 //
 // Deliberately never calls events.SetTrackerRecord: a pull request is a thing
 // somebody did, work evidence in every deployment, never the tracker's own
@@ -95,7 +107,8 @@ func annotate(evt *events.Event, ref ghclient.RepoRef, pr ghclient.PullRequest) 
 	evt.Artifacts[events.ArtifactPullRequest] = events.PullRequestRef(ref.Host, ref.Owner, ref.Repo, pr.Number)
 	events.SetRepos(evt, events.ArtifactWorkRepos, []string{strings.ToLower(ref.Host + "/" + ref.Owner + "/" + ref.Repo)})
 	evt.Artifacts[events.ArtifactGitBranch] = pr.Head.Ref
-	events.SetSCMKeys(evt, events.ExtractTicketKeys(pr.Title+" "+pr.Body))
+	events.SetSCMKeys(evt, events.ExtractTicketKeys(pr.Title))
+	events.SetTicketKeys(evt, events.ExtractTicketKeys(events.BlankMarkdownCode(pr.Body)))
 }
 
 // OpenedEvent builds the one-time :opened event for pr. Captured once, at (or

@@ -175,12 +175,16 @@ func TestMatch_VerifiesEveryCandidateAndDropsUnresolvable(t *testing.T) {
 	tracker := &fakeTracker{issues: map[string]tasktracker.Issue{
 		"PROJ-42": {Key: "PROJ-42", Summary: "Feature work", StatusName: "In Progress"},
 	}}
-	llmFake := &fakeLLM{}
+	// The survivor was only mentioned, so the model judges it (Provenance.NamesTheWork).
+	llmFake := &fakeLLM{responses: []string{
+		`[{"issue_key":"PROJ-42","role":"primary","confidence":0.9,"rationale":"the work"}]`,
+	}}
 
-	results, _, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
+	results, stats, err := correlator.Match(t.Context(), s, tracker, llmFake, matchCfg())
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
+	assert.Equal(t, 1, stats.Calls, "the branch's key did not survive, so the lone survivor is a prose mention")
 	assert.Contains(t, tracker.getCalls, "GONE-1", "the strong-provenance candidate is still verified")
 	assert.Equal(t, []string{"GONE-1"}, results[0].Unresolved)
 	assert.Equal(t, "PROJ-42", results[0].Primary)

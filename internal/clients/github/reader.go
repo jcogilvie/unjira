@@ -3,6 +3,7 @@ package github
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -106,6 +107,11 @@ func toIssue(key string, issue Issue) tasktracker.Issue {
 		labels = append(labels, l.Name)
 	}
 
+	var resolved time.Time
+	if issue.ClosedAt != nil {
+		resolved = *issue.ClosedAt
+	}
+
 	return tasktracker.Issue{
 		Key:            key,
 		Summary:        issue.Title,
@@ -113,5 +119,7 @@ func toIssue(key string, issue Issue) tasktracker.Issue {
 		StatusName:     issue.State,
 		Labels:         labels,
 		Description:    issue.Body,
+		Resolved:       resolved,
+		Updated:        issue.UpdatedAt,
 	}
 }

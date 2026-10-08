@@ -27,6 +27,31 @@ shared. On a real 30-day pass over six repos, 365 of 3,845 PR events were the us
 The user's reviews and comments on others' PRs are a separate, planned kind of evidence (README
 roadmap, "participation evidence").
 
+**Key provenance, amended 2026-10-07.** §2 and §5 put every key in a PR's title and body on
+`ArtifactSCMKeys`, reasoning that a PR body is an authoring artifact. It is, but the keys in it are
+mostly citations, not the author naming the ticket. On a real 30-day store, 12 narratives about one
+repository's own PRs took a key from a PR body as their primary, 10 of them as the lone candidate at
+confidence 1.0, and each drew a comment proposal on a ticket the work never touched: keys quoted as
+syntax examples, inside a pasted crash message, in a block of measured output. Every PR in the other
+repositories that named a ticket named it in the title. Now:
+- **Title keys** stay `ArtifactSCMKeys`.
+- **Body keys** are `ArtifactTicketKeys`, the prose tiers, so the model judges them.
+- **Keys inside Markdown code in the body** (fences, indented blocks, inline spans) are no candidates
+  (`events.BlankMarkdownCode`, a goldmark parse). The text stays in the event summary.
+- **GitHub issue references** in a PR event rank the same way, read from the summary
+  (`correlator.githubCandidates`), except that one after a GitHub closing keyword ("Fixes o/r#N")
+  ranks with the title, since GitHub itself links on it.
+
+The artifact half reaches only PR events collected after it, since a stored event's artifacts are
+frozen at first collection (F21). The reference half reads the summary, so it reaches every stored
+event.
+
+Re-measured on a copy of that store, rebuilding each PR event's artifacts from its stored summary:
+24 of 163 narratives' candidate sets changed, and 8 lost their only candidate, a quoted key. With the
+same change's matching rule (a lone candidate is primary without a model call only when its provenance
+names the work), narratives whose lone verified candidate would be promoted unasked went from 16 to 1.
+"Verified" there means the key resolved somewhere in that store, since the measurement ran offline.
+
 **Decision 1 — `ExternalID` uses GitHub's own timeline-event id, not a bare `:closed`/`:merged`
 suffix.** §3 below still describes the bare form (`<owner>/<repo>#<N>:merged` /
 `:closed`) as if it were final; it was not. The shipped scheme is
