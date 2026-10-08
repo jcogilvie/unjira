@@ -74,11 +74,12 @@ type NarrativeIssueRef struct {
 // and a re-match that picked a DIFFERENT primary tripped the partial unique index
 // one_primary_per_narrative and aborted the entire pass. That crashed a drain.
 //
-// A primary link at ANY confidence means attributed. Deliberately narrower than
-// NarrativesAwaitingCreate's "any link at all": a `mentioned` link is a citation,
-// not an attribution, so a narrative carrying only those is still matching's work.
-// Two questions, two predicates — see awaitingCreate for why the create path needs
-// the broader one.
+// A primary link at ANY confidence means attributed, as far as MATCHING is concerned:
+// it has made its judgment, and re-asking would re-derive it. A `mentioned` link is a
+// citation, not an attribution, so a narrative carrying only those is still matching's
+// work. The create path asks a different question, whether the work has a confident
+// home, so a sub-floor primary is in neither backlog's "done" set there — see
+// awaitingCreate.
 func (s *Store) NarrativesWithoutPrimaryLink(limit int) ([]NarrativeRow, error) {
 	rows, err := s.db.Query(
 		`SELECT n.id, n.window_start, n.window_end, n.title, n.summary, n.status,

@@ -487,7 +487,9 @@ func RenderReconcileResult(r ReconcileRunResult) string {
 // at zero: the linked backlog, the create backlog, and a deferred create path.
 //
 // The create backlog is its own line rather than folded into Remaining because the two
-// populations are disjoint (linked narratives versus narratives with no link at all),
+// populations are disjoint once a pass has run (narratives with a confident primary
+// versus narratives with none, which the reconciler examines once and leaves to the
+// create path),
 // and its absence was a pass starved by its cap reading as a finished one.
 // CreatesRemaining is 0 whenever creates were deferred, so at most one of the last two
 // lines appears.
@@ -562,6 +564,25 @@ func writeProposedAction(b *strings.Builder, a reconciler.ProposedAction) {
 	}
 	if a.TargetStatus != "" {
 		fmt.Fprintf(b, "    -> %s\n", a.TargetStatus)
+	}
+	writeCreateCandidates(b, a.Candidates, "    ")
+}
+
+// writeCreateCandidates writes the tickets a create names as places its work might
+// already belong, one per line under indent, so the reviewer can link the work to one
+// instead of approving a new ticket. Silent when there are none.
+func writeCreateCandidates(b *strings.Builder, candidates []reconciler.CreateCandidate, indent string) {
+	for _, c := range candidates {
+		fmt.Fprintf(b, "%scandidate %s (%s, confidence %.2f, %s)", indent, c.IssueKey, c.Role, c.Confidence, c.Provenance)
+
+		switch {
+		case c.Summary != "" || c.Status != "":
+			fmt.Fprintf(b, ": %s [%s]", c.Summary, c.Status)
+		case c.Unread != "":
+			fmt.Fprintf(b, ": could not be read (%s)", c.Unread)
+		}
+
+		b.WriteString("\n")
 	}
 }
 

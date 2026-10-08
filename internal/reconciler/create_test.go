@@ -83,15 +83,14 @@ func TestProposeCreates_RespectsARefusal(t *testing.T) {
 	assert.Contains(t, got[0].Suppressed[0], "investigation with no outcome")
 }
 
-// TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink: a narrative with a real
-// but LOW-confidence primary is still tracked, and proposing a create for it would
-// open a duplicate ticket for work an issue already covers.
+// TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink: a narrative with a
+// confident primary (at or above match.confidence_floor) is tracked, and proposing a
+// create for it would open a duplicate ticket for work an issue already covers.
 //
-// This test used to assert the opposite precondition — that such a narrative was
-// still in matching's backlog — because that backlog selected on the denormalized
-// narratives.issue_key, which the confidence floor left NULL below the floor. That
-// column is gone (finding F11) and the backlog now asks the link table, so the
-// precondition is inverted here: a primary link at any confidence means attributed.
+// A primary BELOW the floor is the other case, and it is not tracked: the model doubted
+// it, so the work is proposed as a create naming it (no_confident_primary_test.go,
+// finding F64). Matching is done with both, since a primary link at any confidence takes
+// a narrative out of its backlog (finding F11).
 func TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink(t *testing.T) {
 	s := reconcileStore(t)
 	seedLinkedNarrative(t, s, "DEVSBX-9", store.RolePrimary, codeEvent("cr:1", "work"))
@@ -103,7 +102,8 @@ func TestProposeCreates_SkipsNarrativesThatAlreadyHaveALink(t *testing.T) {
 
 	client := &fakeLLM{responses: []string{worthTracking}}
 
-	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil)
+	got, _, err := ProposeCreates(context.Background(), s, client, testConfig(), nil, nil,
+		WithConfidenceFloor(0.9))
 
 	require.NoError(t, err)
 	assert.Empty(t, got, "a linked narrative is tracked; creating for it would duplicate")
@@ -415,13 +415,13 @@ func TestProposeCreates_DeclinedAndNeverConsideredStayDistinct(t *testing.T) {
 	_, _, err := ProposeCreates(context.Background(), s, client, capOf(1), nil, nil)
 	require.NoError(t, err)
 
-	awaiting, err := s.NarrativesAwaitingCreate(10)
+	awaiting, err := s.NarrativesAwaitingCreate(10, 0)
 	require.NoError(t, err)
 	require.Len(t, awaiting, 1)
 	assert.Equal(t, neverConsidered, awaiting[0].ID,
 		"only the narrative the model never saw still awaits a decision")
 
-	count, err := s.CountNarrativesAwaitingCreate()
+	count, err := s.CountNarrativesAwaitingCreate(0)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 }

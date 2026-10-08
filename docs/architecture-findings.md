@@ -28,33 +28,6 @@ description misleads, while a stale finding sends someone to fix something alrea
 
 Ordered by consequence, not by number.
 
-### F64 — the reconciler drafts onto a primary the model itself doubted
-
-`match.confidence_floor` is documented as governing "what unjira asserts, not what it records"
-(`internal/config/config.go`, `MatchConfig.ConfidenceFloor`). Matching honours that: a sub-floor
-primary is written and reported as not promoted (`persistLinks`, `internal/correlator/match.go:486`).
-Nothing downstream reads the floor. `actionableLinks` (`internal/reconciler/reconciler.go:349`) takes
-every primary and `same_work` link at any confidence, so the reconciler drafts a comment onto a
-ticket the model put at 0.15, and the drafter's own confidence is unrelated: one such comment was
-drafted at 0.95.
-
-On a real 30-day store, 12 primaries sat below the example config's floor of 0.7. Every one was
-drafted for: 8 proposed comments (narratives 2, 30, 32, 49, 53, 66, 87, 124) and 4 suppressed drafts
-(20, 88, 107, 126). That is 8 of the 24 proposed comments a sweep reviewed, which judged about 20 of
-the 24 unwarranted. Four of the eight (2, 30, 53, 66) were sessions that only scanned a journal (F67).
-
-Not fixed here, because it reverses a decision rather than repairing a bug. The reconciler spec chose
-to select low-confidence primaries so the reconciler is not "blind to exactly the narratives it most
-needs", and a gate would leave such a narrative with nothing at all: not re-matched (a primary at any
-confidence takes it out of matching's backlog), not drafted, not proposed for creation (F58's
-predicate treats any link as tracked). The options:
-
-- **Gate `actionableLinks` on the floor** and record the examination with its reason, accepting F58's
-  silence for these narratives.
-- **Show the drafter the link's confidence** and floor the action's confidence by it, the way
-  `floorConfidence` (`internal/reconciler/draft.go:196`) already floors by deterministic facts.
-- **Re-admit a sub-floor narrative to matching** when new member evidence arrives.
-
 ### F21 — an event's artifacts are frozen at first collection, so a collector fix never reaches old rows
 
 Events are keyed `(source, external_id)` with `INSERT OR IGNORE`, so re-collecting never updates an
@@ -290,6 +263,35 @@ the same way, which is defensible, since nothing was written. Not fixed here: th
 it changes what a rejection means on the create path, which is a review-semantics decision. Frequency on
 real data is unmeasured.
 
+Work with no confident primary is a create candidate too, and its proposal names the tickets the work
+is linked to. That widens the population this applies to (on a real 30-day store at floor 0.7, by 9
+linked narratives) without changing its bound. The reviewer's "link instead", `[t]arget` on the create,
+leaves a reviewer primary, which is confident, so that ruling is never re-asked. A plain `[r]eject` is
+re-asked as above, and each re-ask also re-reads the candidate tickets, one tracker read each (one real
+narrative holds 10 links).
+
+### F68 — actions drafted before a narrative lost its confident primary stay where they are
+
+A narrative with no confident primary is drafted onto by nobody and is proposed as a create naming its
+links (`reconciler.confidentPrimary`, `internal/reconciler/reconciler.go`). The rule applies when a pass
+selects, so it says nothing about rows written before it applied: a store that predates it, or a
+`match.confidence_floor` raised after a pass. Two consequences:
+
+- A comment or transition drafted onto the doubted primary stays `proposed`, so the queue holds it beside
+  the create that names the same ticket as a candidate. On a real 30-day store at floor 0.7: 8
+  narratives (2, 30, 32, 49, 53, 66, 87, 124), one proposed comment each.
+- A reconciler suppression excludes the narrative from the create path until new member work arrives.
+  `awaitingCreate`'s decision clause counts any `suppressed` row (`internal/store/createbacklog.go`), and
+  a reconciler suppression and a create-path suppression are the same row (`recordSuppression`,
+  `internal/reconciler/persist.go`: type `comment`, no issue key). Same store: 4 narratives (20, 88,
+  107, 126) whose sub-floor primaries drew suppressed drafts.
+
+**Consequence:** a reviewer may approve a comment on a ticket the work's own create proposal names as
+doubtful, and a narrative whose draft was once suppressed waits for new work before its create is
+considered. Not fixed here: what to do with an open draft whose link stopped being confident is an
+action-lifecycle decision (F50 has the same shape), and telling the two suppressions apart needs a type
+or column on the row.
+
 ### F62 — a draft that yields no action leaves no trace, so it is drafted again every pass
 
 When drafting yields no action, `reconcileOne` returns a result with neither a proposal nor a
@@ -299,12 +301,13 @@ empty array, or names only keys that `actionsFromVerdicts` does not recognize, w
 bounds the delta. The narrative is selected again next pass, a model call each time, and the backlog
 count reports it as unexamined work throughout. This is design-notes #29's livelock, with spend. Every
 other "nothing to do" exit in `reconcileOne` records something: a suppression row, or a
-`reconcile_examinations` watermark for a self-authored delta or a narrative whose every link is
-`mentioned`.
+`reconcile_examinations` watermark for a self-authored delta or a narrative with no confident
+primary.
 
 It is not closed the same way, because this outcome may be a malformed answer rather than a verdict.
 The prompt requires exactly one action per issue shown (`draft.go:28`), so an empty array contradicts
-it. F58 records the same disagreement on the matching side. Whether to re-ask, as matching does for an
+it. Matching faces the same question for an empty classification
+(`TestMatch_EmptyClassifierResponseIsLoggedNotSilent`). Whether to re-ask, as matching does for an
 unparseable response, or to record the examination is the open question. **Consequence:** a model that
 declines to draft for a narrative is billed for that narrative on every pass for as long as it keeps
 declining. Unmeasured: no narrative in a real 30-day store's backlog is in this state.
@@ -730,36 +733,6 @@ proposed as a create anywhere. Two things are not measured yet: how often an int
 upstream narrative names its internal ticket at all, and whether the candidate ranking reaches the
 ticket when it does.
 
-### F58 — work that only cites tickets is proposed nowhere
-
-A narrative whose every verified candidate the model judged `mentioned` (a citation, a "caused by", a
-"discovered while") ends matching with link rows and no primary. Matching now records that as an
-examination, so it no longer re-selects the narrative. But no other path picks it up:
-
-- **The reconciler** drafts comments and transitions onto a narrative's linked issue, and a `mentioned`
-  link is not the work, so drafting onto it would put one narrative's story on a ticket it only cites.
-  It selects the narrative, finds no actionable link, and records that in `reconcile_examinations`,
-  so the narrative holds no slot and is not counted as unexamined work until a member event is
-  linked after it. Only a member link re-admits it. A role that changes without one, such as an
-  applied create adding a primary to a narrative examined while it was mentioned-only, waits for the
-  next member link before the reconciler drafts for it.
-- **The create path** selects on `NarrativesAwaitingCreate` (`internal/store/createbacklog.go:88`),
-  whose predicate (`awaitingCreate`, `:54`) treats a link of any role as tracked.
-
-So the work is untracked, and unjira can say nothing about it. Seen on a real 30-day store: narrative
-14, citing two tickets at confidence 0.80–0.92, both `mentioned`.
-
-This outcome is now reached more often, by design. `classifySystemPrompt` permits no primary, and a
-lone candidate that was only mentioned goes to the model instead of being promoted at confidence 1.0
-(`Provenance.NamesTheWork`, `internal/correlator/match_types.go`). On that store, 9 narratives had a
-lone verified prose candidate after the PR-body change; every one the model judges `mentioned` lands
-here. Silence is the better failure, since the alternative was a comment drafted onto a ticket the
-work only cited, but it is still silence.
-
-The open question is policy, not mechanism: should a narrative with only `mentioned` links be a create
-candidate, with the cited tickets named in the proposal so a reviewer can link instead? The F13
-backstop (`applyCreate` refusing once a primary exists) would still hold.
-
 ### F63 — a transition on someone else's ticket is proposed like one on your own
 
 The reconciler proposes a status move on whichever issue a narrative's work is linked to, whoever owns
@@ -793,8 +766,11 @@ journal itself.
 Excluding the directory (`collectors.claude_code.exclude_cwds`) removes all of it, and is the operator's
 call: it is a configuration fact about which directories hold work. What no configuration can say is
 which session in a work directory is reading rather than working, so the class recurs wherever such a
-session runs elsewhere. Matching's prompt does say a candidate may be only cited, and F64 is why a
-model that doubted these links still produced comments. Unmeasured beyond the one directory.
+session runs elsewhere. Matching's prompt does say a candidate may be only cited. A link the model
+doubted below `match.confidence_floor` no longer draws a comment: the narrative has no confident primary,
+so it is proposed as a create naming its links instead. On that store at floor 0.7, 4 of those 6
+narratives (2, 30, 53, 66) move from a proposed comment to a create candidate, which the create prompt
+may decline as not worth tracking. Unmeasured beyond the one directory.
 
 ### F65 — a claude_code SCM command's whole text is authoring, so a PR or commit body's citations rank as SCM
 
@@ -857,11 +833,11 @@ measurement.
 | F54 — the watch LaunchAgent cannot run before login or headless | open. A LaunchDaemon would, but changes the credential story; unmeasured |
 | F63 — a transition on someone else's ticket is proposed like one on your own | open, policy question: never, per-tracker rule, or leave to review. One real instance |
 | F60 — upstream work done for an internal ticket is routed by repository, not by purpose | open. Matching's job, not routing's. 3 of 5 measured cases |
-| F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance. Narrowed: the reconciler examines such a narrative once and records it (`reconcile_examinations`), where before it held a slot and was counted as unexamined work on every pass (`TestReconcile_MentionedOnlyNarrativeYieldsUntilNewWorkIsLinked`) |
 | F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson); matching, omission-round and dispute responses are re-asked within configurable budgets. Only the first clustering response is still never retried. 0 such deaths in 32 passes; a budgeted re-ask is the shape if one appears |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F50 — a split narrative is still read by the create path and the review queue | open, narrowed: the create path examines a split narrative once and its create examination then excludes it, so it no longer holds a slot (`TestProposeCreates_AnEmptiedNarrativeYieldsItsSlot`); it is still reported with a false reason, and the review-queue half is untouched. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed before the create backlog fix: a split narrative held a create slot for 3 of 3 passes at cap 1 |
-| F59 — a rejected create is re-asked on the next pass whether or not anything changed | open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data |
+| F59 — a rejected create is re-asked on the next pass whether or not anything changed | open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data. Work with no confident primary now joins the population (9 more linked narratives on a real 30-day store at floor 0.7) under the same bound; `[t]arget` on its create leaves a confident reviewer primary and is never re-asked |
+| F68 — actions drafted before a narrative lost its confident primary stay where they are | open. Found closing F58/F64. On a real 30-day store at floor 0.7: 8 narratives keep a proposed comment beside their new create candidacy, 4 are held out of the create path by an old reconciler suppression until new work |
 | F62 — a draft that yields no action leaves no trace, so it is drafted again every pass | open, policy question: re-ask (an empty array breaks the prompt's one-action-per-issue rule) or record an examination? Found closing the mentioned-only path, the last silent exit in `reconcileOne`. 0 in a real 30-day store's backlog |
 | F38 — live-tier delete errors discarded | **resolved**: all seven per-test cleanups go through `deleteIssueOnCleanup`, and they and the shared fixture report a failed delete via `reportCleanupFailure` (stderr, plus a `::warning` under Actions). Never fails the test. Unit-tested without Jira |
 | F7 — connection/identity model | **#178**, narrowed: connection and tracker are split (tracker model slice 1); a connection's name still carries identity, credential lookup, cursor prefix and stored-link provenance |

@@ -352,7 +352,12 @@ data/                   SQLite database lives here (gitignored)
   never cause an illegal call.
 - **Untracked-work detection is the default path, not a special case.** Any narrative that
   fails to match an open issue with sufficient confidence lands in the unlinked bucket,
-  whatever stream it came from. unjira then asks whether the work warrants a ticket nobody filed —
+  whatever stream it came from. Sufficient confidence is `match.confidence_floor`: a narrative whose
+  primary link falls below it, or that has no primary at all (its links only cite tickets, or name
+  the same work recorded elsewhere), is untracked work. The reconciler drafts onto none of its
+  links, and its create proposal names each linked ticket with its role, confidence, summary and
+  status, so a reviewer can approve the new ticket or `[t]arget` one of those in triage to link the
+  work there instead. unjira then asks whether the work warrants a ticket nobody filed —
   and most of the time the answer is no, so a refusal is a first-class outcome, recorded as a
   `declined` action rather than silence. A decline is remembered: the same narrative is only
   re-judged once new events arrive, so a "no" costs one model call rather than one per `watch`
@@ -372,11 +377,11 @@ data/                   SQLite database lives here (gitignored)
   the pass summary on stdout — not only in a stderr log line — and say to re-run: a stage that
   truncates silently makes unexamined work look like failed work, which is exactly how a matching
   batch limit once read as a matching bug. The reconciler reports two, because its cap bounds two
-  disjoint selections: linked narratives "carrying unexamined work", and untracked narratives
-  "awaiting a create decision". A cap counts only narratives that still need a decision — one
-  already proposed for, declined, or found to have no allowed destination, each with nothing new
-  since, or holding only unjira's own output, or linked only to tickets it cites (`mentioned`),
-  does not take a slot. A drained pass says nothing, so the line means something when it appears. `correlator.max_context_narratives` bounds clustering's OTHER input —
+  disjoint selections: narratives with a confident primary "carrying unexamined work", and
+  untracked narratives (no confident primary) "awaiting a create decision". A cap counts only
+  narratives that still need a decision — one already proposed for, declined, or found to have no
+  allowed destination, each with nothing new since, or holding only unjira's own output, or
+  examined by the reconciler and found to have no confident primary, does not take a slot. A drained pass says nothing, so the line means something when it appears. `correlator.max_context_narratives` bounds clustering's OTHER input —
   not the window's own events, but how many pre-existing narratives are hydrated as context — zero
   (unlimited) by default, ranked (a narrative sharing an issue key with the window, then
   most-recent-first) rather than truncated by insertion order, and its exclusions reported the same

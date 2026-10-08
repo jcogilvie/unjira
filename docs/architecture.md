@@ -135,6 +135,20 @@ is writable plus its `mirror_to`, work in no scope (or in several, which is ambi
 tracker with no writer is not drafted for at all. A create carries its destination's scope, and
 `gate.Applier` writes it there.
 
+**A narrative with no confident primary is untracked work.** A confident primary is a primary link at
+or above `match.confidence_floor`, which `pipeline.RunReconcile` hands to both halves of the
+reconciler (`reconciler.WithConfidenceFloor`). A narrative without one (its links are all `mentioned`,
+or a `same_work` has no primary beside it, or its primary is below the floor) is drafted onto by
+nobody: `reconcileOne` records a `reconcile_examinations` row saying why and returns
+(`reconciler.confidentPrimary`). The create selector admits it by the same rule and floor
+(`store.awaitingCreate`'s first clause), and the create proposal names every link as a
+`reconciler.CreateCandidate` (key, role, confidence, provenance, and the ticket's summary and status read
+live), in the prompt and in the payload. `actions list` and triage show the candidates, and triage's
+`[t]arget` on the create is "link instead": the named ticket becomes the reviewer's primary, a doubted
+primary is demoted to `mentioned`, and a comment is drafted for it. Applying the create makes the new
+ticket the primary and demotes the doubted one the same way. Every linked narrative therefore belongs
+to exactly one of the two paths.
+
 **A pull request is seen from both sides, under one identifier.** `collector/claudecode` reads root
 session transcripts and the subagent transcripts beneath them (`<session>/subagents/`), and emits two
 event shapes: one per branch run, and one *anchor* per tool call that created a pull request
@@ -238,7 +252,7 @@ the next clustering prompt (rendered under each context narrative as background,
 check at a bisection seam), `:1880` (compaction), `correlator/cluster_reask.go:162` (omission re-ask, one
 call per round), `correlator/cluster_dispute.go:260` (dispute re-ask, per batch, again after a refused
 answer), `correlator/match.go:574` (match), `:600` (match re-ask, after an unparseable response),
-`reconciler/draft.go:100`, `:388`, `reconciler/create.go:283`, and `rules/distill.go:126` (`learn`).
+`reconciler/draft.go:100`, `:388`, `reconciler/create.go:313`, and `rules/distill.go:126` (`learn`).
 Nothing else in the tree calls a model.
 
 Store-mediation is what makes a failed pass cost a retry and nothing else: a stage that dies has
@@ -303,8 +317,9 @@ doc comments. Every other consumer takes `TaskReader`. GitHub has no edge from t
 it cannot have one: its backend implements only `TaskReader`, and its client sends only GET, so
 `tasktracker.Resolver` has no writer to hand out for a GitHub scope.
 
-`reconciler/create.go:128` is worth reading as a design statement: it takes no tracker at all, and
-its comment says *"the parameter's absence is the guarantee."*
+`reconciler/create.go:134` is worth reading as a design statement: `ProposeCreates` takes no
+tracker parameter. Its one read is an optional `TaskReader` (`WithCandidateReader`) that describes the
+tickets a create names as candidates, so no tracker it holds can write either.
 
 Each gate is independently load-bearing, per `docs/design-notes.md` incident 16 — a gate that
 duplicates another is not a gate. Gate 3 answers a different question from gates 1–2: not "is this
@@ -348,7 +363,7 @@ stateDiagram-v2
 
     approved --> applied: Applier wrote it
     approved --> failed: tracker refused<br/>actions.error records<br/>how far it got
-    approved --> failed: Applier refused —<br/>create whose narrative<br/>gained a primary link
+    approved --> failed: Applier refused —<br/>create whose narrative's primary<br/>appeared or changed after it
 
     failed --> proposed: next reconcile pass
     edited --> proposed: replacement row
@@ -362,18 +377,23 @@ stateDiagram-v2
     note right of declined
         Distinct from rejected:
         no human ruled.
-        reconciler/create.go:51
+        reconciler/create.go:52
     end note
 ```
 
 Reading the transitions, since some distinctions matter more than an edge label can carry:
 
 - **`declined`** is the model judging work not worth a ticket — creates only, and **distinct from
-  `rejected`, which is a human's ruling** (`reconciler/create.go:51`). Conflating them would teach
+  `rejected`, which is a human's ruling** (`reconciler/create.go:52`). Conflating them would teach
   slice 7's distiller that unjira's own taste and a reviewer's are the same signal.
 - **`reject / retarget`** are both recorded `rejected`, but only retarget produces a replacement row:
   the old action named the wrong issue, so it was ruled against rather than reworded
-  (`triage/restructure.go:478`).
+  (`triage/restructure.go:509`). Retargeting a create links its work to an existing ticket instead,
+  usually one of the candidates it names, and the replacement is a comment drafted for that ticket.
+- **An approved create is refused at apply** if the narrative's primary is not the one the payload
+  names: a primary linked after the proposal, or the named one changed in key, provenance or
+  confidence (`gate.createPayload.proposedOver`). A sub-floor primary the proposal was made over, and
+  that the reviewer therefore saw, does not refuse it (F13's backstop, narrowed).
 - **`edit / merge`** supersede with a replacement row and status `edited`.
 - **`failed`** carries `actions.error` recording how far a multi-hop route got. **Retry is simply the
   next reconcile pass** — there is no separate retry path.
@@ -472,7 +492,7 @@ trade-off was weighed.
 | Principle / pattern | Where | Evidence |
 |---|---|---|
 | **Interface Segregation** | every interface in `internal/` | **14 interfaces, all 1–3 methods.** `llm.Client` has one. No fat interface anywhere in the tree. |
-| **Dependency Inversion, used for safety** | `tasktracker.TaskReader` / `TaskWriter` | The split exists so "this code cannot write" is a compile error. `reconciler/create.go:124` states it outright: *"this takes no TaskReader — the parameter's absence is the guarantee."* DIP for a security property, not for testability. |
+| **Dependency Inversion, used for safety** | `tasktracker.TaskReader` / `TaskWriter` | The split exists so "this code cannot write" is a compile error. Everything outside `gate.Applier` takes a `TaskReader`, including the create path's candidate reader (`reconciler.WithCandidateReader`). DIP for a security property, not for testability. |
 | **Liskov substitution** | `clients/jira` vs `clients/local` | Both satisfy the full `TaskTracker` *and* `workflow.GraphProvider`, asserted at compile time (`_ workflow.GraphProvider = (*Tracker)(nil)`, `local/local.go:36`, `jira/tracker.go:27`). `local`'s graph is static, `jira`'s is mined — same postcondition, no weakening. |
 | **Strategy + registry (OCP)** | `cmd/unjira/main.go:59` | Adding a collector is one map entry. Verified: **nothing downstream switches on collector name.** |
 | **Adapter** | `internal/clients/*` | Thin facades, business logic one layer up. `clients/local` adapts two SQLite tables to a tracker interface. |
