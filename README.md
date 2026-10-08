@@ -406,6 +406,11 @@ data/                   SQLite database lives here (gitignored)
   issue keys never join anything, since one PR can touch several issues and one issue several PRs. When
   the identity is ambiguous (several narratives already hold the PR, or its one holder is not open),
   the event goes to the model as before, and the pass summary's `identity` lines say which and why.
+  The same identity holds a PR together within one pass: a window too big for one call is split in
+  two by time, and each half's call sees only its own events, so a PR opened in one half and merged in
+  the other came back as two stories (finding F61). Clusters whose work shares an exact pull request
+  are joined after clustering, unless that would merge two stored narratives, which is left to a
+  reviewer and reported on an `identity` line.
 - **Comments pass a narrative-worthiness test.** Draft must fit a category: decision made,
   problem discovered, scope changed, blocking, or resolved-with-substance. Otherwise it
   doesn't post.

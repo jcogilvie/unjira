@@ -65,6 +65,7 @@ flowchart TB
 
     subgraph correlate["internal/correlator"]
         CLUSTER["Cluster<br/>LLM · groups events into narratives:<br/>one member home per event,<br/>context links elsewhere"]
+        PRJOIN["joinByPullRequest<br/>deterministic · joins results whose<br/>members share an exact PR identity"]
         DISPUTE["dispute re-ask<br/>LLM · one home for an event<br/>two clusters claimed"]
         PERSIST["Persist<br/>deterministic · new / extend / compact<br/>MoveMember · AddContext"]
         CAND["gatherCandidates<br/>deterministic · pre-filter<br/>ranks on IssueActivity"]
@@ -88,7 +89,7 @@ flowchart TB
     CC --> CCC --> STORE
     JIRA --> JC --> STORE
     GH --> GHC --> STORE
-    STORE --> SPLIT -->|"work evidence"| PRID -->|"no exact single home"| CLUSTER --> DISPUTE --> PERSIST --> STORE
+    STORE --> SPLIT -->|"work evidence"| PRID -->|"no exact single home"| CLUSTER --> PRJOIN --> DISPUTE --> PERSIST --> STORE
     SPLIT -->|"tracker state · never clustered"| STORE
     PRID -->|"joined by identity · never shown to the model"| STORE
     STORE --> CAND --> MATCH --> STORE
@@ -100,7 +101,7 @@ flowchart TB
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,DISPUTE,MATCH,DRAFT llm
-    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID,DEST det
+    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID,PRJOIN,DEST det
     class APPLY danger
 ```
 
@@ -134,9 +135,9 @@ names exactly one PR, the anchor carries `events.ArtifactPullRequest` — the sa
 read through `events.PullRequestOf`, which accepts only that shape. The host is part of it because
 `acme/infra#12` on github.com and on a GHES instance are different pull requests. An anchor whose
 result named no PR, several, or a failure carries none, and nothing else sets it: a segment that merely
-mentions a PR never does. Two readers: the PR identity join (below), and the dispute re-ask, which shows
-it to the model as evidence. Anchors feed no provenance tier, so `gatherCandidates` and matching read
-exactly what they did before.
+mentions a PR never does. Three readers: the PR identity join before clustering and the one after it
+(both below), and the dispute re-ask, which shows it to the model as evidence. Anchors feed no
+provenance tier, so `gatherCandidates` and matching read exactly what they did before.
 
 **Before clustering, an exact pull-request identity places an event without the model**
 (`internal/pipeline/preassign.go`). After `PartitionByTrackerRecord`, each candidate carrying
@@ -150,7 +151,8 @@ rewritten, since the model never saw the event. The event then leaves the candid
 holders, two or more holders, or a holder that is not `open` (an allowlist) all send the event to the
 model unchanged, and the pass summary reports each with its reason. The join keys on exact PR identity
 only, never on issue keys, which are many-to-many with PRs. It does not group in-window events among
-themselves; a PR's first events go to the model together. It writes before clustering rather than
+themselves; a PR's first events go to the model together, and the join after clustering (below) holds
+them together if the model, or a bisected window, puts them in two clusters. It writes before clustering rather than
 after `Persist`, so a pass whose model call fails still places what identity settles. A dry run
 decides the same placements and writes none of them. Clustering context is read in both modes from
 one query, `store.NarrativesOverlappingExtended`, answered as if each placed-into narrative's
@@ -158,6 +160,21 @@ one query, `store.NarrativesOverlappingExtended`, answered as if each placed-int
 for it the query is plain `NarrativesOverlapping`. A dry run has not, and the query still returns a
 holder that the join brings into the window. Without that, a dry run would cluster against fewer
 narratives than the real pass.
+
+**After clustering, the same identity joins the model's own results**
+(`correlator/cluster_prjoin.go`, `joinByPullRequest`). A window too big for one call is bisected by
+time, each half clustered from its own events, and `mergeSplitResults` joins only results extending the
+same narrative and, once per seam, a NEW pair the same-story check agrees on. So a pull request opened in
+one half and merged in the other would become two NEW clusters. Once the halves are merged, and on every
+`Cluster` call whether or not it bisected, results whose member events share an exact
+`events.PullRequestOf` value are joined, transitively (union-find), before the dispute re-ask. Only a
+member exactly one result claims counts: a context event's PR and a disputed member's PR drive no join,
+so a dispute still goes to the dispute re-ask with its evidence. NEW results join into one NEW with the
+earliest result's title and summary; NEW results sharing a PR with one stored narrative's extend join
+that extend; a group that would join two different stored narratives is left as it is and reported
+(`Stats.PRIdentityConflicts`). Each absorbed member keeps its stated confidence, and no event is
+dropped. The pass summary counts the joins (`Stats.PRIdentityJoins`) and lists each conflict. Triage's
+split calls `Cluster` too, so a split whose only seam the join closes is refused, saying so.
 
 **Clustering produces two kinds of link** (`narrative_events.kind`,
 `docs/superpowers/specs/2026-10-02-shared-context-design.md`). A **member** link says the event is the
@@ -207,8 +224,8 @@ context link re-admits no narrative and reaches no prompt that drafts or matches
 the next clustering prompt (rendered under each context narrative as background, a numbered event as
 `-> #N`), by the pass summary, and by nothing else.
 
-**Eleven LLM call sites**, in three packages — `correlator/correlator.go:559` (cluster), `:1171` (same-story
-check at a bisection seam), `:1848` (compaction), `correlator/cluster_reask.go:162` (omission re-ask, one
+**Eleven LLM call sites**, in three packages — `correlator/correlator.go:585` (cluster), `:1203` (same-story
+check at a bisection seam), `:1880` (compaction), `correlator/cluster_reask.go:162` (omission re-ask, one
 call per round), `correlator/cluster_dispute.go:260` (dispute re-ask, per batch, again after a refused
 answer), `correlator/match.go:567` (match), `:593` (match re-ask, after an unparseable response),
 `reconciler/draft.go:100`, `:388`, `reconciler/create.go:283`, and `rules/distill.go:126` (`learn`).
@@ -536,10 +553,12 @@ change to unjira's architecture, not a refactor — treat it accordingly.
 - **No layering inversions.** Nothing in `internal/` imports `cmd/`. No import cycles.
 - **The store is the only channel between stages**, which is what makes per-narrative failure
   isolation work.
-- **Two deterministic pre-filters run before clustering.** `PartitionByTrackerRecord` keeps tracker
-  state out, and the PR identity join places an event whose exact, host-qualified pull request one open
-  narrative already holds. The join never reasons from issue keys, and anything it cannot settle
-  exactly goes to the model unchanged.
+- **Two deterministic pre-filters run before clustering, and one identity join after it.**
+  `PartitionByTrackerRecord` keeps tracker state out, and the PR identity join places an event whose
+  exact, host-qualified pull request one open narrative already holds. After the model, results whose
+  members share an exact pull request are joined (`joinByPullRequest`), unless that would merge two
+  stored narratives. Neither join reasons from issue keys, and anything the first cannot settle exactly
+  goes to the model unchanged.
 - **Deterministic filters run before and after the model** in the reconciler, in an order asserted by
   a test rather than implied by statement sequence.
 - **Every linked event has exactly one member home, and only member links reach a tracker path.** The

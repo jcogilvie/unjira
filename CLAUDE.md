@@ -79,7 +79,12 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   **exact identity, never issue keys**. The artifact is host-qualified (`<host>/<owner>/<repo>#<N>`)
   and set only where identity is exact, and issue↔PR is many-to-many, so "same ticket, same work" stays
   the model's call. Anything it cannot settle exactly (no holder, several, a holder not `open`) goes to
-  the model unchanged and is reported. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
+  the model unchanged and is reported. The same identity is applied once more *after* the clustering
+  model, to its results (`correlator/cluster_prjoin.go`'s `joinByPullRequest`): results whose
+  undisputed member events share an exact PR are joined before the dispute re-ask (F61: a bisected
+  window showed one PR's `:opened` and `:merged` to two calls that could not see each other). Context
+  and disputed members drive no join, and a group that would merge two stored narratives is left apart
+  and reported, since merging stored narratives is a reviewer's call. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
   issue-key candidates by provenance (branch name > SCM authoring command > Jira event > corroborated
   prose > first-mention prose > later-mention prose). In the reconciler it is `runSuppression`'s
   five-filter chain, plus route resolution. Keep judgment the model's job and extraction a pure

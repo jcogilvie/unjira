@@ -251,6 +251,36 @@ func TestSplitNarrative_ReportsWhenTheModelDisagrees(t *testing.T) {
 	assert.Equal(t, store.StatusOpen, src.Status, "and must not mark it split")
 }
 
+// TestSplitNarrative_SaysWhenIdentityRejoinedTheModelsSeam: the model cut one pull
+// request's events apart, and the pull-request identity join (F61) put them back. The
+// split fails as a declined one does, but must not blame the model for keeping one
+// story, which it did not.
+func TestSplitNarrative_SaysWhenIdentityRejoinedTheModelsSeam(t *testing.T) {
+	s, nid, _ := splitStore(t, 0)
+	base := time.Date(2026, 8, 29, 9, 0, 0, 0, time.UTC)
+	for i, ext := range []string{"pr-7-opened", "pr-7-merged"} {
+		e := events.NewEvent("github", ext, base.Add(time.Duration(i)*time.Hour), ext)
+		e.Artifacts[events.ArtifactPullRequest] = "github.com/o/r#7"
+		_, err := s.InsertEvent(e)
+		require.NoError(t, err)
+		eid, err := s.EventIDByExternalID("github", ext)
+		require.NoError(t, err)
+		require.NoError(t, s.LinkMembers(nid, []int64{eid}, 1))
+	}
+	client := &wireLLM{responses: []string{twoClusters}}
+
+	_, err := splitHandler(s, client).SplitNarrative(context.Background(), nid)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "share a pull request")
+	assert.Contains(t, err.Error(), "nothing was changed")
+	assert.NotContains(t, err.Error(), "despite the split instruction")
+
+	count, err := s.NarrativeEventCount(nid)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "a refused split must leave the narrative intact")
+}
+
 // TestSplitNarrative_RefusesASingleEligibleEvent: one event cannot be two stories.
 // An error beats a "split" that silently returns the narrative unchanged.
 func TestSplitNarrative_RefusesASingleEligibleEvent(t *testing.T) {

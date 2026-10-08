@@ -20,7 +20,11 @@ package pipeline
 // both directions, so "these share a ticket, so they are the same work" is matching's
 // judgment and stays the model's. Nor does this group in-window events among
 // themselves: a PR's :opened and :merged arriving together, with no narrative holding
-// either, go to the model together, which coalesced them in every measured rep.
+// either, go to the model together, which coalesced them in every measured rep. When
+// the window is too big for one call, its bisected halves cannot see each other's
+// events, so the same identity is applied again AFTER clustering, to the model's own
+// results, by correlator's joinByPullRequest (F61). Both read the artifact through
+// events.PullRequestOf, so they agree on what one pull request is.
 
 import (
 	"fmt"
