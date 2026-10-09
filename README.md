@@ -120,6 +120,15 @@ non-obvious corrections each one produced.
   comments, issue comments — collected as evidence for *that* work, so the tokens a review costs are
   attributed to the task reviewed even when you don't own it. Part of token attribution being
   complete. Today the GitHub collector reads only PRs you authored.
+- **Writable GitHub tracker, and selectable write destinations (planned, needs a spec)**: GitHub
+  as a backing tracker unjira can write to, not only a source it reads. Work that touches two
+  sources of record, such as an upstream GitHub issue and an internal Jira ticket, would get a
+  proposal per destination, each with text written for that audience, and the reviewer picks which
+  ones land. The tracker model already shapes this: a destination set, per-tracker
+  `writable_scopes`, and a self-identity requirement on writers, which the GitHub client meets
+  through `GET /user`. What is missing is the GitHub writer itself, per-destination prose, and a
+  disclosure gate. Text generated from internal transcripts can carry internal detail, and a
+  public write cannot be taken back, so that gate has to land before any public scope is writable.
 - **Phase 4 — presentation and inbox**: a local web UI over the store, and collectors that also
   gather work you still *need* to do (review requests, assigned issues, mentions), so the same
   pipeline yields an inbox of incoming work beside the record of work done.
