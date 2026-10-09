@@ -12,32 +12,14 @@ import (
 
 // -- pipeline lock ---------------------------------------------------------
 
-// lockTimeFormat is the timestamp layout used for pipeline_lock.held_since
-// and pipeline_lock.expires_at only — NOT the layout used elsewhere in this
-// package. events/narratives/cursors stay on time.RFC3339; switching those
-// would mean re-auditing every query that string-compares a timestamp
-// (EventsOn, the digest range scans, MemberEventsAfterBoundary), which is
-// why only the lock — where sub-second TTLs are load-bearing — uses this.
-//
-// It differs from time.RFC3339 in two ways, both required for TryAcquire's
-// atomic steal guard (a SQL string comparison, not a time comparison):
-//
-//   - Fixed sub-second width. time.RFC3339 has no fractional-second
-//     placeholder at all, so Format silently truncates to whole seconds —
-//     any sub-second TTL becomes indistinguishable from "already expired."
-//     time.RFC3339Nano fixes precision but strips trailing zeros, which
-//     breaks the lexicographic-order property below.
-//   - Lexicographic order equals chronological order. A fixed-width
-//     fractional part (always 9 digits) means comparing the formatted
-//     strings byte-by-byte gives the same answer as comparing the times.
-//     "...12:00:00.100000000Z" < "...12:00:00.150000000Z" holds as strings
-//     exactly because both are always 9 digits; RFC3339Nano would format
-//     these as ".1" and ".15", where the string comparison is wrong.
-//
-// TryAcquire normalizes now to UTC before formatting so two callers with
-// the same instant but different offsets can't produce different Z07:00
-// suffixes and defeat the ordering.
-const lockTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+// The lease's held_since and expires_at are DATETIME columns bound as time.Time, like
+// every stored time (see the package doc). TryAcquire's atomic steal guard is a SQL
+// comparison of the stored expires_at with a bound now, and that is an instant
+// comparison at full precision: both sides are the driver's UTC text, whose text
+// order is instant order, offsets and trailing-zero trimming included
+// (TestStoredTimes_TextOrderIsInstantOrder). Sub-second precision is load-bearing
+// here: a sub-second TTL truncated to whole seconds would be indistinguishable from
+// "already expired".
 
 // TryAcquire attempts to take the singleton pipeline lock without blocking,
 // in a single atomic statement (safe across concurrent processes/connections,
@@ -54,12 +36,9 @@ const lockTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
 // (another acquirer could race between the SELECT and the write) and never
 // gates the outcome — only the atomic statement's own RowsAffected does that.
 func (s *Store) TryAcquire(runID string, now time.Time, ttl time.Duration) (bool, error) {
-	now = now.UTC()
-	nowStr := now.Format(lockTimeFormat)
-
 	var (
 		priorRunID string
-		priorExp   string
+		priorExp   time.Time
 	)
 	if err := s.db.QueryRow(
 		`SELECT run_id, expires_at FROM pipeline_lock WHERE id = 1`,
@@ -72,7 +51,7 @@ func (s *Store) TryAcquire(runID string, now time.Time, ttl time.Duration) (bool
 		 ON CONFLICT(id) DO UPDATE SET
 		     run_id = excluded.run_id, held_since = excluded.held_since, expires_at = excluded.expires_at
 		 WHERE pipeline_lock.expires_at <= ?`,
-		runID, nowStr, now.Add(ttl).Format(lockTimeFormat), nowStr,
+		runID, now, now.Add(ttl), now,
 	)
 	if err != nil {
 		return false, fmt.Errorf("acquiring pipeline lock for %s: %w", runID, err)
@@ -87,10 +66,8 @@ func (s *Store) TryAcquire(runID string, now time.Time, ttl time.Duration) (bool
 	}
 
 	if priorRunID != "" && priorRunID != runID {
-		if priorExpTime, perr := time.Parse(lockTimeFormat, priorExp); perr == nil {
-			logging.For(s.log, "store").Warn("stealing expired pipeline lease",
-				"prior_run_id", priorRunID, "expired_ago", now.Sub(priorExpTime).String())
-		}
+		logging.For(s.log, "store").Warn("stealing expired pipeline lease",
+			"prior_run_id", priorRunID, "expired_ago", now.Sub(priorExp).String())
 	}
 
 	return true, nil

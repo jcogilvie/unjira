@@ -37,7 +37,7 @@ func (s *Store) SupersedeAction(
 	oldID int64, oldStatus, feedback string, replacement ActionRow,
 ) (newID int64, err error) {
 	err = s.WithTx(func(tx *Tx) error {
-		if err := updateActionStatusImpl(tx.tx, oldID, oldStatus, &feedback, nil); err != nil {
+		if err := updateActionStatusImpl(tx.tx, tx.now(), oldID, oldStatus, &feedback, nil); err != nil {
 			return err
 		}
 

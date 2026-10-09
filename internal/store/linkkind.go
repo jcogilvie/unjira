@@ -131,15 +131,15 @@ func (t *Tx) MoveMember(narrativeID, eventID int64, confidence float64, by Membe
 
 	if _, err := t.tx.Exec(
 		`DELETE FROM narrative_events WHERE narrative_id = ? AND event_id = ? AND kind = ?`,
-		narrativeID, eventID, string(LinkContext),
+		narrativeID, eventID, string(LinkContext), t.now(),
 	); err != nil {
 		return fmt.Errorf("replacing narrative %d's context link to event %d: %w", narrativeID, eventID, err)
 	}
 
 	if _, err := t.tx.Exec(
-		`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement)
-		 VALUES (?, ?, ?, ?, ?)`,
-		narrativeID, eventID, string(LinkMember), confidence, string(by),
+		`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement, linked_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		narrativeID, eventID, string(LinkMember), confidence, string(by), t.now(),
 	); err != nil {
 		return fmt.Errorf("linking event %d to narrative %d as a member: %w", eventID, narrativeID, err)
 	}
@@ -161,9 +161,9 @@ func (t *Tx) MoveMember(narrativeID, eventID int64, confidence float64, by Membe
 // would vanish instead of failing.
 func (t *Tx) AddContext(narrativeID, eventID int64) (bool, error) {
 	res, err := t.tx.Exec(
-		`INSERT INTO narrative_events (narrative_id, event_id, kind) VALUES (?, ?, ?)
+		`INSERT INTO narrative_events (narrative_id, event_id, kind, linked_at) VALUES (?, ?, ?, ?)
 		 ON CONFLICT (narrative_id, event_id) DO NOTHING`,
-		narrativeID, eventID, string(LinkContext),
+		narrativeID, eventID, string(LinkContext), t.now(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("linking event %d to narrative %d as context: %w", eventID, narrativeID, err)
@@ -257,9 +257,9 @@ func (s *Store) LinkMembers(narrativeID int64, eventIDs []int64, confidence floa
 		}
 
 		if _, err := s.db.Exec(
-			`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement)
-			 VALUES (?, ?, ?, ?, ?)`,
-			narrativeID, eid, string(LinkMember), confidence, string(PlacedByModel),
+			`INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement, linked_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			narrativeID, eid, string(LinkMember), confidence, string(PlacedByModel), s.now(),
 		); err != nil {
 			return fmt.Errorf("linking event %d to narrative %d as a member: %w", eid, narrativeID, err)
 		}

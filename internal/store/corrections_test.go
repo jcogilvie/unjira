@@ -133,7 +133,7 @@ func TestCorrectionsSince_HonorsTheWatermark(t *testing.T) {
 // setDecidedAt pins a ruling's decided_at, because the wall clock cannot be relied on to
 // produce a same-millisecond collision on demand: that is the one-in-N flake F30's tests
 // replaced (see export_test.go).
-func setDecidedAt(t *testing.T, s *store.Store, id int64, decidedAt string) {
+func setDecidedAt(t *testing.T, s *store.Store, id int64, decidedAt time.Time) {
 	t.Helper()
 	require.NoError(t, s.ExecForTest(`UPDATE actions SET decided_at = ? WHERE id = ?`, decidedAt, id))
 }

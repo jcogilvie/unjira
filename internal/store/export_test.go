@@ -16,6 +16,26 @@ func (s *Store) ExecForTest(query string, args ...any) error {
 	return err
 }
 
+// QueryStringsForTest runs a single-column query and scans every row as a string.
+func (s *Store) QueryStringsForTest(query string, args ...any) ([]string, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+
+	return out, rows.Err()
+}
+
 // QueryStringForTest runs a single-row, single-column query and scans it as a string.
 func (s *Store) QueryStringForTest(query string, args ...any) (string, error) {
 	var out string

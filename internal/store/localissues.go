@@ -33,15 +33,15 @@ CREATE TABLE IF NOT EXISTS local_issues (
     -- offline tests disagree with every real one.
     status          TEXT NOT NULL DEFAULT 'To Do',
     labels          TEXT NOT NULL DEFAULT '[]',
-    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at      DATETIME NOT NULL,
+    updated_at      DATETIME NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS local_issue_comments (
     id         INTEGER PRIMARY KEY,
     issue_key  TEXT NOT NULL REFERENCES local_issues (key),
     body       TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at DATETIME NOT NULL
 );
 `
 
@@ -79,10 +79,11 @@ func (s *Store) InsertLocalIssue(project, summary, issueType, description string
 		return "", fmt.Errorf("marshaling labels for %s: %w", key, err)
 	}
 
+	now := s.now()
 	_, err = s.db.Exec(
-		`INSERT INTO local_issues (key, project, summary, description, issue_type, labels)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		key, project, summary, nullable(description), issueType, string(labelsJSON),
+		`INSERT INTO local_issues (key, project, summary, description, issue_type, labels, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		key, project, summary, nullable(description), issueType, string(labelsJSON), now, now,
 	)
 	if err != nil {
 		return "", fmt.Errorf("inserting local issue %s: %w", key, err)
@@ -130,9 +131,9 @@ func (s *Store) GetLocalIssue(key string) (LocalIssue, error) {
 func (s *Store) SetLocalIssueStatus(key, status string) error {
 	res, err := s.db.Exec(
 		`UPDATE local_issues
-		 SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 SET status = ?, updated_at = ?
 		 WHERE key = ?`,
-		status, key,
+		status, s.now(), key,
 	)
 	if err != nil {
 		return fmt.Errorf("setting status for local issue %s: %w", key, err)
@@ -157,8 +158,8 @@ func (s *Store) InsertLocalIssueComment(issueKey, body string) error {
 	}
 
 	if _, err := s.db.Exec(
-		`INSERT INTO local_issue_comments (issue_key, body) VALUES (?, ?)`,
-		issueKey, body,
+		`INSERT INTO local_issue_comments (issue_key, body, created_at) VALUES (?, ?, ?)`,
+		issueKey, body, s.now(),
 	); err != nil {
 		return fmt.Errorf("adding comment to local issue %s: %w", issueKey, err)
 	}

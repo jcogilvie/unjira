@@ -2,10 +2,11 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/events"
@@ -28,8 +29,8 @@ type NarrativeRow struct {
 	Status             string
 	CompactionBoundary *time.Time
 	// CompactionBoundaryEventID pairs with CompactionBoundary to break ties:
-	// occurred_at alone cannot uniquely order events (stored via
-	// time.RFC3339 — whole seconds only), so MemberEventsAfterBoundary
+	// occurred_at alone cannot uniquely order events (events can share an
+	// instant — see MemberEventsAfterBoundary), so MemberEventsAfterBoundary
 	// filters on the (occurred_at, event_id) pair rather than occurred_at
 	// alone. nil iff CompactionBoundary is nil (never compacted).
 	CompactionBoundaryEventID *int64
@@ -38,18 +39,18 @@ type NarrativeRow struct {
 // InsertNarrative inserts a new narrative row (status 'open', no compaction
 // boundary) and returns its id.
 func (s *Store) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
-	return insertNarrativeImpl(s.db, windowStart, windowEnd, title, summary)
+	return insertNarrativeImpl(s.db, s.now(), windowStart, windowEnd, title, summary)
 }
 
 // InsertNarrative is the *Tx-scoped variant of (*Store).InsertNarrative.
 func (t *Tx) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
-	return insertNarrativeImpl(t.tx, windowStart, windowEnd, title, summary)
+	return insertNarrativeImpl(t.tx, t.now(), windowStart, windowEnd, title, summary)
 }
 
-func insertNarrativeImpl(c dbConn, windowStart, windowEnd time.Time, title, summary string) (int64, error) {
+func insertNarrativeImpl(c dbConn, createdAt, windowStart, windowEnd time.Time, title, summary string) (int64, error) {
 	res, err := c.Exec(
-		`INSERT INTO narratives (window_start, window_end, title, summary) VALUES (?, ?, ?, ?)`,
-		windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339), title, summary,
+		`INSERT INTO narratives (window_start, window_end, title, summary, created_at) VALUES (?, ?, ?, ?, ?)`,
+		windowStart, windowEnd, title, summary, createdAt,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("inserting narrative %q: %w", title, err)
@@ -91,39 +92,26 @@ func getNarrativeImpl(c dbConn, id int64) (NarrativeRow, error) {
 
 // scanNarrativeRow scans one narratives row (in the column order
 // id, window_start, window_end, title, summary, issue_key, confidence,
-// status, compaction_boundary, compaction_boundary_event_id) and parses its
-// RFC3339 timestamps. Shared by GetNarrative (single row, via *sql.Row) and
+// status, compaction_boundary, compaction_boundary_event_id), its times as
+// time.Time. Shared by GetNarrative (single row, via *sql.Row) and
 // NarrativesOverlapping (many, via *sql.Rows) so the nullable-column handling
 // exists once. Takes scanRow rather than a concrete type for exactly that
 // reason — both *sql.Row and *sql.Rows satisfy it, mirroring scanEvent.
 func scanNarrativeRow(row scanRow) (NarrativeRow, error) {
 	var (
 		out                NarrativeRow
-		windowStart        string
-		windowEnd          string
-		compactionBoundary sql.NullString
+		compactionBoundary sql.NullTime
 		compactionEventID  sql.NullInt64
 	)
 
-	if err := row.Scan(&out.ID, &windowStart, &windowEnd, &out.Title, &out.Summary,
+	if err := row.Scan(&out.ID, &out.WindowStart, &out.WindowEnd, &out.Title, &out.Summary,
 		&out.Status, &compactionBoundary, &compactionEventID); err != nil {
 		return NarrativeRow{}, err
 	}
 
-	var err error
-	if out.WindowStart, err = time.Parse(time.RFC3339, windowStart); err != nil {
-		return NarrativeRow{}, fmt.Errorf("parsing window_start for narrative %d: %w", out.ID, err)
-	}
-	if out.WindowEnd, err = time.Parse(time.RFC3339, windowEnd); err != nil {
-		return NarrativeRow{}, fmt.Errorf("parsing window_end for narrative %d: %w", out.ID, err)
-	}
-
 	if compactionBoundary.Valid {
-		parsed, perr := time.Parse(time.RFC3339, compactionBoundary.String)
-		if perr != nil {
-			return NarrativeRow{}, fmt.Errorf("parsing compaction_boundary for narrative %d: %w", out.ID, perr)
-		}
-		out.CompactionBoundary = &parsed
+		boundary := compactionBoundary.Time
+		out.CompactionBoundary = &boundary
 	}
 	if compactionEventID.Valid {
 		id := compactionEventID.Int64
@@ -147,7 +135,7 @@ func (t *Tx) ExtendNarrative(id int64, windowEnd time.Time, summary string) erro
 func extendNarrativeImpl(c dbConn, id int64, windowEnd time.Time, summary string) error {
 	_, err := c.Exec(
 		`UPDATE narratives SET window_end = ?, summary = ? WHERE id = ?`,
-		windowEnd.Format(time.RFC3339), summary, id,
+		windowEnd, summary, id,
 	)
 	if err != nil {
 		return fmt.Errorf("extending narrative %d: %w", id, err)
@@ -159,8 +147,8 @@ func extendNarrativeImpl(c dbConn, id int64, windowEnd time.Time, summary string
 // SetCompactionBoundary records the occurred_at and row id of the newest
 // compacted event and stores the recap-prefixed summary. boundaryEventID is
 // required alongside boundary: occurred_at alone cannot uniquely order
-// events sharing a stored second (time.RFC3339 truncates to whole seconds —
-// see the comment on MemberEventsAfterBoundary), so the pair is what
+// events sharing an instant (see the comment on MemberEventsAfterBoundary),
+// so the pair is what
 // MemberEventsAfterBoundary's row-value comparison uses to avoid dropping a
 // tied event from future context.
 func (s *Store) SetCompactionBoundary(id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
@@ -176,7 +164,7 @@ func (t *Tx) SetCompactionBoundary(id int64, boundary time.Time, boundaryEventID
 func setCompactionBoundaryImpl(c dbConn, id int64, boundary time.Time, boundaryEventID int64, recapSummary string) error {
 	_, err := c.Exec(
 		`UPDATE narratives SET compaction_boundary = ?, compaction_boundary_event_id = ?, summary = ? WHERE id = ?`,
-		boundary.Format(time.RFC3339), boundaryEventID, recapSummary, id,
+		boundary, boundaryEventID, recapSummary, id,
 	)
 	if err != nil {
 		return fmt.Errorf("setting compaction boundary for narrative %d: %w", id, err)
@@ -198,8 +186,9 @@ func setCompactionBoundaryImpl(c dbConn, id int64, boundary time.Time, boundaryE
 //
 // The boundary comparison is on the pair (compaction_boundary,
 // compaction_boundary_event_id), not occurred_at alone: occurred_at is
-// stored via time.RFC3339 (whole seconds only — see InsertEvent), so two
-// events in the same second are indistinguishable by timestamp. A bare
+// stored at the precision its source gave, and a second-granular source
+// (Jira's changelog; a bulk transition moves many issues in one second)
+// gives many events one instant, indistinguishable by timestamp. A bare
 // "occurred_at > boundary" filter would then either include or exclude
 // *both* tied events depending on which one the boundary happened to be set
 // from, silently dropping whichever tied event was meant to stay visible.
@@ -235,8 +224,8 @@ func (s *Store) MemberEventsAfterBoundary(narrativeID int64) ([]events.Event, er
 // (MemberEventsAfterBoundary), which is why excluding it here does not starve the
 // model.
 //
-// Ordering is composite because occurred_at is stored via time.RFC3339
-// (whole seconds — see InsertEvent) and cannot uniquely order events.
+// Ordering is composite because events can share an instant (see
+// MemberEventsAfterBoundary), so occurred_at cannot uniquely order them.
 func (s *Store) UnlinkedEventsInRange(start, end time.Time) ([]events.Event, error) {
 	rows, err := s.db.Query(
 		`SELECT e.source, e.external_id, e.occurred_at, e.actor, e.summary, e.artifacts, e.raw_ref
@@ -244,11 +233,11 @@ func (s *Store) UnlinkedEventsInRange(start, end time.Time) ([]events.Event, err
 		 WHERE e.occurred_at >= ? AND e.occurred_at < ?
 		   AND NOT EXISTS (SELECT 1 FROM narrative_events ne WHERE ne.event_id = e.id AND `+memberLink+`)
 		 ORDER BY e.occurred_at, e.id`,
-		start.Format(time.RFC3339), end.Format(time.RFC3339),
+		start, end,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying unlinked events in [%s, %s): %w",
-			start.Format(time.RFC3339), end.Format(time.RFC3339), err)
+			start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -308,43 +297,41 @@ func (s *Store) NarrativesOverlapping(start, end time.Time) ([]NarrativeRow, err
 // an end the store already holds changes nothing, which is what lets the real pass go
 // through this query too, rather than through a second one that could drift.
 //
-// "Forward" is decided by instant (strftime('%s'), whole seconds, which is what
-// RFC3339 stores), as the join's writer decides it with time.After, and not by
-// comparing the strings, which disagree with the instants when offsets differ. The
-// end that wins is then compared with the window exactly as a stored one would be.
+// "Forward" is decided by instant, as the join's writer decides it with time.After:
+// each planned end is bound as a time.Time, so it is the same UTC text as a stored
+// window_end (see the package doc) and the SQL comparison between them is an instant
+// comparison. The end that wins is compared with the window exactly as a stored one
+// would be. The row's window_end is then moved forward in Go rather than selected
+// from SQL, because a CASE over two times has no declared type and would come back
+// as text rather than a time.Time.
 func (s *Store) NarrativesOverlappingExtended(start, end time.Time, extendTo map[int64]time.Time) ([]NarrativeRow, error) {
-	planned := make(map[string]string, len(extendTo))
-	for id, at := range extendTo {
-		planned[strconv.FormatInt(id, 10)] = at.Format(time.RFC3339)
+	planned := `SELECT NULL, NULL WHERE 0`
+	args := make([]any, 0, 2*len(extendTo)+2)
+	if len(extendTo) > 0 {
+		ids := slices.Sorted(maps.Keys(extendTo))
+		values := make([]string, 0, len(ids))
+		for _, id := range ids {
+			values = append(values, `(?, ?)`)
+			args = append(args, id, extendTo[id])
+		}
+		planned = `VALUES ` + strings.Join(values, `, `)
 	}
-	plannedJSON, err := json.Marshal(planned)
-	if err != nil {
-		return nil, fmt.Errorf("encoding %d planned window end(s): %w", len(planned), err)
-	}
+	args = append(args, start, end)
 
 	rows, err := s.db.Query(
-		`WITH planned(id, window_end) AS (
-		   SELECT CAST(key AS INTEGER), value FROM json_each(?)
-		 ),
-		 effective AS (
-		   SELECT n.id, n.window_start,
-		          CASE WHEN CAST(strftime('%s', p.window_end) AS INTEGER) > CAST(strftime('%s', n.window_end) AS INTEGER)
-		               THEN p.window_end ELSE n.window_end END AS window_end,
-		          n.title, n.summary, n.status,
-		          n.compaction_boundary, n.compaction_boundary_event_id
-		     FROM narratives n LEFT JOIN planned p ON p.id = n.id
-		 )
-		 SELECT id, window_start, window_end, title, summary, status,
-		        compaction_boundary, compaction_boundary_event_id
-		 FROM effective
-		 WHERE window_end >= ? AND window_start <= ?
-		   AND status != '`+StatusSplit+`'
-		 ORDER BY window_start, id`,
-		string(plannedJSON), start.Format(time.RFC3339), end.Format(time.RFC3339),
+		`WITH planned(id, window_end) AS (`+planned+`)
+		 SELECT n.id, n.window_start, n.window_end, n.title, n.summary, n.status,
+		        n.compaction_boundary, n.compaction_boundary_event_id
+		 FROM narratives n LEFT JOIN planned p ON p.id = n.id
+		 WHERE CASE WHEN p.window_end > n.window_end THEN p.window_end ELSE n.window_end END >= ?
+		   AND n.window_start <= ?
+		   AND n.status != '`+StatusSplit+`'
+		 ORDER BY n.window_start, n.id`,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying narratives overlapping [%s, %s): %w",
-			start.Format(time.RFC3339), end.Format(time.RFC3339), err)
+			start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -353,6 +340,10 @@ func (s *Store) NarrativesOverlappingExtended(start, end time.Time, extendTo map
 		row, err := scanNarrativeRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scanning overlapping narrative row: %w", err)
+		}
+		// In UTC, as a stored end reads back; UTC also drops a monotonic reading.
+		if at, ok := extendTo[row.ID]; ok && at.After(row.WindowEnd) {
+			row.WindowEnd = at.UTC()
 		}
 		out = append(out, row)
 	}
@@ -456,15 +447,15 @@ func (s *Store) DeltaEvents(narrativeID int64) ([]events.Event, error) {
 // NarrativeEventLinkedAt returns the linked_at timestamp for one
 // (narrativeID, eventID) narrative_events row. This is a test-support
 // introspection accessor — same precedent as NarrativeEventCount — so tests
-// outside this package (store_test) can assert on linked_at's format without
-// reaching into *sql.DB directly.
-func (s *Store) NarrativeEventLinkedAt(narrativeID, eventID int64) (string, error) {
-	var linkedAt string
+// outside this package (store_test) can assert on linked_at without reaching
+// into *sql.DB directly.
+func (s *Store) NarrativeEventLinkedAt(narrativeID, eventID int64) (time.Time, error) {
+	var linkedAt time.Time
 	if err := s.db.QueryRow(
 		`SELECT linked_at FROM narrative_events WHERE narrative_id = ? AND event_id = ?`,
 		narrativeID, eventID,
 	).Scan(&linkedAt); err != nil {
-		return "", fmt.Errorf("querying linked_at for narrative %d event %d: %w", narrativeID, eventID, err)
+		return time.Time{}, fmt.Errorf("querying linked_at for narrative %d event %d: %w", narrativeID, eventID, err)
 	}
 
 	return linkedAt, nil

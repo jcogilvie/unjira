@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // -- cursors -----------------------------------------------------------
@@ -31,10 +32,10 @@ func (s *Store) GetCursor(collector, resource string) (string, error) {
 func (s *Store) SetCursor(collector, resource, position string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO cursors (collector, resource, position, updated_at)
-		 VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT (collector, resource)
 		 DO UPDATE SET position = excluded.position, updated_at = excluded.updated_at`,
-		collector, resource, position,
+		collector, resource, position, s.now(),
 	)
 	if err != nil {
 		return fmt.Errorf("setting cursor %s/%s: %w", collector, resource, err)
@@ -47,14 +48,18 @@ func (s *Store) SetCursor(collector, resource, position string) error {
 type CollectorCount struct {
 	Collector string
 	Count     int
-	Latest    string
+	Latest    time.Time
 }
 
 // CursorCounts returns the number of tracked resources and the latest
-// updated_at, grouped by collector.
+// updated_at, grouped by collector. The latest is read from its row by a scalar
+// subquery, as EventCountsBySource reads its own, so it stays a DATETIME.
 func (s *Store) CursorCounts() ([]CollectorCount, error) {
 	rows, err := s.db.Query(
-		`SELECT collector, COUNT(*) AS n, MAX(updated_at) AS latest FROM cursors GROUP BY collector`,
+		`SELECT c.collector, COUNT(*) AS n,
+		        (SELECT l.updated_at FROM cursors l WHERE l.collector = c.collector
+		          ORDER BY l.updated_at DESC LIMIT 1) AS latest
+		   FROM cursors c GROUP BY c.collector`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying cursor counts: %w", err)
