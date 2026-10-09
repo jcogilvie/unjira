@@ -566,8 +566,10 @@ func TestTryAcquire_TrailingZeroBoundaryOrdersCorrectly(t *testing.T) {
 	// "2026-08-01T12:00:00.15Z" == false — the trailing-zero-stripped
 	// strings sort in the WRONG order relative to true chronological order
 	// (verified directly against time.RFC3339Nano's actual output). The
-	// lock's fixed-width format must keep these two writes in correct order
-	// under TryAcquire's string-based SQL guard.
+	// driver's stored layout trims trailing zeros too ("...12:00:00.1+00:00"),
+	// and stays in order only because '+' sorts below every digit; this keeps
+	// these two writes in correct order under TryAcquire's text-compared SQL
+	// guard (see also TestStoredTimes_TextOrderIsInstantOrder).
 	s := openStore(t)
 	start := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
@@ -649,9 +651,9 @@ func TestUnlinkedEventsInRange_EmptyRangeReturnsNoError(t *testing.T) {
 // modernc.org/sqlite happens to return tied rows in rowid order on this
 // schema, there being no secondary index to push it toward another scan order.
 //
-// The explicit tiebreaker is still required. occurred_at is stored via
-// time.RFC3339 (whole seconds — see InsertEvent) and so cannot uniquely order
-// events, and depending on an engine's incidental tie behavior is precisely
+// The explicit tiebreaker is still required. occurred_at is stored at the
+// precision its source gives, and a second-granular source puts many events on
+// one instant, so it cannot uniquely order events, and depending on an engine's incidental tie behavior is precisely
 // how the compaction boundary came to silently drop a tied event from all
 // future Cluster context before it was paired with an event id.
 func TestUnlinkedEventsInRange_OrdersDeterministicallyWithinSameSecond(t *testing.T) {
@@ -758,8 +760,8 @@ func TestNarrativesOverlappingExtended_AnswersAsIfWindowEndsHadMoved(t *testing.
 }
 
 // TestNarrativesOverlappingExtended_ComparesInstantsNotStrings: "later" is decided by
-// instant, as the join's writer decides it (time.After), not by comparing the RFC3339
-// strings. 12:45+02:00 sorts after 11:00Z as text but is the earlier instant, so it
+// instant, as the join's writer decides it (time.After), not by comparing offset
+// text. 12:45+02:00 sorts after 11:00Z as text but is the earlier instant, so it
 // must not replace the stored end.
 func TestNarrativesOverlappingExtended_ComparesInstantsNotStrings(t *testing.T) {
 	s := openStore(t)
@@ -1229,14 +1231,17 @@ func TestLinkedAtAndActionCreatedAtUseTheSameFormat(t *testing.T) {
 	actions, err := s.ActionsForNarrative(nid)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
-	createdAt := actions[0].CreatedAt
+	assert.False(t, actions[0].CreatedAt.Before(linkedAt), "the action was created after the link")
 
-	assert.Contains(t, linkedAt, ".", "linked_at must carry sub-second precision")
-	assert.Contains(t, createdAt, ".",
-		"actions.created_at must use the SAME sub-second format as linked_at, or an "+
-			"ad-hoc query ordering the two reads them inverted")
-	assert.Len(t, createdAt, len(linkedAt),
-		"identical format strings produce identical lengths")
+	linkedText, err := s.QueryStringForTest(`SELECT CAST(linked_at AS TEXT) FROM narrative_events`)
+	require.NoError(t, err)
+	createdText, err := s.QueryStringForTest(`SELECT CAST(created_at AS TEXT) FROM actions`)
+	require.NoError(t, err)
+	assert.Regexp(t, utcDatetime, linkedText, "linked_at is in the one stored layout")
+	assert.Regexp(t, utcDatetime, createdText,
+		"actions.created_at must use the SAME layout as linked_at, or an ad-hoc query "+
+			"ordering the two reads them inverted")
+	assert.LessOrEqual(t, linkedText, createdText, "and as text they sort in the order they happened")
 }
 
 // -- actions ---------------------------------------------------------------

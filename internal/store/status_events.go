@@ -57,7 +57,7 @@ func (s *Store) LatestStatusEvent(issueKey string) (StatusEvent, bool, error) {
 	var (
 		from       sql.NullString
 		to         sql.NullString
-		occurredAt string
+		occurredAt time.Time
 	)
 
 	// The artifact keys are internal/events' declared cross-package contract
@@ -103,12 +103,5 @@ func (s *Store) LatestStatusEvent(issueKey string) (StatusEvent, bool, error) {
 		return StatusEvent{}, false, nil
 	}
 
-	at, err := time.Parse(time.RFC3339, occurredAt)
-	if err != nil {
-		return StatusEvent{}, false, fmt.Errorf(
-			"parsing occurred_at %q for latest status event on %s: %w", occurredAt, issueKey, err,
-		)
-	}
-
-	return StatusEvent{From: from.String, To: to.String, OccurredAt: at}, true, nil
+	return StatusEvent{From: from.String, To: to.String, OccurredAt: occurredAt}, true, nil
 }

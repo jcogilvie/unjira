@@ -24,10 +24,10 @@ func (s *Store) InsertEvent(event events.Event) (bool, error) {
 	}
 
 	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO events (source, external_id, occurred_at, actor, summary, artifacts, raw_ref)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		event.Source, event.ExternalID, event.OccurredAt.Format(time.RFC3339),
-		nullable(event.Actor), event.Summary, string(artifacts), nullable(event.RawRef),
+		`INSERT OR IGNORE INTO events (source, external_id, occurred_at, actor, summary, artifacts, raw_ref, ingested_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.Source, event.ExternalID, event.OccurredAt,
+		nullable(event.Actor), event.Summary, string(artifacts), nullable(event.RawRef), s.now(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("inserting event %s/%s: %w", event.Source, event.ExternalID, err)
@@ -49,7 +49,7 @@ func (s *Store) EventsOn(day time.Time) ([]events.Event, error) {
 	rows, err := s.db.Query(
 		`SELECT source, external_id, occurred_at, actor, summary, artifacts, raw_ref
 		 FROM events WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at`,
-		start.Format(time.RFC3339), end.Format(time.RFC3339),
+		start, end,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying events on %s: %w", day.Format("2006-01-02"), err)
@@ -72,14 +72,21 @@ func (s *Store) EventsOn(day time.Time) ([]events.Event, error) {
 type SourceCount struct {
 	Source string
 	Count  int
-	Latest string
+	Latest time.Time
 }
 
 // EventCountsBySource returns the number of events and the latest
 // occurred_at, grouped by source.
+//
+// The latest is the column read from its row by a scalar subquery, not MAX(occurred_at):
+// an aggregate has no declared type, so the driver would hand it back as text rather
+// than a time.Time (see the package doc).
 func (s *Store) EventCountsBySource() ([]SourceCount, error) {
 	rows, err := s.db.Query(
-		`SELECT source, COUNT(*) AS n, MAX(occurred_at) AS latest FROM events GROUP BY source`,
+		`SELECT e.source, COUNT(*) AS n,
+		        (SELECT l.occurred_at FROM events l WHERE l.source = e.source
+		          ORDER BY l.occurred_at DESC LIMIT 1) AS latest
+		   FROM events e GROUP BY e.source`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying event counts by source: %w", err)
@@ -132,22 +139,15 @@ type scanRow interface {
 
 func scanEvent(row scanRow) (events.Event, error) {
 	var (
-		e          events.Event
-		occurredAt string
-		actor      sql.NullString
-		artifacts  string
-		rawRef     sql.NullString
+		e         events.Event
+		actor     sql.NullString
+		artifacts string
+		rawRef    sql.NullString
 	)
 
-	if err := row.Scan(&e.Source, &e.ExternalID, &occurredAt, &actor, &e.Summary, &artifacts, &rawRef); err != nil {
+	if err := row.Scan(&e.Source, &e.ExternalID, &e.OccurredAt, &actor, &e.Summary, &artifacts, &rawRef); err != nil {
 		return events.Event{}, err
 	}
-
-	parsed, err := time.Parse(time.RFC3339, occurredAt)
-	if err != nil {
-		return events.Event{}, fmt.Errorf("parsing occurred_at %q: %w", occurredAt, err)
-	}
-	e.OccurredAt = parsed
 
 	e.Actor = actor.String
 	e.RawRef = rawRef.String

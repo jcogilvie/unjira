@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // -- narrative issues (narrative -> issue matching) -----------------------
@@ -295,28 +296,28 @@ func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]Narrat
 // still letting the database's partial unique index reject a genuine second
 // primary with a real error.
 func (s *Store) AddNarrativeIssues(narrativeID int64, links []NarrativeIssue) error {
-	return addNarrativeIssuesImpl(s.db, narrativeID, links)
+	return addNarrativeIssuesImpl(s.db, s.now(), narrativeID, links)
 }
 
 // AddNarrativeIssues is the *Tx-scoped variant of
 // (*Store).AddNarrativeIssues.
 func (t *Tx) AddNarrativeIssues(narrativeID int64, links []NarrativeIssue) error {
-	return addNarrativeIssuesImpl(t.tx, narrativeID, links)
+	return addNarrativeIssuesImpl(t.tx, t.now(), narrativeID, links)
 }
 
-func addNarrativeIssuesImpl(c dbConn, narrativeID int64, links []NarrativeIssue) error {
+func addNarrativeIssuesImpl(c dbConn, createdAt time.Time, narrativeID int64, links []NarrativeIssue) error {
 	for _, link := range links {
 		if _, err := c.Exec(
 			`INSERT INTO narrative_issues
-			   (narrative_id, issue_key, role, provenance, confidence, connection)
-			 VALUES (?, ?, ?, ?, ?, ?)
+			   (narrative_id, issue_key, role, provenance, confidence, connection, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT (narrative_id, issue_key) DO UPDATE SET
 			   role       = excluded.role,
 			   provenance = excluded.provenance,
 			   confidence = excluded.confidence,
 			   connection = excluded.connection`,
 			narrativeID, link.IssueKey, string(link.Role), link.Provenance,
-			link.Confidence, nullable(link.Connection),
+			link.Confidence, nullable(link.Connection), createdAt,
 		); err != nil {
 			return fmt.Errorf("adding issue link %s (%s) to narrative %d: %w",
 				link.IssueKey, link.Role, narrativeID, err)

@@ -187,21 +187,6 @@ If it occurs, it shows as an M3 split whose identity half was placed by `identit
 (`narrative_events.member_placement`), and the remedy is to number no eligible member whose PR an open
 narrative already holds by identity. That is a prompt-shape decision, and is not taken here.
 
-### F53 — stored timestamps keep their source's UTC offset, and window queries compare them as strings
-
-`store.InsertEvent` writes `event.OccurredAt.Format(time.RFC3339)` (`internal/store/events.go:29`)
-without converting to UTC, so a timestamp keeps the offset its source gave it. Jira's carry the
-account's zone (`2026-08-21T12:00:57.812-0700`, the layout the Jira collector parses), and are stored as
-`…-07:00`. Claude Code and GitHub timestamps are `Z`. The window queries then compare these as text:
-event-range reads bound `occurred_at` with `start.Format(time.RFC3339)`, and `NarrativesOverlapping`
-tests narrative windows the same way. Lexical order equals chronological order only within a single
-offset. **Consequence:** a Jira event can fall on the wrong side of a pass's window, or be missed by an
-overlap test, by up to its offset (7 hours for that account). The F46 fix compares instants
-(`strftime('%s')`) where it decides "forward", and leaves the existing comparisons as they were.
-Unmeasured: every event in the snapshots measured in this period is `Z`, since those windows held no
-Jira events. The likely fix is to store UTC at every writer, which needs a fresh store under the
-no-migrations rule, or to compare instants in the queries.
-
 ### F51 — a dry run reports an extend's title and window from the cluster result, not as Persist writes them
 
 `describeUnpersisted` (`internal/pipeline/narrate.go:413`) builds each dry-run narrative from the
@@ -849,7 +834,6 @@ measurement.
 | F66 — key-shaped tokens that are not keys are candidates until verification | open, deferred. Fix planned: each tracker reports its existing scopes, and verification drops a candidate in a scope that doesn't exist. Not a pattern list. 11 narratives affected, 0 real keys displaced |
 | F45 — the model can still reshuffle a PR's placed members apart | open. Pre-existing for every eligible member; the join only places unplaced events. Measured in six two-pass reps after the join: 24 identity placements, M3 26/26 in every rep, 0 identity-placed members moved by the model |
 | F51 — a dry run reports an extend's title and window from the cluster result | open. Report only: clustering and placements match the real pass. Found fixing F46 |
-| F53 — stored timestamps keep their offset; window queries compare strings | open. Jira timestamps are stored with the account's offset, everything else `Z`; unmeasured |
 | F61 — one pass can still extend two stored narratives with one PR's work | open, narrowed: `joinByPullRequest` joins results sharing an exact PR identity after clustering (on a real 30-day first pass, 19 of 99 multi-event PRs had split across bisection seams). Left apart and reported: a group extending two different stored narratives, and a disputed member the re-ask gives to a result holding none of its PR's other work. Unmeasured |
 | F47 — a subagent-opened PR is not named in its root segment | open. Needs cross-transcript lineage (shared-context slice 2). 0 of 70 here |
 | F48 — a script handed to a shell is read as data | open, guarded: `TestHiddenAuthoring_Tripwire` (`HIDDEN_AUTHORING_PROBE=1`) re-measures by week and fails if one appears. 0 through W40 |
