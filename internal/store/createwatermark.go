@@ -40,7 +40,7 @@ const ActionTypeCreate = "create"
 const createExaminationsSchema = `
 CREATE TABLE IF NOT EXISTS create_examinations (
     narrative_id INTEGER PRIMARY KEY REFERENCES narratives (id),
-    examined_at  TEXT NOT NULL,
+    examined_at  DATETIME NOT NULL,
     examined_link_seq INTEGER NOT NULL,
     reason       TEXT NOT NULL
 );`
@@ -71,12 +71,12 @@ const createExaminationPredicate = `
 func (s *Store) RecordCreateExamined(narrativeID int64, reason string) error {
 	if _, err := s.db.Exec(
 		`INSERT INTO create_examinations (narrative_id, examined_at, examined_link_seq, reason)
-		 VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), `+linkSeqHighWater+`, ?)
+		 VALUES (?, ?, `+linkSeqHighWater+`, ?)
 		 ON CONFLICT(narrative_id) DO UPDATE SET
 		     examined_at = excluded.examined_at,
 		     examined_link_seq = excluded.examined_link_seq,
 		     reason = excluded.reason`,
-		narrativeID, reason,
+		narrativeID, s.now(), reason,
 	); err != nil {
 		return fmt.Errorf("recording create examination for narrative %d: %w", narrativeID, err)
 	}

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,15 +111,15 @@ func TestCorrectionsSince_ACorrectionThatLapsedAndReturnedIsOfferedAgain(t *test
 func TestCorrectionsSince_IgnoresTheWallClock(t *testing.T) {
 	s, nid := correctionsStore(t)
 	read := insertRuled(t, s, nid, store.StatusRejected, "read by the draft")
-	setDecidedAt(t, s, read, "2026-01-01T12:00:05.950Z")
+	setDecidedAt(t, s, read, time.Date(2026, 1, 1, 12, 0, 5, 950000000, time.UTC))
 
 	_, readThrough, err := s.CorrectionsSince(store.CorrectionsCursor{})
 	require.NoError(t, err)
 
 	same := insertRuled(t, s, nid, store.StatusRejected, "same millisecond, after the read")
-	setDecidedAt(t, s, same, "2026-01-01T12:00:05.950Z")
+	setDecidedAt(t, s, same, time.Date(2026, 1, 1, 12, 0, 5, 950000000, time.UTC))
 	stepped := insertRuled(t, s, nid, store.StatusEdited, "the clock stepped back")
-	setDecidedAt(t, s, stepped, "2026-01-01T11:59:00.000Z")
+	setDecidedAt(t, s, stepped, time.Date(2026, 1, 1, 11, 59, 0, 0, time.UTC))
 
 	got, _, err := s.CorrectionsSince(readThrough)
 	require.NoError(t, err)

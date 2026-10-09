@@ -36,9 +36,9 @@ import (
 
 // farFuture and farPast are display timestamps chosen to make a timestamp comparison
 // give the WRONG answer, so a test passing with them proves no timestamp was consulted.
-const (
-	farFuture = "9999-12-31T23:59:59.999Z"
-	farPast   = "2000-01-01T00:00:00.000Z"
+var (
+	farFuture = time.Date(9999, 12, 31, 23, 59, 59, 999000000, time.UTC)
+	farPast   = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
 // linkNewEvent inserts one event and links it to narrativeID, returning the event id.
@@ -57,7 +57,7 @@ func linkNewEvent(t *testing.T, s *store.Store, narrativeID int64, extID string)
 }
 
 // linkedAt reads one link's display timestamp.
-func linkedAt(t *testing.T, s *store.Store, narrativeID, eventID int64) string {
+func linkedAt(t *testing.T, s *store.Store, narrativeID, eventID int64) time.Time {
 	t.Helper()
 
 	ts, err := s.NarrativeEventLinkedAt(narrativeID, eventID)
@@ -82,9 +82,12 @@ func TestMatchWatermark_ALinkInTheSameMillisecondReadmits(t *testing.T) {
 	require.NoError(t, s.ExecForTest(
 		`UPDATE match_examinations SET examined_at = ? WHERE narrative_id = ?`, ts, id))
 	examinedAt, err := s.QueryStringForTest(
-		`SELECT examined_at FROM match_examinations WHERE narrative_id = ?`, id)
+		`SELECT CAST(examined_at AS TEXT) FROM match_examinations WHERE narrative_id = ?`, id)
 	require.NoError(t, err)
-	require.Equal(t, ts, examinedAt, "fixture: the two timestamps are byte-identical")
+	linkedAtText, err := s.QueryStringForTest(
+		`SELECT CAST(linked_at AS TEXT) FROM narrative_events WHERE event_id = ?`, eventID)
+	require.NoError(t, err)
+	require.Equal(t, linkedAtText, examinedAt, "fixture: the two timestamps are byte-identical")
 
 	got, err := s.NarrativesWithoutPrimaryLink(10)
 	require.NoError(t, err)

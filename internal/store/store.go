@@ -12,6 +12,13 @@
 // unrelated responsibility that happens to share this package's *Store
 // handle, Open, and connection pool because both need exactly one SQLite
 // file. The two share no query logic: see localissues.go's own doc comment.
+//
+// Time columns are DATETIME, bound and scanned as time.Time (see timeDSNOptions).
+// Three rules keep them comparable. A time is supplied from Go (Store.now), never by
+// SQLite, so no statement or default uses strftime. A time is compared only with
+// another stored time or a bound time.Time. An aggregate or expression over a time
+// column loses its DATETIME type and comes back as text, so read the column itself,
+// through a scalar subquery or a window function.
 package store
 
 import (
@@ -21,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
@@ -30,12 +38,12 @@ CREATE TABLE IF NOT EXISTS events (
     id           INTEGER PRIMARY KEY,
     source       TEXT NOT NULL,
     external_id  TEXT NOT NULL,
-    occurred_at  TEXT NOT NULL,
+    occurred_at  DATETIME NOT NULL,
     actor        TEXT,
     summary      TEXT NOT NULL,
     artifacts    TEXT NOT NULL DEFAULT '{}',
     raw_ref      TEXT,
-    ingested_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    ingested_at  DATETIME NOT NULL,
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_events_occurred ON events (occurred_at);
@@ -44,25 +52,26 @@ CREATE TABLE IF NOT EXISTS cursors (
     collector  TEXT NOT NULL,
     resource   TEXT NOT NULL,
     position   TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at DATETIME NOT NULL,
     PRIMARY KEY (collector, resource)
 );
 
 CREATE TABLE IF NOT EXISTS narratives (
     id           INTEGER PRIMARY KEY,
-    window_start TEXT NOT NULL,
-    window_end   TEXT NOT NULL,
+    window_start DATETIME NOT NULL,
+    window_end   DATETIME NOT NULL,
     title        TEXT NOT NULL,
     summary      TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'open',
-    compaction_boundary TEXT,
+    compaction_boundary DATETIME,
     -- Paired with compaction_boundary to break ties: occurred_at alone
-    -- cannot uniquely order events (it's stored via time.RFC3339, whole
-    -- seconds only), so MemberEventsAfterBoundary compares the
+    -- cannot uniquely order events (it is stored at the precision its source
+    -- gave, and a second-granular source such as Jira's changelog puts many
+    -- events on one instant), so MemberEventsAfterBoundary compares the
     -- (occurred_at, event_id) pair — events.id is a monotonic
-    -- INTEGER PRIMARY KEY, an exact tiebreaker for events sharing a second.
+    -- INTEGER PRIMARY KEY, an exact tiebreaker for events sharing an instant.
     compaction_boundary_event_id INTEGER,
-    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at   DATETIME NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS narrative_events (
@@ -92,12 +101,14 @@ CREATE TABLE IF NOT EXISTS narrative_events (
     -- DISPLAY ONLY. Kept because a human-readable time is how most watermark bugs
     -- here have been diagnosed in a sqlite3 session, and it stays useful in ad-hoc
     -- queries. It must NEVER again appear in a > / < comparison that decides
-    -- behaviour: it is written at millisecond resolution, so two writes in one
-    -- millisecond are byte-identical and a strict > between them is false — which
+    -- behaviour: it is a wall-clock reading, so two writes can carry the same
+    -- instant (when it was written at millisecond resolution, two writes in one
+    -- millisecond were byte-identical and a strict > between them was false, which
     -- made every watermark compared on it a tombstone for anything inside one
-    -- tick (F30). Compare link_seq instead. (The format is still %f, matching the
-    -- other display timestamps, so they sort together when read by eye.)
-    linked_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- tick: F30), and a clock can step back. Compare link_seq instead. Like every
+    -- stored time it is Store.now bound as a DATETIME (see the package doc), so it sorts
+    -- with the other display timestamps when read by eye.
+    linked_at    DATETIME NOT NULL,
     -- What this link says about the event (docs/superpowers/specs/2026-10-02-shared-context-design.md
     -- §1). 'member': the event is part of this narrative's WORK — the unit of token attribution, and
     -- the only kind any delta, watermark, matching or drafting path reads. 'context': the event is
@@ -148,7 +159,7 @@ CREATE TABLE IF NOT EXISTS narrative_issues (
     provenance   TEXT    NOT NULL,   -- reviewer | branch | jira_event | corroborated | prose_first | prose_later
     confidence   REAL,
     connection   TEXT,               -- which connection resolved it
-    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    created_at   DATETIME NOT NULL,
     PRIMARY KEY (narrative_id, issue_key)
 );
 
@@ -185,11 +196,11 @@ CREATE TABLE IF NOT EXISTS actions (
                                       --   was written. Distinct from 'rejected',
                                       --   which is a human's ruling — see
                                       --   reconciler.StatusDeclined)
-    decided_at   TEXT,
+    decided_at   DATETIME,
     -- executed_at is DISPLAY ONLY, like created_at below: the freeze rule reads
     -- executed_link_seq, never this. See narrative_events.linked_at for why a
-    -- millisecond timestamp must not decide behaviour.
-    executed_at  TEXT,
+    -- wall-clock timestamp must not decide behaviour.
+    executed_at  DATETIME,
     -- The link high-water mark when this action was last executed (applied or
     -- failed), stamped in the same statement as executed_at. The freeze rule —
     -- "a link made before the narrative's last APPLIED action is frozen" — is
@@ -213,8 +224,8 @@ CREATE TABLE IF NOT EXISTS actions (
     -- DISPLAY and ORDERING only — ORDER BY created_at, id is safe because id
     -- breaks the tie. It must never again be compared with > / < against
     -- narrative_events.linked_at to decide what is delta; created_link_seq does
-    -- that. Same %f format as linked_at so the two still read side by side.
-    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- that. Stored like linked_at, so the two still read side by side.
+    created_at   DATETIME NOT NULL,
     -- The link high-water mark when this action was created. The reconciler's
     -- delta (DeltaEvents, hasUnexaminedDelta) is narrative_events.link_seq >
     -- MAX(created_link_seq) over the narrative's actions of any status. NOT NULL
@@ -247,7 +258,7 @@ CREATE TABLE IF NOT EXISTS correction_marks (
     seq       INTEGER PRIMARY KEY AUTOINCREMENT,
     action_id INTEGER NOT NULL REFERENCES actions(id),
     -- DISPLAY only, like every other timestamp beside a sequence.
-    marked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    marked_at DATETIME NOT NULL
 );
 
 -- The estimates and ledger tables were declared here as phase-2 placeholders, with no Go
@@ -264,8 +275,8 @@ CREATE TABLE IF NOT EXISTS correction_marks (
 CREATE TABLE IF NOT EXISTS pipeline_lock (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     run_id     TEXT NOT NULL,
-    held_since TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    held_since DATETIME NOT NULL,
+    expires_at DATETIME NOT NULL
 );
 `
 
@@ -277,6 +288,11 @@ type Store struct {
 	// after Open rather than as an Open parameter, because Open's signature is used in
 	// dozens of tests that have no interest in logs.
 	log *slog.Logger
+	// now is the store's clock: every time the store stamps itself (ingested_at,
+	// linked_at, created_at, decided_at, examined_at and the rest) is now(), bound as a
+	// time.Time like every other stored time (see the package doc), never SQLite's
+	// strftime('now'), whose text has a different shape. time.Now from Open.
+	now func() time.Time
 }
 
 // SetLogger attaches a logger to an already-open store.
@@ -287,6 +303,14 @@ type Store struct {
 // exactly where the logger already exists.
 func (s *Store) SetLogger(log *slog.Logger) {
 	s.log = log
+}
+
+// SetClock replaces the store's clock, the source of every time the store stamps
+// itself (ingested_at, updated_at, linked_at, created_at and the rest). Open sets
+// time.Now. Not an Open parameter, for SetLogger's reason; its callers are tests that
+// need a stamp to be a chosen instant (internal/store/storetest).
+func (s *Store) SetClock(now func() time.Time) {
+	s.now = now
 }
 
 // dbConn is the subset of *sql.DB / *sql.Tx the narrative accessors need, so
@@ -302,6 +326,8 @@ type dbConn interface {
 // correlator.Persist needs to run atomically. Obtain one via WithTx.
 type Tx struct {
 	tx *sql.Tx
+	// now is the Store's clock, for the stamps a write through this Tx makes.
+	now func() time.Time
 }
 
 // WithTx runs fn inside a single transaction, committing if fn returns nil and
@@ -320,7 +346,7 @@ func (s *Store) WithTx(fn func(*Tx) error) error {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 
-	if err := fn(&Tx{tx: tx}); err != nil {
+	if err := fn(&Tx{tx: tx, now: s.now}); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
 			// Wrap both: callers may need errors.Is against either the
 			// original failure or the rollback failure that masked it.
@@ -370,9 +396,24 @@ func Open(dbPath string) (*Store, error) {
 	// store came back from a refused open with a new-shaped reconcile_examinations,
 	// which the old build cannot use, breaking the README's "run learn on the old
 	// build first" escape hatch.
-	if err := checkRequiredColumns(db, dbPath); err != nil {
+	format, hasTables, err := readStoreFormat(db, dbPath)
+	if err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if err := checkRequiredColumns(db, dbPath, format, hasTables); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	// A store this build creates is stamped with its format before its first table, so
+	// a schema statement failing part-way leaves a store the next open completes rather
+	// than one it refuses as old.
+	if !hasTables {
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, storeFormat)); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("recording the store format of %s: %w", dbPath, err)
+		}
 	}
 
 	if _, err := db.Exec(schema + localIssuesSchema + matchExaminationsSchema + reconcileExaminationsSchema +
@@ -381,7 +422,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{db: db, now: time.Now}, nil
 }
 
 // sqliteDSN turns a plain filesystem path into a modernc.org/sqlite DSN that
@@ -435,8 +476,15 @@ func sqliteDSN(dbPath string) string {
 	p = strings.ReplaceAll(p, "?", "%3f")
 	p = strings.ReplaceAll(p, "#", "%23")
 
-	return "file:" + p + "?_pragma=foreign_keys(1)"
+	return "file:" + p + "?_pragma=foreign_keys(1)&" + timeDSNOptions
 }
+
+// timeDSNOptions makes the driver render every bound time.Time in UTC at full
+// precision, e.g. "2026-10-07 03:37:37.998156484+00:00", and scan it back in UTC.
+// Text order is still instant order: trailing fractional zeros are trimmed, but
+// every value ends in "+00:00" and '+' sorts below '.' and every digit (pinned by
+// TestStoredTimes_TextOrderIsInstantOrder).
+const timeDSNOptions = "_time_format=sqlite&_timezone=UTC"
 
 // Close closes the underlying database connection.
 func (s *Store) Close() error {

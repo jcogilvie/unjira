@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrActionNotFound is returned by GetAction when no row matches — `unjira
@@ -18,11 +19,10 @@ var ErrActionNotFound = errors.New("action not found")
 // executed change to a tracker issue.
 //
 // IssueKey is empty for a `create` action (there is no key until it is
-// applied). DecidedAt/ExecutedAt are *string rather than string because NULL
-// is meaningful: NULL decided_at means "no human has ruled yet", which is
-// distinct from any timestamp. They stay strings rather than time.Time to
-// match how the rest of this package stores timestamps (SQLite TEXT), and
-// because nothing orders by them.
+// applied). DecidedAt/ExecutedAt are pointers because NULL is meaningful: NULL
+// decided_at means "no human has ruled yet", which is distinct from any
+// timestamp. Every time is a time.Time in UTC, as the store reads every
+// DATETIME column (see the package doc).
 // JSON tags mirror the actions table's own column names (snake_case), not
 // Go's default CamelCase field names — `unjira actions list --json` is a
 // machine-facing surface built for scripting/jq, and a reader piping this
@@ -43,35 +43,37 @@ type ActionRow struct {
 	// this is a separate field from Feedback, never conflated. Empty for
 	// every other status, including a since-cleared failure that was later
 	// retried and applied (see UpdateActionStatusAndError).
-	Error      string  `json:"error"`
-	DecidedAt  *string `json:"decided_at"`
-	ExecutedAt *string `json:"executed_at"`
-	CreatedAt  string  `json:"created_at"`
+	Error      string     `json:"error"`
+	DecidedAt  *time.Time `json:"decided_at"`
+	ExecutedAt *time.Time `json:"executed_at"`
+	// CreatedAt is set by InsertAction from the store's clock; a value passed in is
+	// ignored.
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // InsertAction writes one proposed action and returns its id.
 //
 // created_link_seq records the link sequence's high-water mark in the same
 // statement, and is what DeltaEvents bounds on: links made after this insert
-// are the next pass's delta. created_at comes from the column DEFAULT and is for
-// display and ordering only (finding F30).
+// are the next pass's delta. created_at is the store's clock at insert, for display
+// and ordering only (finding F30).
 func (s *Store) InsertAction(a ActionRow) (int64, error) {
-	return insertActionImpl(s.db, a)
+	return insertActionImpl(s.db, s.now(), a)
 }
 
 // InsertAction is the Tx-scoped form, so reconciler.Persist can write a whole
 // pass atomically.
 func (t *Tx) InsertAction(a ActionRow) (int64, error) {
-	return insertActionImpl(t.tx, a)
+	return insertActionImpl(t.tx, t.now(), a)
 }
 
-func insertActionImpl(c dbConn, a ActionRow) (int64, error) {
+func insertActionImpl(c dbConn, createdAt time.Time, a ActionRow) (int64, error) {
 	res, err := c.Exec(
 		`INSERT INTO actions
-		   (narrative_id, type, issue_key, payload, confidence, rationale, status, created_link_seq)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, `+linkSeqHighWater+`)`,
+		   (narrative_id, type, issue_key, payload, confidence, rationale, status, created_at, created_link_seq)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, `+linkSeqHighWater+`)`,
 		a.NarrativeID, a.Type, nullable(a.IssueKey), a.Payload,
-		a.Confidence, nullable(a.Rationale), a.Status,
+		a.Confidence, nullable(a.Rationale), a.Status, createdAt,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("inserting %s action for narrative %d: %w", a.Type, a.NarrativeID, err)
@@ -166,8 +168,8 @@ func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, er
 // UpdateActionStatus moves an action to a new workflow state, stamping
 // decided_at and/or executed_at as that state implies.
 //
-// Both stamps are set with the same strftime format the columns default to, so
-// every timestamp in this table reads consistently. Terminal-state semantics:
+// Both stamps are one reading of the store's clock, bound as a time.Time like every
+// stored time, so a statement that sets both sets them equal. Terminal-state semantics:
 // any human ruling sets decided_at; only a write that actually reached the
 // tracker sets executed_at — and, in the same statement, executed_link_seq,
 // which is what the freeze rule compares (EligibleMemberEventIDs, EligibleContextEventIDs). executed_at itself
@@ -223,13 +225,12 @@ func (s *Store) UpdateActionStatusAndError(id int64, status string, errText *str
 //
 // It takes a transaction, not any dbConn, because a ruling that makes the row a correction
 // is two writes (markCorrection's insert, then this update) and they are one fact.
-func updateActionStatusImpl(c *sql.Tx, id int64, status string, feedback, errText *string) error {
-	const ts = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
-
+// now is the store's clock reading for every stamp the ruling makes.
+func updateActionStatusImpl(c *sql.Tx, now time.Time, id int64, status string, feedback, errText *string) error {
 	query := `UPDATE actions SET status = ?`
 	args := []any{status}
 
-	seq, marked, err := markCorrection(c, id, status, feedback)
+	seq, marked, err := markCorrection(c, now, id, status, feedback)
 	if err != nil {
 		return err
 	}
@@ -250,7 +251,8 @@ func updateActionStatusImpl(c *sql.Tx, id int64, status string, feedback, errTex
 
 	switch status {
 	case StatusApproved, StatusEdited, StatusRejected:
-		query += `, decided_at = COALESCE(decided_at, ` + ts + `)`
+		query += `, decided_at = COALESCE(decided_at, ?)`
+		args = append(args, now)
 	case StatusApplied, StatusFailed:
 		// An applied action was necessarily decided, but decided_at may
 		// already be set from an earlier approval — COALESCE preserves the
@@ -259,8 +261,8 @@ func updateActionStatusImpl(c *sql.Tx, id int64, status string, feedback, errTex
 		// executed_link_seq is restamped with executed_at on every execution, so
 		// a retried write freezes against the moment it last ran, as executed_at
 		// always recorded.
-		query += `, decided_at = COALESCE(decided_at, ` + ts + `), executed_at = ` + ts +
-			`, executed_link_seq = ` + linkSeqHighWater
+		query += `, decided_at = COALESCE(decided_at, ?), executed_at = ?, executed_link_seq = ` + linkSeqHighWater
+		args = append(args, now, now)
 	}
 	query += ` WHERE id = ?`
 	args = append(args, id)
@@ -285,7 +287,7 @@ func updateActionStatusImpl(c *sql.Tx, id int64, status string, feedback, errTex
 // are not already inside one.
 func (s *Store) updateActionStatus(id int64, status string, feedback, errText *string) error {
 	return s.WithTx(func(tx *Tx) error {
-		return updateActionStatusImpl(tx.tx, id, status, feedback, errText)
+		return updateActionStatusImpl(tx.tx, tx.now(), id, status, feedback, errText)
 	})
 }
 
@@ -300,7 +302,7 @@ func (s *Store) updateActionStatus(id int64, status string, feedback, errText *s
 // The condition is evaluated in SQL against the row as it is before the update, in the
 // caller's transaction, so no other writer can change the row between the read and the
 // write.
-func markCorrection(c *sql.Tx, id int64, status string, feedback *string) (int64, bool, error) {
+func markCorrection(c *sql.Tx, now time.Time, id int64, status string, feedback *string) (int64, bool, error) {
 	if status != StatusRejected && status != StatusEdited {
 		return 0, false, nil
 	}
@@ -311,14 +313,14 @@ func markCorrection(c *sql.Tx, id int64, status string, feedback *string) (int64
 	}
 
 	res, err := c.Exec(
-		`INSERT INTO correction_marks (action_id)
-		 SELECT id FROM actions
+		`INSERT INTO correction_marks (action_id, marked_at)
+		 SELECT id, ? FROM actions
 		  WHERE id = ?
 		    AND TRIM(COALESCE(?, feedback, '')) != ''
 		    AND NOT (status IN (?, ?)
 		             AND corrected_seq IS NOT NULL
 		             AND COALESCE(feedback, '') = COALESCE(?, feedback, ''))`,
-		id, newFeedback, StatusRejected, StatusEdited, newFeedback,
+		now, id, newFeedback, StatusRejected, StatusEdited, newFeedback,
 	)
 	if err != nil {
 		return 0, false, fmt.Errorf("marking action %d as a correction: %w", id, err)
@@ -353,7 +355,7 @@ func scanActions(rows *sql.Rows) ([]ActionRow, error) {
 			a                                     ActionRow
 			issueKey, rationale, feedback, errCol sql.NullString
 			confidence                            sql.NullFloat64
-			decidedAt, executedAt                 sql.NullString
+			decidedAt, executedAt                 sql.NullTime
 		)
 
 		if err := rows.Scan(
@@ -369,10 +371,10 @@ func scanActions(rows *sql.Rows) ([]ActionRow, error) {
 		a.Error = errCol.String
 		a.Confidence = confidence.Float64
 		if decidedAt.Valid {
-			a.DecidedAt = &decidedAt.String
+			a.DecidedAt = &decidedAt.Time
 		}
 		if executedAt.Valid {
-			a.ExecutedAt = &executedAt.String
+			a.ExecutedAt = &executedAt.Time
 		}
 
 		out = append(out, a)

@@ -187,15 +187,22 @@ an unquoted `NO`, `ON` or `YES` as a boolean, and load says so.
 
 **The store has no migrations; a schema change needs a fresh one.** There will be none until
 unjira is productionized. Every table is `CREATE TABLE IF NOT EXISTS`, so an existing database
-keeps its old shape. The most recent such change orders reviewer corrections by when each
-became a correction (`actions.corrected_seq`, findings F41 and F42), so the learn cursor no longer
-reads the first ruling's clock time. The one before records who placed every member link
+keeps its old shape. The most recent such change stores every timestamp in UTC at full
+precision (finding F53): every time column is a `DATETIME` the driver writes from a Go
+`time.Time` as `2026-10-07 03:37:37.998156484+00:00`, and none is stamped by SQLite itself.
+Before it, a Jira event kept the account's offset (`…-07:00`) while everything else was `Z`, and
+window queries, which compare timestamps as text, put such an event on the wrong side of a
+window by up to its offset. It adds no column, so it is recorded as a store format in SQLite's
+`PRAGMA user_version` (1; a store made before it reads 0). The one before orders reviewer
+corrections by when each became a correction (`actions.corrected_seq`, findings F41 and F42), so
+the learn cursor no longer reads the first ruling's clock time. The one before that records who
+placed every member link
 (`narrative_events.member_placement`: the model, an exact pull-request identity, or a reviewer;
-finding F43's fix). The one before that gave every `narrative_events` link a kind (`member` or
+finding F43's fix). An earlier one gave every `narrative_events` link a kind (`member` or
 `context`) and every member link a confidence
 (`docs/superpowers/specs/2026-10-02-shared-context-design.md`), and the earliest ordered
 links by a monotonic sequence instead of millisecond timestamps (finding F30). A store created
-before any of them is refused when opened, BEFORE any schema statement runs, naming the missing columns, the
+before any of them is refused when opened, BEFORE any schema statement runs, naming the missing columns (or the old store format), the
 change that added them, and the fix: *rename the database to a backup and re-collect*:
 `mv data/unjira.db data/unjira.db.bak` (or whatever `db_path` names), then `./unjira collect`.
 Events re-collect from their
