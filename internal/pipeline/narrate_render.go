@@ -116,6 +116,13 @@ func writeNarrateHeader(b *strings.Builder, r NarrateResult) {
 			r.Stats.OmittedEvents, r.Stats.RecoveredEvents, rounds)
 	}
 
+	// Only when it fired, for the reason the omission line above is printed on a pass
+	// that succeeded: the re-ask is all that stood between a refused clustering response
+	// and a failed pass, and each one re-sent a whole clustering prompt.
+	if n := r.Stats.ClusterReasks; n > 0 {
+		fmt.Fprintf(b, "re-asked %d clustering response(s) the parser refused (llm.max_cluster_reasks)\n", n)
+	}
+
 	writeSharingLines(b, r.Stats)
 
 	for _, c := range r.Compactions {

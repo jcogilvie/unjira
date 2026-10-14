@@ -219,26 +219,23 @@ prompt are the same as the real pass's. The fix is to report an extend from the 
 row, the way the context-only branch already does. Not fixed here because it is a separate defect from
 the clustering context.
 
-### F44 — a malformed clustering response that is not a lossless slip still kills the whole pass
+### F44 — an unparseable same-story answer at a bisection seam still kills the whole pass
 
 Two lossless classes are absorbed: a trailing comma (`llm.JSONArrayPayload` and `llm.JSONObjectPayload`
 drop it via `hujson.Standardize`), and a NEW cluster holding no event (`pipeline.dropEmptyClusters`
-discards it and reports it in the pass summary). Matching is covered too: `classifyCandidates`
-re-asks an unparseable match response, quoting the parser's reason, up to `llm.max_match_reasks`
-times (default 1), then fails that narrative loudly. A real 30-day matching drain hit two, in
-consecutive passes: prose where the array belonged and a duplicated malformed key
-(`"confidence=0.2"`). So are clustering's own follow-ups: an omission re-ask round whose response
-`mergeReaskResponse` refuses spends the round and the next round quotes the refusal, and a refused
-dispute answer is re-asked per batch, each up to its configured budget.
+discards it and reports it in the pass summary). Every other model response on the clustering and
+matching paths that the parser refuses is re-asked, quoting the refusal and the parser's reason,
+within its configured budget, then fails loudly: a match response (`llm.max_match_reasks`), the
+clustering response itself (`llm.max_cluster_reasks`, each re-ask re-sending the whole window prompt),
+an omission round (`llm.max_omission_reasks`) and a dispute batch (`llm.max_dispute_reasks`).
 
-What remains is the FIRST clustering response. An out-of-range index, an unknown `kind`, a missing
-`confidence` or prose instead of JSON there still fails `parseClusterResponse`, which is right,
-because a best-effort reading is how events get silently misattributed. But nothing retries it: no
-re-ask budget covers it, so one such response costs the whole multi-minute pass, and under `watch`
-the window may move on. The same shape would fit: re-ask quoting the reason, bounded by a budget,
-then fail loudly. Not built, because no such clustering failure has been observed (0 in the 32
-passes measured on 2026-10-02 and 2026-10-04, and none in the 30-day drain), and a clustering re-ask
-costs a full-prompt call (~70–110k tokens), where a matching re-ask costs one narrative's prompt.
+What remains is `checkSameStory` (`internal/correlator/correlator.go`), the one call a bisected pass
+makes at each seam to ask whether the two adjacent NEW clusters are one story. Its response is a JSON
+object, and one `json.Unmarshal` refuses still fails the pass with no follow-up, after both halves
+have been paid for. It only runs on a pass that bisected, and its answer is a boolean plus a title and
+summary, so the exposure is small: no such failure has been observed (0 in the 32 passes measured on
+2026-10-02 and 2026-10-04, and none in a 30-day drain). The same shape would fit, at the cost of a
+tiny prompt rather than a window's: re-ask quoting the reason, bounded by a budget, then fail loudly.
 
 ### F50 — a split narrative is still read by the create path and the review queue
 
@@ -858,7 +855,7 @@ measurement.
 | F63 — a transition on someone else's ticket is proposed like one on your own | open, policy question: never, per-tracker rule, or leave to review. One real instance |
 | F60 — upstream work done for an internal ticket is routed by repository, not by purpose | open. Matching's job, not routing's. 3 of 5 measured cases |
 | F58 — work that only cites tickets is proposed nowhere | open, policy question: make an all-`mentioned` narrative a create candidate? One real instance. Narrowed: the reconciler examines such a narrative once and records it (`reconcile_examinations`), where before it held a slot and was counted as unexamined work on every pass (`TestReconcile_MentionedOnlyNarrativeYieldsUntilNewWorkIsLinked`) |
-| F44 — a non-lossless malformed response kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson); matching, omission-round and dispute responses are re-asked within configurable budgets. Only the first clustering response is still never retried. 0 such deaths in 32 passes; a budgeted re-ask is the shape if one appears |
+| F44 — an unparseable same-story answer kills the pass | open, narrowed: the observed trailing comma is absorbed (hujson); matching, clustering, omission-round and dispute responses are re-asked within configurable budgets. Only the same-story check at a bisection seam is still never retried. 0 such deaths in 32 passes; a budgeted re-ask is the shape if one appears |
 | F52 — a single dispute too large for the context window fails the pass | open. What remains of the dispute re-ask's size once a dispute set too large for one call is batched. Unmeasured |
 | F50 — a split narrative is still read by the create path and the review queue | open, narrowed: the create path examines a split narrative once and its create examination then excludes it, so it no longer holds a slot (`TestProposeCreates_AnEmptiedNarrativeYieldsItsSlot`); it is still reported with a false reason, and the review-queue half is untouched. Pre-existing for triage split's sources; found while fixing F40, which made clustering and merge mark emptied narratives split too. Probed before the create backlog fix: a split narrative held a create slot for 3 of 3 passes at cap 1 |
 | F59 — a rejected create is re-asked on the next pass whether or not anything changed | open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data |
