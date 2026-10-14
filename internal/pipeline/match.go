@@ -69,6 +69,8 @@ func RunMatch(
 	cfg config.Config,
 	opts MatchOptions,
 ) (MatchRunResult, error) {
+	ctx = llm.WithStage(ctx, "match")
+
 	if err := cfg.Match.Validate(); err != nil {
 		return MatchRunResult{}, fmt.Errorf("invalid match config: %w", err)
 	}

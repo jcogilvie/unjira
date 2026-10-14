@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jcogilvie/unjira/internal/config"
+	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -176,14 +177,15 @@ func (s *Session) itemWritability(a store.ActionRow) (bool, string) {
 
 // NewSession builds a review session. handler may be nil: the verbs that need
 // it (edit and the three restructures) then report that they are unavailable
-// and the reviewer is re-prompted, which is exactly what --dry-run wants.
+// and the reviewer is re-prompted, which is exactly what --dry-run wants. The
+// handler's LLM calls are recorded under the triage stage.
 func NewSession(ctx context.Context, batch []store.ActionRow, p Prompter, h Handler) *Session {
 	return &Session{
 		batch:     batch,
 		decisions: make(map[int64]Decision, len(batch)),
 		prompter:  p,
 		handler:   h,
-		ctx:       ctx,
+		ctx:       llm.WithStage(ctx, "triage"),
 
 		issueCache: make(map[string]tasktracker.Issue),
 	}

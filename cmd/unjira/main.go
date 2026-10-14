@@ -444,8 +444,30 @@ func (a *appContext) llmClient() (llm.Client, error) {
 		return nil, err
 	}
 
-	return openai.New(a.config.LLM.BaseURL, credential,
-		a.config.LLM.Model, a.config.LLM.MaxOutputTokens), nil
+	return llm.NewRecordingClient(
+		openai.New(a.config.LLM.BaseURL, credential, a.config.LLM.Model, a.config.LLM.MaxOutputTokens),
+		llmCallRecorder{a.store}, a.config.LLM.Model, time.Now), nil
+}
+
+// llmCallRecorder adapts the store to llm.Recorder, so neither package imports
+// the other for one struct.
+type llmCallRecorder struct{ store *store.Store }
+
+func (r llmCallRecorder) RecordLLMCall(c llm.CallRecord) error {
+	return r.store.RecordLLMCall(llmCallRow(c))
+}
+
+// llmCallRow maps a call to its llm_calls row. Cached passes through as is: nil
+// records that the gateway reported none, which a stored 0 would erase.
+func llmCallRow(c llm.CallRecord) store.LLMCall {
+	return store.LLMCall{
+		CalledAt:         c.At,
+		Stage:            c.Stage,
+		Model:            c.Model,
+		PromptTokens:     c.Prompt,
+		CompletionTokens: c.Completion,
+		CachedTokens:     c.Cached,
+	}
 }
 
 // llmCredential resolves the configured credential source: the helper if one is
