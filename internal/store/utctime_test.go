@@ -518,6 +518,9 @@ func TestOpen_StoreFormat(t *testing.T) {
 		// absent are tables that must still not exist after Open: a refused open runs
 		// no schema statement.
 		absent []string
+		// notErr are fragments the refusal must not contain: changes no newer than the
+		// store's format.
+		notErr []string
 		// present are tables that must exist after Open.
 		present []string
 		// reopens is whether a second Open of the same file must succeed too.
@@ -536,6 +539,7 @@ func TestOpen_StoreFormat(t *testing.T) {
 			name:    "a format-1 store predates the token ledger and is refused",
 			file:    storetest.StoreFile{Format: 1, Tables: true, Without: []string{"token_messages"}},
 			wantErr: []string{"the token ledger", "rename the database to a backup", "re-collect"},
+			notErr:  []string{"UTC timestamps (finding F53)"},
 			absent:  []string{"token_messages"},
 		},
 		{
@@ -559,6 +563,9 @@ func TestOpen_StoreFormat(t *testing.T) {
 				require.ErrorContains(t, err, path, "names which database")
 				for _, fragment := range tt.wantErr {
 					require.ErrorContains(t, err, fragment)
+				}
+				for _, fragment := range tt.notErr {
+					assert.NotContains(t, err.Error(), fragment)
 				}
 			} else {
 				require.NoError(t, err)

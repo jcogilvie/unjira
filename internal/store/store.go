@@ -274,17 +274,21 @@ CREATE TABLE IF NOT EXISTS correction_marks (
 -- One row per Claude Code assistant message.id: what that model call cost
 -- (docs/superpowers/specs/2026-10-14-token-attribution-design.md). Written by the
 -- claude_code collector as it reads a transcript, upserted so a re-read is idempotent.
+-- A message in a segment under an excluded cwd gets no row at all.
 -- Attribution is NOT stored here: it is joined at read time, message -> covering event
 -- -> member link -> primary issue.
 CREATE TABLE IF NOT EXISTS token_messages (
     message_id           TEXT     PRIMARY KEY,
     -- The transcript that first recorded this id, and only that one: an id seen in two
     -- transcripts keeps its first holder (F33's ownership rule). A later holder may raise
-    -- the counters below, never reassign this or covering_external_id.
+    -- the four counters below and nothing else: transcript_id, agent_id, occurred_at,
+    -- model and covering_external_id all belong to the first holder and are never
+    -- reassigned by another transcript.
     transcript_id        TEXT     NOT NULL,
-    -- The subagent's id when the transcript is a subagent's; NULL for a root session.
+    -- The holder's subagent id when it is a subagent transcript; NULL for a root session.
     agent_id             TEXT,
-    -- The earliest line's timestamp for this id, bound as a time.Time.
+    -- The earliest timestamp among this id's lines in the holder transcript, bound as a
+    -- time.Time.
     occurred_at          DATETIME NOT NULL,
     model                TEXT     NOT NULL,
     -- The four counters are each the MAX seen over the id's lines: a message's usage
@@ -294,9 +298,10 @@ CREATE TABLE IF NOT EXISTS token_messages (
     cache_write_tokens   INTEGER  NOT NULL CHECK (cache_write_tokens >= 0),
     cache_read_tokens    INTEGER  NOT NULL CHECK (cache_read_tokens >= 0),
     -- events.external_id (source 'claude_code') of the segment event holding this id's
-    -- first line in the holder transcript's newest snapshot. NULL when that segment emits
-    -- no event; a later NULL never erases a set value. A fact about lines, not an
-    -- attribution.
+    -- first line in the holder transcript's newest snapshot. NULL (reported as no_event)
+    -- when that segment emits no event for a reason other than an excluded cwd, e.g. it
+    -- holds no user text; a later NULL never erases a set value. A fact about lines, not
+    -- an attribution.
     covering_external_id TEXT
 );
 
@@ -312,10 +317,10 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     -- The pipeline stage that made the call (llm.StageOf).
     stage             TEXT     NOT NULL,
     model             TEXT     NOT NULL,
-    prompt_tokens     INTEGER  NOT NULL,
-    completion_tokens INTEGER  NOT NULL,
+    prompt_tokens     INTEGER  NOT NULL CHECK (prompt_tokens >= 0),
+    completion_tokens INTEGER  NOT NULL CHECK (completion_tokens >= 0),
     -- Prompt tokens served from cache. NULL when the server reported none.
-    cached_tokens     INTEGER
+    cached_tokens     INTEGER  CHECK (cached_tokens >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS llm_calls_called_at ON llm_calls (called_at);

@@ -52,11 +52,13 @@ const (
 // without the marker an older store would open with empty ledger tables, and the
 // transcripts it has already read past would never be re-read: their spend would be
 // silently absent.
-const storeFormat = 2
+const storeFormat = len(formatChanges) - 1
 
-// formatChanges names the change each store format introduced, indexed by format. A
-// store whose format is older is refused naming every change newer than it.
-var formatChanges = map[int]string{
+// formatChanges names the change each store format introduced, indexed by format (0
+// introduced nothing). An array, and storeFormat is derived from its length, so a
+// format without a named change cannot be written. A store whose format is older is
+// refused naming every change newer than it.
+var formatChanges = [...]string{
 	1: changeUTCTimestamps,
 	2: changeTokenLedger,
 }
@@ -135,7 +137,9 @@ func checkRequiredColumns(db *sql.DB, dbPath string, format int, hasTables bool)
 		parts = append(parts, fmt.Sprintf("%s (missing %s)", change, strings.Join(missingByChange[change], ", ")))
 	}
 	if hasTables {
-		for f := format + 1; f <= storeFormat; f++ {
+		// A negative user_version (the header field is signed) is no format this build
+		// wrote; read it as 0, so it is refused naming every change.
+		for f := max(format, 0) + 1; f <= storeFormat; f++ {
 			parts = append(parts, fmt.Sprintf("%s (store format %d; this build requires %d)",
 				formatChanges[f], format, storeFormat))
 		}
