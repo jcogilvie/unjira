@@ -27,6 +27,9 @@ const (
 		"whether the model, an exact pull-request identity or a reviewer placed each member link"
 	changeUTCTimestamps = "UTC timestamps (finding F53), which store every timestamp as a DATETIME in UTC at full " +
 		"precision, so that comparing two as text orders them by instant"
+	changeTokenLedger = "the token ledger (docs/superpowers/specs/2026-10-14-token-attribution-design.md), which " +
+		"records each Claude Code assistant message's token usage as its transcript is read; a store collected " +
+		"before it has no ledger rows for any transcript it has already read, and never re-reads them"
 )
 
 // storeFormat is the store format this build writes, recorded in SQLite's
@@ -44,8 +47,19 @@ const (
 // Formats: 0 (SQLite's default, so every store made before the marker existed), in
 // which a timestamp keeps its source's offset; 1, in which every timestamp written
 // is a DATETIME bound as a time.Time, which the driver stores in UTC at full precision
-// (see the package doc).
-const storeFormat = 1
+// (see the package doc); 2, which adds the token_messages and llm_calls tables. A new
+// table trips no column check (columnMissing passes a table that does not exist), so
+// without the marker an older store would open with empty ledger tables, and the
+// transcripts it has already read past would never be re-read: their spend would be
+// silently absent.
+const storeFormat = 2
+
+// formatChanges names the change each store format introduced, indexed by format. A
+// store whose format is older is refused naming every change newer than it.
+var formatChanges = map[int]string{
+	1: changeUTCTimestamps,
+	2: changeTokenLedger,
+}
 
 // requiredColumns are the columns this build's queries read that an older store can lack.
 //
@@ -92,7 +106,9 @@ const (
 // The correction sequence's: it records when each action became a correction, and the
 // store kept no record of that either, only the first ruling's clock time, which is the
 // value F42 found wrong. UTC timestamps': converting an old store's offset timestamps
-// would be exact, but it would be a migration all the same.
+// would be exact, but it would be a migration all the same. The token ledger's: its rows
+// come from transcript lines the old store's cursors have already passed, so only a
+// re-collect can produce them.
 //
 // MUST run before any schema statement: see Open.
 func checkRequiredColumns(db *sql.DB, dbPath string, format int, hasTables bool) error {
@@ -118,9 +134,11 @@ func checkRequiredColumns(db *sql.DB, dbPath string, format int, hasTables bool)
 	for _, change := range changeOrder {
 		parts = append(parts, fmt.Sprintf("%s (missing %s)", change, strings.Join(missingByChange[change], ", ")))
 	}
-	if hasTables && format < storeFormat {
-		parts = append(parts, fmt.Sprintf("%s (store format %d; this build requires %d)",
-			changeUTCTimestamps, format, storeFormat))
+	if hasTables {
+		for f := format + 1; f <= storeFormat; f++ {
+			parts = append(parts, fmt.Sprintf("%s (store format %d; this build requires %d)",
+				formatChanges[f], format, storeFormat))
+		}
 	}
 
 	if len(parts) == 0 {

@@ -518,18 +518,30 @@ func TestOpen_StoreFormat(t *testing.T) {
 		// absent are tables that must still not exist after Open: a refused open runs
 		// no schema statement.
 		absent []string
+		// present are tables that must exist after Open.
+		present []string
 		// reopens is whether a second Open of the same file must succeed too.
 		reopens bool
 	}{
 		{
-			name:    "an old-format store is refused, before any schema statement",
-			file:    storetest.StoreFile{Format: 0, Tables: true, Without: []string{"create_examinations"}},
-			wantErr: []string{"UTC timestamps (finding F53)", "rename the database to a backup", "re-collect"},
-			absent:  []string{"create_examinations"},
+			name: "an old-format store is refused, before any schema statement",
+			file: storetest.StoreFile{Format: 0, Tables: true, Without: []string{"create_examinations"}},
+			wantErr: []string{
+				"UTC timestamps (finding F53)", "the token ledger",
+				"rename the database to a backup", "re-collect",
+			},
+			absent: []string{"create_examinations"},
+		},
+		{
+			name:    "a format-1 store predates the token ledger and is refused",
+			file:    storetest.StoreFile{Format: 1, Tables: true, Without: []string{"token_messages"}},
+			wantErr: []string{"the token ledger", "rename the database to a backup", "re-collect"},
+			absent:  []string{"token_messages"},
 		},
 		{
 			name:    "an empty database file is a fresh store",
 			file:    storetest.StoreFile{Format: 0, Tables: false},
+			present: []string{"token_messages", "llm_calls"},
 			reopens: true,
 		},
 	}
@@ -555,6 +567,9 @@ func TestOpen_StoreFormat(t *testing.T) {
 			tables := storetest.Tables(t, path)
 			for _, table := range tt.absent {
 				assert.NotContains(t, tables, table, "a refused open must not create any table")
+			}
+			for _, table := range tt.present {
+				assert.Contains(t, tables, table)
 			}
 
 			if tt.reopens {

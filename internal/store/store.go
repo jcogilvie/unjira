@@ -271,6 +271,55 @@ CREATE TABLE IF NOT EXISTS correction_marks (
 -- mechanism (every statement is CREATE TABLE IF NOT EXISTS), so removal applies to new
 -- stores only. Harmless: nothing referenced them.
 
+-- One row per Claude Code assistant message.id: what that model call cost
+-- (docs/superpowers/specs/2026-10-14-token-attribution-design.md). Written by the
+-- claude_code collector as it reads a transcript, upserted so a re-read is idempotent.
+-- Attribution is NOT stored here: it is joined at read time, message -> covering event
+-- -> member link -> primary issue.
+CREATE TABLE IF NOT EXISTS token_messages (
+    message_id           TEXT     PRIMARY KEY,
+    -- The transcript that first recorded this id, and only that one: an id seen in two
+    -- transcripts keeps its first holder (F33's ownership rule). A later holder may raise
+    -- the counters below, never reassign this or covering_external_id.
+    transcript_id        TEXT     NOT NULL,
+    -- The subagent's id when the transcript is a subagent's; NULL for a root session.
+    agent_id             TEXT,
+    -- The earliest line's timestamp for this id, bound as a time.Time.
+    occurred_at          DATETIME NOT NULL,
+    model                TEXT     NOT NULL,
+    -- The four counters are each the MAX seen over the id's lines: a message's usage
+    -- grows across its lines, and MAX converges whatever order the lines arrive in.
+    input_tokens         INTEGER  NOT NULL CHECK (input_tokens >= 0),
+    output_tokens        INTEGER  NOT NULL CHECK (output_tokens >= 0),
+    cache_write_tokens   INTEGER  NOT NULL CHECK (cache_write_tokens >= 0),
+    cache_read_tokens    INTEGER  NOT NULL CHECK (cache_read_tokens >= 0),
+    -- events.external_id (source 'claude_code') of the segment event holding this id's
+    -- first line in the holder transcript's newest snapshot. NULL when that segment emits
+    -- no event; a later NULL never erases a set value. A fact about lines, not an
+    -- attribution.
+    covering_external_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS token_messages_covering_external_id
+    ON token_messages (covering_external_id);
+
+-- One row per call unjira itself made to its LLM, recorded by the llm.Client decorator.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id                INTEGER  PRIMARY KEY,
+    -- The caller's clock at the call, bound as a time.Time; never read from time.Now
+    -- inside the store.
+    called_at         DATETIME NOT NULL,
+    -- The pipeline stage that made the call (llm.StageOf).
+    stage             TEXT     NOT NULL,
+    model             TEXT     NOT NULL,
+    prompt_tokens     INTEGER  NOT NULL,
+    completion_tokens INTEGER  NOT NULL,
+    -- Prompt tokens served from cache. NULL when the server reported none.
+    cached_tokens     INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS llm_calls_called_at ON llm_calls (called_at);
+
 CREATE TABLE IF NOT EXISTS pipeline_lock (
     id         INTEGER PRIMARY KEY CHECK (id = 1),
     run_id     TEXT NOT NULL,
