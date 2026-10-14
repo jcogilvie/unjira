@@ -81,6 +81,10 @@ flowchart TB
 
     TRIAGE["internal/triage<br/>approve · reject · edit<br/>merge · split · target"]
 
+    LEDGER[("token_messages · llm_calls<br/>token ledger, in the store")]
+    RECORD["llm.RecordingClient<br/>deterministic · one llm_calls row<br/>per own LLM call, by stage"]
+    TOKENS["pipeline.BuildTokenReport<br/>deterministic · read-time attribution<br/>message → covering event → member → primary"]
+
     subgraph write["internal/gate"]
         DECIDE["Decide<br/>pure, no I/O"]
         APPLY["Applier<br/>holds TaskWriter"]
@@ -95,15 +99,31 @@ flowchart TB
     STORE --> CAND --> MATCH --> STORE
     STORE --> DEST --> VERIFY --> DRAFT --> FILTERS --> STORE
     STORE --> TRIAGE --> STORE
+    CCC -->|"one row per assistant message.id"| LEDGER
+    CLUSTER & DISPUTE & MATCH & DRAFT & TRIAGE -.->|"every completion"| RECORD --> LEDGER
+    LEDGER & STORE --> TOKENS
     STORE --> DECIDE --> APPLY -->|"AddComment · SetStatus · CreateIssue"| JIRA
 
     classDef llm fill:#f9e79f,stroke:#b7950b,color:#1a1a1a
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,DISPUTE,MATCH,DRAFT llm
-    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID,PRJOIN,DEST det
+    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID,PRJOIN,DEST,RECORD,TOKENS det
     class APPLY danger
 ```
+
+**Token spend is ledgered, then attributed only when read.** `collector/claudecode` writes one
+`token_messages` row per assistant `message.id` through the store it holds for cursors, before it
+advances the transcript's cursor. The upsert takes each counter's maximum, so repeated lines and
+re-snapshots never double-count, and the earliest `(occurred_at, transcript)` holds the row. Each row
+names the segment event that covers it in the newest snapshot, or none (`no_event`) when that segment
+emits no event. Messages under an excluded cwd and `<synthetic>` messages get no row. Nothing stores
+an attribution: `store.MessageAttributions` joins row → covering event → `member` link → confident
+`primary` at read time, so a moved member or relinked primary changes the totals with no re-ingest.
+unjira's own calls go through `llm.RecordingClient`, wrapped once in `cmd/unjira`'s `llmClient()`.
+It writes one `llm_calls` row per completion under the stage each `pipeline.Run*` entry (or
+`triage.NewSession`) puts on the context, and those rows are never attributed to a ticket.
+`unjira tokens` prices both from `token_pricing` and writes nothing.
 
 **GitHub PR events never enter `SPLIT`'s tracker-state branch.** A pull request is a thing
 somebody did, work evidence in every deployment — never the tracker's own account of itself, so
@@ -473,9 +493,10 @@ flowchart TB
     end
 
     CMD --> PIPE & TRIAGE & GATE & CORR & STORE & CONFIG
+    CMD -->|"NewRecordingClient"| LLM
     CMD --> CJIRA & CGH & CLOCAL & COAI & COLLJ & COLLC & COLLGH
-    PIPE --> RECON & CORR & GATE & STORE & CONFIG & TT
-    TRIAGE --> RECON & CORR & STORE
+    PIPE --> RECON & CORR & GATE & STORE & CONFIG & TT & LLM
+    TRIAGE --> RECON & CORR & STORE & LLM
     RECON --> CORR & STORE & CONFIG & WF & LLM & RULES & EVENTS & TT
     CORR --> STORE & CONFIG & LLM & RULES & EVENTS & TT
     GATE --> STORE & CONFIG & TT
@@ -485,7 +506,7 @@ flowchart TB
     CLOCAL --> STORE & TT & WF
     COAI --> LLM
     COLLJ --> CJIRA & CONFIG & EVENTS & PIPE
-    COLLC --> EVENTS & PIPE
+    COLLC --> EVENTS & PIPE & STORE
     COLLGH --> CGH & CONFIG & EVENTS & PIPE & CRED
     CGH --> TT
     PIPE --> CRED

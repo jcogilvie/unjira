@@ -125,6 +125,22 @@ func (b *transcriptBuilder) ToolUse(ts, id, name string, input map[string]any) *
 	return b
 }
 
+// Assistant appends one line of an assistant message: Claude Code writes one line per
+// content block, each repeating the message's id, model and usage.
+func (b *transcriptBuilder) Assistant(ts, msgID, model string, usage map[string]any) *transcriptBuilder {
+	l := b.base(ts, "assistant")
+	l["message"] = map[string]any{
+		"role":    "assistant",
+		"id":      msgID,
+		"model":   model,
+		"usage":   usage,
+		"content": []any{map[string]any{"type": "text", "text": "working on it"}},
+	}
+	b.lines = append(b.lines, l)
+
+	return b
+}
+
 func (b *transcriptBuilder) Bash(ts, id, command string) *transcriptBuilder {
 	return b.ToolUse(ts, id, "Bash", map[string]any{"command": command})
 }

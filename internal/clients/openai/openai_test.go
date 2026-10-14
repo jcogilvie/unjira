@@ -168,6 +168,53 @@ func TestComplete_ReturnsUsageFromResponse(t *testing.T) {
 		"the served model can differ from the requested one behind a gateway")
 }
 
+func TestComplete_CachedPromptTokensReportedOnlyWhenPresent(t *testing.T) {
+	respond := func(usage map[string]any) *openai.Client {
+		return newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"id":     "chatcmpl-3",
+				"object": "chat.completion",
+				"model":  "gpt-5-2",
+				"choices": []map[string]any{{
+					"index":         0,
+					"message":       map[string]any{"role": "assistant", "content": "ok"},
+					"finish_reason": "stop",
+				}},
+				"usage": usage,
+			})
+		})
+	}
+
+	_, withCached, err := respond(map[string]any{
+		"prompt_tokens":         31,
+		"completion_tokens":     7,
+		"total_tokens":          38,
+		"prompt_tokens_details": map[string]any{"cached_tokens": 19},
+	}).Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+	require.NotNil(t, withCached.CachedPromptTokens)
+	assert.Equal(t, int64(19), *withCached.CachedPromptTokens)
+
+	_, zero, err := respond(map[string]any{
+		"prompt_tokens":         31,
+		"completion_tokens":     7,
+		"total_tokens":          38,
+		"prompt_tokens_details": map[string]any{"cached_tokens": 0},
+	}).Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+	require.NotNil(t, zero.CachedPromptTokens, "a reported zero is a count, not an absence")
+	assert.Equal(t, int64(0), *zero.CachedPromptTokens)
+
+	_, without, err := respond(map[string]any{
+		"prompt_tokens":     31,
+		"completion_tokens": 7,
+		"total_tokens":      38,
+	}).Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+	assert.Nil(t, without.CachedPromptTokens,
+		"a gateway that reports no cached tokens is nil, never a fabricated zero")
+}
+
 func TestComplete_MissingUsageIsZeroNotAnError(t *testing.T) {
 	// A backend that omits usage must not fail a completion that succeeded.
 	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {

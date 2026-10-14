@@ -206,6 +206,61 @@ func (b *CursorBuilder) Build() CursorSpec {
 	return b.spec
 }
 
+// -- token ledger ------------------------------------------------------------------
+
+// MessageUsageBuilder builds one store.MessageUsage. Defaults: transcript "t-root", no
+// agent, at UTC(12, 0, 0), model "claude-opus", zero counters, no covering event.
+type MessageUsageBuilder struct {
+	u store.MessageUsage
+}
+
+// MessageUsage starts a ledger row for the assistant message id.
+func MessageUsage(messageID string) *MessageUsageBuilder {
+	return &MessageUsageBuilder{u: store.MessageUsage{
+		MessageID: messageID, TranscriptID: "t-root", OccurredAt: UTC(12, 0, 0), Model: "claude-opus",
+	}}
+}
+
+// Transcript sets the transcript that recorded the row, and its subagent id ("" for a root).
+func (b *MessageUsageBuilder) Transcript(id, agentID string) *MessageUsageBuilder {
+	b.u.TranscriptID, b.u.AgentID = id, agentID
+
+	return b
+}
+
+// At sets when the line was written.
+func (b *MessageUsageBuilder) At(at time.Time) *MessageUsageBuilder {
+	b.u.OccurredAt = at
+
+	return b
+}
+
+// Model sets the model.
+func (b *MessageUsageBuilder) Model(model string) *MessageUsageBuilder {
+	b.u.Model = model
+
+	return b
+}
+
+// Tokens sets the four counters.
+func (b *MessageUsageBuilder) Tokens(input, output, cacheWrite, cacheRead int64) *MessageUsageBuilder {
+	b.u.InputTokens, b.u.OutputTokens, b.u.CacheWriteTokens, b.u.CacheReadTokens = input, output, cacheWrite, cacheRead
+
+	return b
+}
+
+// Covering sets the covering segment event's external id.
+func (b *MessageUsageBuilder) Covering(externalID string) *MessageUsageBuilder {
+	b.u.CoveringExternalID = externalID
+
+	return b
+}
+
+// Build returns the row.
+func (b *MessageUsageBuilder) Build() store.MessageUsage {
+	return b.u
+}
+
 // -- seeding -----------------------------------------------------------------------
 
 // Fixture is a store's contents, declared. Names must be unique across events and

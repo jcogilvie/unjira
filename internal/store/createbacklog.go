@@ -2,6 +2,15 @@ package store
 
 import "fmt"
 
+// confidentPrimary is the SQL predicate restricting a narrative_issues row `ni` to the
+// narrative's CONFIDENT home: its primary, at or above match.confidence_floor (the one
+// bound parameter). The boundary is matching's own: persistLinks withholds promotion
+// when confidence < floor, so a primary AT the floor is confident. A NULL confidence
+// reads as 0, as store.NarrativeIssues reads it, so Go and SQL agree. One const so the
+// create path (awaitingCreate) and token attribution (MessageAttributions) cannot
+// disagree about which narratives are untracked work.
+const confidentPrimary = `ni.role = '` + string(RolePrimary) + `' AND COALESCE(ni.confidence, 0) >= ?`
+
 // awaitingCreate is the SQL predicate for "the create path still owes this narrative a
 // decision", shared verbatim by NarrativesAwaitingCreate (what a create pass selects)
 // and CountNarrativesAwaitingCreate (what the pass summary reports as left over).
@@ -27,9 +36,7 @@ import "fmt"
 //     (reconciler.confidentPrimary), so this is the only path that can speak for such
 //     work. Before this, any link of any role excluded the narrative, and with the
 //     reconciler also silent on a `mentioned` link the work was proposed nowhere
-//     (findings F58 and F64). The boundary is matching's own: persistLinks withholds
-//     promotion when confidence < floor, so a primary AT the floor is confident. A NULL
-//     confidence reads as 0, as store.NarrativeIssues reads it, so Go and SQL agree.
+//     (findings F58 and F64). The boundary is confidentPrimary's.
 //
 //   - Not a narrative whose create-path decision stands: one whose actions include a
 //     create at proposed, approved, applied or declined, or a suppression, with no
@@ -62,8 +69,7 @@ import "fmt"
 // either WHERE clause unchanged.
 const awaitingCreate = `NOT EXISTS (
 		     SELECT 1 FROM narrative_issues ni
-		     WHERE ni.narrative_id = n.id AND ni.role = '` + string(RolePrimary) + `'
-		       AND COALESCE(ni.confidence, 0) >= ?
+		     WHERE ni.narrative_id = n.id AND ` + confidentPrimary + `
 		 )
 		 AND NOT (
 		     EXISTS (

@@ -97,6 +97,8 @@ func RunLearn(
 	cfg config.Config,
 	opts LearnOptions,
 ) (LearnResult, error) {
+	ctx = llm.WithStage(ctx, "distil")
+
 	var result LearnResult
 
 	since, err := readLearnWatermark(s)

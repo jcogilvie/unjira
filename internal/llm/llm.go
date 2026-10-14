@@ -36,6 +36,10 @@ type Client interface {
 type Usage struct {
 	PromptTokens     int64
 	CompletionTokens int64
+	// CachedPromptTokens is how many of PromptTokens the server served from
+	// its prompt cache. It is a pointer because "not reported" differs from
+	// zero: nil means the backend said nothing, never a fabricated 0.
+	CachedPromptTokens *int64
 	// Model is what the server reported serving, which can differ from the
 	// model requested when a gateway (litellm, OpenRouter) remaps it.
 	Model string
