@@ -90,6 +90,99 @@ func nullIfEmpty(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }
 
+// AttributionState is where a ledgered message's tokens are charged, as
+// MessageAttributions computes it.
+type AttributionState string
+
+// The four attribution states.
+const (
+	// AttributionTracked: the covering event's member narrative has a confident primary
+	// (confidentPrimary), and the message is charged to that issue.
+	AttributionTracked AttributionState = "tracked"
+	// AttributionUntracked: the member narrative has no confident primary, so its work is
+	// untracked, the same set the create path proposes tickets for. IssueKey is the
+	// below-floor primary as a candidate, or empty when there is no primary at all.
+	AttributionUntracked AttributionState = "untracked"
+	// AttributionUnattributed: the covering event exists but has no member link. A context
+	// link does not count: context is some other narrative's work, never charged here.
+	AttributionUnattributed AttributionState = "unattributed"
+	// AttributionNoEvent: the row names no covering event, or one never stored.
+	AttributionNoEvent AttributionState = "no_event"
+)
+
+// MessageAttribution is one ledgered message and where its tokens are charged now.
+// NarrativeID is 0 unless State is tracked or untracked; IssueKey and Connection are
+// empty unless the member narrative has a primary.
+type MessageAttribution struct {
+	MessageUsage
+
+	IssueKey    string
+	Connection  string
+	NarrativeID int64
+	State       AttributionState
+}
+
+// messageAttributionsSQL joins message -> covering event -> member link -> primary, in
+// that order, at read time; nothing is cached, so Tx.MoveMember, a primary relink and a
+// triage merge or split show on the next read. Every join is at most one row, so each
+// message yields exactly one: events is UNIQUE (source, external_id), and
+// one_member_link_per_event and one_primary_per_narrative do the rest. The kind filter
+// is mandatory: a context link must never reach attribution. The source is the
+// claude_code collector's name (claudecode.Name, which this package cannot import),
+// the only producer of covering ids.
+//
+// The ledger is read whole, so token_messages is scanned (in message-id order, which
+// also serves the ORDER BY) and each join is a unique-index lookup. EXPLAIN QUERY PLAN
+// on modernc.org/sqlite, 2026-10-14:
+//
+//	SCAN tm USING INDEX sqlite_autoindex_token_messages_1
+//	SEARCH e USING COVERING INDEX sqlite_autoindex_events_1 (source=? AND external_id=?) LEFT-JOIN
+//	SEARCH ne USING INDEX one_member_link_per_event (event_id=?) LEFT-JOIN
+//	SEARCH ni USING INDEX one_primary_per_narrative (narrative_id=?) LEFT-JOIN
+const messageAttributionsSQL = `
+SELECT tm.message_id, tm.transcript_id, COALESCE(tm.agent_id, ''), tm.occurred_at, tm.model,
+       tm.input_tokens, tm.output_tokens, tm.cache_write_tokens, tm.cache_read_tokens,
+       COALESCE(tm.covering_external_id, ''),
+       COALESCE(ni.issue_key, ''), COALESCE(ni.connection, ''), COALESCE(ne.narrative_id, 0),
+       CASE
+           WHEN e.id IS NULL THEN '` + string(AttributionNoEvent) + `'
+           WHEN ne.narrative_id IS NULL THEN '` + string(AttributionUnattributed) + `'
+           WHEN ` + confidentPrimary + ` THEN '` + string(AttributionTracked) + `'
+           ELSE '` + string(AttributionUntracked) + `'
+       END
+FROM token_messages tm
+LEFT JOIN events e
+       ON e.source = 'claude_code' AND e.external_id = tm.covering_external_id
+LEFT JOIN narrative_events ne
+       ON ne.event_id = e.id AND ne.kind = '` + string(LinkMember) + `'
+LEFT JOIN narrative_issues ni
+       ON ni.narrative_id = ne.narrative_id AND ni.role = '` + string(RolePrimary) + `'
+ORDER BY tm.message_id`
+
+// MessageAttributions returns every ledgered message with its attribution as of now,
+// ordered by message id. confidenceFloor is match.confidence_floor: a primary below it
+// leaves its narrative untracked, as it does for the create path (confidentPrimary).
+func (s *Store) MessageAttributions(confidenceFloor float64) ([]MessageAttribution, error) {
+	rows, err := s.db.Query(messageAttributionsSQL, confidenceFloor)
+	if err != nil {
+		return nil, fmt.Errorf("querying token attributions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []MessageAttribution
+	for rows.Next() {
+		var a MessageAttribution
+		if err := rows.Scan(&a.MessageID, &a.TranscriptID, &a.AgentID, &a.OccurredAt, &a.Model,
+			&a.InputTokens, &a.OutputTokens, &a.CacheWriteTokens, &a.CacheReadTokens,
+			&a.CoveringExternalID, &a.IssueKey, &a.Connection, &a.NarrativeID, &a.State); err != nil {
+			return nil, fmt.Errorf("scanning token attribution: %w", err)
+		}
+		out = append(out, a)
+	}
+
+	return out, rows.Err()
+}
+
 // LLMCall is one llm_calls row: one call unjira itself made to its LLM. CachedTokens
 // is nil when the server reported none.
 type LLMCall struct {

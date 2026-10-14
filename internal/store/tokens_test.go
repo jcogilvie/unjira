@@ -8,6 +8,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jcogilvie/unjira/internal/events"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/store/storetest"
 )
@@ -152,4 +153,199 @@ func TestRecordLLMCall(t *testing.T) {
 	if diff := cmp.Diff(calls, got, cmp.Comparer(func(a, b time.Time) bool { return a.Equal(b) })); diff != "" {
 		t.Errorf("llm_calls (-want +got):\n%s", diff)
 	}
+}
+
+func TestMessageAttributions(t *testing.T) {
+	ev, nar, msg := storetest.Event, storetest.Narrative, storetest.MessageUsage
+	primary := func(narrative, key string, confidence float64) primaryLink {
+		return primaryLink{narrative: narrative, key: key, confidence: confidence}
+	}
+	// One ticket per narrative is the common shape: N1 holds A-1, N2 holds B-2.
+	twoTickets := storetest.Fixture{
+		Events: []events.Event{ev("ev-1").Build(), ev("ev-2").Build()},
+		Narratives: []storetest.NarrativeSpec{
+			nar("N1").Members("ev-1").Build(), nar("N2").Members("ev-2").Build(),
+		},
+	}
+	twoPrimaries := []primaryLink{primary("N1", "A-1", 0.9), primary("N2", "B-2", 0.9)}
+
+	tests := []struct {
+		name      string
+		fixture   storetest.Fixture
+		primaries []primaryLink
+		// context links each named event to the named narrative as context.
+		context  map[string][]string
+		messages []store.MessageUsage
+		// then runs after the messages are ledgered, never re-upserting them.
+		then  func(t *testing.T, s *store.Store, ids storetest.IDs)
+		floor float64
+		want  []wantAttribution
+	}{
+		{
+			name: "a subagent's message follows its own event's member link, not the parent's",
+			fixture: storetest.Fixture{
+				Events: []events.Event{ev("ev-parent").Build(), ev("ev-sub").Build()},
+				Narratives: []storetest.NarrativeSpec{
+					nar("N-parent").Members("ev-parent").Build(), nar("N-sub").Members("ev-sub").Build(),
+				},
+			},
+			primaries: []primaryLink{primary("N-parent", "A-1", 0.9), primary("N-sub", "B-2", 0.9)},
+			messages: []store.MessageUsage{
+				msg("m-parent").Covering("ev-parent").Tokens(1, 2, 3, 4).Build(),
+				msg("m-sub").Transcript("t-sub", "agent-1").Covering("ev-sub").Build(),
+			},
+			want: []wantAttribution{
+				{"m-parent", "N-parent", "A-1", store.AttributionTracked},
+				{"m-sub", "N-sub", "B-2", store.AttributionTracked},
+			},
+		},
+		{
+			name:      "after MoveMember the message reports the new narrative's ticket",
+			fixture:   twoTickets,
+			primaries: twoPrimaries,
+			messages:  []store.MessageUsage{msg("m1").Covering("ev-1").Build()},
+			then: func(t *testing.T, s *store.Store, ids storetest.IDs) {
+				t.Helper()
+				require.NoError(t, s.WithTx(func(tx *store.Tx) error {
+					return tx.MoveMember(ids["N2"], ids["ev-1"], 1, store.PlacedByModel)
+				}))
+			},
+			want: []wantAttribution{{"m1", "N2", "B-2", store.AttributionTracked}},
+		},
+		{
+			name:      "after the primary is relinked the message reports the new key",
+			fixture:   twoTickets,
+			primaries: twoPrimaries,
+			messages:  []store.MessageUsage{msg("m1").Covering("ev-1").Build()},
+			then: func(t *testing.T, s *store.Store, ids storetest.IDs) {
+				t.Helper()
+				require.NoError(t, s.RemoveNarrativeIssue(ids["N1"], "A-1"))
+				require.NoError(t, s.AddNarrativeIssues(ids["N1"], []store.NarrativeIssue{{
+					IssueKey: "A-9", Role: store.RolePrimary, Provenance: "reviewer", Confidence: 1, Connection: "corp",
+				}}))
+			},
+			want: []wantAttribution{{"m1", "N1", "A-9", store.AttributionTracked}},
+		},
+		{
+			name:     "a narrative with no primary is untracked, with no candidate key",
+			fixture:  twoTickets,
+			messages: []store.MessageUsage{msg("m1").Covering("ev-1").Build()},
+			want:     []wantAttribution{{"m1", "N1", "", store.AttributionUntracked}},
+		},
+		{
+			name:      "a primary below the floor is untracked, labeled with its candidate key",
+			fixture:   twoTickets,
+			primaries: []primaryLink{primary("N1", "A-1", 0.5), primary("N2", "B-2", 0.8)},
+			messages: []store.MessageUsage{
+				msg("m1").Covering("ev-1").Build(), msg("m2").Covering("ev-2").Build(),
+			},
+			floor: 0.8,
+			want: []wantAttribution{
+				{"m1", "N1", "A-1", store.AttributionUntracked},
+				// AT the floor is confident, as matching promotes it.
+				{"m2", "N2", "B-2", store.AttributionTracked},
+			},
+		},
+		{
+			name: "a covering event with only a context link, or no link, is unattributed",
+			fixture: storetest.Fixture{
+				Events:     []events.Event{ev("ev-1").Build(), ev("ev-ctx").Build(), ev("ev-bare").Build()},
+				Narratives: []storetest.NarrativeSpec{nar("N1").Members("ev-1").Build()},
+			},
+			primaries: []primaryLink{primary("N1", "A-1", 0.9)},
+			context:   map[string][]string{"N1": {"ev-ctx"}},
+			messages: []store.MessageUsage{
+				msg("m-bare").Covering("ev-bare").Build(), msg("m-ctx").Covering("ev-ctx").Build(),
+			},
+			want: []wantAttribution{
+				{"m-bare", "", "", store.AttributionUnattributed},
+				{"m-ctx", "", "", store.AttributionUnattributed},
+			},
+		},
+		{
+			name: "no covering id, an id never inserted, or another source's id is no_event",
+			fixture: storetest.Fixture{
+				Events:     []events.Event{ev("ev-jira").Source("jira").Build()},
+				Narratives: []storetest.NarrativeSpec{nar("N1").Members("ev-jira").Build()},
+			},
+			primaries: []primaryLink{primary("N1", "A-1", 0.9)},
+			messages: []store.MessageUsage{
+				msg("m-jira").Covering("ev-jira").Build(),
+				msg("m-missing").Covering("ev-never").Build(),
+				msg("m-null").Build(),
+			},
+			want: []wantAttribution{
+				{"m-jira", "", "", store.AttributionNoEvent},
+				{"m-missing", "", "", store.AttributionNoEvent},
+				{"m-null", "", "", store.AttributionNoEvent},
+			},
+		},
+		{
+			name: "only the row's covering snapshot counts, never an older snapshot's link",
+			fixture: storetest.Fixture{
+				Events: []events.Event{ev("t:100:0").Build(), ev("t:200:0").Build()},
+				Narratives: []storetest.NarrativeSpec{
+					nar("N-old").Members("t:100:0").Build(), nar("N-new").Members("t:200:0").Build(),
+				},
+			},
+			primaries: []primaryLink{primary("N-old", "A-1", 0.9), primary("N-new", "B-2", 0.9)},
+			messages:  []store.MessageUsage{msg("m1").Covering("t:200:0").Build()},
+			want:      []wantAttribution{{"m1", "N-new", "B-2", store.AttributionTracked}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openStore(t)
+			ids := storetest.Seed(t, s, tt.fixture)
+			for _, p := range tt.primaries {
+				require.NoError(t, s.AddNarrativeIssues(ids[p.narrative], []store.NarrativeIssue{{
+					IssueKey: p.key, Role: store.RolePrimary, Provenance: "branch", Confidence: p.confidence,
+					Connection: "corp",
+				}}))
+			}
+			for narrative, evs := range tt.context {
+				for _, e := range evs {
+					require.NoError(t, s.LinkContext(ids[narrative], []int64{ids[e]}))
+				}
+			}
+			require.NoError(t, s.UpsertMessageUsage(tt.messages))
+			if tt.then != nil {
+				tt.then(t, s, ids)
+			}
+
+			byID := make(map[string]store.MessageUsage, len(tt.messages))
+			for _, m := range tt.messages {
+				byID[m.MessageID] = m
+			}
+			want := make([]store.MessageAttribution, 0, len(tt.want))
+			for _, w := range tt.want {
+				a := store.MessageAttribution{MessageUsage: byID[w.message], IssueKey: w.key, State: w.state}
+				if w.narrative != "" {
+					a.NarrativeID = ids[w.narrative]
+				}
+				if w.key != "" {
+					a.Connection = "corp"
+				}
+				want = append(want, a)
+			}
+
+			got, err := s.MessageAttributions(tt.floor)
+			require.NoError(t, err)
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("MessageAttributions (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+type primaryLink struct {
+	narrative, key string
+	confidence     float64
+}
+
+// wantAttribution names a message's expected attribution by fixture names; the test
+// fills in the row's usage, the narrative's id and the connection.
+type wantAttribution struct {
+	message, narrative, key string
+	state                   store.AttributionState
 }
