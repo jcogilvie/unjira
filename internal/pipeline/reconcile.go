@@ -164,8 +164,14 @@ func RunReconcile(
 	// tracker (or default_ticket_in) says, or nowhere.
 	destinations := reconciler.WithDestinations(cfg)
 
+	// The floor is match.confidence_floor, shared by both halves: a primary below it is
+	// no confident home, so Reconcile drafts onto none of that narrative's links and the
+	// create path proposes a ticket for it instead, naming those links. One option for
+	// both, so the two cannot disagree about which narrative is whose.
+	floor := reconciler.WithConfidenceFloor(cfg.Match.ConfidenceFloor)
+
 	reconcileOpts := []reconciler.ReconcileOption{
-		reconciler.WithRules(reconcilerRules), reconciler.WithReconcileLogger(opts.Log), destinations,
+		reconciler.WithRules(reconcilerRules), reconciler.WithReconcileLogger(opts.Log), destinations, floor,
 	}
 	if opts.Graph != nil {
 		reconcileOpts = append(reconcileOpts, reconciler.WithWorkflowGraph(opts.Graph))
@@ -189,7 +195,8 @@ func RunReconcile(
 		createsDeferred = opts.UnmatchedNarratives
 	} else {
 		createResults, createStats, createErr := reconciler.ProposeCreates(
-			ctx, s, client, cfg.Reconciler, reconcilerRules, opts.Log, destinations)
+			ctx, s, client, cfg.Reconciler, reconcilerRules, opts.Log, destinations, floor,
+			reconciler.WithCandidateReader(tracker))
 		results = append(results, createResults...)
 		stats.Add(createStats)
 		reconcileErr = errors.Join(reconcileErr, createErr)
@@ -214,7 +221,7 @@ func RunReconcile(
 	if opts.DryRun {
 		result.Remaining = countDeltaBacklog(s, opts.Log)
 		if createsRan {
-			result.CreatesRemaining = countCreateBacklog(s, opts.Log)
+			result.CreatesRemaining = countCreateBacklog(s, cfg.Match.ConfidenceFloor, opts.Log)
 		}
 
 		return result, reconcileErr
@@ -233,7 +240,7 @@ func RunReconcile(
 	result.Persisted = persisted
 
 	if createsRan {
-		result.CreatesRemaining = countCreateBacklog(s, opts.Log)
+		result.CreatesRemaining = countCreateBacklog(s, cfg.Match.ConfidenceFloor, opts.Log)
 	}
 
 	return result, reconcileErr
@@ -264,8 +271,11 @@ func countDeltaBacklog(s *store.Store, log *slog.Logger) int {
 // countCreateBacklog is ReconcileRunResult.CreatesRemaining. A count failure does not
 // fail the pass, for the reason countDeltaBacklog gives: the work happened, and 0 is the
 // quieter wrong answer.
-func countCreateBacklog(s *store.Store, log *slog.Logger) int {
-	n, err := s.CountNarrativesAwaitingCreate()
+//
+// floor is the one the create pass selected under (match.confidence_floor), or the count
+// describes a different population than the pass examined.
+func countCreateBacklog(s *store.Store, floor float64, log *slog.Logger) int {
+	n, err := s.CountNarrativesAwaitingCreate(floor)
 	if err != nil {
 		logging.For(log, "pipeline").Warn(
 			"could not count the narratives awaiting a create decision",

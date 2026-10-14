@@ -184,7 +184,7 @@ func TestMatch_LinksTheJiraEventCandidate(t *testing.T) {
 
 	// And the narrative is no longer selected as untracked, which is what let the
 	// create path propose a duplicate.
-	untracked, err := s.NarrativesAwaitingCreate(10)
+	untracked, err := s.NarrativesAwaitingCreate(10, narrative19Config().ConfidenceFloor)
 	require.NoError(t, err)
 	assert.Empty(t, untracked,
 		"a linked narrative must not reach the create path as untracked work")
@@ -378,7 +378,7 @@ func TestMatch_NarrativeCapIsSeparateFromCandidateCap(t *testing.T) {
 	assert.Len(t, results, total,
 		"a small CANDIDATE cap must not shrink how many NARRATIVES a pass examines")
 
-	linked, err := s.NarrativesAwaitingCreate(100)
+	linked, err := s.NarrativesAwaitingCreate(100, 0.7)
 	require.NoError(t, err)
 	assert.Empty(t, linked,
 		"every narrative had one resolvable candidate, so none may be left untracked")

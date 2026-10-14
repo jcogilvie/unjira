@@ -199,12 +199,12 @@ func TestProposeCreateOne_BackstopsRemainInPlace(t *testing.T) {
 				require.NoError(t, s.UpdateActionStatus(id, tc.status))
 			}
 
-			awaiting, err := s.NarrativesAwaitingCreate(10)
+			awaiting, err := s.NarrativesAwaitingCreate(10, 0)
 			require.NoError(t, err)
 			require.Empty(t, awaiting, "precondition: the selector already excludes it")
 
 			client := &fakeLLM{responses: []string{worthTracking}}
-			got, _, err := proposeCreateOne(context.Background(), s, client, store.NarrativeRow{ID: nid}, nil, nil)
+			got, _, err := proposeCreateOne(context.Background(), s, client, store.NarrativeRow{ID: nid}, nil, &reconcileOptions{})
 
 			require.NoError(t, err)
 			assert.Empty(t, got.Proposed)

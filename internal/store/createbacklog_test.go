@@ -30,6 +30,10 @@ import (
 
 var createBacklogBase = time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC)
 
+// createBacklogFloor is the match.confidence_floor these tests select under: the
+// example config's value, so keepTracked's 0.9 primary is confident.
+const createBacklogFloor = 0.7
+
 // seedUntrackedNarrative inserts a narrative with one member event and no issue link —
 // the shape the create path selects. offset orders it by window_start.
 func seedUntrackedNarrative(t *testing.T, s *store.Store, extID string, offset time.Duration) int64 {
@@ -102,7 +106,7 @@ func insertCreateAction(t *testing.T, s *store.Store, narrativeID int64, status 
 func awaitingIDs(t *testing.T, s *store.Store) []int64 {
 	t.Helper()
 
-	got, err := s.NarrativesAwaitingCreate(100)
+	got, err := s.NarrativesAwaitingCreate(100, createBacklogFloor)
 	require.NoError(t, err)
 
 	ids := make([]int64, 0, len(got))
@@ -144,7 +148,7 @@ func TestNarrativesAwaitingCreate_CreateStatus(t *testing.T) {
 				assert.Empty(t, got, "a %s create must take the narrative out of the backlog", tc.status)
 			}
 
-			count, err := s.CountNarrativesAwaitingCreate()
+			count, err := s.CountNarrativesAwaitingCreate(createBacklogFloor)
 			require.NoError(t, err)
 			assert.Len(t, got, count, "the count and the selector share one predicate")
 		})
@@ -297,15 +301,23 @@ func TestCountNarrativesAwaitingCreate_MatchesTheSelector(t *testing.T) {
 
 	require.NoError(t, s.RecordCreateExamined(next("self-authored"), "all unjira"))
 
-	linked, err := s.InsertNarrative(createBacklogBase, createBacklogBase.Add(time.Hour), "linked", "s")
-	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeIssues(linked, []store.NarrativeIssue{
+	keepTracked(t, s, next("confidently linked"))
+
+	citesOnly := next("mentioned only")
+	require.NoError(t, s.AddNarrativeIssues(citesOnly, []store.NarrativeIssue{
 		{IssueKey: "DEVSBX-8", Role: store.Role("mentioned"), Provenance: "test", Confidence: 0.2},
 	}))
+	want = append(want, citesOnly)
+
+	doubted := next("sub-floor primary")
+	require.NoError(t, s.AddNarrativeIssues(doubted, []store.NarrativeIssue{
+		{IssueKey: "DEVSBX-7", Role: store.RolePrimary, Provenance: "test", Confidence: 0.3},
+	}))
+	want = append(want, doubted)
 
 	assert.Equal(t, want, awaitingIDs(t, s), "selected in (window_start, id) order")
 
-	count, err := s.CountNarrativesAwaitingCreate()
+	count, err := s.CountNarrativesAwaitingCreate(createBacklogFloor)
 	require.NoError(t, err)
 	assert.Equal(t, len(want), count, "the count must describe exactly the selector's population")
 }

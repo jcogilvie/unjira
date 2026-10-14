@@ -454,3 +454,24 @@ func TestActionsDecideCmd_KongXorGroupRejectsCombinedFlags(t *testing.T) {
 	assert.True(t, cli.Decide.Reject)
 	assert.Equal(t, int64(5), cli.Decide.ID)
 }
+
+// TestActionsList_ACreateNamesItsCandidates: a create proposed for work with no confident
+// primary names the tickets it was proposed over, so the queue says which tickets a
+// reviewer might link the work to instead of approving a new one.
+func TestActionsList_ACreateNamesItsCandidates(t *testing.T) {
+	app, s := actionsTestApp(t)
+
+	seedAction(t, s, store.ActionRow{
+		Type: "create", Confidence: 0.8, Status: "proposed",
+		Payload: `{"summary":"s","description":"d","candidates":[` +
+			`{"key":"PROJ-7","role":"primary","confidence":0.3,"provenance":"prose_first"},` +
+			`{"key":"PROJ-8","role":"mentioned","confidence":0.9,"provenance":"prose_later"}]}`,
+	})
+
+	cmd := actionsListCmd{Status: "proposed"}
+	out := captureStdout(t, func() {
+		require.NoError(t, cmd.Run(app))
+	})
+
+	assert.Contains(t, out, "candidates=PROJ-7(primary 0.30),PROJ-8(mentioned 0.90)")
+}

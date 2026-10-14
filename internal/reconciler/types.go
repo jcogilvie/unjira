@@ -28,8 +28,9 @@ const (
 	// ActionTransition moves an existing issue to a new named status.
 	ActionTransition ActionType = "transition"
 	// ActionCreate opens a new issue. Proposed only when a narrative has no
-	// verified link at all — never alongside one, or unjira would manufacture
-	// duplicate tickets for work already tracked.
+	// confident primary (see confidentPrimary) — never alongside one, or unjira
+	// would manufacture duplicate tickets for work already tracked. The weaker
+	// links such a narrative may carry are named on the proposal as Candidates.
 	ActionCreate ActionType = store.ActionTypeCreate
 )
 
@@ -83,6 +84,32 @@ type ProposedAction struct {
 	// flooring (see floorConfidence). Never the raw model number.
 	Confidence float64
 	Rationale  string
+	// Candidates, set only for ActionCreate, are the tickets matching linked to the
+	// narrative without making one of them its confident home: `mentioned`
+	// citations, `same_work` links, and a primary below match.confidence_floor.
+	// Carried to the payload so a reviewer sees them beside the proposal and can
+	// link the work to one instead, and so gate.Applier can tell the doubted
+	// primary this create was proposed over from one linked after it.
+	Candidates []CreateCandidate
+}
+
+// CreateCandidate is one ticket a create proposal names as a place the work might
+// already belong: its link as matching recorded it, plus the ticket's summary and
+// status as read when the create was drafted.
+//
+// The JSON names are the payload's (see ActionPayload), and gate.Applier decodes the
+// link half with a struct of its own mirroring them.
+type CreateCandidate struct {
+	IssueKey   string     `json:"key"`
+	Role       store.Role `json:"role"`
+	Confidence float64    `json:"confidence"`
+	Provenance string     `json:"provenance"`
+	// Summary and Status are empty when the ticket was not read: no reader was
+	// configured, or the read failed for a reason that is not a transport error,
+	// which Unread then states.
+	Summary string `json:"summary,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Unread  string `json:"unread,omitempty"`
 }
 
 // verifiedLink pairs a stored narrative→issue link with the live issue read
