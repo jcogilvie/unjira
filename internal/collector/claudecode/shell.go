@@ -16,7 +16,7 @@ package claudecode
 // That includes a script the shell does go on to run: one handed to another shell
 // (`sh -c '…'`, `bash <<'EOF'`, `docker run … sh -c '…'`), and a Python heredoc that
 // shells out. Its commands are invisible here. Known and measured, not overlooked: see
-// F48 in docs/architecture-findings.md.
+// docs/findings/F48-a-script-handed-to-a-shell-is.md.
 //
 // A command the parser rejects runs nothing here. Measured over every distinct shell
 // command in the local transcripts: 10 of 42,145 (0.02%) fail to parse, all with an

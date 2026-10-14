@@ -346,9 +346,10 @@ func (s *Store) WithTx(fn func(*Tx) error) error {
 // backend config.json actually names. Open takes no backend parameter: the
 // local_issues/local_issue_comments tables are created unconditionally, even
 // when the jira backend is configured (the default). That is a known
-// property, not an oversight of this move — see docs/architecture-findings.md
-// F3 (which now covers only the correlator's Jira dependency; whether
-// local_issues creation should be conditional on the backend is a separate,
+// property, not an oversight of this move — see F3 (fixed and
+// deleted since; in git history it covered only the correlator's Jira
+// dependency; whether local_issues creation should be conditional on the
+// backend is a separate,
 // open design question this split does not take a position on).
 func Open(dbPath string) (*Store, error) {
 	if dir := filepath.Dir(dbPath); dir != "." {

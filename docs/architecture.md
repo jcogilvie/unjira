@@ -15,7 +15,7 @@ distrust the rest.
 Companion docs, none of which this duplicates:
 
 - `README.md` — what unjira does and the locked design decisions.
-- `docs/architecture-findings.md` — where the current shape falls **short**. Kept separate because a
+- `docs/findings/` — where the current shape falls **short**. Kept separate because a
   description is true until the code changes, while a finding is open until somebody closes it; one
   file holding both is never in a settled state.
 - `docs/design-notes.md` — *why* it is shaped this way, as numbered incidents.
@@ -583,4 +583,4 @@ change to unjira's architecture, not a refactor — treat it accordingly.
   nothing there does.
 
 Where the current shape falls short of these, or of good practice generally, is
-`docs/architecture-findings.md`.
+`docs/findings/`, one file per finding.

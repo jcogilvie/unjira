@@ -67,7 +67,7 @@ M7  screen: 0 pass-2 member placement(s) whose evidence points at another pass-1
 
 Two-pass M3 went from 24/26 to 26/26, and the four placements are exactly the merged/closed events of
 #72 and #73, the two PRs that split before. No several-holders or not-open fallbacks occurred, and no
-rep showed F45's reshuffle. See `docs/architecture-findings.md` F45 for what the join leaves open. F46,
+rep showed F45's reshuffle. See `docs/findings/F45-the-model-can-still-reshuffle-a-pr.md` for what the join leaves open. F46,
 a dry run clustering against less context than the real pass when the join fired, has since been fixed.
 
 **The cheaper first step, taken: a segment names the PRs its run opened.** The "inert" verdict above
@@ -126,7 +126,7 @@ The three drills §"First slice" names, each run against the committed implement
 | restore last-writer-wins (no dispute re-ask, and `Persist`'s duplicate-member backstop off, so `MoveMember` applies in result order) | `TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`: `"0" is not positive — narrative 2 must not be left empty (F37)` |
 | replace the dispute re-ask with first-in-response-order | `TestCluster_DisputeWinnerIsTheModelsChoiceNotResponseOrder/the_later_claimant`: `[]string{"github/pr-7-merged"} does not contain "github/pr-7-opened"` (the `the_earlier_claimant` subtest passed, as it should) |
 
-F36 and F37 are closed by this slice (see `docs/architecture-findings.md`). F39 and F40 are new findings
+F36 and F37 are closed by this slice (see `docs/findings/`). F39 and F40 are new findings
 recorded there.
 
 **Where the implementation deviates from, or had to decide what, this design left open:**
@@ -181,7 +181,7 @@ recorded there.
 
 Step 4 of the subagent-collection work: let one event — typically a root session's investigation,
 reused across several fixes — attach to more than one narrative, as **context**, without becoming
-any of them's **work**. This is the reader `docs/architecture-findings.md` F6 names for the subagent
+any of them's **work**. This is the reader `docs/findings/F6-six-artifacts-are-written-and-never-read.md` names for the subagent
 artifacts written on 2026-10-01. §"First slice" says what to build first (now landed, see Status)
 and §"What follows" what comes after, with the condition that gates each.
 
