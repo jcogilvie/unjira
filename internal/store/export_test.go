@@ -43,3 +43,52 @@ func (s *Store) QueryStringForTest(query string, args ...any) (string, error) {
 
 	return out, err
 }
+
+// MessageUsageRows returns every token_messages row, ordered by message id.
+func (s *Store) MessageUsageRows() ([]MessageUsage, error) {
+	rows, err := s.db.Query(
+		`SELECT message_id, transcript_id, COALESCE(agent_id, ''), occurred_at, model,
+		        input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+		        COALESCE(covering_external_id, '')
+		 FROM token_messages ORDER BY message_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []MessageUsage
+	for rows.Next() {
+		var r MessageUsage
+		if err := rows.Scan(&r.MessageID, &r.TranscriptID, &r.AgentID, &r.OccurredAt, &r.Model,
+			&r.InputTokens, &r.OutputTokens, &r.CacheWriteTokens, &r.CacheReadTokens,
+			&r.CoveringExternalID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+
+	return out, rows.Err()
+}
+
+// LLMCallRows returns every llm_calls row in insertion order.
+func (s *Store) LLMCallRows() ([]LLMCall, error) {
+	rows, err := s.db.Query(
+		`SELECT called_at, stage, model, prompt_tokens, completion_tokens, cached_tokens
+		 FROM llm_calls ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []LLMCall
+	for rows.Next() {
+		var c LLMCall
+		if err := rows.Scan(&c.CalledAt, &c.Stage, &c.Model, &c.PromptTokens,
+			&c.CompletionTokens, &c.CachedTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+
+	return out, rows.Err()
+}

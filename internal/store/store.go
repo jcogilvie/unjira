@@ -279,11 +279,11 @@ CREATE TABLE IF NOT EXISTS correction_marks (
 -- -> member link -> primary issue.
 CREATE TABLE IF NOT EXISTS token_messages (
     message_id           TEXT     PRIMARY KEY,
-    -- The transcript that first recorded this id, and only that one: an id seen in two
-    -- transcripts keeps its first holder (F33's ownership rule). A later holder may raise
-    -- the four counters below and nothing else: transcript_id, agent_id, occurred_at,
-    -- model and covering_external_id all belong to the first holder and are never
-    -- reassigned by another transcript.
+    -- The holder: of every transcript recording this id, the one with the smallest
+    -- (occurred_at, transcript_id), so the owner does not depend on the order transcripts
+    -- are read in. Any other transcript may raise the four counters below and nothing
+    -- else: transcript_id, agent_id, occurred_at, model and covering_external_id all
+    -- belong to the holder.
     transcript_id        TEXT     NOT NULL,
     -- The holder's subagent id when it is a subagent transcript; NULL for a root session.
     agent_id             TEXT,
