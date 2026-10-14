@@ -6,7 +6,8 @@
 // Both grow as the work continues. Each changed file yields one snapshot event per
 // branch run (external ID includes the file size, so a transcript that grows
 // produces a new snapshot; identical re-reads dedupe at insert), plus one anchor
-// event per pull-request-creating tool call (see anchors.go).
+// event per pull-request-creating tool call (see anchors.go). It also writes one
+// token ledger row per assistant message.id straight to the store (see usage.go).
 //
 // This collector is deliberately deterministic: it extracts metadata,
 // ticket-key candidates, and the opening ask. Judging what the session
@@ -24,7 +25,9 @@ import (
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/events"
+	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/pipeline"
+	"github.com/jcogilvie/unjira/internal/store"
 )
 
 // DefaultBackfillDays is how far back sessions are collected when no
@@ -72,9 +75,9 @@ func (c *Collector) Name() string {
 }
 
 // Collect scans every session transcript under cc.Options["transcript_root"]
-// (default ~/.claude/projects), calling visit for each new event and
-// advancing the store's cursor for every file scanned, whether or not it
-// yielded an event.
+// (default ~/.claude/projects), calling visit for each new event, writing each
+// read transcript's token ledger rows (usage.go), and advancing the store's
+// cursor for every file scanned, whether or not it yielded an event.
 func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)) error {
 	root := stringOption(cc.Options, "transcript_root", "")
 	if root == "" {
@@ -139,9 +142,19 @@ func (c *Collector) Collect(cc pipeline.CollectContext, visit func(events.Event)
 			continue
 		}
 
-		evts, err := sessionEvents(t, mtime, normalizedExcludes, minSegment, owners, reader)
+		evts, usages, unledgered, err := sessionEvents(t, mtime, normalizedExcludes, minSegment, owners, reader)
 		if err != nil {
 			return fmt.Errorf("reading session %s: %w", path, err)
+		}
+		if unledgered > 0 {
+			logging.For(cc.Log, Name).Debug("assistant lines without message.id or usage were not ledgered",
+				"path", path, "lines", unledgered)
+		}
+
+		// Before the cursor moves, so a failed write leaves the file to be re-read next
+		// pass; the upsert is idempotent, so the re-read cannot double-count.
+		if err := cc.Store.UpsertMessageUsage(usages); err != nil {
+			return fmt.Errorf("ledgering token usage for %s: %w", path, err)
 		}
 
 		if err := cc.Store.SetCursor(Name, path, position); err != nil {
@@ -227,7 +240,9 @@ func sessionLabel(t transcript) string {
 }
 
 // sessionEvents turns one transcript into one event per contiguous branch run, plus one
-// anchor per pull-request-creating tool call whose result it holds (anchors.go).
+// anchor per pull-request-creating tool call whose result it holds (anchors.go). It also
+// returns the transcript's token ledger rows, and how many assistant lines yielded none
+// (messageUsages).
 //
 // Finding F15: this used to return a single event dated to the session's LAST message.
 // Session e951ef78 ran 71 days across three branches; the run that produced the merge
@@ -242,12 +257,12 @@ func sessionLabel(t transcript) string {
 // sessions that change branch, and 42 of 79 multi-day sessions never do.
 func sessionEvents(
 	t transcript, mtime time.Time, excludeCwds []string, minSegment int, owners lineOwners, reader *remoteReader,
-) ([]events.Event, error) {
+) ([]events.Event, []store.MessageUsage, int, error) {
 	path := t.path
 
 	lines, err := jsonlLines(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
 
 	if t.sub != nil {
@@ -285,23 +300,24 @@ func sessionEvents(
 	}
 	resolved, awaiting := transcriptAnchors(lines, excludeCwds)
 	if len(segs) == 0 && len(resolved) == 0 {
-		return nil, nil
+		return nil, nil, 0, nil
 	}
 
 	stat, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("stat %s: %w", path, err)
+		return nil, nil, 0, fmt.Errorf("stat %s: %w", path, err)
 	}
+
+	cover := coverFor(t, segs, stat.Size(), excludeCwds)
+	usages, unledgered := messageUsages(t, segs, cover, mtime)
 
 	out := make([]events.Event, 0, len(segs)+len(resolved))
 	created := createdPullRequests(resolved)
 
 	for i, seg := range segs {
-		if len(seg.userTexts) == 0 {
+		externalID, _ := cover(i)
+		if externalID == "" {
 			continue
-		}
-		if seg.cwd != "" && isExcluded(seg.cwd, excludeCwds) {
-			continue // unjira's own repo etc. — skip to avoid self-reference loops
 		}
 
 		occurredAt := mtime
@@ -309,18 +325,9 @@ func sessionEvents(
 			occurredAt = parsed
 		}
 
-		// The segment index is part of the ExternalID, not just the file size. Size
-		// alone made a growing session re-emit whole-session snapshots (one live
-		// session produced 19); size plus index keeps each segment distinct within a
-		// snapshot while still deduping an unchanged re-read at insert. The index
-		// rather than the branch name because a branch can legitimately appear twice
-		// when runs are far enough apart not to coalesce.
-		//
-		// The prefix is t.id — the root session's filename stem or `agent-<agentId>`
-		// — never the JSONL sessionId, which a subagent shares with its parent.
 		evt := events.NewEvent(
 			Name,
-			fmt.Sprintf("%s:%d:%d", t.id, stat.Size(), i),
+			externalID,
 			occurredAt,
 			segmentSummary(projectName(t, seg.cwd), t, seg, openedPullRequests(seg, created)),
 		)
@@ -367,7 +374,41 @@ func sessionEvents(
 		out = append(out, anchorEvent(t, a, mtime))
 	}
 
-	return out, nil
+	return out, usages, unledgered, nil
+}
+
+// coverFor is the one place that decides whether each of segs emits an event, and its
+// ExternalID, so the ledger's covering ids and the events cannot drift apart. size is
+// the snapshot's file size.
+func coverFor(t transcript, segs []segment, size int64, excludeCwds []string) segmentCover {
+	return func(i int) (string, bool) {
+		seg := segs[i]
+		if seg.cwd != "" && isExcluded(seg.cwd, excludeCwds) {
+			// unjira's own repo etc. — skip to avoid self-reference loops. Not ledgered
+			// either: an excluded cwd is not the user's work to account for.
+			return "", false
+		}
+		if len(seg.userTexts) == 0 {
+			return "", true // ledgered with no covering event, so its spend is not lost
+		}
+
+		return segmentExternalID(t, size, i), true
+	}
+}
+
+// segmentExternalID is the ExternalID of segment i's event in the snapshot of t taken at
+// size bytes.
+//
+// The segment index is part of the ExternalID, not just the file size. Size alone made a
+// growing session re-emit whole-session snapshots (one live session produced 19); size
+// plus index keeps each segment distinct within a snapshot while still deduping an
+// unchanged re-read at insert. The index rather than the branch name because a branch can
+// legitimately appear twice when runs are far enough apart not to coalesce.
+//
+// The prefix is t.id — the root session's filename stem or `agent-<agentId>` — never the
+// JSONL sessionId, which a subagent shares with its parent.
+func segmentExternalID(t transcript, size int64, i int) string {
+	return fmt.Sprintf("%s:%d:%d", t.id, size, i)
 }
 
 // projectName is the human-readable project an event is about: the working directory's
