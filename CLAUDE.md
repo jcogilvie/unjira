@@ -12,10 +12,10 @@ Guidance for anyone (human or agent) editing this codebase. This is distinct fro
   lifecycle and package dependencies as mermaid diagrams, plus a SOLID/patterns read. Present tense
   only — it describes the current tree, never how it got here. Kept current in the PR that
   invalidates it, same as the README.
-- **`docs/architecture-findings.md`** — where that shape falls **short**, as numbered `F<n>` entries.
+- **`docs/findings/`** — where that shape falls **short**, one `F<n>-<slug>.md` file per finding.
   Separate from `architecture.md` because the two have different lifecycles: a description is true
-  until the code changes, a finding is open until somebody closes it. Delete a finding when it is
-  fixed; never renumber, since the labels are cross-referenced from tasks and commits.
+  until the code changes, a finding is open until somebody closes it. Delete a finding's file when it
+  is fixed; never renumber or reuse a number, since the labels are cross-referenced from tasks and commits.
 - **`docs/go-conventions.md`** — how unjira's Go is written: CLI/DI (Kong), error handling,
   testing (testify + go-cmp + fluent builders), package layout, linting, build (Earthfile). Read
   it before writing or reviewing any Go in this repo.
@@ -165,10 +165,10 @@ So, in the same PR:
   model, so a stale one misleads in the same way a stale Status section does. Edit it in the **present
   tense**: replace the description, don't append "previously X, now Y" — that file says what the code
   is, and `git log` already holds what it was.
-- **`docs/architecture-findings.md`** — **delete** the finding you just fixed. Not strike it through,
+- **`docs/findings/`** — **delete** the file of the finding you just fixed. Not strike it through,
   not annotate it as resolved: a stale finding sends the next reader to fix something already fixed.
   If the fix taught a general lesson, that lesson goes to `design-notes.md` as an incident. Add a
-  finding here whenever you notice a problem you are not fixing in this PR.
+  finding file here (rules in `docs/findings/README.md`) whenever you notice a problem you are not fixing in this PR.
 - **This file** — when an architecture invariant changes.
 
 A doc claim that can be checked should be checked. "602 assertions pass" and "the write path is

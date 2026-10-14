@@ -47,7 +47,7 @@ type NarrateResult struct {
 	//
 	// Reported for the same reason ExcludedTrackerRecords is: an unreported
 	// exclusion reads as "nothing was left out", and this bound is deliberately
-	// unmeasured (docs/architecture-findings.md F16) — an operator needs the
+	// unmeasured (docs/findings/F16-the-prompt-is-unbounded-in-the-window.md) — an operator needs the
 	// count to tune correlator.max_context_narratives against evidence rather
 	// than guessing blind.
 	ExcludedContextNarratives int

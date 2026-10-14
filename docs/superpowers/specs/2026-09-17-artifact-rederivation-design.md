@@ -2,7 +2,7 @@
 
 **Status: design**
 
-Closes nothing yet. Resolves finding **F21** (`docs/architecture-findings.md`) by naming the shape a
+Closes nothing yet. Resolves finding **F21** (`docs/findings/F21-an-event-s-artifacts-are-frozen-at.md`) by naming the shape a
 fix would take, and recommends **not building it now**. This is a "record the shape, defer the work"
 spec, in the same register as F1, F7, and F8's own entries in that file — a deliberate, argued
 deferral, not an unfinished design.
@@ -320,7 +320,7 @@ soon after, for three reasons that together outweigh the case for building it:
    `dev` subcommand with a dry-run report. Nothing about deferring this loses that simplicity; the
    design does not decay by waiting.
 
-This mirrors F1, F7, and F8's own entries in `docs/architecture-findings.md`: each records a
+This mirrors F1, F7, and F8's own entries in `docs/findings/`: each records a
 considered position and a condition that would change the answer, rather than either implementing
 prematurely or leaving the question unexamined. The condition here is explicit: **revisit when a
 non-disposable store exists, or when a second collector improvement (after F20 and F25) makes the

@@ -501,7 +501,7 @@ strongest available signal that it finished. Everything else considered and defe
   `rules/bot-pr-noise.md`'s own documented failure mode almost exactly — a check-run stream risks
   becoming the new dependency-bump-approval noise. Deferred until there is real volume data to size
   a filter against, matching this codebase's own "measure before capping" discipline
-  (`docs/architecture-findings.md` F16's four falsified proposals are the cautionary example).
+  (`docs/findings/F16-the-prompt-is-unbounded-in-the-window.md`'s four falsified proposals are the cautionary example).
 - **Commits (within a PR, or direct pushes).** Real value — F20 measured 32 of 47 commits carrying a
   key in their message — but `collector/claudecode`'s own `scmKeys` (F20) already recovers commit
   messages for every commit *authored through a Claude Code session*, which is unjira's primary
@@ -517,7 +517,7 @@ strongest available signal that it finished. Everything else considered and defe
 
 ### Full text, no truncation — and this is where F16's own foresight pays off
 
-PR bodies are exactly the "whale-shaped" input `docs/architecture-findings.md` F16 already
+PR bodies are exactly the "whale-shaped" input `docs/findings/F16-the-prompt-is-unbounded-in-the-window.md` already
 anticipated when it kept `correlator.WithMaxEventSummaryChars` alive after measuring it inert on the
 current (all-Jira, all-`claude_code`) store: *"a future GitHub or Slack collector has whale-shaped
 inputs (PR bodies, thread transcripts)."* This collector does not add a new cap — the existing one
@@ -744,7 +744,7 @@ pre-collector state.
 
 **Recommendation:** extract via `refs.ParsePRRefs` and store as a private artifact in slice 1 (cheap,
 and it means the data exists the day a consumer is designed — the same "write now, read later"
-shape `docs/architecture-findings.md` F6 defends for `ArtifactGitBranch`'s siblings), but do **not**
+shape `docs/findings/F6-six-artifacts-are-written-and-never-read.md` defends for `ArtifactGitBranch`'s siblings), but do **not**
 claim this collector "wires in" `refs` in the sense the Jira collector's own spec wired in
 `gatherCandidates`. It does not. This is recorded as an **open question** below rather than resolved,
 per the task's own instruction not to force a resolution where none is earned.

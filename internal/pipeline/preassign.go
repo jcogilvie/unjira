@@ -273,7 +273,7 @@ func extendForPreAssignments(tx *store.Tx, placed []PRPreAssignment) error {
 // What the model can still do is move one of the narrative's OTHER eligible members —
 // the PR's :opened, say — somewhere else, which would split the PR again. That is the
 // reshuffle every eligible member has always been open to, not something this join
-// introduces; see docs/architecture-findings.md F45.
+// introduces; see docs/findings/F45-the-model-can-still-reshuffle-a-pr.md.
 func hidePreAssigned(
 	existing []correlator.Narrative, placed []PRPreAssignment,
 ) ([]correlator.Narrative, map[int64]int) {

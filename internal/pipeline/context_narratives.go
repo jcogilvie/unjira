@@ -5,7 +5,7 @@ package pipeline
 // MaxContextNarratives.
 //
 // WHY THIS IS THE RIGHT LEVER. Re-measured across nine dev narrate --dry-run runs
-// (docs/architecture-findings.md, F16): completion tokens track EXTENDS-cluster
+// (docs/findings/F16-the-prompt-is-unbounded-in-the-window.md): completion tokens track EXTENDS-cluster
 // count, and EXTENDS count equals the context-narrative count in every run — 32
 // in, 32 out, every time. Neither the per-event summary cap
 // (correlator.WithMaxEventSummaryChars) nor a coarser grouping instruction moves
@@ -37,7 +37,7 @@ package pipeline
 // neither side has matched one yet, or because the connecting thread is a
 // branch/topic rather than a ticket) and is not among the most recent ranks below
 // both tiers and can be dropped — the same class of loss any bound accepts, stated
-// so an operator can weigh it. Recorded in docs/architecture-findings.md F16 as
+// so an operator can weigh it. Recorded in docs/findings/F16-the-prompt-is-unbounded-in-the-window.md as
 // available-but-UNMEASURED: this repo's design-notes #37/#38 record why a
 // worktree with no Jira credentials cannot produce a trustworthy before/after
 // token number, so none is claimed here.

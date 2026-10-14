@@ -2,7 +2,7 @@
 
 Status: approved, landing slice by slice. See "Status by slice" at the end.
 
-Resolves the tracker-model chain in `docs/architecture-findings.md`:
+Resolves the tracker-model chain in `docs/findings/`:
 
 - **F7:** one struct carries four concerns.
 - **F28:** a collector cannot ask whether its system is a tracker here.

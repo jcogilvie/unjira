@@ -408,7 +408,7 @@ data/                   SQLite database lives here (gitignored)
   count fell 37 → 25 but `NEW` clusters more than doubled, every extra one duplicating a narrative
   that already existed but was dropped from context — and completion tokens did not measurably
   improve. Set it only where the alternative is a pass that fails outright on the response ceiling;
-  see `docs/architecture-findings.md` F16.
+  see `docs/findings/F16-the-prompt-is-unbounded-in-the-window.md`.
 - **An event is one narrative's work, and may be other narratives' context.** Subagent-first work
   reuses one investigation for several fixes, so clustering links an event to several narratives,
   as two kinds of link. A **member** link says the event is this narrative's work. Each event has
