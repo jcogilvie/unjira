@@ -27,7 +27,7 @@ func (s *Store) InsertEvent(event events.Event) (bool, error) {
 		`INSERT OR IGNORE INTO events (source, external_id, occurred_at, actor, summary, artifacts, raw_ref, ingested_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.Source, event.ExternalID, event.OccurredAt,
-		nullable(event.Actor), event.Summary, string(artifacts), nullable(event.RawRef), s.now(),
+		nullable(event.Actor), event.Summary, string(artifacts), nullable(event.RawRef), time.Now(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("inserting event %s/%s: %w", event.Source, event.ExternalID, err)

@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // SupersedeAction records a reviewer's ruling on one action and replaces it with
 // a freshly drafted one, atomically. It is what triage's [e]dit and [t]arget
@@ -37,7 +40,7 @@ func (s *Store) SupersedeAction(
 	oldID int64, oldStatus, feedback string, replacement ActionRow,
 ) (newID int64, err error) {
 	err = s.WithTx(func(tx *Tx) error {
-		if err := updateActionStatusImpl(tx.tx, tx.now(), oldID, oldStatus, &feedback, nil); err != nil {
+		if err := updateActionStatusImpl(tx.tx, time.Now(), oldID, oldStatus, &feedback, nil); err != nil {
 			return err
 		}
 

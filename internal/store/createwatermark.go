@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // ActionTypeCreate is the actions.type value of a create action: opening a new issue
 // for a narrative that has none.
@@ -76,7 +79,7 @@ func (s *Store) RecordCreateExamined(narrativeID int64, reason string) error {
 		     examined_at = excluded.examined_at,
 		     examined_link_seq = excluded.examined_link_seq,
 		     reason = excluded.reason`,
-		narrativeID, s.now(), reason,
+		narrativeID, time.Now(), reason,
 	); err != nil {
 		return fmt.Errorf("recording create examination for narrative %d: %w", narrativeID, err)
 	}

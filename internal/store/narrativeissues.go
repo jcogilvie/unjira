@@ -297,13 +297,13 @@ func (s *Store) NarrativesWithActionableLinks(limit int, roles []Role) ([]Narrat
 // still letting the database's partial unique index reject a genuine second
 // primary with a real error.
 func (s *Store) AddNarrativeIssues(narrativeID int64, links []NarrativeIssue) error {
-	return addNarrativeIssuesImpl(s.db, s.now(), narrativeID, links)
+	return addNarrativeIssuesImpl(s.db, time.Now(), narrativeID, links)
 }
 
 // AddNarrativeIssues is the *Tx-scoped variant of
 // (*Store).AddNarrativeIssues.
 func (t *Tx) AddNarrativeIssues(narrativeID int64, links []NarrativeIssue) error {
-	return addNarrativeIssuesImpl(t.tx, t.now(), narrativeID, links)
+	return addNarrativeIssuesImpl(t.tx, time.Now(), narrativeID, links)
 }
 
 func addNarrativeIssuesImpl(c dbConn, createdAt time.Time, narrativeID int64, links []NarrativeIssue) error {

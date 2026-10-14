@@ -166,7 +166,9 @@ func (b *NarrativeBuilder) Build() NarrativeSpec {
 
 // -- cursors -----------------------------------------------------------------------
 
-// CursorSpec is one collector cursor a Fixture seeds, stamped at UpdatedAt.
+// CursorSpec is one collector cursor a Fixture seeds, stamped at UpdatedAt. Seed
+// reaches UpdatedAt by sleeping in a synctest bubble, so a Fixture lists its cursors
+// oldest first.
 type CursorSpec struct {
 	Collector, Resource, Position string
 	UpdatedAt                     time.Time
@@ -218,8 +220,12 @@ type Fixture struct {
 type IDs map[string]int64
 
 // Seed writes f to s: events, then narratives with their member links and compaction
-// boundaries, then cursors, each stamped at its UpdatedAt through Store.SetClock. It
-// leaves the store's clock at time.Now.
+// boundaries, then cursors, each stamped at its UpdatedAt by sleeping until then.
+//
+// A fixture with cursors must be seeded inside synctest.Test, on a store opened in the
+// same bubble, where time.Now is fake time and time.Sleep advances it at once. Fake
+// time only moves forward, so cursors are seeded in order, each at or after the one
+// before and the bubble's clock; one earlier fails the test rather than being reordered.
 func Seed(tb testing.TB, s *store.Store, f Fixture) IDs {
 	tb.Helper()
 
@@ -261,12 +267,17 @@ func Seed(tb testing.TB, s *store.Store, f Fixture) IDs {
 	}
 
 	for _, c := range f.Cursors {
-		s.SetClock(func() time.Time { return c.UpdatedAt })
+		wait := time.Until(c.UpdatedAt)
+		if wait < 0 {
+			tb.Fatalf("storetest: cursor %s/%s is stamped at %s, before the bubble's clock at %s; "+
+				"fake time only moves forward, so list cursors oldest first, inside synctest.Test",
+				c.Collector, c.Resource, c.UpdatedAt.UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+		}
+		time.Sleep(wait)
 		if err := s.SetCursor(c.Collector, c.Resource, c.Position); err != nil {
 			tb.Fatalf("storetest: seeding cursor %s/%s: %v", c.Collector, c.Resource, err)
 		}
 	}
-	s.SetClock(time.Now)
 
 	return ids
 }

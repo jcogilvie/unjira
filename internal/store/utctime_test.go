@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -258,56 +259,66 @@ func latestFixture() storetest.Fixture {
 			storetest.Event("newer").Source("jira").Issue("PROJ-1").StatusTo("Done").At(newer).Build(),
 			storetest.Event("older").Source("jira").Issue("PROJ-1").StatusTo("In Progress").At(older).Build(),
 		},
+		// Oldest first: Seed stamps each cursor by moving a synctest bubble's clock
+		// forward to it.
 		Cursors: []storetest.CursorSpec{
-			storetest.Cursor("/newer.jsonl").UpdatedAt(newer).Build(),
 			storetest.Cursor("/older.jsonl").UpdatedAt(older).Build(),
+			storetest.Cursor("/newer.jsonl").UpdatedAt(newer).Build(),
 		},
 	}
 }
 
 func TestLatestStatusEvent_TakesTheNewestInstantAcrossOffsets(t *testing.T) {
-	s := openStore(t)
-	storetest.Seed(t, s, latestFixture())
+	synctest.Test(t, func(t *testing.T) {
+		s := openStore(t)
+		storetest.Seed(t, s, latestFixture())
 
-	got, ok, err := s.LatestStatusEvent("PROJ-1")
-	require.NoError(t, err)
-	require.True(t, ok)
-	if d := cmp.Diff(store.StatusEvent{To: "Done", OccurredAt: newer}, got); d != "" {
-		t.Errorf("LatestStatusEvent (-want +got):\n%s", d)
-	}
+		got, ok, err := s.LatestStatusEvent("PROJ-1")
+		require.NoError(t, err)
+		require.True(t, ok)
+		if d := cmp.Diff(store.StatusEvent{To: "Done", OccurredAt: newer}, got); d != "" {
+			t.Errorf("LatestStatusEvent (-want +got):\n%s", d)
+		}
+	})
 }
 
 func TestIssueActivity_TakesTheNewestInstantAcrossOffsets(t *testing.T) {
-	s := openStore(t)
-	storetest.Seed(t, s, latestFixture())
+	synctest.Test(t, func(t *testing.T) {
+		s := openStore(t)
+		storetest.Seed(t, s, latestFixture())
 
-	got, err := s.IssueActivity()
-	require.NoError(t, err)
-	if d := cmp.Diff(map[string]time.Time{"PROJ-1": newer}, got); d != "" {
-		t.Errorf("IssueActivity (-want +got):\n%s", d)
-	}
+		got, err := s.IssueActivity()
+		require.NoError(t, err)
+		if d := cmp.Diff(map[string]time.Time{"PROJ-1": newer}, got); d != "" {
+			t.Errorf("IssueActivity (-want +got):\n%s", d)
+		}
+	})
 }
 
 func TestEventCountsBySource_TakesTheNewestInstantAcrossOffsets(t *testing.T) {
-	s := openStore(t)
-	storetest.Seed(t, s, latestFixture())
+	synctest.Test(t, func(t *testing.T) {
+		s := openStore(t)
+		storetest.Seed(t, s, latestFixture())
 
-	got, err := s.EventCountsBySource()
-	require.NoError(t, err)
-	if d := cmp.Diff([]store.SourceCount{{Source: "jira", Count: 2, Latest: newer}}, got); d != "" {
-		t.Errorf("EventCountsBySource (-want +got):\n%s", d)
-	}
+		got, err := s.EventCountsBySource()
+		require.NoError(t, err)
+		if d := cmp.Diff([]store.SourceCount{{Source: "jira", Count: 2, Latest: newer}}, got); d != "" {
+			t.Errorf("EventCountsBySource (-want +got):\n%s", d)
+		}
+	})
 }
 
 func TestCursorCounts_TakesTheNewestInstantAcrossOffsets(t *testing.T) {
-	s := openStore(t)
-	storetest.Seed(t, s, latestFixture())
+	synctest.Test(t, func(t *testing.T) {
+		s := openStore(t)
+		storetest.Seed(t, s, latestFixture())
 
-	got, err := s.CursorCounts()
-	require.NoError(t, err)
-	if d := cmp.Diff([]store.CollectorCount{{Collector: "claude_code", Count: 2, Latest: newer}}, got); d != "" {
-		t.Errorf("CursorCounts (-want +got):\n%s", d)
-	}
+		got, err := s.CursorCounts()
+		require.NoError(t, err)
+		if d := cmp.Diff([]store.CollectorCount{{Collector: "claude_code", Count: 2, Latest: newer}}, got); d != "" {
+			t.Errorf("CursorCounts (-want +got):\n%s", d)
+		}
+	})
 }
 
 // -- the stored format's properties ------------------------------------------------

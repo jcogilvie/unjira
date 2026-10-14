@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // reconcileExaminationsSchema records that a reconcile pass looked at a narrative and
 // could act on nothing in its delta — the watermark that keeps that backlog draining.
@@ -102,7 +105,7 @@ func (s *Store) RecordReconcileExamined(narrativeID int64, reason string) error 
 		     examined_at = excluded.examined_at,
 		     examined_link_seq = excluded.examined_link_seq,
 		     reason = excluded.reason`,
-		narrativeID, s.now(), reason,
+		narrativeID, time.Now(), reason,
 	); err != nil {
 		return fmt.Errorf("recording reconcile examination for narrative %d: %w", narrativeID, err)
 	}

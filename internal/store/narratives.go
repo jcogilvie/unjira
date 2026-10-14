@@ -39,12 +39,12 @@ type NarrativeRow struct {
 // InsertNarrative inserts a new narrative row (status 'open', no compaction
 // boundary) and returns its id.
 func (s *Store) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
-	return insertNarrativeImpl(s.db, s.now(), windowStart, windowEnd, title, summary)
+	return insertNarrativeImpl(s.db, time.Now(), windowStart, windowEnd, title, summary)
 }
 
 // InsertNarrative is the *Tx-scoped variant of (*Store).InsertNarrative.
 func (t *Tx) InsertNarrative(windowStart, windowEnd time.Time, title, summary string) (int64, error) {
-	return insertNarrativeImpl(t.tx, t.now(), windowStart, windowEnd, title, summary)
+	return insertNarrativeImpl(t.tx, time.Now(), windowStart, windowEnd, title, summary)
 }
 
 func insertNarrativeImpl(c dbConn, createdAt, windowStart, windowEnd time.Time, title, summary string) (int64, error) {

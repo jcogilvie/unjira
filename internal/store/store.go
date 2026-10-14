@@ -28,7 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
@@ -288,11 +287,6 @@ type Store struct {
 	// after Open rather than as an Open parameter, because Open's signature is used in
 	// dozens of tests that have no interest in logs.
 	log *slog.Logger
-	// now is the store's clock: every time the store stamps itself (ingested_at,
-	// linked_at, created_at, decided_at, examined_at and the rest) is now(), bound as a
-	// time.Time like every other stored time (see the package doc), never SQLite's
-	// strftime('now'), whose text has a different shape. time.Now from Open.
-	now func() time.Time
 }
 
 // SetLogger attaches a logger to an already-open store.
@@ -303,14 +297,6 @@ type Store struct {
 // exactly where the logger already exists.
 func (s *Store) SetLogger(log *slog.Logger) {
 	s.log = log
-}
-
-// SetClock replaces the store's clock, the source of every time the store stamps
-// itself (ingested_at, updated_at, linked_at, created_at and the rest). Open sets
-// time.Now. Not an Open parameter, for SetLogger's reason; its callers are tests that
-// need a stamp to be a chosen instant (internal/store/storetest).
-func (s *Store) SetClock(now func() time.Time) {
-	s.now = now
 }
 
 // dbConn is the subset of *sql.DB / *sql.Tx the narrative accessors need, so
@@ -326,8 +312,6 @@ type dbConn interface {
 // correlator.Persist needs to run atomically. Obtain one via WithTx.
 type Tx struct {
 	tx *sql.Tx
-	// now is the Store's clock, for the stamps a write through this Tx makes.
-	now func() time.Time
 }
 
 // WithTx runs fn inside a single transaction, committing if fn returns nil and
@@ -346,7 +330,7 @@ func (s *Store) WithTx(fn func(*Tx) error) error {
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 
-	if err := fn(&Tx{tx: tx, now: s.now}); err != nil {
+	if err := fn(&Tx{tx: tx}); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
 			// Wrap both: callers may need errors.Is against either the
 			// original failure or the rollback failure that masked it.
@@ -423,7 +407,7 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("applying schema to %s: %w", dbPath, err)
 	}
 
-	return &Store{db: db, now: time.Now}, nil
+	return &Store{db: db}, nil
 }
 
 // sqliteDSN turns a plain filesystem path into a modernc.org/sqlite DSN that

@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // matchExaminationsSchema records that matching looked at a narrative and found nothing
 // to match against — the watermark that keeps its backlog draining (finding F22).
@@ -100,7 +103,7 @@ func (s *Store) RecordMatchExamined(narrativeID int64, reason string) error {
 		     examined_at = excluded.examined_at,
 		     examined_link_seq = excluded.examined_link_seq,
 		     reason = excluded.reason`,
-		narrativeID, s.now(), reason,
+		narrativeID, time.Now(), reason,
 	); err != nil {
 		return fmt.Errorf("recording match examination for narrative %d: %w", narrativeID, err)
 	}

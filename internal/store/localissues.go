@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrLocalIssueNotFound is returned by the local-issue accessors when no
@@ -79,7 +80,7 @@ func (s *Store) InsertLocalIssue(project, summary, issueType, description string
 		return "", fmt.Errorf("marshaling labels for %s: %w", key, err)
 	}
 
-	now := s.now()
+	now := time.Now()
 	_, err = s.db.Exec(
 		`INSERT INTO local_issues (key, project, summary, description, issue_type, labels, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -133,7 +134,7 @@ func (s *Store) SetLocalIssueStatus(key, status string) error {
 		`UPDATE local_issues
 		 SET status = ?, updated_at = ?
 		 WHERE key = ?`,
-		status, s.now(), key,
+		status, time.Now(), key,
 	)
 	if err != nil {
 		return fmt.Errorf("setting status for local issue %s: %w", key, err)
@@ -159,7 +160,7 @@ func (s *Store) InsertLocalIssueComment(issueKey, body string) error {
 
 	if _, err := s.db.Exec(
 		`INSERT INTO local_issue_comments (issue_key, body, created_at) VALUES (?, ?, ?)`,
-		issueKey, body, s.now(),
+		issueKey, body, time.Now(),
 	); err != nil {
 		return fmt.Errorf("adding comment to local issue %s: %w", issueKey, err)
 	}

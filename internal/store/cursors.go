@@ -35,7 +35,7 @@ func (s *Store) SetCursor(collector, resource, position string) error {
 		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT (collector, resource)
 		 DO UPDATE SET position = excluded.position, updated_at = excluded.updated_at`,
-		collector, resource, position, s.now(),
+		collector, resource, position, time.Now(),
 	)
 	if err != nil {
 		return fmt.Errorf("setting cursor %s/%s: %w", collector, resource, err)

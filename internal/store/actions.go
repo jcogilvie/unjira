@@ -46,7 +46,7 @@ type ActionRow struct {
 	Error      string     `json:"error"`
 	DecidedAt  *time.Time `json:"decided_at"`
 	ExecutedAt *time.Time `json:"executed_at"`
-	// CreatedAt is set by InsertAction from the store's clock; a value passed in is
+	// CreatedAt is set by InsertAction from time.Now; a value passed in is
 	// ignored.
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -55,16 +55,16 @@ type ActionRow struct {
 //
 // created_link_seq records the link sequence's high-water mark in the same
 // statement, and is what DeltaEvents bounds on: links made after this insert
-// are the next pass's delta. created_at is the store's clock at insert, for display
+// are the next pass's delta. created_at is time.Now at insert, for display
 // and ordering only (finding F30).
 func (s *Store) InsertAction(a ActionRow) (int64, error) {
-	return insertActionImpl(s.db, s.now(), a)
+	return insertActionImpl(s.db, time.Now(), a)
 }
 
 // InsertAction is the Tx-scoped form, so reconciler.Persist can write a whole
 // pass atomically.
 func (t *Tx) InsertAction(a ActionRow) (int64, error) {
-	return insertActionImpl(t.tx, t.now(), a)
+	return insertActionImpl(t.tx, time.Now(), a)
 }
 
 func insertActionImpl(c dbConn, createdAt time.Time, a ActionRow) (int64, error) {
@@ -168,7 +168,7 @@ func (s *Store) LatestActionForNarrative(narrativeID int64) (ActionRow, bool, er
 // UpdateActionStatus moves an action to a new workflow state, stamping
 // decided_at and/or executed_at as that state implies.
 //
-// Both stamps are one reading of the store's clock, bound as a time.Time like every
+// Both stamps are one reading of time.Now, bound as a time.Time like every
 // stored time, so a statement that sets both sets them equal. Terminal-state semantics:
 // any human ruling sets decided_at; only a write that actually reached the
 // tracker sets executed_at — and, in the same statement, executed_link_seq,
@@ -225,7 +225,7 @@ func (s *Store) UpdateActionStatusAndError(id int64, status string, errText *str
 //
 // It takes a transaction, not any dbConn, because a ruling that makes the row a correction
 // is two writes (markCorrection's insert, then this update) and they are one fact.
-// now is the store's clock reading for every stamp the ruling makes.
+// now is the one time.Now reading for every stamp the ruling makes.
 func updateActionStatusImpl(c *sql.Tx, now time.Time, id int64, status string, feedback, errText *string) error {
 	query := `UPDATE actions SET status = ?`
 	args := []any{status}
@@ -287,7 +287,7 @@ func updateActionStatusImpl(c *sql.Tx, now time.Time, id int64, status string, f
 // are not already inside one.
 func (s *Store) updateActionStatus(id int64, status string, feedback, errText *string) error {
 	return s.WithTx(func(tx *Tx) error {
-		return updateActionStatusImpl(tx.tx, tx.now(), id, status, feedback, errText)
+		return updateActionStatusImpl(tx.tx, time.Now(), id, status, feedback, errText)
 	})
 }
 
