@@ -13,5 +13,8 @@ journal itself.
 Excluding the directory (`collectors.claude_code.exclude_cwds`) removes all of it, and is the operator's
 call: it is a configuration fact about which directories hold work. What no configuration can say is
 which session in a work directory is reading rather than working, so the class recurs wherever such a
-session runs elsewhere. Matching's prompt does say a candidate may be only cited, and F64 is why a
-model that doubted these links still produced comments. Unmeasured beyond the one directory.
+session runs elsewhere. Matching's prompt does say a candidate may be only cited. A link the model
+doubted below `match.confidence_floor` no longer draws a comment: the narrative has no confident primary,
+so it is proposed as a create naming its links instead. On that store at floor 0.7, 4 of those 6
+narratives (2, 30, 53, 66) move from a proposed comment to a create candidate, which the create prompt
+may decline as not worth tracking. Unmeasured beyond the one directory.

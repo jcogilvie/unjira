@@ -19,9 +19,10 @@ import (
 
 // SelectionRoles is every role a narrative_issues row can carry. Reconcile
 // selects on this superset — NOT the narrower actionable set actionableLinks
-// filters to — so a `mentioned`-only narrative still gets a ReconcileResult
-// row documenting "considered, nothing to do", distinguishing it from a
-// narrative with no link at all. Once per delta: reconcileOne records that
+// filters to — so a narrative with no confident primary (a `mentioned`-only one,
+// a `same_work` with no primary, a primary below match.confidence_floor) still
+// gets a ReconcileResult row documenting "considered, nothing to draft: a create
+// candidate", distinguishing it from a narrative with no link at all. Once per delta: reconcileOne records that
 // examination, so the narrative is not selected again until a member event is
 // linked after it. A genuinely unlinked narrative has no
 // narrative_issues row of any role, so NarrativesWithActionableLinks excludes
@@ -49,6 +50,11 @@ type reconcileOptions struct {
 	graph        *workflow.Graph
 	log          *slog.Logger
 	destinations DestinationPolicy
+	// floor is match.confidence_floor: a primary below it is not a confident home
+	// (see confidentPrimary). Zero, the unset value, makes every primary confident.
+	floor float64
+	// candidates describes a create's candidate tickets (see WithCandidateReader).
+	candidates tasktracker.TaskReader
 }
 
 // ReconcileOption configures an optional Reconcile behaviour.
@@ -127,13 +133,42 @@ func WithReconcileLogger(log *slog.Logger) ReconcileOption {
 	}
 }
 
-// Reconcile drafts proposed actions for narratives with at least one
-// narrative_issues link of any role. A mentioned-only narrative is still
-// selected (see SelectionRoles) so it gets a ReconcileResult documenting
-// "considered, nothing to do" rather than silently vanishing; reconcileOne's
-// actionableLinks then narrows to primary/same_work before anything is
-// drafted. A narrative with no link at all is excluded — that is matching's
-// backlog, not the reconciler's.
+// WithConfidenceFloor supplies match.confidence_floor, the confidence a primary link
+// must reach to be the narrative's confident home. Below it, Reconcile drafts onto no
+// link of that narrative and ProposeCreates treats it as untracked work, naming its
+// links as candidates (see confidentPrimary).
+//
+// Absent means 0, so every primary is confident: that is how an unset
+// match.confidence_floor reads, and it keeps every caller that passes no floor drafting
+// exactly as before.
+func WithConfidenceFloor(floor float64) ReconcileOption {
+	return func(o *reconcileOptions) {
+		o.floor = floor
+	}
+}
+
+// WithCandidateReader supplies the reader ProposeCreates uses to describe a create's
+// candidate tickets (summary and status) for the drafting prompt and the reviewer. It
+// reads only tickets the narrative is already linked to, and nothing is verified or
+// drafted against them: a create still writes nothing to them, and gate.Applier still
+// checks the destination before writing.
+//
+// Absent means the candidates are named without a description, by key, role and
+// confidence only.
+func WithCandidateReader(reader tasktracker.TaskReader) ReconcileOption {
+	return func(o *reconcileOptions) {
+		o.candidates = reader
+	}
+}
+
+// Reconcile drafts proposed actions for narratives with a confident primary: a
+// primary link at or above match.confidence_floor (WithConfidenceFloor). Every
+// narrative with a link of any role is selected (see SelectionRoles), so one with no
+// confident primary still gets a ReconcileResult saying why nothing was drafted
+// rather than silently vanishing; it is the create path's to propose for
+// (ProposeCreates). For the rest, reconcileOne's actionableLinks narrows to
+// primary/same_work before anything is drafted. A narrative with no link at all is
+// excluded — that is matching's backlog, not the reconciler's.
 //
 // Acquires no lease; the caller holds one, matching RunNarrate's convention
 // for Cluster/Persist/Match. Failures are per narrative via errors.Join: one
@@ -211,24 +246,33 @@ func reconcileOne(
 		return result, correlator.Stats{}, fmt.Errorf("loading links for narrative %d: %w", narrative.ID, err)
 	}
 
-	actionable := actionableLinks(links)
-	if len(actionable) == 0 {
-		// Only `mentioned` links, which by definition get nothing (a narrative with no
-		// link at all is never selected). Recorded, for the reason the self-authored
-		// branch below is: SelectionRoles selects this narrative on purpose, so it gets
-		// this result row, and an outcome that writes nothing under the stable
-		// (window_start, id) order is design-notes #29's livelock. Unrecorded, it held a
-		// slot every pass and CountNarrativesWithDelta reported it as unexamined work
-		// forever. A member event linked later re-admits it, which is also when matching
-		// re-examines it and may promote a primary.
-		if err := s.RecordReconcileExamined(
-			narrative.ID, "no actionable link: every link is mentioned"); err != nil {
+	if why, confident := confidentPrimary(links, o.floor); !confident {
+		// No confident home, so nothing is drafted onto ANY link: not a `mentioned`
+		// citation, not a primary the model doubted, and not a `same_work` beside it,
+		// which is the same work recorded again and shares that doubt. The narrative is
+		// untracked work, and the create path proposes a ticket for it naming these
+		// links, so a reviewer can link it to one of them instead (findings F58, F64).
+		// Drafting here as well would put the story on a ticket the reviewer is about to
+		// be asked whether it belongs on.
+		//
+		// Recorded, for the reason the self-authored branch below is: SelectionRoles
+		// selects this narrative on purpose, so it gets this result row, and an outcome
+		// that writes nothing under the stable (window_start, id) order is design-notes
+		// #29's livelock. Unrecorded, it held a slot every pass and
+		// CountNarrativesWithDelta reported it as unexamined work forever. A member event
+		// linked later re-admits it. A role that changes without one (a create applied,
+		// a reviewer's [t]arget) does not; a [t]arget drafts for the new link itself.
+		if err := s.RecordReconcileExamined(narrative.ID, why); err != nil {
 			return result, correlator.Stats{}, fmt.Errorf(
 				"recording reconcile examination for narrative %d: %w", narrative.ID, err)
 		}
 
+		result.Notes = append(result.Notes, why)
+
 		return result, correlator.Stats{}, nil
 	}
+
+	actionable := actionableLinks(links)
 
 	delta, err := s.DeltaEvents(narrative.ID)
 	if err != nil {
@@ -336,6 +380,42 @@ func noteLowConfidence(result *ReconcileResult, threshold float64) {
 				a.Type, a.IssueKey, a.Confidence, threshold))
 		}
 	}
+}
+
+// confidentPrimary reports whether a narrative's links include a confident home: a
+// primary at or above floor (match.confidence_floor). When they do not, why says what
+// they hold instead, for the examination record and the pass output.
+//
+// The boundary is matching's own (persistLinks withholds promotion when confidence <
+// floor), and the same rule, with the same floor, is store.awaitingCreate's first
+// clause, so the reconciler and the create path partition linked work between them:
+// a linked narrative is drafted onto here or is the create path's to decide, never
+// both.
+func confidentPrimary(links []store.NarrativeIssue, floor float64) (why string, confident bool) {
+	hasSameWork := false
+
+	for _, l := range links {
+		switch l.Role {
+		case correlator.RolePrimary:
+			if l.Confidence >= floor {
+				return "", true
+			}
+
+			return fmt.Sprintf("no confident primary: %s at confidence %.2f is below "+
+				"match.confidence_floor %.2f, so this is a create candidate naming its links",
+				l.IssueKey, l.Confidence, floor), false
+		case correlator.RoleSameWork:
+			hasSameWork = true
+		}
+	}
+
+	if hasSameWork {
+		return "no primary link: a same_work link with no primary beside it is not a " +
+			"confident home, so this is a create candidate naming its links", false
+	}
+
+	return "no actionable link: every link is mentioned, so this is a create candidate " +
+		"naming its links", false
 }
 
 // actionableLinks returns the links that may receive an action: the primary

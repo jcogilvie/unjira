@@ -7,12 +7,13 @@ empty array, or names only keys that `actionsFromVerdicts` does not recognize, w
 bounds the delta. The narrative is selected again next pass, a model call each time, and the backlog
 count reports it as unexamined work throughout. This is design-notes #29's livelock, with spend. Every
 other "nothing to do" exit in `reconcileOne` records something: a suppression row, or a
-`reconcile_examinations` watermark for a self-authored delta or a narrative whose every link is
-`mentioned`.
+`reconcile_examinations` watermark for a self-authored delta or a narrative with no confident
+primary.
 
 It is not closed the same way, because this outcome may be a malformed answer rather than a verdict.
 The prompt requires exactly one action per issue shown (`draft.go:28`), so an empty array contradicts
-it. F58 records the same disagreement on the matching side. Whether to re-ask, as matching does for an
+it. Matching faces the same question for an empty classification
+(`TestMatch_EmptyClassifierResponseIsLoggedNotSilent`). Whether to re-ask, as matching does for an
 unparseable response, or to record the examination is the open question. **Consequence:** a model that
 declines to draft for a narrative is billed for that narrative on every pass for as long as it keeps
 declining. Unmeasured: no narrative in a real 30-day store's backlog is in this state.

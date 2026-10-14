@@ -121,6 +121,11 @@ func ActionPayload(action ProposedAction) (string, error) {
 			// the payload shape every earlier build wrote.
 			payload["scope"] = action.Scope
 		}
+		if len(action.Candidates) > 0 {
+			// Only for work that carries links short of a confident primary, so a
+			// create for work with no link at all keeps the earlier shape too.
+			payload["candidates"] = action.Candidates
+		}
 	default:
 		return "", fmt.Errorf("unknown action type %q", action.Type)
 	}
@@ -146,6 +151,22 @@ func CreateScopeOf(payload string) string {
 	}
 
 	return p.Scope
+}
+
+// CreateCandidatesOf reads the candidate tickets a create action's payload names, or nil
+// when it names none (work with no link at all, and every create persisted before
+// candidates existed). A payload that does not decode names none: this is for display,
+// and gate.Applier decodes the payload itself before it writes.
+func CreateCandidatesOf(payload string) []CreateCandidate {
+	var p struct {
+		Candidates []CreateCandidate `json:"candidates"`
+	}
+
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		return nil
+	}
+
+	return p.Candidates
 }
 
 // recordSuppression writes one watermark row for a narrative a pass examined and

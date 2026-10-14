@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,4 +175,25 @@ func seedTriageAction(t *testing.T, s *store.Store, issueKey string) store.Actio
 	require.NoError(t, err)
 
 	return got
+}
+
+// TestTerminalPrompter_ACreateShowsItsCandidates: the reviewer of a create proposed for
+// work with no confident primary sees each candidate ticket, and how to link the work to
+// one instead, before being asked to decide.
+func TestTerminalPrompter_ACreateShowsItsCandidates(t *testing.T) {
+	p := &terminalPrompter{in: bufio.NewScanner(strings.NewReader("q\n"))}
+	item := triage.Item{Position: 1, Total: 1, Appliable: true, Action: store.ActionRow{
+		Type: "create", Confidence: 0.8,
+		Payload: `{"summary":"Rework the retry path","description":"d","candidates":[` +
+			`{"key":"PROJ-7","role":"primary","confidence":0.3,"provenance":"prose_first",` +
+			`"summary":"Retries hammer the API","status":"Done"}]}`,
+	}}
+
+	out := captureStdout(t, func() {
+		_, err := p.Ask(item)
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, out, "PROJ-7 (primary, confidence 0.30, prose_first): Retries hammer the API [Done]")
+	assert.Contains(t, out, "[t]arget one to link the work there instead")
 }

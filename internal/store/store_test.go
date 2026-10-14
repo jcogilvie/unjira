@@ -1781,70 +1781,93 @@ func TestRemoveNarrativeIssue_MissingLinkErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "NOPE-1")
 }
 
-// TestNarrativesAwaitingCreate_IsStricterThanWithoutPrimaryLink pins the
-// distinction the create path depends on, and it survived finding F11 in a
-// different form.
+// TestNarrativesAwaitingCreate_AWeakerLinkThanAConfidentPrimaryIsUntracked pins the
+// one rule the create path and the reconciler share: a narrative with no confident
+// primary is untracked work. Every link that falls short of one (a `mentioned`
+// citation, a `same_work` with no primary beside it, a primary below
+// match.confidence_floor) leaves the narrative a create candidate, and the proposal
+// names those tickets so a reviewer can link the work instead (findings F58, F64).
 //
-// It used to be column-vs-table: NarrativesWithoutIssueKey selected on the
-// denormalized narratives.issue_key while this one asked the link table, so a
-// low-confidence primary appeared in the former and not the latter. That column is
-// gone and both now ask the link table — but they still differ, on ROLE:
-//
-//   - NarrativesWithoutPrimaryLink: "no PRIMARY link". A `mentioned` citation is
-//     not an attribution, so matching still has work to do.
-//   - NarrativesAwaitingCreate: "no link of ANY role". Stricter, because the
-//     create path must not open a ticket for work that names any issue at all —
-//     even one it only cited.
-//
-// Both accessors are asserted on one fixture so the contrast is the assertion.
-func TestNarrativesAwaitingCreate_IsStricterThanWithoutPrimaryLink(t *testing.T) {
-	s := openStore(t)
-	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+// The boundary is matching's own: persistLinks withholds promotion when confidence <
+// floor, so a primary AT the floor is confident here too.
+func TestNarrativesAwaitingCreate_AWeakerLinkThanAConfidentPrimaryIsUntracked(t *testing.T) {
+	const floor = 0.7
 
-	// Cites a ticket without being attributed to it — the case that separates the two.
-	mentionedOnly, err := s.InsertNarrative(base, base.Add(time.Hour), "cites", "mentioned only")
-	require.NoError(t, err)
-	require.NoError(t, s.AddNarrativeIssues(mentionedOnly, []store.NarrativeIssue{
-		{
-			IssueKey: "PROJ-1", Role: store.Role("mentioned"),
-			Provenance: "prose_later", Confidence: 0.3, Connection: "test",
-		},
-	}))
+	cases := []struct {
+		name     string
+		links    []store.NarrativeIssue
+		awaiting bool
+	}{
+		{name: "no link at all", awaiting: true},
+		{name: "mentioned only", awaiting: true, links: []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: "mentioned", Provenance: "prose_later", Confidence: 0.9},
+		}},
+		{name: "same_work with no primary", awaiting: true, links: []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: "same_work", Provenance: "prose_first", Confidence: 0.9},
+		}},
+		{name: "primary below the floor", awaiting: true, links: []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: store.RolePrimary, Provenance: "prose_first", Confidence: 0.69},
+			{IssueKey: "PROJ-2", Role: "same_work", Provenance: "prose_first", Confidence: 0.95},
+		}},
+		{name: "primary at the floor", awaiting: false, links: []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: store.RolePrimary, Provenance: "prose_first", Confidence: floor},
+		}},
+		{name: "primary above the floor", awaiting: false, links: []store.NarrativeIssue{
+			{IssueKey: "PROJ-1", Role: store.RolePrimary, Provenance: "branch", Confidence: 0.9},
+			{IssueKey: "PROJ-2", Role: "mentioned", Provenance: "prose_later", Confidence: 0.2},
+		}},
+	}
 
-	// Genuinely untracked: no link of any role.
-	unlinked, err := s.InsertNarrative(base, base.Add(time.Hour), "untracked", "no link at all")
-	require.NoError(t, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openStore(t)
+			base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 
-	byPrimary, err := s.NarrativesWithoutPrimaryLink(10)
-	require.NoError(t, err)
-	assert.Len(t, byPrimary, 2,
-		"a mentioned-only narrative is unattributed, so matching still owns it")
+			id, err := s.InsertNarrative(base, base.Add(time.Hour), tc.name, "s")
+			require.NoError(t, err)
+			if len(tc.links) > 0 {
+				require.NoError(t, s.AddNarrativeIssues(id, tc.links))
+			}
 
-	byAnyLink, err := s.NarrativesAwaitingCreate(10)
-	require.NoError(t, err)
-	require.Len(t, byAnyLink, 1,
-		"but the create path must skip it: it names an issue, and a create would duplicate")
-	assert.Equal(t, unlinked, byAnyLink[0].ID)
+			got, err := s.NarrativesAwaitingCreate(10, floor)
+			require.NoError(t, err)
+
+			count, err := s.CountNarrativesAwaitingCreate(floor)
+			require.NoError(t, err)
+
+			if tc.awaiting {
+				require.Len(t, got, 1, "no confident primary: the create path owes this a decision")
+				assert.Equal(t, id, got[0].ID)
+				assert.Equal(t, 1, count, "the count must describe exactly the selector's population")
+			} else {
+				assert.Empty(t, got, "a confident primary is tracked work; a create would duplicate it")
+				assert.Zero(t, count)
+			}
+		})
+	}
 }
 
-// TestNarrativesAwaitingCreate_AnyRoleCounts: a `mentioned`-only narrative is not
-// untracked work — somebody cited an issue for it. Creating a new ticket would
-// duplicate whatever that citation points at.
-func TestNarrativesAwaitingCreate_AnyRoleCounts(t *testing.T) {
+// TestNarrativesAwaitingCreate_TheFloorIsAParameter: what counts as confident is
+// config (match.confidence_floor), so the same stored primary is tracked under one
+// floor and untracked under a higher one. A floor of 0, which is what an unset key
+// reads as, makes every primary confident.
+func TestNarrativesAwaitingCreate_TheFloorIsAParameter(t *testing.T) {
 	s := openStore(t)
 	base := time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 
-	id, err := s.InsertNarrative(base, base.Add(time.Hour), "mentioned only", "cited an issue")
+	id, err := s.InsertNarrative(base, base.Add(time.Hour), "doubted", "s")
 	require.NoError(t, err)
-	require.NoError(t, s.WithTx(func(tx *store.Tx) error {
-		return tx.AddNarrativeIssues(id, []store.NarrativeIssue{{
-			IssueKey: "PROJ-9", Role: store.Role("mentioned"),
-			Provenance: "prose_later", Confidence: 0.2, Connection: "test",
-		}})
+	require.NoError(t, s.AddNarrativeIssues(id, []store.NarrativeIssue{
+		{IssueKey: "PROJ-1", Role: store.RolePrimary, Provenance: "prose_first", Confidence: 0.5},
 	}))
 
-	got, err := s.NarrativesAwaitingCreate(10)
+	for floor, want := range map[float64]int{0: 0, 0.5: 0, 0.51: 1, 1: 1} {
+		got, err := s.NarrativesAwaitingCreate(10, floor)
+		require.NoError(t, err)
+		assert.Len(t, got, want, "floor %v", floor)
 
-	require.NoError(t, err)
-	assert.Empty(t, got, "a mentioned link is still a link; this is not untracked work")
+		count, err := s.CountNarrativesAwaitingCreate(floor)
+		require.NoError(t, err)
+		assert.Equal(t, want, count, "floor %v", floor)
+	}
 }

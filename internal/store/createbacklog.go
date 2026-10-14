@@ -18,10 +18,18 @@ import "fmt"
 //
 // Three clauses, one per kind of skip:
 //
-//   - No narrative_issues row of ANY role. Stricter than NarrativesWithoutPrimaryLink's
-//     "no primary": a narrative carrying only a `mentioned` link cites an issue, and a
-//     create would duplicate whatever that citation points at. A real but
-//     low-confidence primary is a link too, so that narrative is tracked work.
+//   - No CONFIDENT primary: no narrative_issues row with role primary at or above
+//     match.confidence_floor (the one bound parameter). Every weaker link leaves the
+//     narrative untracked work: a `mentioned` citation, a `same_work` with no primary
+//     beside it, and a primary the model itself doubted. The proposal names those
+//     tickets (reconciler.CreateCandidate), so a reviewer can approve the new ticket or
+//     link the work to one of them instead; the reconciler drafts onto none of them
+//     (reconciler.confidentPrimary), so this is the only path that can speak for such
+//     work. Before this, any link of any role excluded the narrative, and with the
+//     reconciler also silent on a `mentioned` link the work was proposed nowhere
+//     (findings F58 and F64). The boundary is matching's own: persistLinks withholds
+//     promotion when confidence < floor, so a primary AT the floor is confident. A NULL
+//     confidence reads as 0, as store.NarrativeIssues reads it, so Go and SQL agree.
 //
 //   - Not a narrative whose create-path decision stands: one whose actions include a
 //     create at proposed, approved, applied or declined, or a suppression, with no
@@ -49,10 +57,13 @@ import "fmt"
 //   - Not examined-and-entirely-self-authored with no member link since
 //     (createExaminationPredicate, written where dropSelfAuthored empties a narrative).
 //
-// Correlated on n.id with no bound parameters, so it drops into either query's WHERE
-// clause unchanged.
+// Correlated on n.id with exactly ONE bound parameter, the confidence floor, which is
+// config and so cannot be a literal here. Both queries bind it first, so it drops into
+// either WHERE clause unchanged.
 const awaitingCreate = `NOT EXISTS (
-		     SELECT 1 FROM narrative_issues ni WHERE ni.narrative_id = n.id
+		     SELECT 1 FROM narrative_issues ni
+		     WHERE ni.narrative_id = n.id AND ni.role = '` + string(RolePrimary) + `'
+		       AND COALESCE(ni.confidence, 0) >= ?
 		 )
 		 AND NOT (
 		     EXISTS (
@@ -69,13 +80,16 @@ const awaitingCreate = `NOT EXISTS (
 		 )` + createExaminationPredicate
 
 // NarrativesAwaitingCreate returns up to limit narratives the create path still owes a
-// decision — untracked work it has not already proposed for, applied, declined with
+// decision — untracked work (no primary at or above confidenceFloor, which is
+// match.confidence_floor) it has not already proposed for, applied, declined with
 // nothing new since, or found to be only unjira's own output — ordered by
 // (window_start, id).
 //
 // RENAMED from NarrativesWithNoIssueLink when its meaning narrowed from "no issue link"
 // to "no issue link and not already handled", so no caller could keep the old meaning
-// by accident. See awaitingCreate for each clause and why it is in SQL.
+// by accident. Its population widened again, from "no issue link" to "no confident
+// primary", and the floor became a parameter; the new parameter puts every caller in
+// front of that change. See awaitingCreate for each clause and why it is in SQL.
 //
 // Exists because the reconciler could not see untracked narratives at all.
 // NarrativesWithActionableLinks requires a link by construction, so reconcileOne
@@ -85,7 +99,7 @@ const awaitingCreate = `NOT EXISTS (
 //	NarrativesWithoutPrimaryLink (matching's backlog)    -> 1 rows
 //
 // which is why adding "create" to the drafting prompt would have changed nothing.
-func (s *Store) NarrativesAwaitingCreate(limit int) ([]NarrativeRow, error) {
+func (s *Store) NarrativesAwaitingCreate(limit int, confidenceFloor float64) ([]NarrativeRow, error) {
 	rows, err := s.db.Query(
 		`SELECT n.id, n.window_start, n.window_end, n.title, n.summary,
 		        n.status, n.compaction_boundary, n.compaction_boundary_event_id
@@ -93,7 +107,7 @@ func (s *Store) NarrativesAwaitingCreate(limit int) ([]NarrativeRow, error) {
 		 WHERE `+awaitingCreate+`
 		 ORDER BY n.window_start, n.id
 		 LIMIT ?`,
-		limit,
+		confidenceFloor, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying narratives awaiting a create decision: %w", err)
@@ -115,14 +129,15 @@ func (s *Store) NarrativesAwaitingCreate(limit int) ([]NarrativeRow, error) {
 // CountNarrativesAwaitingCreate is how many narratives the create path still owes a
 // decision — the create backlog behind reconciler.max_narratives_per_pass.
 //
-// Same predicate as NarrativesAwaitingCreate by construction (awaitingCreate). Counted
+// Same predicate and the same floor as NarrativesAwaitingCreate by construction
+// (awaitingCreate), so the caller must pass the floor the pass selected under. Counted
 // after a pass, it says how much untracked work that pass's cap left unexamined: before
 // it existed, a pass starved by already-handled narratives rendered exactly like a pass
 // with nothing left to create.
-func (s *Store) CountNarrativesAwaitingCreate() (int, error) {
+func (s *Store) CountNarrativesAwaitingCreate(confidenceFloor float64) (int, error) {
 	var n int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM narratives n WHERE ` + awaitingCreate,
+		`SELECT COUNT(*) FROM narratives n WHERE `+awaitingCreate, confidenceFloor,
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("counting narratives awaiting a create decision: %w", err)
 	}

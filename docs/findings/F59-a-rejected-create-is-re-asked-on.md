@@ -19,6 +19,13 @@ the same way, which is defensible, since nothing was written. Not fixed here: th
 it changes what a rejection means on the create path, which is a review-semantics decision. Frequency on
 real data is unmeasured.
 
+Work with no confident primary is a create candidate too, and its proposal names the tickets the work
+is linked to. That widens the population this applies to (on a real 30-day store at floor 0.7, by 9
+linked narratives) without changing its bound. The reviewer's "link instead", `[t]arget` on the create,
+leaves a reviewer primary, which is confident, so that ruling is never re-asked. A plain `[r]eject` is
+re-asked as above, and each re-ask also re-reads the candidate tickets, one tracker read each (one real
+narrative holds 10 links).
+
 ## Status
 
-open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data
+open. Found fixing the create backlog; pinned as current behaviour by `TestProposeCreates_ARejectedCreateDoesNotBlockForever` (no new event, one call, one fresh proposal). Bounded at one re-ask per rejection. Unmeasured on real data. Work with no confident primary now joins the population (9 more linked narratives on a real 30-day store at floor 0.7) under the same bound; `[t]arget` on its create leaves a confident reviewer primary and is never re-asked

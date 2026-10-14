@@ -15,6 +15,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/logging"
 	"github.com/jcogilvie/unjira/internal/rules"
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
 
 // createSystemPrompt asks for an issue to open, or for an explicit refusal.
@@ -31,14 +32,14 @@ import (
 // unrecognized fragment of work into a ticket somebody has to close, which is
 // worse than proposing nothing. So "worth_tracking": false is a first-class
 // answer, and the prompt names the cases that deserve it.
-const createSystemPrompt = `You are deciding whether a body of work that has NO tracker issue deserves one, and if so, drafting it.
+const createSystemPrompt = `You are deciding whether a body of work that no tracker issue is known to track deserves one, and if so, drafting it.
 
-You will be shown a narrative: a title, a summary, and the events that make it up. No issue exists for it.
+You will be shown a narrative: a title, a summary, and the events that make it up. No issue is known to track it. When the work is linked to tickets that are not confidently its home (tickets it cites, or ones it might belong to), they are listed as candidates.
 
 Most work like this should NOT get a new issue. Answer "worth_tracking": false when the work is:
 - exploratory or investigative with no lasting outcome
 - routine maintenance (dependency bumps, formatting, config tweaks)
-- too small to plan around, or already obviously part of something else
+- too small to plan around, or already obviously part of something else that is not among the candidates you are shown
 - a false start, or an experiment that was abandoned
 
 Answer "worth_tracking": true only when the work is substantial, has a lasting outcome, and a team planning their next cycle would want it visible. An issue nobody will act on is worse than no issue.
@@ -85,8 +86,11 @@ type createVerdict struct {
 	Destinations []string `json:"destinations"`
 }
 
-// ProposeCreates drafts a create action for each narrative that matched no issue
-// at all.
+// ProposeCreates drafts a create action for each narrative with no confident
+// primary: no link at all, or links that fall short of a primary at or above
+// match.confidence_floor (WithConfidenceFloor). Those links are named on the proposal
+// as candidates, described through WithCandidateReader, so the reviewer can link the
+// work to one instead of approving a new ticket.
 //
 // This is the actual fix for "the drafting prompt never offers create". That
 // framing was wrong, and the probe is worth keeping because the wrong fix looked
@@ -120,11 +124,13 @@ type createVerdict struct {
 // review queue exists to draw. The recurring cost that might otherwise justify
 // one is handled where it belongs, by remembering declines: see StatusDeclined.
 //
-// No tracker call anywhere in here, unlike Reconcile: there is no issue to verify.
-// That is why this takes no TaskReader — the parameter's absence is the guarantee.
-// The verification invariant is not weakened, because it governs proposing against
-// state unjira inferred; here there is no prior state to be wrong about, and
-// gate.Applier still resolves and checks the target project before writing.
+// No tracker call is made to VERIFY anything, unlike Reconcile: there is no issue to
+// act on. That is why this takes no TaskReader parameter. The one read, through the
+// optional WithCandidateReader, describes the candidate tickets for the prompt and the
+// reviewer, and nothing is drafted against them. The verification invariant is not
+// weakened, because it governs proposing against state unjira inferred; here there is
+// no prior state to be wrong about, and gate.Applier still resolves and checks the
+// target project, and re-checks the narrative's primary, before writing.
 func ProposeCreates(
 	ctx context.Context,
 	s *store.Store,
@@ -143,7 +149,7 @@ func ProposeCreates(
 
 	limit := cfg.NarrativeLimit()
 
-	narratives, err := s.NarrativesAwaitingCreate(limit + 1)
+	narratives, err := s.NarrativesAwaitingCreate(limit+1, o.floor)
 	if err != nil {
 		return nil, stats, fmt.Errorf("listing narratives awaiting a create decision: %w", err)
 	}
@@ -157,7 +163,7 @@ func ProposeCreates(
 
 	var results []ReconcileResult
 	for _, n := range narratives {
-		result, oneStats, err := proposeCreateOne(ctx, s, client, n, learnedRules, o.destinations)
+		result, oneStats, err := proposeCreateOne(ctx, s, client, n, learnedRules, &o)
 		stats.Add(oneStats)
 		results = append(results, result)
 		if err != nil {
@@ -179,11 +185,28 @@ func proposeCreateOne(
 	client llm.Client,
 	narrative store.NarrativeRow,
 	learnedRules []rules.Rule,
-	policy DestinationPolicy,
+	o *reconcileOptions,
 ) (ReconcileResult, correlator.Stats, error) {
 	result := ReconcileResult{NarrativeID: narrative.ID}
+	policy := o.destinations
 
 	var stats correlator.Stats
+
+	// Untracked means no CONFIDENT primary (confidentPrimary, with the floor the
+	// selector used). The selector already excludes a confidently linked narrative, so
+	// this is a backstop: a selector bug here costs a duplicate ticket. A note, not a
+	// suppression row, because nothing about the create path's decision changed.
+	links, err := s.NarrativeIssues(narrative.ID)
+	if err != nil {
+		return result, stats, fmt.Errorf("loading links for narrative %d: %w", narrative.ID, err)
+	}
+
+	if _, confident := confidentPrimary(links, o.floor); confident {
+		result.Notes = append(result.Notes, fmt.Sprintf(
+			"already tracked by its confident primary %s; no create proposed", primaryKey(links)))
+
+		return result, stats, nil
+	}
 
 	// AllMemberEvents, not DeltaEvents: there is no prior action to compute a
 	// delta against, and a create must describe the whole body of work rather
@@ -275,12 +298,19 @@ func proposeCreateOne(
 		}
 	}
 
+	// Read last, once nothing else settles the narrative without a model call, so a
+	// narrative the pass skips costs no tracker read either.
+	candidates, err := describeCandidates(o.candidates, narrative.ID, links)
+	if err != nil {
+		return result, stats, err
+	}
+
 	systemPrompt := createSystemPrompt
 	if rendered := rules.Render(learnedRules); rendered != "" {
 		systemPrompt += "\n\n" + rendered
 	}
 
-	raw, usage, err := client.Complete(ctx, systemPrompt, buildCreatePrompt(narrative, evts, allowed))
+	raw, usage, err := client.Complete(ctx, systemPrompt, buildCreatePrompt(narrative, evts, allowed, candidates))
 	if err != nil {
 		return result, stats, fmt.Errorf("proposing a create for narrative %d: %w", narrative.ID, err)
 	}
@@ -313,6 +343,7 @@ func proposeCreateOne(
 		Body:       verdict.Description,
 		Confidence: clampConfidence(verdict.Confidence),
 		Rationale:  verdict.Rationale,
+		Candidates: candidates,
 	}
 
 	if policy == nil {
@@ -529,9 +560,66 @@ func parseCreateResponse(raw string) (createVerdict, error) {
 	return v, nil
 }
 
-// buildCreatePrompt renders the narrative and its full event list, and, when several
-// destinations are allowed, asks the model to name the ones the work belongs in.
-func buildCreatePrompt(narrative store.NarrativeRow, evts []events.Event, allowed []config.Destination) string {
+// primaryKey is the key of links' primary, or "" when there is none.
+func primaryKey(links []store.NarrativeIssue) string {
+	for _, l := range links {
+		if l.Role == correlator.RolePrimary {
+			return l.IssueKey
+		}
+	}
+
+	return ""
+}
+
+// describeCandidates turns a narrative's links into the candidates its create proposal
+// names: every link, since a narrative that reaches here has no confident primary and
+// each of its links is a ticket a reviewer might link the work to instead.
+//
+// With a reader, each ticket's summary and status are read, so the model and the
+// reviewer judge a ticket and not a key. A transport error fails the narrative for this
+// pass, as in verifyLinks: an unreachable tracker is no answer about the ticket, and a
+// proposal drafted from part of the picture would be reviewed as though it were all of
+// it. Any other read failure (not found, no tracker covers the key) keeps the candidate
+// and says why it is undescribed: dropping it would show the reviewer fewer tickets than
+// matching linked.
+func describeCandidates(
+	reader tasktracker.TaskReader, narrativeID int64, links []store.NarrativeIssue,
+) ([]CreateCandidate, error) {
+	if len(links) == 0 {
+		return nil, nil
+	}
+
+	out := make([]CreateCandidate, 0, len(links))
+	for _, l := range links {
+		c := CreateCandidate{
+			IssueKey: l.IssueKey, Role: l.Role, Confidence: l.Confidence, Provenance: l.Provenance,
+		}
+
+		if reader != nil {
+			issue, err := reader.GetIssue(l.IssueKey)
+			switch {
+			case err == nil:
+				c.Summary, c.Status = issue.Summary, issue.StatusName
+			case tasktracker.IsTransportError(err):
+				return nil, fmt.Errorf(
+					"reading candidate %s for narrative %d: %w", l.IssueKey, narrativeID, err)
+			default:
+				c.Unread = err.Error()
+			}
+		}
+
+		out = append(out, c)
+	}
+
+	return out, nil
+}
+
+// buildCreatePrompt renders the narrative and its full event list, the candidate tickets
+// it is linked to without a confident primary, and, when several destinations are
+// allowed, asks the model to name the ones the work belongs in.
+func buildCreatePrompt(
+	narrative store.NarrativeRow, evts []events.Event, allowed []config.Destination, candidates []CreateCandidate,
+) string {
 	var b strings.Builder
 
 	if len(allowed) > 1 {
@@ -541,11 +629,44 @@ func buildCreatePrompt(narrative store.NarrativeRow, evts []events.Event, allowe
 	}
 
 	fmt.Fprintf(&b, "Narrative: title=%q\nsummary: %q\n\n", narrative.Title, narrative.Summary)
-	b.WriteString("Every event in this work (no tracker issue exists for any of it):\n")
+
+	if len(candidates) == 0 {
+		b.WriteString("Every event in this work (no tracker issue exists for any of it):\n")
+	} else {
+		writeCandidates(&b, candidates)
+		b.WriteString("Every event in this work:\n")
+	}
+
 	for _, e := range evts {
 		fmt.Fprintf(&b, "- [%s] %s: %s\n",
 			e.OccurredAt.Format("2006-01-02 15:04"), e.Source, e.Summary)
 	}
 
 	return b.String()
+}
+
+// writeCandidates renders the candidate tickets and tells the model what the reviewer
+// will do with them, so it can judge whether the work deserves its own ticket or is
+// better linked to one of these.
+func writeCandidates(b *strings.Builder, candidates []CreateCandidate) {
+	b.WriteString("Candidate tickets. This work is linked to these, but none of them is " +
+		"confidently where it is tracked:\n")
+
+	for _, c := range candidates {
+		fmt.Fprintf(b, "- %s (%s, confidence %.2f, found by %s)", c.IssueKey, c.Role, c.Confidence, c.Provenance)
+		switch {
+		case c.Summary != "" || c.Status != "":
+			fmt.Fprintf(b, ": %q [%s]", c.Summary, c.Status)
+		case c.Unread != "":
+			fmt.Fprintf(b, ": could not be read (%s)", c.Unread)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\nThe reviewer sees these candidates beside your answer, and may link the work to " +
+		"one of them instead of opening a new ticket. Judge whether this work deserves its own " +
+		"ticket. If it is substantial but looks like one candidate's work, still answer " +
+		"\"worth_tracking\": true and name that candidate in your rationale, so the reviewer can " +
+		"link it there. A ticket the work only cites (a \"caused by\", a \"discovered while\") " +
+		"says nothing either way.\n\n")
 }
