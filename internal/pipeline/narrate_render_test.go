@@ -127,6 +127,17 @@ func TestRenderNarrateResult(t *testing.T) {
 		assert.NotContains(t, pipeline.RenderNarrateResult(one), "rounds", "one round is the line as it always read")
 	})
 
+	t.Run("a refused clustering response re-asked is reported, silent at zero", func(t *testing.T) {
+		reasked := full
+		reasked.Stats.ClusterReasks = 2
+
+		out := pipeline.RenderNarrateResult(reasked)
+
+		assert.Contains(t, out, "re-asked 2 clustering response(s) the parser refused (llm.max_cluster_reasks)",
+			"a pass that recovered from a refused answer says how close it came to failing")
+		assert.NotContains(t, pipeline.RenderNarrateResult(full), "clustering response(s)")
+	})
+
 	t.Run("a refused dispute answer re-asked is reported apart from batching", func(t *testing.T) {
 		disputed := full
 		disputed.Stats.DisputedEvents = 1

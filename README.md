@@ -120,6 +120,15 @@ non-obvious corrections each one produced.
   comments, issue comments — collected as evidence for *that* work, so the tokens a review costs are
   attributed to the task reviewed even when you don't own it. Part of token attribution being
   complete. Today the GitHub collector reads only PRs you authored.
+- **Writable GitHub tracker, and selectable write destinations (planned, needs a spec)**: GitHub
+  as a backing tracker unjira can write to, not only a source it reads. Work that touches two
+  sources of record, such as an upstream GitHub issue and an internal Jira ticket, would get a
+  proposal per destination, each with text written for that audience, and the reviewer picks which
+  ones land. The tracker model already shapes this: a destination set, per-tracker
+  `writable_scopes`, and a self-identity requirement on writers, which the GitHub client meets
+  through `GET /user`. What is missing is the GitHub writer itself, per-destination prose, and a
+  disclosure gate. Text generated from internal transcripts can carry internal detail, and a
+  public write cannot be taken back, so that gate has to land before any public scope is writable.
 - **Phase 4 — presentation and inbox**: a local web UI over the store, and collectors that also
   gather work you still *need* to do (review requests, assigned issues, mentions), so the same
   pipeline yields an inbox of incoming work beside the record of work done.
@@ -234,17 +243,19 @@ and an LLM — `UNJIRA_LLM_API_KEY`, or better, `llm.api_key_helper`, a command 
 a fresh token. A `watch` loop against a gateway issuing short-lived credentials needs the helper;
 a captured token expires mid-pass, after earlier stages have already cost money.
 
-**Re-ask budgets bound how often a model is asked again.** Three call sites follow up on a
+**Re-ask budgets bound how often a model is asked again.** Four call sites follow up on a
 response that cannot be used as it stands: matching re-asks a response its parser refused, quoting
-the reason; clustering re-asks for in-window events the response left in no cluster (in rounds,
-each showing the clusters merged so far); and clustering asks which cluster owns an event two of them
+the reason; clustering re-asks a clustering response its parser refused (an out-of-range index, an
+unknown kind, a missing confidence, prose), repeating the same prompt and quoting the refusal;
+clustering re-asks for in-window events an accepted response left in no cluster (in rounds, each
+showing the clusters merged so far); and clustering asks which cluster owns an event two of them
 claimed, re-asking a batch whose answer was refused. A re-ask is any call after the original one for
 the same problem, so `0` means never ask again and fail loudly. The most specific key that is set
 wins:
 
 | key | applies to |
 |---|---|
-| `llm.max_match_reasks`, `llm.max_omission_reasks`, `llm.max_dispute_reasks` | one use, for this model |
+| `llm.max_match_reasks`, `llm.max_cluster_reasks`, `llm.max_omission_reasks`, `llm.max_dispute_reasks` | one use, for this model |
 | `llm.max_reasks` | every use, for this model |
 | `llm_defaults.max_reasks` | every use, every model block (one exists today) |
 | built in | `1` |
@@ -252,8 +263,16 @@ wins:
 For the dispute budget the first dispute call counts, because it is itself a re-ask of the
 clustering response: `0` makes any double placement an error, and `2` allows one more call per
 batch after a refused answer. A spent budget is always a loud error, never a partial result, and a
-negative value is refused when the config loads. A clustering re-ask repeats the whole clustering
-prompt, so each round costs about as much as the first call.
+negative value is refused when the config loads.
+
+The uses differ in cost. A matching re-ask resends one narrative's prompt, and a dispute re-ask one
+batch of disputed events. A cluster re-ask resends the whole clustering prompt plus the refused
+response, and an omission round the whole clustering prompt plus the clusters so far, so each costs
+about as much as the first clustering call (roughly 70–110k tokens on a mature store). Both apply
+per clustering call, so a bisected window's halves each have their own. `llm.max_cluster_reasks`
+still defaults to `1` like the others, because the alternative is a failed pass, whose retry resends
+the same prompt along with everything else the pass had already paid for. A cluster re-ask that would
+not fit the context window is not sent, and the pass fails naming the refusal.
 
 Run it unattended on macOS with `ops/com.unjira.watch.plist` — `watch` already loops on its
 own `--interval`, so the template starts it once via `RunAtLoad`/`KeepAlive` rather than

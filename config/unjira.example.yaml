@@ -91,11 +91,18 @@ llm:
   max_output_tokens: 32000
   # Re-ask budgets: how many follow-up calls a refused or incomplete model answer may
   # cost before it is a loud error. The most specific setting that is set wins:
-  # max_match_reasks / max_omission_reasks / max_dispute_reasks, then max_reasks here,
-  # then llm_defaults.max_reasks, then 1. 0 never re-asks. A matching re-ask resends
-  # one narrative's prompt; an omission or dispute re-ask resends a clustering prompt.
+  # max_match_reasks / max_cluster_reasks / max_omission_reasks / max_dispute_reasks,
+  # then max_reasks here, then llm_defaults.max_reasks, then 1. 0 never re-asks.
+  # A matching re-ask resends one narrative's prompt, and a dispute re-ask one batch of
+  # disputed events. An omission round resends the whole clustering prompt.
   max_reasks: 1
   max_omission_reasks: 1
+  # Re-asks a clustering response the parser refused (bad index, unknown kind, missing
+  # confidence, prose), per clustering call. The costliest re-ask: each one resends the
+  # whole window's clustering prompt plus the refused response, about what the first
+  # call cost. Still 1 by default, since the alternative is a failed pass whose retry
+  # resends that prompt anyway. A re-ask too big for context_window_tokens is not sent.
+  max_cluster_reasks: 1
 
 correlator:
   tail_summarize_threshold_tokens: 6000
