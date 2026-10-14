@@ -17,8 +17,8 @@ func WithStage(ctx context.Context, stage string) context.Context {
 	return context.WithValue(ctx, stageKey{}, stage)
 }
 
-// StageFrom returns the stage set by WithStage, or UnstagedStage when there is none.
-func StageFrom(ctx context.Context) string {
+// StageOf returns the stage set by WithStage, or UnstagedStage when there is none.
+func StageOf(ctx context.Context) string {
 	if s, ok := ctx.Value(stageKey{}).(string); ok && s != "" {
 		return s
 	}
@@ -56,7 +56,7 @@ var _ Client = (*RecordingClient)(nil)
 
 // NewRecordingClient wraps inner so each call is recorded through rec under the
 // configured model name (not the server-reported one: own calls are priced by
-// the name configured).
+// the name configured). now must be non-nil.
 func NewRecordingClient(inner Client, rec Recorder, model string, now func() time.Time) Client {
 	return &RecordingClient{inner: inner, rec: rec, model: model, now: now}
 }
@@ -69,7 +69,7 @@ func (c *RecordingClient) Complete(ctx context.Context, systemPrompt, userPrompt
 
 	recErr := c.rec.RecordLLMCall(CallRecord{
 		At:         c.now(),
-		Stage:      StageFrom(ctx),
+		Stage:      StageOf(ctx),
 		Model:      c.model,
 		Prompt:     usage.PromptTokens,
 		Completion: usage.CompletionTokens,

@@ -57,7 +57,7 @@ func TestRecordingClient(t *testing.T) {
 		{
 			name:    "an error carrying usage still records and returns the original error",
 			ctx:     llm.WithStage(context.Background(), "match"),
-			inner:   fakeClient{text: "partial", usage: llm.Usage{PromptTokens: 50, CompletionTokens: 9}, err: errLength},
+			inner:   fakeClient{usage: llm.Usage{PromptTokens: 50, CompletionTokens: 9}, err: errLength},
 			want:    llm.CallRecord{At: at, Stage: "match", Model: "configured", Prompt: 50, Completion: 9},
 			wantErr: []error{errLength},
 		},
@@ -81,6 +81,13 @@ func TestRecordingClient(t *testing.T) {
 			recErr: errors.New("disk full"),
 			want:   llm.CallRecord{At: at, Stage: llm.UnstagedStage, Model: "configured"},
 		},
+		{
+			name:   "a recorder error joins the inner error",
+			ctx:    context.Background(),
+			inner:  fakeClient{err: errLength},
+			recErr: errors.New("disk full"),
+			want:   llm.CallRecord{At: at, Stage: llm.UnstagedStage, Model: "configured"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -101,6 +108,9 @@ func TestRecordingClient(t *testing.T) {
 			case tt.recErr != nil:
 				require.ErrorIs(t, err, tt.recErr)
 				require.ErrorContains(t, err, "recording llm call")
+				if tt.inner.err != nil {
+					require.ErrorIs(t, err, tt.inner.err)
+				}
 			case len(tt.wantErr) > 0:
 				for _, w := range tt.wantErr {
 					require.ErrorIs(t, err, w)
