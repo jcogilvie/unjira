@@ -40,22 +40,30 @@ import (
 // same benefit without a knob whose correct value nobody can calibrate, so the
 // caller receives every key and sorts.
 //
-// Rows whose occurred_at will not parse are SKIPPED rather than failing the call.
+// Rows whose occurred_at is not a time are SKIPPED rather than failing the call.
 // This map is a soft ranking signal, not a correctness gate: one malformed
 // timestamp should cost that key its promotion, not cost the whole pass its
-// ranking. The skip is silent because a parse failure here is a collector bug
-// that belongs in the collector's own validation, and logging per row would emit
-// one line per event on a corrupted store.
+// ranking. The skip is silent because the store writes only time.Time values, so a
+// value the driver cannot read as one was written by something else, and logging
+// per row would emit one line per event on a corrupted store.
+//
+// The newest row per key is chosen with a window function rather than
+// MAX(occurred_at): an aggregate has no declared type, so the driver would return it
+// as text, while the column read from its row stays a DATETIME (see the package doc).
 func (s *Store) IssueActivity() (map[string]time.Time, error) {
 	// The artifact key is interpolated from internal/events' declared contract
 	// rather than written as a literal, so this query and events.StatusChangeOf
 	// cannot drift apart — the same treatment LatestStatusEvent uses.
 	query := fmt.Sprintf(
-		`SELECT json_extract(artifacts, '$.%[1]s') AS issue_key, MAX(occurred_at)
-		   FROM events
-		  WHERE json_extract(artifacts, '$.%[1]s') IS NOT NULL
-		    AND json_extract(artifacts, '$.%[1]s') != ''
-		  GROUP BY issue_key`,
+		`SELECT issue_key, occurred_at FROM (
+		   SELECT json_extract(artifacts, '$.%[1]s') AS issue_key, occurred_at,
+		          ROW_NUMBER() OVER (
+		            PARTITION BY json_extract(artifacts, '$.%[1]s') ORDER BY occurred_at DESC
+		          ) AS newest
+		     FROM events
+		    WHERE json_extract(artifacts, '$.%[1]s') IS NOT NULL
+		      AND json_extract(artifacts, '$.%[1]s') != ''
+		 ) WHERE newest = 1`,
 		events.ArtifactIssueKey,
 	)
 
@@ -69,14 +77,14 @@ func (s *Store) IssueActivity() (map[string]time.Time, error) {
 	for rows.Next() {
 		var (
 			issueKey   string
-			occurredAt string
+			occurredAt any
 		)
 		if err := rows.Scan(&issueKey, &occurredAt); err != nil {
 			return nil, fmt.Errorf("scanning issue activity: %w", err)
 		}
 
-		at, parseErr := time.Parse(time.RFC3339, occurredAt)
-		if parseErr != nil {
+		at, isTime := occurredAt.(time.Time)
+		if !isTime {
 			continue
 		}
 

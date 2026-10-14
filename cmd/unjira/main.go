@@ -536,7 +536,7 @@ func (c *statusCmd) Run(app *appContext) error {
 
 	fmt.Println("Events by source:")
 	for _, row := range counts {
-		fmt.Printf("  %s: %d (latest %s)\n", row.Source, row.Count, row.Latest)
+		fmt.Printf("  %s: %d (latest %s)\n", row.Source, row.Count, row.Latest.Format(time.RFC3339))
 	}
 
 	cursorCounts, err := app.store.CursorCounts()
@@ -546,7 +546,7 @@ func (c *statusCmd) Run(app *appContext) error {
 
 	fmt.Println("Cursors:")
 	for _, row := range cursorCounts {
-		fmt.Printf("  %s: %d tracked resource(s), updated %s\n", row.Collector, row.Count, row.Latest)
+		fmt.Printf("  %s: %d tracked resource(s), updated %s\n", row.Collector, row.Count, row.Latest.Format(time.RFC3339))
 	}
 
 	return nil

@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // reconcileExaminationsSchema records that a reconcile pass looked at a narrative and
 // could act on nothing in its delta — the watermark that keeps that backlog draining.
@@ -31,7 +34,7 @@ import "fmt"
 const reconcileExaminationsSchema = `
 CREATE TABLE IF NOT EXISTS reconcile_examinations (
     narrative_id INTEGER PRIMARY KEY REFERENCES narratives (id),
-    examined_at  TEXT NOT NULL,
+    examined_at  DATETIME NOT NULL,
     examined_link_seq INTEGER NOT NULL,
     reason       TEXT NOT NULL
 );`
@@ -97,12 +100,12 @@ const reconcileExaminationPredicate = `
 func (s *Store) RecordReconcileExamined(narrativeID int64, reason string) error {
 	if _, err := s.db.Exec(
 		`INSERT INTO reconcile_examinations (narrative_id, examined_at, examined_link_seq, reason)
-		 VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), `+linkSeqHighWater+`, ?)
+		 VALUES (?, ?, `+linkSeqHighWater+`, ?)
 		 ON CONFLICT(narrative_id) DO UPDATE SET
 		     examined_at = excluded.examined_at,
 		     examined_link_seq = excluded.examined_link_seq,
 		     reason = excluded.reason`,
-		narrativeID, reason,
+		narrativeID, time.Now(), reason,
 	); err != nil {
 		return fmt.Errorf("recording reconcile examination for narrative %d: %w", narrativeID, err)
 	}

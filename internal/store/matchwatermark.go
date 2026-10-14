@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // matchExaminationsSchema records that matching looked at a narrative and found nothing
 // to match against — the watermark that keeps its backlog draining (finding F22).
@@ -22,12 +25,12 @@ import "fmt"
 // in the same tick was never re-admitted, so the watermark was a tombstone. Before
 // that, the first attempt wrote whole seconds against linked_at's milliseconds and
 // the comparison inverted outright ('.' 0x2E sorts before 'Z' 0x5A). Two different
-// failures of the same idea; the sequence retires the idea. Still %f, so it reads
-// alongside linked_at by eye.
+// failures of the same idea; the sequence retires the idea. Stored like linked_at
+// (see the package doc), so the two read side by side.
 const matchExaminationsSchema = `
 CREATE TABLE IF NOT EXISTS match_examinations (
     narrative_id INTEGER PRIMARY KEY REFERENCES narratives (id),
-    examined_at  TEXT NOT NULL,
+    examined_at  DATETIME NOT NULL,
     examined_link_seq INTEGER NOT NULL,
     reason       TEXT NOT NULL
 );`
@@ -95,12 +98,12 @@ const matchExaminationPredicate = `
 func (s *Store) RecordMatchExamined(narrativeID int64, reason string) error {
 	if _, err := s.db.Exec(
 		`INSERT INTO match_examinations (narrative_id, examined_at, examined_link_seq, reason)
-		 VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), `+linkSeqHighWater+`, ?)
+		 VALUES (?, ?, `+linkSeqHighWater+`, ?)
 		 ON CONFLICT(narrative_id) DO UPDATE SET
 		     examined_at = excluded.examined_at,
 		     examined_link_seq = excluded.examined_link_seq,
 		     reason = excluded.reason`,
-		narrativeID, reason,
+		narrativeID, time.Now(), reason,
 	); err != nil {
 		return fmt.Errorf("recording match examination for narrative %d: %w", narrativeID, err)
 	}

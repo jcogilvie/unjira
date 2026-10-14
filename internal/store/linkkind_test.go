@@ -151,17 +151,17 @@ func TestSchema_EnforcesOneMemberHomeAndKindShape(t *testing.T) {
 		name string
 		stmt string
 	}{
-		{"a second member link for one event", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?2, ?3, 'member', 0.5, 'model')`},
-		{"a link with no kind", `INSERT INTO narrative_events (narrative_id, event_id) VALUES (?2, ?3)`},
-		{"an unknown kind", `INSERT INTO narrative_events (narrative_id, event_id, kind) VALUES (?2, ?3, 'supporting')`},
-		{"a member with no confidence", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_placement) VALUES (?2, ?4, 'member', 'model')`},
-		{"a member confidence above 1", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?2, ?4, 'member', 1.5, 'model')`},
-		{"a context link with a confidence", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?2, ?3, 'context', 0.5)`},
+		{"a second member link for one event", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?5, ?2, ?3, 'member', 0.5, 'model')`},
+		{"a link with no kind", `INSERT INTO narrative_events (linked_at, narrative_id, event_id) VALUES (?5, ?2, ?3)`},
+		{"an unknown kind", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind) VALUES (?5, ?2, ?3, 'supporting')`},
+		{"a member with no confidence", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_placement) VALUES (?5, ?2, ?4, 'member', 'model')`},
+		{"a member confidence above 1", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?5, ?2, ?4, 'member', 1.5, 'model')`},
+		{"a context link with a confidence", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_confidence) VALUES (?5, ?2, ?3, 'context', 0.5)`},
 		// member_placement mirrors member_confidence: required on a member, absent on
 		// context, and the IS NOT NULL is what makes "required" true (design-notes #44).
-		{"a member with no placement", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence) VALUES (?2, ?4, 'member', 0.5)`},
-		{"an unknown placement", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?2, ?4, 'member', 0.5, 'guess')`},
-		{"a context link with a placement", `INSERT INTO narrative_events (narrative_id, event_id, kind, member_placement) VALUES (?2, ?3, 'context', 'model')`},
+		{"a member with no placement", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_confidence) VALUES (?5, ?2, ?4, 'member', 0.5)`},
+		{"an unknown placement", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_confidence, member_placement) VALUES (?5, ?2, ?4, 'member', 0.5, 'guess')`},
+		{"a context link with a placement", `INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_placement) VALUES (?5, ?2, ?3, 'context', 'model')`},
 	}
 
 	for _, tt := range tests {
@@ -173,11 +173,20 @@ func TestSchema_EnforcesOneMemberHomeAndKindShape(t *testing.T) {
 			f := insertBareEvent(t, s, "f", base)
 			require.NoError(t, s.LinkMembers(a, []int64{e}, 0.9))
 
-			err := s.ExecForTest(tt.stmt, a, b, e, f)
+			err := s.ExecForTest(tt.stmt, a, b, e, f, base)
 
 			require.Error(t, err, "the schema must reject %s", tt.name)
 		})
 	}
+
+	// The control: the same shape of statement, well-formed, is accepted, so each
+	// rejection above is the constraint it names and not a column every row needs.
+	s := openStore(t)
+	b := seedNarrative(t, s, "b", base)
+	f := insertBareEvent(t, s, "f", base)
+	require.NoError(t, s.ExecForTest(
+		`INSERT INTO narrative_events (linked_at, narrative_id, event_id, kind, member_confidence, member_placement)
+		 VALUES (?3, ?1, ?2, 'member', 0.5, 'model')`, b, f, base))
 }
 
 // -- MoveMember --------------------------------------------------------------------
