@@ -38,7 +38,8 @@ func TestMessageUsages_ChargesASplitMessageToItsFirstSegment(t *testing.T) {
 	), 1)
 	require.Len(t, segs, 2, "the two lines sit in two segments")
 
-	rows, unledgered := messageUsages(transcript{id: "s1"}, segs, coverEach, time.Time{})
+	rows, unledgered, err := messageUsages(transcript{id: "s1"}, segs, coverEach, time.Time{})
+	require.NoError(t, err)
 
 	require.Len(t, rows, 1)
 	assert.Equal(t, "seg-0", rows[0].CoveringExternalID)
@@ -54,7 +55,8 @@ func TestMessageUsages_ASplitMessageWhoseFirstSegmentIsNotLedgeredGetsNoRow(t *t
 	), 1)
 	firstExcluded := func(i int) (string, bool) { return "seg", i != 0 }
 
-	rows, _ := messageUsages(transcript{id: "s1"}, segs, firstExcluded, time.Time{})
+	rows, _, err := messageUsages(transcript{id: "s1"}, segs, firstExcluded, time.Time{})
+	require.NoError(t, err)
 
 	assert.Empty(t, rows)
 }
@@ -66,8 +68,42 @@ func TestMessageUsages_CountsAssistantLinesWithoutIDOrUsage(t *testing.T) {
 		`{"type":"user","timestamp":"2026-09-01T10:00:02Z","message":{"content":"not an assistant line"}}`,
 	), 1)
 
-	rows, unledgered := messageUsages(transcript{id: "s1"}, segs, coverEach, time.Time{})
+	rows, unledgered, err := messageUsages(transcript{id: "s1"}, segs, coverEach, time.Time{})
+	require.NoError(t, err)
 
 	assert.Empty(t, rows)
 	assert.Equal(t, 2, unledgered)
+}
+
+func TestMessageUsages_MalformedCounters(t *testing.T) {
+	for name, tc := range map[string]struct {
+		usage   string
+		wantErr string
+		want    int64
+	}{
+		"absent is zero":         {usage: `{"input_tokens":1}`},
+		"null is zero":           {usage: `{"input_tokens":1,"output_tokens":null}`},
+		"a string errors":        {usage: `{"input_tokens":1,"output_tokens":"7"}`, wantErr: `"output_tokens"`},
+		"an object errors":       {usage: `{"input_tokens":1,"output_tokens":{"n":7}}`, wantErr: `"output_tokens"`},
+		"a fraction errors":      {usage: `{"input_tokens":1,"output_tokens":7.5}`, wantErr: `"output_tokens"`},
+		"a negative errors":      {usage: `{"input_tokens":1,"output_tokens":-7}`, wantErr: `"output_tokens"`},
+		"an integral float is n": {usage: `{"input_tokens":1,"output_tokens":7}`, want: 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			segs := segments(usageLines(t, `{"type":"assistant","timestamp":"2026-09-01T10:00:00Z",`+
+				`"message":{"id":"msg_1","model":"m","usage":`+tc.usage+`}}`), 1)
+
+			rows, _, err := messageUsages(transcript{id: "s1"}, segs, coverEach, time.Time{})
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.ErrorContains(t, err, "msg_1")
+
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			assert.Equal(t, tc.want, rows[0].OutputTokens)
+		})
+	}
 }

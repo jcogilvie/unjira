@@ -94,6 +94,13 @@ func TestUpsertMessageUsage(t *testing.T) {
 			want: []store.MessageUsage{ownedByA},
 		},
 		{
+			name: "a takeover with a NULL covering id clears the old holder's",
+			passes: [][]store.MessageUsage{
+				{inB().Build()}, {inA().Covering("").Build()},
+			},
+			want: []store.MessageUsage{inA().Covering("").Tokens(1, 40, 0, 0).Build()},
+		},
+		{
 			name: "same occurred_at: the smaller transcript id owns, in either order",
 			passes: [][]store.MessageUsage{
 				{inB().At(storetest.UTC(12, 0, 0)).Build()}, {inA().Build()},

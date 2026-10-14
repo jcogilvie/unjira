@@ -5,6 +5,8 @@ package claudecode
 // joined at read time in the store, never decided here.
 
 import (
+	"fmt"
+	"math"
 	"time"
 
 	"github.com/jcogilvie/unjira/internal/store"
@@ -38,9 +40,17 @@ type segmentCover func(i int) (externalID string, ledgered bool)
 //
 // mtime dates a message whose lines carry no parseable timestamp, as sessionEvents
 // dates such a segment.
+//
+// Only lines inside a segment are read. A line before any run opens that has neither a
+// timestamp nor text never reaches a segment (rawRuns drops it), so its usage would be
+// neither ledgered nor counted. Every Claude Code line carries a timestamp, so this
+// assumes none such exists.
+//
+// A malformed counter is an error, not a zero: the cursor moves past these lines once the
+// pass succeeds, so a counter read as 0 would stay 0 in the ledger for good.
 func messageUsages(
 	t transcript, segs []segment, cover segmentCover, mtime time.Time,
-) (rows []store.MessageUsage, unledgered int) {
+) (rows []store.MessageUsage, unledgered int, err error) {
 	index := map[string]int{} // message id -> its row in rows, or -1 when not ledgered
 
 	for i, seg := range segs {
@@ -61,10 +71,7 @@ func messageUsages(
 				continue
 			}
 
-			occurredAt := mtime
-			if parsed, ok := parseTimestamp(stringField(line, "timestamp")); ok {
-				occurredAt = parsed
-			}
+			occurredAt := lineTime(line, mtime)
 
 			at, seen := index[id]
 			if !seen {
@@ -93,23 +100,60 @@ func messageUsages(
 			if occurredAt.Before(r.OccurredAt) {
 				r.OccurredAt = occurredAt
 			}
-			r.InputTokens = max(r.InputTokens, usageCount(usage, "input_tokens"))
-			r.OutputTokens = max(r.OutputTokens, usageCount(usage, "output_tokens"))
-			r.CacheWriteTokens = max(r.CacheWriteTokens, usageCount(usage, "cache_creation_input_tokens"))
-			r.CacheReadTokens = max(r.CacheReadTokens, usageCount(usage, "cache_read_input_tokens"))
+			if err := raiseCounters(r, usage); err != nil {
+				return nil, 0, fmt.Errorf("message %s: %w", id, err)
+			}
 		}
 	}
 
-	return rows, unledgered
+	return rows, unledgered, nil
 }
 
-// usageCount reads one usage counter. An absent counter is zero: usage objects omit the
-// cache counters when there was no caching. A negative one is passed through, so the
-// store's CHECK refuses it loudly rather than this clamping it.
-func usageCount(usage map[string]any, key string) int64 {
-	n, _ := usage[key].(float64)
+// lineTime is line's timestamp, or fallback when it has none that parses.
+func lineTime(line map[string]any, fallback time.Time) time.Time {
+	if parsed, ok := parseTimestamp(stringField(line, "timestamp")); ok {
+		return parsed
+	}
 
-	return int64(n)
+	return fallback
+}
+
+// raiseCounters raises each of r's counters to usage's, if larger.
+func raiseCounters(r *store.MessageUsage, usage map[string]any) error {
+	for _, c := range []struct {
+		key string
+		dst *int64
+	}{
+		{"input_tokens", &r.InputTokens},
+		{"output_tokens", &r.OutputTokens},
+		{"cache_creation_input_tokens", &r.CacheWriteTokens},
+		{"cache_read_input_tokens", &r.CacheReadTokens},
+	} {
+		n, err := usageCount(usage, c.key)
+		if err != nil {
+			return err
+		}
+		*c.dst = max(*c.dst, n)
+	}
+
+	return nil
+}
+
+// usageCount reads one usage counter. An absent or JSON null counter is zero: usage
+// objects omit the cache counters when there was no caching. A non-number, a
+// non-integral number or a negative one is an error. A negative one cannot be left to
+// the store's CHECK: the MAX against a row's zero start would clamp it to 0 first.
+func usageCount(usage map[string]any, key string) (int64, error) {
+	v, present := usage[key]
+	if !present || v == nil {
+		return 0, nil
+	}
+	n, ok := v.(float64)
+	if !ok || n != math.Trunc(n) || n < 0 {
+		return 0, fmt.Errorf("usage counter %q is %v, not a non-negative integer", key, v)
+	}
+
+	return int64(n), nil
 }
 
 func stringField(line map[string]any, key string) string {

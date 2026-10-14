@@ -189,11 +189,21 @@ func TestComplete_CachedPromptTokensReportedOnlyWhenPresent(t *testing.T) {
 		"prompt_tokens":         31,
 		"completion_tokens":     7,
 		"total_tokens":          38,
-		"prompt_tokens_details": map[string]any{"cached_tokens": 7},
+		"prompt_tokens_details": map[string]any{"cached_tokens": 19},
 	}).Complete(t.Context(), "sys", "user")
 	require.NoError(t, err)
 	require.NotNil(t, withCached.CachedPromptTokens)
-	assert.Equal(t, int64(7), *withCached.CachedPromptTokens)
+	assert.Equal(t, int64(19), *withCached.CachedPromptTokens)
+
+	_, zero, err := respond(map[string]any{
+		"prompt_tokens":         31,
+		"completion_tokens":     7,
+		"total_tokens":          38,
+		"prompt_tokens_details": map[string]any{"cached_tokens": 0},
+	}).Complete(t.Context(), "sys", "user")
+	require.NoError(t, err)
+	require.NotNil(t, zero.CachedPromptTokens, "a reported zero is a count, not an absence")
+	assert.Equal(t, int64(0), *zero.CachedPromptTokens)
 
 	_, without, err := respond(map[string]any{
 		"prompt_tokens":     31,

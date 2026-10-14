@@ -155,7 +155,9 @@ depend on the create path or on where new issues may be opened.
 - **Collector stays dumb.** The claude_code collector extracts the rows deterministically from the
   lines it already reads. No judgment, no network. It writes them through the store it already
   holds for cursors, per transcript and before `SetCursor`, so a failed write leaves the cursor in
-  place and the next pass re-reads the file.
+  place and the next pass re-reads the file. An absent or JSON-null usage counter is 0. A counter
+  that is not a non-negative integer (a string, an object, a fraction, a negative) fails the pass,
+  naming the key and message id, before the cursor moves: read as 0, it would stay 0 for good.
 - **Attribution chain.** message → the newest collected event whose lines cover it → that event's
   `member` narrative → that narrative's `primary` issue.
   - A subagent's messages follow the subagent event's own member link (D-4).
@@ -183,7 +185,9 @@ depend on the create path or on where new issues may be opened.
     `triage`: the label records who spent it.
   - Cost is (prompt − cached) × input + cached × cache read + completion × output. NULL cached is
     priced as 0, so every prompt token is charged at the input rate. That overestimates, and
-    `unjira tokens` marks any window holding such a row as an upper bound.
+    `unjira tokens` marks any window holding such a row as an upper bound. The formula assumes
+    prompt includes cached (open question 3). A row with cached above prompt breaks that assumption,
+    so `unjira tokens` errors naming the call rather than pricing it below its input cost.
   - `--dry-run` on `dev narrate` and `watch` persists no narratives and writes no actions, but it
     still stores collected events and one `llm_calls` row per call. Its help text says so.
 - **The store refuses older stores** through the existing schema check. It does not migrate them.

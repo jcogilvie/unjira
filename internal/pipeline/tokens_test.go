@@ -211,3 +211,19 @@ no_event: 1 message(s)
 func TestRenderTokens_EmptyLedger(t *testing.T) {
 	assert.Contains(t, pipeline.RenderTokens(pipeline.TokenReport{}), "No ledger rows yet. Run: unjira collect")
 }
+
+// prompt_tokens is assumed to include cached_tokens. A call whose cached count exceeds its
+// prompt breaks that assumption, and pricing it would make its cost silently shrink.
+func TestBuildTokenReport_CachedAbovePromptErrors(t *testing.T) {
+	s := openTokenStore(t)
+	cached := int64(150)
+	require.NoError(t, s.RecordLLMCall(store.LLMCall{
+		CalledAt: storetest.UTC(11, 0, 0), Stage: "match", Model: "own", PromptTokens: 100, CachedTokens: &cached,
+	}))
+
+	_, err := pipeline.BuildTokenReport(s, tokenPricing, 0.8, storetest.UTC(12, 0, 0))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "match")
+	assert.Contains(t, err.Error(), "150")
+}

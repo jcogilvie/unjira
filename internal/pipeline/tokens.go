@@ -112,6 +112,8 @@ func BuildTokenReport(s *store.Store, pricing config.TokenPricing, confidenceFlo
 		case store.AttributionUnattributed, store.AttributionNoEvent:
 			addTo(unattributed, m.State, m.Model, amount)
 			unattributedCount[m.State]++
+		default:
+			return TokenReport{}, fmt.Errorf("message %s: attribution state %q has no report bucket", m.MessageID, m.State)
 		}
 	}
 
@@ -152,7 +154,7 @@ func ownSpend(s *store.Store, pricing config.TokenPricing, now time.Time) ([]Own
 		{"1d", now.Add(-24 * time.Hour)},
 		{"today", time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())},
 	}
-	// 30d starts earliest: today starts within the last 24 hours.
+	// 30d starts earliest.
 	calls, err := s.LLMCallsSince(windows[0].start)
 	if err != nil {
 		return nil, err
@@ -174,6 +176,15 @@ func ownSpend(s *store.Store, pricing config.TokenPricing, now time.Time) ([]Own
 		var cached int64
 		if c.CachedTokens != nil {
 			cached = *c.CachedTokens
+		}
+		// prompt_tokens is assumed to include cached_tokens (OpenAI semantics). A gateway
+		// passing through Anthropic's, where input excludes cache reads, would break that,
+		// and pricing it anyway would make the cost shrink with no signal.
+		if cached > c.PromptTokens {
+			return nil, fmt.Errorf(
+				"llm call %s at %s reports cached_tokens %d above prompt_tokens %d: "+
+					"own-spend pricing assumes prompt_tokens includes cached_tokens",
+				c.Stage, c.CalledAt.Format(time.RFC3339), cached, c.PromptTokens)
 		}
 		cost := (float64(c.PromptTokens-cached)**price.Input + float64(cached)**price.CacheRead +
 			float64(c.CompletionTokens)**price.Output) / 1e6

@@ -309,7 +309,10 @@ func sessionEvents(
 	}
 
 	cover := coverFor(t, segs, stat.Size(), excludeCwds)
-	usages, unledgered := messageUsages(t, segs, cover, mtime)
+	usages, unledgered, err := messageUsages(t, segs, cover, mtime)
+	if err != nil {
+		return nil, nil, 0, err
+	}
 
 	out := make([]events.Event, 0, len(segs)+len(resolved))
 	created := createdPullRequests(resolved)

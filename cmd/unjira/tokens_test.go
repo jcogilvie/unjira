@@ -9,17 +9,16 @@ import (
 )
 
 func TestTokensCmd_ParsesAndReportsAnEmptyLedger(t *testing.T) {
-	var parsed struct {
-		Tokens tokensCmd `cmd:""`
-	}
-	parser, err := kong.New(&parsed)
+	// The real cli, so this fails if the command is ever unregistered.
+	parser, err := kong.New(&cli)
 	require.NoError(t, err)
-	_, err = parser.Parse([]string{"tokens"})
+	ctx, err := parser.Parse([]string{"tokens"})
 	require.NoError(t, err)
+	assert.Equal(t, "tokens", ctx.Command())
 
 	app := &appContext{store: openTestStore(t)}
 	out := captureStdout(t, func() {
-		require.NoError(t, parsed.Tokens.Run(app))
+		require.NoError(t, cli.Tokens.Run(app))
 	})
 
 	assert.Contains(t, out, "No ledger rows yet. Run: unjira collect")

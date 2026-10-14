@@ -271,3 +271,22 @@ func TestCollect_LedgerWriteFailureLeavesCursor(t *testing.T) {
 	collectWith(t, s, root, nil)
 	assert.Len(t, ledger(t, dbPath), 1, "the next pass re-read the transcript")
 }
+
+// A negative counter fails the pass before the cursor moves, as any malformed counter does.
+func TestCollect_NegativeCounterFailsBeforeCursor(t *testing.T) {
+	root := t.TempDir()
+	s, _ := openLedgerStore(t)
+	path := threeAsks(t).
+		Assistant("2026-09-01T10:03:00Z", "msg_1", model, usage(5, -7, 0, 0)).
+		WriteRoot(root, slug, "s1")
+
+	err := claudecode.New().Collect(
+		pipeline.CollectContext{Store: s, Options: map[string]any{"transcript_root": root}},
+		func(events.Event) {},
+	)
+
+	require.ErrorContains(t, err, `"output_tokens"`)
+	cursor, err := s.GetCursor(claudecode.Name, path)
+	require.NoError(t, err)
+	assert.Empty(t, cursor, "the cursor did not move")
+}
