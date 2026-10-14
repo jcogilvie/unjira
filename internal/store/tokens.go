@@ -208,3 +208,26 @@ func (s *Store) RecordLLMCall(c LLMCall) error {
 
 	return nil
 }
+
+// LLMCallsSince returns every llm_calls row called at or after since, in insertion order.
+func (s *Store) LLMCallsSince(since time.Time) ([]LLMCall, error) {
+	rows, err := s.db.Query(
+		`SELECT called_at, stage, model, prompt_tokens, completion_tokens, cached_tokens
+		 FROM llm_calls WHERE called_at >= ? ORDER BY id`, since)
+	if err != nil {
+		return nil, fmt.Errorf("querying llm calls since %s: %w", since.Format(time.RFC3339), err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []LLMCall
+	for rows.Next() {
+		var c LLMCall
+		if err := rows.Scan(&c.CalledAt, &c.Stage, &c.Model, &c.PromptTokens,
+			&c.CompletionTokens, &c.CachedTokens); err != nil {
+			return nil, fmt.Errorf("scanning llm call: %w", err)
+		}
+		out = append(out, c)
+	}
+
+	return out, rows.Err()
+}

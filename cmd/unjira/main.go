@@ -544,6 +544,19 @@ func (c *digestCmd) Run(app *appContext) error {
 	return nil
 }
 
+type tokensCmd struct{}
+
+func (c *tokensCmd) Run(app *appContext) error {
+	// time.Now() keeps the local zone: the "today" window is the local calendar day.
+	report, err := pipeline.BuildTokenReport(app.store, app.config.TokenPricing, app.config.Match.ConfidenceFloor, time.Now())
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(pipeline.RenderTokens(report))
+	return nil
+}
+
 type statusCmd struct{}
 
 func (c *statusCmd) Run(app *appContext) error {
@@ -1135,6 +1148,7 @@ var cli struct {
 	Collect collectCmd `cmd:"" help:"Run every enabled collector and persist new events."`
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
 	Status  statusCmd  `cmd:"" help:"Event counts and collector cursor freshness."`
+	Tokens  tokensCmd  `cmd:"" help:"Token spend per ticket, untracked and unattributed, plus unjira's own LLM spend. Read-only."`
 	Watch   watchCmd   `cmd:"" help:"Interval loop: collect -> narrate -> match -> reconcile -> auto-commit gate."`
 	Actions actionsCmd `cmd:"" help:"Machine-facing primitives over the review queue: list and decide on proposed actions."`
 	Triage  triageCmd  `cmd:"" help:"Review the queue one action at a time: approve, reject, reword, re-cluster, retarget. Applies nothing until you confirm."`

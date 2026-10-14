@@ -1,5 +1,7 @@
 package store
 
+import "time"
+
 // export_test.go exposes raw SQL to this package's external tests (store_test) and to
 // nothing else: a _test.go file in package store compiles only into this package's own
 // test binary, so these never become API another package could reach.
@@ -72,23 +74,5 @@ func (s *Store) MessageUsageRows() ([]MessageUsage, error) {
 
 // LLMCallRows returns every llm_calls row in insertion order.
 func (s *Store) LLMCallRows() ([]LLMCall, error) {
-	rows, err := s.db.Query(
-		`SELECT called_at, stage, model, prompt_tokens, completion_tokens, cached_tokens
-		 FROM llm_calls ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var out []LLMCall
-	for rows.Next() {
-		var c LLMCall
-		if err := rows.Scan(&c.CalledAt, &c.Stage, &c.Model, &c.PromptTokens,
-			&c.CompletionTokens, &c.CachedTokens); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-
-	return out, rows.Err()
+	return s.LLMCallsSince(time.Time{})
 }
