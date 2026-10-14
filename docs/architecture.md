@@ -100,7 +100,7 @@ flowchart TB
     STORE --> DEST --> VERIFY --> DRAFT --> FILTERS --> STORE
     STORE --> TRIAGE --> STORE
     CCC -->|"one row per assistant message.id"| LEDGER
-    CLUSTER & DISPUTE & MATCH & DRAFT -.->|"every completion"| RECORD --> LEDGER
+    CLUSTER & DISPUTE & MATCH & DRAFT & TRIAGE -.->|"every completion"| RECORD --> LEDGER
     LEDGER & STORE --> TOKENS
     STORE --> DECIDE --> APPLY -->|"AddComment · SetStatus · CreateIssue"| JIRA
 
@@ -493,10 +493,10 @@ flowchart TB
     end
 
     CMD --> PIPE & TRIAGE & GATE & CORR & STORE & CONFIG
-    CMD --> LLM
+    CMD -->|"NewRecordingClient"| LLM
     CMD --> CJIRA & CGH & CLOCAL & COAI & COLLJ & COLLC & COLLGH
     PIPE --> RECON & CORR & GATE & STORE & CONFIG & TT & LLM
-    TRIAGE --> RECON & CORR & STORE
+    TRIAGE --> RECON & CORR & STORE & LLM
     RECON --> CORR & STORE & CONFIG & WF & LLM & RULES & EVENTS & TT
     CORR --> STORE & CONFIG & LLM & RULES & EVENTS & TT
     GATE --> STORE & CONFIG & TT

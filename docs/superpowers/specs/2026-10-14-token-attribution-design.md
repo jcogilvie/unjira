@@ -17,13 +17,14 @@ Deviations from the design as first written, measured by a probe over every loca
 - **`no_event` state.** Messages in a segment that emits no event are still ledgered, with no
   covering event, rather than lost.
 
-Rulings made during planning, all reflected in "Design" above: a below-floor primary is untracked;
+Rulings made during planning, all reflected in "Design" below: a below-floor primary is untracked;
 the first holder of a doubly-recorded id is the lowest `(occurred_at, transcript_id)`; excluded cwds
 get no rows; unreported cached tokens stay NULL and price as 0, with the output marked an upper bound.
 
 Verification, 2026-10-14:
 
-- `go test ./...` passed, every package `ok` (exit 0).
+- `go test ./...` printed 26 `ok` lines, one `?   github.com/jcogilvie/unjira/internal/store/storetest
+  [no test files]`, and exited 0. `earthly +reviewable` printed `Earthly Build  ✅ SUCCESS`.
 - A scratch store, collected with only the claude_code collector (`backfill_days: 2`), ledgered
   10,925 rows over 7 models from 247 events. The first `unjira tokens` failed as criterion 5 asks:
   `Error: no price for model "claude-sonnet-5-5": add it under token_pricing`. With every model priced
@@ -53,6 +54,13 @@ Verification, 2026-10-14:
   collected and never narrated or matched: no member links exist. Own spend is zero because no LLM
   call was made. The per-ticket path and the call recording are covered by the offline tests, not by
   this run.
+- Row count against the transcripts: of the 1,440 transcripts the scratch pass read, those that
+  produced any row held 11,106 distinct non-`<synthetic>` assistant ids with usage, up to each
+  cursor's offset. 10,925 were ledgered, none outside that set. All 181 missing ids sit in one root
+  transcript, dated one day, and are not explained here.
+- **Not verified: the own-call count.** No LLM gateway credential was available, so no
+  `dev narrate --dry-run` was run, and no pass's reported call count was compared with
+  `SELECT count(*) FROM llm_calls`. Call recording is covered only by the offline tests.
 
 ## Problem
 
@@ -178,10 +186,13 @@ depend on the create path or on where new issues may be opened.
 
 - **Per ticket:** logged, unlogged and pending tokens and cost, per model. "Logged" and "pending" read
   as zero until PR 2.
-- **The untracked bucket,** per narrative.
-- **Unattributed messages.**
+- **The untracked bucket,** per narrative, each labeled with its candidate primary key if it has one
+  (D-33).
+- **Unattributed messages,** in two groups: `unattributed` (the covering event has no member link)
+  and `no_event` (no covering event).
 - **unjira's own spend** for the windows `30d`, `7d`, `1d` (rolling 24h) and `today` (local calendar
-  day), computed on the fly from the call rows (D-29).
+  day), computed on the fly from the call rows (D-29). A window holding a call with no reported
+  cached count is marked an upper bound.
 
 ### Attribution sink interface (PR 2)
 
@@ -351,9 +362,9 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
 |---|---|---|---|---|
 | D-1 | ~~Metrics recorded per ticket: Record raw input and output tokens plus a USD cost, with an optional per-agent breakdown (parent session vs each subagent/agent type). Cache-miss % is out of scope for per-ticket attribution: it describes work patterns, not the work.~~ | User: raw in/out and dollars are what describe the work's cost; cache efficiency is a property of how we work, so it belongs elsewhere if anywhere. |  | superseded by D-24 |
 | D-2 | First output surface: Per-ticket token totals are written to Jira as worklogs (not a local-report-first slice). | User picked Jira worklog in round 1 over the recommended local report. |  | active |
-| D-3 | Dedup key: A per-message ledger keyed on message.id (idempotent upsert), each message charged through the newest event that covers it. | User accepted the recommendation. It is immune to repeated lines per message (1.7-2x overcount measured), re-snapshots and segment boundary shifts. |  | active |
+| D-3 | Dedup key: A per-message ledger keyed on message.id (idempotent upsert), each message charged through the newest event that covers it. | User accepted the recommendation. It is immune to repeated lines per message (1.7-2x overcount measured), re-snapshots and segment boundary shifts. |  | active (holder rule refined by D-34) |
 | D-4 | Subagent attribution: A subagent transcript's tokens follow that subagent event's own member link, not the parent session's narrative. | User accepted the recommendation. Consistent with member links being the unit of attribution. |  | active |
-| D-5 | Ticket mapping: A narrative's tokens are charged to its primary issue only; a narrative with no primary goes to an untracked bucket. | User accepted the recommendation. Sums stay exact because there is at most one primary per narrative. |  | active |
+| D-5 | ~~Ticket mapping: A narrative's tokens are charged to its primary issue only; a narrative with no primary goes to an untracked bucket.~~ | User accepted the recommendation. Sums stay exact because there is at most one primary per narrative. |  | superseded by D-33 |
 | D-6 | timeSpent: Jira requires a time value on every worklog. What should it hold?: Active wall-clock time (Recommended) | user picked Active wall-clock time (Recommended): The parent session's time spans across its member segments, with idle gaps over a threshold left out. Subagents add tokens but no time because they run in parallel. Anyone reading Jira's time field gets a real number. | Q-1 | active |
 | D-7 | ~~Granularity: How many worklogs per ticket?: One per ticket per day (Recommended)~~ | user picked One per ticket per day (Recommended): `started` is that day. Updated in place while the day's total grows, found by an idempotency key in its properties. Matches how people log time. | Q-2 | superseded by D-14 |
 | D-8 | Corrections: When attribution changes after a worklog is posted (a member moves, a primary is relinked), what happens?: Correct it (Recommended) | user picked Correct it (Recommended): Propose an update, or a delete plus a new worklog, so Jira matches the ledger. Allowed because unjira can edit its own worklogs. Each correction goes through the gate like any write. | Q-3 | active |
@@ -374,13 +385,15 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
 | D-23 | Idle gap: For active wall-clock time, how long a gap between messages counts as idle and is excluded?: Configurable, default 15 min (Recommended) | user picked Configurable, default 15 min (Recommended): `worklog.idle_gap`. Long enough to cover reading or a slow tool run, short enough to drop lunch. | Q-16 | active |
 | D-24 | Metrics recorded per ticket: Record input and output tokens plus a USD cost, broken down per model only. There is no breakdown by agent name, type or instance. The ledger keeps all four token kinds (input, output, cache write, cache read) because the cost needs them. Cache-miss % is out of scope. | User (Q-15): local agent names aren't comparable across users, so count per model only. |  | active (replaces D-1) |
 | D-25 | Breakdown granularity: Worklog properties and comments break tokens and cost down per model only, never by agent name, type or instance. | User: local agent names aren't comparable across users. | Q-15 | active |
-| D-26 | Local view: Should there also be a read-only local view of the ledger?: Yes, `unjira tokens` (Recommended) | user picked Yes, `unjira tokens` (Recommended): Per ticket: logged, unlogged and pending, plus the untracked bucket (narratives with no primary) and unattributed messages. Lets you check the numbers before arming any write, and untracked tokens show up nowhere else. | Q-17 | active |
+| D-26 | Local view: Should there also be a read-only local view of the ledger?: Yes, `unjira tokens` (Recommended) | user picked Yes, `unjira tokens` (Recommended): Per ticket: logged, unlogged and pending, plus the untracked bucket (narratives with no confident primary, D-33) and unattributed messages. Lets you check the numbers before arming any write, and untracked tokens show up nowhere else. | Q-17 | active |
 | D-27 | Comment: What text goes in the worklog's visible comment?: Deterministic template (Recommended) | user picked Deterministic template (Recommended): E.g. 'unjira: 1.2M in / 45k out, $3.41 (claude-opus-5-5 $3.10, claude-sonnet-5-5 $0.31)'. No model call, nothing from transcripts reaches Jira, and the text can't hallucinate. | Q-19 | active |
 | D-28 | Slicing: How should this ship?: Three stacked PRs (Recommended) | user picked Three stacked PRs (Recommended): (1) Ledger, attribution and the read-only view. (2) Worklog action type, Jira client, gate, corrections and a live test on DEVSBX. (3) Condensed approval units in triage. Each layer ships something usable. | Q-20 | active |
 | D-29 | unjira's own LLM spend: unjira's own LLM spend (clustering, matching, drafting, distil) is counted but never attributed to tickets or narratives. It is tracked separately, codeburn-style, and `unjira tokens` reports it computed on the fly for 30d, 7d, 1d and today windows. | User (Q-18): count it but don't attribute it; it is useful as `unjira tokens` output. | Q-18 | active |
 | D-30 | Docs location: The contract, plan and PR descriptions for this work live in the repo's docs/superpowers/ folder (spec under docs/superpowers/specs/, plan under docs/superpowers/plans/), not in the ~/.claude documents folder. | User: use the preexisting in-repo docs folder that superpowers uses. |  | active |
 | D-31 | Attribution sink interface: Build the Jira output behind a sink interface so it can be swapped, flagged per tracker, or composed (several sinks fed from the same ledger). The first and only implementation in this work is the worklog sink. A custom-field sink is a considered alternative, not built. | User: definitely worklogs to start, but build with an interface that allows swapping, flagging or composing. |  | active |
 | D-32 | Future: field sink when sole worklog author: Recorded as future work, not in scope: a field sink that sets a custom field directly when unjira's user is the only worklog author on the ticket, which avoids the multi-user overwrite problem. | User's idea for future work. |  | active |
+| D-33 | Untracked means no confident primary: A narrative whose primary is below `match.confidence_floor`, or that has no primary at all, goes to the untracked bucket, labeled with its candidate primary key if it has one. Its tokens are never charged to that ticket. | User ruling, 2026-10-14: the same rule as the create path, consistent with the repo's meaning since F58/F64. |  | active (replaces D-5) |
+| D-34 | First holder owns a doubly-recorded message: When one message.id is recorded by two transcripts, the row's transcript and covering event belong to the lowest (occurred_at, transcript_id) across them. A later holder may raise counters through MAX but never takes ownership unless its pair sorts lower. | User ruling, 2026-10-14 (F33's rule), made order-independent so read order A,B and B,A agree. |  | active |
 
 ## Open assumptions
 
