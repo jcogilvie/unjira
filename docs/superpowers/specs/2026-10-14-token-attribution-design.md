@@ -56,8 +56,10 @@ Verification, 2026-10-14:
   this run.
 - Row count against the transcripts: of the 1,440 transcripts the scratch pass read, those that
   produced any row held 11,106 distinct non-`<synthetic>` assistant ids with usage, up to each
-  cursor's offset. 10,925 were ledgered, none outside that set. All 181 missing ids sit in one root
-  transcript, dated one day, and are not explained here.
+  cursor's offset. 10,925 were ledgered, none outside that set. The 181 missing ids are resumed
+  history: they sit in one root transcript (`c68b4c96…`) whose lines are copies from the original
+  root transcript `d8159df7…`, which ended 2026-09-02, is older than the horizon and is never read.
+  Verified: all 181 belong to resumed copies whose original holder is past the horizon (D-35).
 - **Not verified: the own-call count.** No LLM gateway credential was available, so no
   `dev narrate --dry-run` was run, and no pass's reported call count was compared with
   `SELECT count(*) FROM llm_calls`. Call recording is covered only by the offline tests.
@@ -139,7 +141,11 @@ depend on the create path or on where new issues may be opened.
   transcript is collected late, and never back.
 - **What is not ledgered.** `<synthetic>` messages, through a named constant in the collector, since
   an unpriced model is an error (D-10) and they are not model calls. Messages in a segment under an
-  excluded cwd: the user excluded that work, so it gets no row at all.
+  excluded cwd: the user excluded that work, so it gets no row at all. A resumed transcript's copied
+  history, when its original (earliest) holder is older than the collection horizon: ownership gives
+  those lines to the original, which is never read, and events drop the same lines. The tokens were
+  spent on the original's date, outside the window. Widening `backfill_days` on a fresh store
+  recovers them (D-35).
 - **Covering event.** Within one snapshot the segments partition the owned lines, so each message
   sits in exactly one segment, and the row stores that segment's event id (one shared
   `segmentExternalID`, so the ledger and the event cannot drift). A re-snapshot overwrites it, which
@@ -394,6 +400,7 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
 | D-32 | Future: field sink when sole worklog author: Recorded as future work, not in scope: a field sink that sets a custom field directly when unjira's user is the only worklog author on the ticket, which avoids the multi-user overwrite problem. | User's idea for future work. |  | active |
 | D-33 | Untracked means no confident primary: A narrative whose primary is below `match.confidence_floor`, or that has no primary at all, goes to the untracked bucket, labeled with its candidate primary key if it has one. Its tokens are never charged to that ticket. | User ruling, 2026-10-14: the same rule as the create path, consistent with the repo's meaning since F58/F64. |  | active (replaces D-5) |
 | D-34 | First holder owns a doubly-recorded message: When one message.id is recorded by two transcripts, the row's transcript and covering event belong to the lowest (occurred_at, transcript_id) across them. A later holder may raise counters through MAX but never takes ownership unless its pair sorts lower. | User ruling, 2026-10-14 (F33's rule), made order-independent so read order A,B and B,A agree. |  | active |
+| D-35 | Resumed history past the horizon is not ledgered: A resumed transcript's copied lines belong to their original (earliest) holder. When that original is older than the collection horizon it is never read, so those messages get no ledger row, as they get no event. | Planning ruling, 2026-10-14: the tokens were spent on the original's date, outside the window. The 181 ids missing from a scratch collect were exactly such copies. Cost if wrong: resumed spend older than `backfill_days` is not counted; widening backfill on a fresh store recovers it. |  | active |
 
 ## Open assumptions
 
