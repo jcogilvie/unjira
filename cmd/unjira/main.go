@@ -705,7 +705,7 @@ func (c *devWorkflowCmd) Run(app *appContext) error {
 // output" shape.
 type devNarrateCmd struct {
 	Since  config.Span `default:"24h" help:"How far back to narrate (e.g. 36h, 7d, 2w, 7d12h)."`
-	DryRun bool        `help:"Run the full pass, including real LLM calls, but persist nothing."`
+	DryRun bool        `help:"Run the full pass, including real LLM calls, but persist no narratives and write no actions. Collected events and each LLM call's token usage are still stored."`
 }
 
 // Run assembles the LLM client and validates config before doing any
@@ -890,7 +890,7 @@ type watchCmd struct {
 	// ship as-is rather than a placeholder that must be revisited.
 	Since  config.Span `default:"1h" help:"How far back each pass narrates (e.g. 1h, 24h)."`
 	Once   bool        `help:"Run a single pass and exit, instead of looping. Makes the loop testable and cron-friendly without a supervisor."`
-	DryRun bool        `help:"Run every stage's real work, including LLM calls, but skip Persist and the auto-commit gate. Never writes to the store or a real tracker."`
+	DryRun bool        `help:"Run every stage's real work, including LLM calls, but skip Persist and the auto-commit gate: no narratives, no actions, nothing written to a real tracker. Collected events and each LLM call's token usage are still stored."`
 }
 
 // Run validates configuration once, up front — before the first lease, let

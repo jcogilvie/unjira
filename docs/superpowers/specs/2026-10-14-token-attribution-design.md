@@ -1,8 +1,58 @@
 # Token attribution for tracked tickets — design
 
-**Status: design** (contract from a grilling session, 2026-10-14)
+**Status: PR 1 landed 2026-10-14; PR 2 and PR 3 design** (contract from a grilling session, 2026-10-14)
 
 This is the spec. An implementation plan points at it instead of restating it.
+
+## Status
+
+PR 1 landed 2026-10-14. PR 2 and PR 3 are design.
+
+Deviations from the design as first written, measured by a probe over every local transcript (see
+"Facts"):
+
+- **Per-counter MAX upsert,** not "identical copies": 23% of ids carry growing usage across lines.
+- **`<synthetic>` messages are skipped.** They are not model calls, and ledgering them would make
+  `unjira tokens` fail for every user under D-10.
+- **`no_event` state.** Messages in a segment that emits no event are still ledgered, with no
+  covering event, rather than lost.
+
+Rulings made during planning, all reflected in "Design" above: a below-floor primary is untracked;
+the first holder of a doubly-recorded id is the lowest `(occurred_at, transcript_id)`; excluded cwds
+get no rows; unreported cached tokens stay NULL and price as 0, with the output marked an upper bound.
+
+Verification, 2026-10-14:
+
+- `go test ./...` passed, every package `ok` (exit 0).
+- A scratch store, collected with only the claude_code collector (`backfill_days: 2`), ledgered
+  10,925 rows over 7 models from 247 events. The first `unjira tokens` failed as criterion 5 asks:
+  `Error: no price for model "claude-sonnet-5-5": add it under token_pricing`. With every model priced
+  at **placeholder** rates (input 1, output 2, cache write 1, cache read 0.1, so the dollar figures
+  mean nothing), it printed:
+
+  ```
+  ## Per ticket
+    (none)
+
+  ## Untracked work, by narrative id
+    (none)
+
+  ## Unattributed messages
+  no_event: 324 message(s)
+    claude-opus-5-5  unlogged: in 630, out 201535, cache write 1080940, cache read 14192878, $2.9039  logged: $0.0000  pending: $0.0000
+    ...
+  unattributed: 10601 message(s)
+    ...
+
+  ## unjira's own LLM spend
+    30d    0 call(s)  prompt 0 (cached 0)  completion 0  $0.0000
+    ...
+  ```
+
+  Per ticket and untracked are empty, and every message is unattributed, because that store was
+  collected and never narrated or matched: no member links exist. Own spend is zero because no LLM
+  call was made. The per-ticket path and the call recording are covered by the offline tests, not by
+  this run.
 
 ## Problem
 
@@ -23,7 +73,11 @@ depend on the create path or on where new issues may be opened.
   `message.usage` (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
   `cache_read_input_tokens`, plus sub-objects) and `message.model`.
 - **Summing lines double-counts.** One `message.id` spans several lines, one per content block, and
-  each line carries an identical full copy of its usage. On the three largest local transcripts there
+  each line carries a full copy of its usage. The copies are not always identical: across every local
+  transcript (1,413 files, 77,089 distinct owned ids), 17,475 ids (23%) differ between lines, mostly
+  in `output_tokens`. In every one, the last line's four counts are at least every earlier line's.
+  513 ids carry `message.model = "<synthetic>"` with all counts zero: Claude Code's own locally
+  generated lines, not model calls. On the three largest local transcripts there
   were 7830, 3825 and 6185 usage lines for 4519, 2289 and 3004 distinct ids, so summing lines
   overcounts 1.7–2x. Do not key on `requestId`: the measurement found one distinct value per file.
 - **Subagents are separate transcripts, already collected.** They live at
@@ -67,23 +121,57 @@ depend on the create path or on where new issues may be opened.
 ### Ledger (PR 1)
 
 - **One row per assistant `message.id`,** holding: transcript id, subagent agent id (if any),
-  timestamp, model, and all four token counts. Written by idempotent upsert, so repeated lines and
-  re-snapshots cannot double-count.
+  timestamp, model, all four token counts, and the segment event that covers it. Written by an
+  idempotent upsert that keeps each counter's maximum, so repeated lines, re-snapshots and a snapshot
+  taken mid-stream converge on the final usage without double-counting. MAX does not depend on order.
+- **First holder owns the row.** An id recorded by two transcripts (239 ids, always two subagent
+  transcripts) belongs to the transcript with the lowest `(occurred_at, transcript_id)`. The upsert
+  takes ownership only when the incoming pair sorts lower, so read order cannot change the owner. A
+  later holder may still raise counters through MAX. Ownership can move once, when an earlier
+  transcript is collected late, and never back.
+- **What is not ledgered.** `<synthetic>` messages, through a named constant in the collector, since
+  an unpriced model is an error (D-10) and they are not model calls. Messages in a segment under an
+  excluded cwd: the user excluded that work, so it gets no row at all.
+- **Covering event.** Within one snapshot the segments partition the owned lines, so each message
+  sits in exactly one segment, and the row stores that segment's event id (one shared
+  `segmentExternalID`, so the ledger and the event cannot drift). A re-snapshot overwrites it, which
+  is how "newest" works. A segment that emits no event for a reason other than an excluded cwd (49
+  ids, segments with no user text) writes none, and an existing covering event is never overwritten
+  with none. Such a message is reported as `no_event`.
 - **Collector stays dumb.** The claude_code collector extracts the rows deterministically from the
-  lines it already reads. No judgment, no network.
+  lines it already reads. No judgment, no network. It writes them through the store it already
+  holds for cursors, per transcript and before `SetCursor`, so a failed write leaves the cursor in
+  place and the next pass re-reads the file.
 - **Attribution chain.** message → the newest collected event whose lines cover it → that event's
   `member` narrative → that narrative's `primary` issue.
   - A subagent's messages follow the subagent event's own member link (D-4).
-  - A narrative with no primary is **untracked**.
-  - A message whose covering event has no member link is **unattributed**.
+  - A narrative with no confident primary, meaning none at or above `match.confidence_floor`, is
+    **untracked**, labeled with its candidate primary key if it has one. This is the create path's
+    rule.
+  - A message whose covering event has no member link is **unattributed**. One with no covering
+    event is **`no_event`**.
+  - `store.MessageAttributions` returns each row's model and four counters with its attribution, so
+    pricing needs no second query. Its plan is a scan of `token_messages` plus a lookup on the events
+    unique index. The `covering_external_id` index serves PR 2's per-event lookups.
 - **Attribution is computed, never copied.** It is derived from current links at read time, so
   `Tx.MoveMember`, a primary relink and a triage merge or split are reflected automatically.
 - **Cost.** USD from the config price table `token_pricing.<model>`: per-million rates for input,
   output, cache write and cache read. A model missing from the table is an error naming the model,
   never $0.
 - **unjira's own spend.** One row per unjira LLM call: time, pipeline stage, model, prompt tokens,
-  completion tokens, and cached tokens if the server reports them. These rows are never attributed to a
-  ticket or narrative (D-29).
+  completion tokens, and cached tokens if the server reports them, NULL otherwise. These rows are never
+  attributed to a ticket or narrative (D-29).
+  - One `llm.RecordingClient` decorator writes them, wrapped once at `cmd/unjira`'s `llmClient()`. A
+    small adapter in `cmd/unjira` maps `llm.CallRecord` to `store.LLMCall`, so neither `llm` nor
+    `store` imports the other.
+  - The stage is a context value set at each `pipeline.Run*` entry (`cluster`, `match`, `draft`,
+    `distil`) and in `triage.NewSession` (`triage`). A recluster done inside triage is recorded as
+    `triage`: the label records who spent it.
+  - Cost is (prompt − cached) × input + cached × cache read + completion × output. NULL cached is
+    priced as 0, so every prompt token is charged at the input rate. That overestimates, and
+    `unjira tokens` marks any window holding such a row as an upper bound.
+  - `--dry-run` on `dev narrate` and `watch` persists no narratives and writes no actions, but it
+    still stores collected events and one `llm_calls` row per call. Its help text says so.
 - **The store refuses older stores** through the existing schema check. It does not migrate them.
 
 ### `unjira tokens` (PR 1, read-only)
@@ -196,13 +284,15 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
 
 1. **No double counting.** Ingesting the same transcript twice, then again after it grows, yields one
    ledger row per `message.id`, and its counts equal that id's usage. A test fixture repeats one id
-   across several lines with identical usage.
+   across several lines with identical usage, and a second fixture's usage grows across lines and
+   lands at the per-counter maximum.
 2. **Subagent tokens follow their own link.** Subagent messages are attributed through the subagent
    event's member link, not the parent's (test with a parent and a subagent in different narratives).
 3. **Totals track membership.** After `Tx.MoveMember`, or after a primary relink, a ticket's total
    changes with no re-ingest.
-4. **Untracked and unattributed are both reported.** A narrative with no primary appears in the
-   untracked bucket. A message whose covering event has no member link appears as unattributed.
+4. **Untracked and unattributed are both reported.** A narrative with no confident primary appears
+   in the untracked bucket. A message whose covering event has no member link appears as
+   unattributed, and one with no covering event as `no_event`.
 5. **Unknown models fail loudly.** A model absent from `token_pricing` makes `unjira tokens` error,
    naming the model.
 6. **unjira's own spend is recorded and windowed.** Every unjira LLM call writes one row, and `unjira
@@ -212,7 +302,8 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
 8. **Docs ship with the code:**
    - the README CLI surface and config keys;
    - `config/unjira.example.yaml` with `token_pricing`, commented;
-   - `docs/architecture.md`.
+   - `docs/architecture.md`;
+   - the `--dry-run` help for `dev narrate` and `watch`, which still store events and `llm_calls`.
 
 ### PR 2: worklog sink
 
@@ -298,7 +389,8 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
 - `today` is the local calendar day and `1d` is a rolling 24h. Other windows are rolling.
 - The message → covering-event mapping uses the newest snapshot event that contains the message's line.
   Unchecked: whether one `message.id` can straddle a segment boundary. If it can, PR 1 charges it to the
-  segment holding its first line and says so.
+  segment holding its first line and says so. Measured 2026-10-14: 0 of 77,089 ids straddle, in 0 of
+  1,413 files. The first-line rule is implemented and pinned by a test.
 - The model name in a transcript (e.g. `claude-opus-5-5`) is the `token_pricing` key as written. No
   alias table.
 - unjira's own calls are priced from the same `token_pricing` table, keyed by its configured model

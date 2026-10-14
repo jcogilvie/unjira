@@ -64,7 +64,10 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   bounded exception: the claude_code collector reads each working directory's local git config
   through go-git (`collector/claudecode/location.go`) to record its remotes — local, deterministic,
   no network, no `git` binary, read once per directory per pass. It records remotes only; which
-  tracker they belong to is decided at reconcile time, from config. Adding
+  tracker they belong to is decided at reconcile time, from config. The claude_code collector also
+  writes one token-ledger row per assistant `message.id` through the store it holds for cursors
+  (`collector/claudecode/usage.go`): deterministic extraction from lines it already reads, written
+  before the cursor advances. It writes no attribution; that is joined at read time. Adding
   a stream = implement the `Collector` interface in `internal/pipeline`, register it in
   `cmd/unjira/main.go`'s registry, enable it in config.
 - **All verification lives in the reconciler.** Never emit a state-bearing action from transcript
