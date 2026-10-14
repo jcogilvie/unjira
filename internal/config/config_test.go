@@ -110,6 +110,15 @@ func TestLLMConfig_Validate(t *testing.T) {
 			},
 			wantErrText: "max_output_tokens",
 		},
+		{
+			// The reply's reserve comes off the context window before a clustering
+			// prompt is fitted, so a ceiling at or above the window leaves no prompt.
+			name: "rejects max output tokens that leave no room for a prompt",
+			cfg: config.LLMConfig{
+				Model: "gpt-5-2", ContextWindowTokens: 128000, MaxOutputTokens: 128000,
+			},
+			wantErrText: "must be less than llm.context_window_tokens",
+		},
 	}
 
 	for _, tt := range tests {

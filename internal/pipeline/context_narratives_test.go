@@ -65,17 +65,19 @@ func TestSelectContextNarratives_ZeroBoundIncludesEverything(t *testing.T) {
 
 	kept, excluded := selectContextNarratives(rows, nil, nil, 0)
 
-	assert.Equal(t, rows, kept, "zero means unlimited: rows pass through unchanged, in their original order")
+	// Ranked even when nothing is excluded here: the order is the priority
+	// correlator.Cluster fits the prompt budget by.
+	assert.Equal(t, []int64{3, 2, 1}, idsOf(kept), "zero means unlimited: every row is kept, in ranked order")
 	assert.Zero(t, excluded)
 }
 
-func TestSelectContextNarratives_BoundAtOrAbovePopulationIsANoOp(t *testing.T) {
+func TestSelectContextNarratives_BoundAtOrAbovePopulationExcludesNothing(t *testing.T) {
 	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	rows := []store.NarrativeRow{narrativeRow(1, base), narrativeRow(2, base.Add(time.Hour))}
 
 	kept, excluded := selectContextNarratives(rows, nil, nil, 5)
 
-	assert.Equal(t, rows, kept, "nothing excluded means nothing re-ordered either")
+	assert.Equal(t, []int64{2, 1}, idsOf(kept), "every row is kept, ranked")
 	assert.Zero(t, excluded)
 }
 

@@ -44,8 +44,8 @@ type parseReaskRequest struct {
 	// makes the first refusal an error with no call.
 	maxReasks int
 
-	contextWindowTokens int
-	log                 *slog.Logger
+	promptBudgetTokens int
+	log                *slog.Logger
 }
 
 // reaskRefusedCluster asks the refused clustering call again, up to req.maxReasks
@@ -77,12 +77,12 @@ func reaskRefusedCluster(ctx context.Context, client llm.Client, req parseReaskR
 			"reason", latest.Error(), "est_tokens", estimated,
 			"window_start", req.window.Start, "window_end", req.window.End)
 
-		if estimated > req.contextWindowTokens {
+		if estimated > req.promptBudgetTokens {
 			return nil, nil, stats, fmt.Errorf(
 				"clustering events in window [%s, %s): re-ask %d of %d (llm.max_cluster_reasks) for the refused "+
-					"cluster response is estimated at %d tokens, over the %d-token context window, so it was not "+
-					"sent; the refusal was: %w",
-				req.window.Start, req.window.End, attempt, req.maxReasks, estimated, req.contextWindowTokens, latest)
+					"cluster response is estimated at %d tokens, over the %d-token prompt budget (llm.context_window_tokens less "+
+					"llm.max_output_tokens, the context window less the reply's reserve), so it was not sent; the refusal was: %w",
+				req.window.Start, req.window.End, attempt, req.maxReasks, estimated, req.promptBudgetTokens, latest)
 		}
 
 		stats.ClusterReasks++

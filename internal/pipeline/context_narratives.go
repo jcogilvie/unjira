@@ -5,7 +5,7 @@ package pipeline
 // MaxContextNarratives.
 //
 // WHY THIS IS THE RIGHT LEVER. Re-measured across nine dev narrate --dry-run runs
-// (docs/findings/F16-the-prompt-is-unbounded-in-the-window.md): completion tokens track EXTENDS-cluster
+// (finding F16, now fixed): completion tokens track EXTENDS-cluster
 // count, and EXTENDS count equals the context-narrative count in every run — 32
 // in, 32 out, every time. Neither the per-event summary cap
 // (correlator.WithMaxEventSummaryChars) nor a coarser grouping instruction moves
@@ -37,7 +37,7 @@ package pipeline
 // neither side has matched one yet, or because the connecting thread is a
 // branch/topic rather than a ticket) and is not among the most recent ranks below
 // both tiers and can be dropped — the same class of loss any bound accepts, stated
-// so an operator can weigh it. Recorded in docs/findings/F16-the-prompt-is-unbounded-in-the-window.md as
+// so an operator can weigh it. Recorded in finding F16 (now fixed) as
 // available-but-UNMEASURED: this repo's design-notes #37/#38 record why a
 // worktree with no Jira credentials cannot produce a trustworthy before/after
 // token number, so none is claimed here.
@@ -94,11 +94,11 @@ func candidateIssueKeys(evts []events.Event) map[string]bool {
 	return out
 }
 
-// selectContextNarratives bounds rows to at most maxContext, returning the kept
-// rows (in ranked order — see the file doc comment for the two-tier ordering) and
-// how many were excluded. maxContext <= 0 means unlimited: rows pass through
-// unchanged, in NarrativesOverlapping's own (window_start, id) order, so every
-// existing caller (today, none — this is new) means exactly what it always meant.
+// selectContextNarratives ranks rows (see the file doc comment for the two-tier
+// ordering) and bounds them to at most maxContext, returning the kept rows in ranked
+// order and how many were excluded. maxContext <= 0 means unlimited: every row is
+// kept, still ranked, because the order is also the priority correlator.Cluster fits
+// each call's prompt budget by.
 //
 // linkedKeys is narrative id -> its narrative_issues keys (store.
 // NarrativeIssueKeysByNarrative; a missing id means "no links yet", not "linked to
@@ -115,10 +115,6 @@ func candidateIssueKeys(evts []events.Event) map[string]bool {
 func selectContextNarratives(
 	rows []store.NarrativeRow, linkedKeys map[int64][]string, candidateKeys map[string]bool, maxContext int,
 ) ([]store.NarrativeRow, int) {
-	if maxContext <= 0 || len(rows) <= maxContext {
-		return rows, 0
-	}
-
 	sharesKey := func(id int64) bool {
 		for _, key := range linkedKeys[id] {
 			if candidateKeys[key] {
@@ -146,6 +142,10 @@ func selectContextNarratives(
 		// context set from one run to the next.
 		return ranked[i].ID < ranked[j].ID
 	})
+
+	if maxContext <= 0 || len(ranked) <= maxContext {
+		return ranked, 0
+	}
 
 	kept := ranked[:maxContext]
 
