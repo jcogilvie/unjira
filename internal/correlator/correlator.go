@@ -662,15 +662,15 @@ func clusterWindow(
 	if err != nil {
 		var reaskStats Stats
 		results, indices, reaskStats, err = reaskRefusedCluster(ctx, client, parseReaskRequest{
-			window:              window,
-			systemPrompt:        systemPrompt,
-			userPrompt:          userPrompt,
-			assignable:          assignable,
-			refused:             raw,
-			reason:              err,
-			maxReasks:           o.clusterReasks,
-			contextWindowTokens: contextWindowTokens,
-			log:                 o.log,
+			window:             window,
+			systemPrompt:       systemPrompt,
+			userPrompt:         userPrompt,
+			assignable:         assignable,
+			refused:            raw,
+			reason:             err,
+			maxReasks:          o.clusterReasks,
+			promptBudgetTokens: promptBudgetTokens,
+			log:                o.log,
 		})
 		stats.Add(reaskStats)
 		if err != nil {
