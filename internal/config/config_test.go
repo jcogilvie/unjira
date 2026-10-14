@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -770,4 +771,77 @@ func TestLoad_ShippedExampleConfigLoads(t *testing.T) {
 	got, err := cfg.ReaskBudgets()
 	require.NoError(t, err)
 	assert.Equal(t, config.ReaskBudgets{Match: 1, Omission: 1, Dispute: 1, Cluster: 1}, got)
+}
+
+func TestLoad_TokenPricing(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	tests := []struct {
+		name    string
+		body    string
+		want    config.TokenPricing
+		wantErr []string
+	}{
+		{
+			name: "two models parse",
+			body: `token_pricing:
+  claude-opus: {input: 15, output: 75, cache_write: 18.75, cache_read: 1.5}
+  claude-haiku: {input: 0.8, output: 4, cache_write: 1, cache_read: 0.08}
+`,
+			want: config.TokenPricing{
+				"claude-opus":  {Input: f(15), Output: f(75), CacheWrite: f(18.75), CacheRead: f(1.5)},
+				"claude-haiku": {Input: f(0.8), Output: f(4), CacheWrite: f(1), CacheRead: f(0.08)},
+			},
+		},
+		{
+			name:    "unknown sub-key refused",
+			body:    "token_pricing:\n  m: {input_per_mtok: 1, input: 1, output: 1, cache_write: 1, cache_read: 1}\n",
+			wantErr: []string{"input_per_mtok"},
+		},
+		{
+			name:    "missing rate refused naming model and field",
+			body:    "token_pricing:\n  claude-opus: {input: 1, output: 1, cache_write: 1}\n",
+			wantErr: []string{"claude-opus", "cache_read"},
+		},
+		{
+			name:    "negative rate refused",
+			body:    "token_pricing:\n  claude-opus: {input: -1, output: 1, cache_write: 1, cache_read: 1}\n",
+			wantErr: []string{"claude-opus", "input"},
+		},
+		{
+			name: "absent block loads",
+			body: "db_path: x.db\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "unjira.config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tt.body), 0o600))
+
+			cfg, err := config.Load(path)
+
+			if tt.wantErr != nil {
+				require.Error(t, err)
+				for _, s := range tt.wantErr {
+					assert.Contains(t, err.Error(), s)
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Empty(t, cmp.Diff(tt.want, cfg.TokenPricing))
+		})
+	}
+}
+
+func TestTokenPricing_Lookup(t *testing.T) {
+	one := 1.0
+	p := config.TokenPricing{"m": {Input: &one, Output: &one, CacheWrite: &one, CacheRead: &one}}
+
+	got, err := p.Lookup("m")
+	require.NoError(t, err)
+	assert.Equal(t, p["m"], got)
+
+	_, err = p.Lookup("unpriced-model")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unpriced-model")
+	assert.Contains(t, err.Error(), "token_pricing")
 }
