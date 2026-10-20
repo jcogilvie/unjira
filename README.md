@@ -37,6 +37,12 @@ its own changes as part of reality. There is no separate "executor" component: a
 
 ## Status: phase 1 landed — unjira can write, and does not by default
 
+**Token attribution, PR 1 of 3, writes nothing to Jira.** The claude_code collector ledgers each
+assistant message's token usage, unjira records its own LLM calls, and `unjira tokens` reports them
+per ticket (through member links to each narrative's confident primary), per untracked narrative,
+unattributed, and for unjira's own spend over 30d/7d/1d/today. It only reads. Worklogs are PR 2
+(`docs/superpowers/specs/2026-10-14-token-attribution-design.md`).
+
 The whole loop runs: collectors → event log → correlator (cluster + match) → reconciler →
 review queue → apply → learn. `unjira watch` executes the pipeline on an interval;
 `unjira triage` is the human review surface, `unjira actions` the machine-facing one, and
@@ -152,8 +158,9 @@ cp .env.example .env                 # Jira + LLM credentials (gitignored)
 ./unjira collect        # ingest new events from enabled collectors
 ./unjira status         # event counts and collector cursor freshness
 ./unjira digest         # print a day's drift digest
+./unjira tokens         # token spend per ticket, untracked, unattributed, and unjira's own; read-only
 
-./unjira watch --once --dry-run      # one full pass, persisting nothing
+./unjira watch --once --dry-run      # one full pass: no narratives or actions persisted; events and token usage still stored
 ./unjira watch --interval 1h         # the real loop; Ctrl-C finishes the pass in flight
 
 ./unjira actions list                # the review queue
@@ -243,7 +250,15 @@ A reject records your reasoning, which is what slice 7's rule distillation will
 learn from.
 
 Start with `watch --once --dry-run`: it runs every stage and prints what it *would* do, skipping
-`Persist` and the gate, and says which stages it skipped rather than going quiet.
+`Persist` and the gate, and says which stages it skipped rather than going quiet. It still stores
+the events it collects and one `llm_calls` row per LLM call it makes.
+
+**`token_pricing` prices tokens for `unjira tokens`.** Each key is a model name exactly as a
+transcript or `llm.model` writes it, with `input`, `output`, `cache_write` and `cache_read` in
+dollars per million tokens. Every rate is required. A model that appears in the ledger but not in
+the table makes `unjira tokens` fail naming it, never price it at $0. When the gateway reports no
+cached prompt tokens, every prompt token of unjira's own calls is priced at the input rate, and the
+output says the figure is an upper bound.
 
 Reads need Jira credentials (`UNJIRA_JIRA_CREDENTIALS`, a JSON object keyed by connection name)
 and an LLM — `UNJIRA_LLM_API_KEY`, or better, `llm.api_key_helper`, a command unjira runs to fetch

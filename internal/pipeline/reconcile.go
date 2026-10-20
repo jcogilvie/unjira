@@ -148,6 +148,8 @@ func RunReconcile(
 	cfg config.Config,
 	opts ReconcileOptions,
 ) (ReconcileRunResult, error) {
+	ctx = llm.WithStage(ctx, "draft")
+
 	if err := cfg.Reconciler.Validate(); err != nil {
 		return ReconcileRunResult{}, fmt.Errorf("invalid reconciler config: %w", err)
 	}

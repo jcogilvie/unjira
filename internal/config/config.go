@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -591,6 +593,55 @@ type Config struct {
 	AutoCommit map[string]AutoCommitRule `json:"auto_commit"`
 	Rules      RulesConfig               `json:"rules"`
 	DBPath     string                    `json:"db_path"`
+	// TokenPricing prices token usage per model. Absent is valid: it is needed only
+	// when a model's tokens are priced, and Lookup fails loudly for an unpriced one.
+	TokenPricing TokenPricing `json:"token_pricing"`
+}
+
+// ModelPrice is one model's rates in dollars per million tokens. The fields are
+// pointers so an absent rate is refused instead of silently pricing at $0.
+type ModelPrice struct {
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheWrite *float64 `json:"cache_write"`
+	CacheRead  *float64 `json:"cache_read"`
+}
+
+// TokenPricing maps a model name to its rates.
+type TokenPricing map[string]ModelPrice
+
+// Validate refuses a model with a missing or negative rate, naming both.
+func (p TokenPricing) Validate() error {
+	var errs []error
+	for _, model := range slices.Sorted(maps.Keys(p)) {
+		price := p[model]
+		for _, r := range []struct {
+			field string
+			rate  *float64
+		}{
+			{"input", price.Input},
+			{"output", price.Output},
+			{"cache_write", price.CacheWrite},
+			{"cache_read", price.CacheRead},
+		} {
+			switch {
+			case r.rate == nil:
+				errs = append(errs, fmt.Errorf("token_pricing.%s.%s is missing", model, r.field))
+			case *r.rate < 0:
+				errs = append(errs, fmt.Errorf("token_pricing.%s.%s must not be negative, got %v", model, r.field, *r.rate))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Lookup returns model's rates, or an error naming the model when token_pricing has none.
+func (p TokenPricing) Lookup(model string) (ModelPrice, error) {
+	price, ok := p[model]
+	if !ok {
+		return ModelPrice{}, fmt.Errorf("no price for model %q: add it under token_pricing", model)
+	}
+	return price, nil
 }
 
 // DefaultRulesDir is where RulesDir looks when Rules.Dir is unset — matching
@@ -764,6 +815,10 @@ func Load(path string) (Config, error) {
 	// in a value no command can run correctly with, and every LLM-using command reads
 	// it, so the earliest point it can fail is the right one.
 	if _, err := cfg.ReaskBudgets(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
+
+	if err := cfg.TokenPricing.Validate(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 

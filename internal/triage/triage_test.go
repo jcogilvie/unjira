@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jcogilvie/unjira/internal/llm"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/triage"
@@ -88,6 +89,7 @@ func TestSession_QuitAbandonsWithoutApplying(t *testing.T) {
 // stubHandler records what it was asked and returns canned replacements.
 type stubHandler struct {
 	redraftCalls     []string
+	redraftStages    []string
 	retargetCalls    []string
 	restructureCalls []triage.Decision
 	replacement      store.ActionRow
@@ -108,9 +110,10 @@ func (h *stubHandler) IssueContext(string) (tasktracker.Issue, error) {
 }
 
 func (h *stubHandler) Redraft(
-	_ context.Context, _ store.ActionRow, feedback string,
+	ctx context.Context, _ store.ActionRow, feedback string,
 ) (store.ActionRow, error) {
 	h.redraftCalls = append(h.redraftCalls, feedback)
+	h.redraftStages = append(h.redraftStages, llm.StageOf(ctx))
 
 	return h.replacement, h.err
 }
@@ -156,6 +159,20 @@ func TestSession_EditRepresentsTheReplacement(t *testing.T) {
 	approved := s.Approved()
 	require.Len(t, approved, 1)
 	assert.Equal(t, int64(99), approved[0].ID, "the approved action is the REPLACEMENT, not the original")
+}
+
+// TestSession_LabelsHandlerCallsAsTriage: every LLM call a review session makes
+// through its handler is recorded under the triage stage.
+func TestSession_LabelsHandlerCallsAsTriage(t *testing.T) {
+	h := &stubHandler{replacement: store.ActionRow{ID: 99, NarrativeID: 1, Type: "comment", Status: "proposed"}}
+	p := &scriptedPrompter{answers: []triage.Decision{
+		{Verb: triage.VerbEdit, Text: "too vague"},
+		{Verb: triage.VerbApprove},
+	}}
+
+	require.NoError(t, triage.NewSession(context.Background(), batchOf(1), p, h).Run())
+
+	assert.Equal(t, []string{"triage"}, h.redraftStages)
 }
 
 // TestSession_NilHandlerNotifiesAndReprompts: --dry-run runs with no handler,

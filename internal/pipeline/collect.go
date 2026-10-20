@@ -12,12 +12,13 @@ import (
 )
 
 // CollectContext is everything a collector may need from its caller: the store
-// for cursors, the loaded config, resolved credentials, and its own options
-// block from config.Collectors[<name>].
+// for cursors (and, for claude_code, the token ledger rows it extracts, written
+// before each transcript's cursor moves), the loaded config, resolved
+// credentials, and its own options block from config.Collectors[<name>].
 //
 // It exists as a struct rather than a parameter list because collectors differ
-// in what they need — claude_code reads local files and uses only Store and
-// Options, while a Jira or GitHub collector needs connection config and
+// in what they need — claude_code reads local files and uses only Store,
+// Options and Log, while a Jira or GitHub collector needs connection config and
 // credentials — and because a future need can be added here without changing
 // every implementation's signature again.
 //

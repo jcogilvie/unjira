@@ -125,6 +125,10 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userPrompt string) 
 		CompletionTokens: resp.Usage.CompletionTokens,
 		Model:            resp.Model,
 	}
+	if resp.Usage.PromptTokensDetails.JSON.CachedTokens.Valid() {
+		cached := resp.Usage.PromptTokensDetails.CachedTokens
+		usage.CachedPromptTokens = &cached
+	}
 
 	// A "length" finish means the model was cut off mid-answer. Erroring here
 	// rather than returning the fragment is the whole point: every caller in

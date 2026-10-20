@@ -143,6 +143,8 @@ func RunNarrate(
 	window correlator.TimeRange,
 	opts NarrateOptions,
 ) (NarrateResult, error) {
+	ctx = llm.WithStage(ctx, "cluster")
+
 	result := NarrateResult{Window: window, DryRun: opts.DryRun}
 
 	// Before anything is read or written: config.Load already refuses a bad budget,

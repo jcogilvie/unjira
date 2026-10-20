@@ -131,4 +131,14 @@ workflow:
 rules:
   dir: rules
 
+# Prices for `unjira tokens`, in dollars per million tokens. Keys are model names exactly as a
+# transcript or llm.model writes them; all four rates are required. A model seen in the ledger but
+# absent here makes `unjira tokens` fail naming it. The rates below are placeholders: use your own.
+# token_pricing:
+#   claude-opus-5-5:
+#     input: 5
+#     output: 25
+#     cache_write: 6.25
+#     cache_read: 0.5
+
 db_path: data/unjira.db

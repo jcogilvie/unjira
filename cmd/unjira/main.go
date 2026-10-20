@@ -444,8 +444,30 @@ func (a *appContext) llmClient() (llm.Client, error) {
 		return nil, err
 	}
 
-	return openai.New(a.config.LLM.BaseURL, credential,
-		a.config.LLM.Model, a.config.LLM.MaxOutputTokens), nil
+	return llm.NewRecordingClient(
+		openai.New(a.config.LLM.BaseURL, credential, a.config.LLM.Model, a.config.LLM.MaxOutputTokens),
+		llmCallRecorder{a.store}, a.config.LLM.Model, time.Now), nil
+}
+
+// llmCallRecorder adapts the store to llm.Recorder, so neither package imports
+// the other for one struct.
+type llmCallRecorder struct{ store *store.Store }
+
+func (r llmCallRecorder) RecordLLMCall(c llm.CallRecord) error {
+	return r.store.RecordLLMCall(llmCallRow(c))
+}
+
+// llmCallRow maps a call to its llm_calls row. Cached passes through as is: nil
+// records that the gateway reported none, which a stored 0 would erase.
+func llmCallRow(c llm.CallRecord) store.LLMCall {
+	return store.LLMCall{
+		CalledAt:         c.At,
+		Stage:            c.Stage,
+		Model:            c.Model,
+		PromptTokens:     c.Prompt,
+		CompletionTokens: c.Completion,
+		CachedTokens:     c.Cached,
+	}
 }
 
 // llmCredential resolves the configured credential source: the helper if one is
@@ -519,6 +541,19 @@ func (c *digestCmd) Run(app *appContext) error {
 	}
 
 	fmt.Println(out)
+	return nil
+}
+
+type tokensCmd struct{}
+
+func (c *tokensCmd) Run(app *appContext) error {
+	// time.Now() keeps the local zone: the "today" window is the local calendar day.
+	report, err := pipeline.BuildTokenReport(app.store, app.config.TokenPricing, app.config.Match.ConfidenceFloor, time.Now())
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(pipeline.RenderTokens(report))
 	return nil
 }
 
@@ -670,7 +705,7 @@ func (c *devWorkflowCmd) Run(app *appContext) error {
 // output" shape.
 type devNarrateCmd struct {
 	Since  config.Span `default:"24h" help:"How far back to narrate (e.g. 36h, 7d, 2w, 7d12h)."`
-	DryRun bool        `help:"Run the full pass, including real LLM calls, but persist nothing."`
+	DryRun bool        `help:"Run the full pass, including real LLM calls, but persist no narratives and write no actions. Collected events and each LLM call's token usage are still stored."`
 }
 
 // Run assembles the LLM client and validates config before doing any
@@ -855,7 +890,7 @@ type watchCmd struct {
 	// ship as-is rather than a placeholder that must be revisited.
 	Since  config.Span `default:"1h" help:"How far back each pass narrates (e.g. 1h, 24h)."`
 	Once   bool        `help:"Run a single pass and exit, instead of looping. Makes the loop testable and cron-friendly without a supervisor."`
-	DryRun bool        `help:"Run every stage's real work, including LLM calls, but skip Persist and the auto-commit gate. Never writes to the store or a real tracker."`
+	DryRun bool        `help:"Run every stage's real work, including LLM calls, but skip Persist and the auto-commit gate: no narratives, no actions, nothing written to a real tracker. Collected events and each LLM call's token usage are still stored."`
 }
 
 // Run validates configuration once, up front — before the first lease, let
@@ -1113,6 +1148,7 @@ var cli struct {
 	Collect collectCmd `cmd:"" help:"Run every enabled collector and persist new events."`
 	Digest  digestCmd  `cmd:"" help:"Print the drift digest for a day."`
 	Status  statusCmd  `cmd:"" help:"Event counts and collector cursor freshness."`
+	Tokens  tokensCmd  `cmd:"" help:"Token spend per ticket, untracked and unattributed, plus unjira's own LLM spend. Read-only."`
 	Watch   watchCmd   `cmd:"" help:"Interval loop: collect -> narrate -> match -> reconcile -> auto-commit gate."`
 	Actions actionsCmd `cmd:"" help:"Machine-facing primitives over the review queue: list and decide on proposed actions."`
 	Triage  triageCmd  `cmd:"" help:"Review the queue one action at a time: approve, reject, reword, re-cluster, retarget. Applies nothing until you confirm."`
