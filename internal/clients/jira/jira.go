@@ -15,11 +15,13 @@ package jira
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	jiracloud "github.com/andygrunwald/go-jira/v2/cloud"
 
@@ -318,6 +320,48 @@ func (c *Client) GetComments(key string) ([]map[string]any, error) {
 	}
 }
 
+// EntityProperty is a Jira entity property: a key and its raw JSON value.
+type EntityProperty struct {
+	Key   string          `json:"key"`
+	Value json.RawMessage `json:"value"`
+}
+
+// Worklog is the part of a Jira worklog unjira reads back: its id and its
+// properties.
+type Worklog struct {
+	ID         string           `json:"id"`
+	Properties []EntityProperty `json:"properties"`
+}
+
+type worklogPage struct {
+	Worklogs []Worklog `json:"worklogs"`
+	Total    int       `json:"total"`
+}
+
+// ListWorklogs returns every worklog on an issue, with its properties.
+func (c *Client) ListWorklogs(key string) ([]Worklog, error) {
+	var worklogs []Worklog
+	start := 0
+
+	for {
+		path := fmt.Sprintf("rest/api/2/issue/%s/worklog?startAt=%d&maxResults=100&expand=properties", key, start)
+
+		var page worklogPage
+		if err := c.do(http.MethodGet, path, nil, &page); err != nil {
+			return nil, err
+		}
+
+		worklogs = append(worklogs, page.Worklogs...)
+
+		// Same termination as GetComments: advance by what the server
+		// returned, stop on an empty page or once Total is reached.
+		if len(page.Worklogs) == 0 || len(worklogs) >= page.Total {
+			return worklogs, nil
+		}
+		start += len(page.Worklogs)
+	}
+}
+
 // StatusChanges returns the (from, to) status pairs from an issue's
 // changelog, oldest first.
 func (c *Client) StatusChanges(key string) ([]workflow.StatusChange, error) {
@@ -408,6 +452,70 @@ func (c *Client) AddComment(key, text string) (map[string]any, error) {
 	}
 
 	return result, nil
+}
+
+// WorklogInput is the body of a worklog add or update.
+type WorklogInput struct {
+	Started          time.Time
+	TimeSpentSeconds int
+	Comment          string
+	Properties       []EntityProperty
+}
+
+// worklogWriteFlags go on every worklog write: no watcher notification, and
+// the issue's remaining estimate is left alone. This is the only place they
+// live.
+const worklogWriteFlags = "notifyUsers=false&adjustEstimate=leave"
+
+func (in WorklogInput) body() map[string]any {
+	body := map[string]any{
+		"started":          in.Started.Format(issueTimeFormat),
+		"timeSpentSeconds": in.TimeSpentSeconds,
+		"comment":          in.Comment,
+	}
+	if len(in.Properties) > 0 {
+		body["properties"] = in.Properties
+	}
+
+	return body
+}
+
+// AddWorklog adds a worklog to an issue and returns its id.
+func (c *Client) AddWorklog(key string, in WorklogInput) (string, error) {
+	var result struct {
+		ID string `json:"id"`
+	}
+	path := fmt.Sprintf("rest/api/2/issue/%s/worklog?%s", key, worklogWriteFlags)
+	if err := c.do(http.MethodPost, path, in.body(), &result); err != nil {
+		return "", err
+	}
+
+	return result.ID, nil
+}
+
+// UpdateWorklog replaces a worklog's fields and properties. The worklog PUT
+// accepts inline properties but silently ignores them (measured on DEVSBX,
+// 2026-10-23), so each property is set through its own endpoint after it.
+func (c *Client) UpdateWorklog(key, id string, in WorklogInput) error {
+	path := fmt.Sprintf("rest/api/2/issue/%s/worklog/%s?%s", key, id, worklogWriteFlags)
+	if err := c.do(http.MethodPut, path, in.body(), nil); err != nil {
+		return err
+	}
+	for _, p := range in.Properties {
+		propPath := fmt.Sprintf("rest/api/2/issue/%s/worklog/%s/properties/%s?%s",
+			key, id, url.PathEscape(p.Key), worklogWriteFlags)
+		if err := c.do(http.MethodPut, propPath, p.Value, nil); err != nil {
+			return fmt.Errorf("set worklog %s property %s: %w", id, p.Key, err)
+		}
+	}
+
+	return nil
+}
+
+// DeleteWorklog deletes a worklog.
+func (c *Client) DeleteWorklog(key, id string) error {
+	path := fmt.Sprintf("rest/api/2/issue/%s/worklog/%s?%s", key, id, worklogWriteFlags)
+	return c.do(http.MethodDelete, path, nil, nil)
 }
 
 // DeleteIssue deletes an issue by key.

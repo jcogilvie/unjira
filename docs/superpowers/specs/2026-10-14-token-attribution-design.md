@@ -1,12 +1,12 @@
 # Token attribution for tracked tickets — design
 
-**Status: PR 1 landed 2026-10-14; PR 2 and PR 3 design** (contract from a grilling session, 2026-10-14)
+**Status: PR 1 landed 2026-10-14; PR 2 landed 2026-10-23; PR 3 design** (contract from a grilling session, 2026-10-14)
 
 This is the spec. An implementation plan points at it instead of restating it.
 
 ## Status
 
-PR 1 landed 2026-10-14. PR 2 and PR 3 are design.
+PR 1 landed 2026-10-14. PR 2 landed 2026-10-23. PR 3 is design.
 
 Deviations from the design as first written, measured by a probe over every local transcript (see
 "Facts"):
@@ -63,6 +63,71 @@ Verification, 2026-10-14:
 - **Not verified: the own-call count.** No LLM gateway credential was available, so no
   `dev narrate --dry-run` was run, and no pass's reported call count was compared with
   `SELECT count(*) FROM llm_calls`. Call recording is covered only by the offline tests.
+
+PR 2, landed 2026-10-23.
+
+Deviations from the design as first written:
+
+- **R2 — worklog actions are ticket-scoped.** Their `narrative_id` is NULL (0 ↔ NULL at the store
+  boundary), because the narrative-keyed watermarks count every action type and a worklog carrying a
+  narrative id would freeze links, hide deltas and block creates. A worklog spans every narrative
+  whose confident primary is the ticket.
+- **R7 — a moved message joins its new ticket's delta only after the old ticket's correction
+  applies** and clears its marker, so Jira never holds the same message in two worklogs; a rejected
+  correction leaves it logged on the old ticket.
+- **R13 — the sink is on by default.** An absent `attribution_sinks` means `[worklog]` on a
+  writable Jira tracker; `[]` disables it; unknown names, duplicates, non-Jira kinds and empty
+  `writable_scopes` are refused at load. Everything still queues (AC18).
+- **Time is computed per delta, floored at 60s.** Each worklog's `timeSpentSeconds` comes from its
+  own delta alone, so the gap between the last message of an applied worklog and the first message
+  of the next delta is never counted, even when it is under `idle_gap`; and every delta shorter than
+  Jira's measured 60s minimum rounds up to 60s, so many short deltas log more than their active time.
+  Both are intended: a delta's time depends only on its own messages, so a later pass never changes
+  what an applied worklog says.
+- **An add refuses time Jira already holds under another key.** Each worklog's `unjira.attribution`
+  property lists its `message_ids`. Before POSTing, the applier refuses an add when another unjira
+  worklog on the issue lists any of its messages: an earlier add whose marking failed, or whose POST
+  reached Jira without a readable answer, after the delta grew and took a new key. An update whose
+  kept messages are no longer all marked to its worklog is refused as stale.
+- Implementation-level deviations from the plan's file map: the Jira client's worklog tests live in
+  `internal/clients/jira/worklog_test.go` (the plan named `jira_test.go`), the applier's in
+  `internal/gate/applier_worklog_test.go`, and the sink wiring's in `cmd/unjira/watch_pass_test.go`
+  and `cmd/unjira/main_test.go`. `config.KnownSinks` is an exported function (a `var` would be
+  mutable), `pipeline.RunSinks` keeps its helpers (`runTicketSinks`, `persistDraft`) unexported in
+  the same file, and `cmd/unjira`'s `runSinks`/`sinkRegistry` split the wiring from the pass. `Date`
+  parses in `time.Local` under a targeted `//nolint:gosmopolitan` (a calendar date is the
+  operator's local day). `cmd/unjira/main_test.go` uses `reflect.TypeFor` (Go 1.22+) to pin the
+  command structs. `worklog/compute.go`'s `property` returns `(string, error)` because
+  `json.Marshal` can fail, and that error is surfaced rather than swallowed.
+
+Verification, 2026-10-23:
+
+- `go test ./...` printed 28 `ok` lines, one `?   github.com/jcogilvie/unjira/internal/store/storetest
+  [no test files]`, and exited 0. `earthly +reviewable` printed `+go-lint | 0 issues.` and
+  `🌍 Earthly Build  ✅ SUCCESS`.
+- AC 17's live DEVSBX run (post, update and delete one worklog; the minimum accepted duration,
+  whether time tracking is enabled, and the permissions the unjira user needs) is the
+  CONTROLLER's to run and record:
+
+  > Run 2026-10-23, `UNJIRA_LIVE=1 go test -tags=live -run TestLiveWorklogLifecycle -v -count=1
+  > ./internal/live/` (second run; the first failed on the PUT-property step, which became R11a —
+  > see the deviations above). Printed, quoted:
+  >
+  > ```
+  > time tracking enabled: true
+  > permission WORK_ON_ISSUES: present=true havePermission=true
+  > permission EDIT_OWN_WORKLOGS: present=true havePermission=true
+  > permission DELETE_OWN_WORKLOGS: present=true havePermission=true
+  > minimum probe 1s: rejected (Jira API 400: Worklog must not be null / timeLogged - You must indicate the time spent working.)
+  > minimum probe 30s: rejected (same 400)
+  > minimum probe 60s: accepted (id 34547)
+  > measured minimum worklog duration: 60s
+  > --- PASS: TestLiveWorklogLifecycle (9.04s)
+  > ```
+  >
+  > **Minimum accepted duration: 60s** (1s and 30s are rejected with a 400). **Time tracking is
+  > enabled** on DEVSBX. **Permissions:** the unjira user needs `WORK_ON_ISSUES`,
+  > `EDIT_OWN_WORKLOGS` and `DELETE_OWN_WORKLOGS`, all held.
 
 ## Problem
 
@@ -421,4 +486,6 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
   name.
 - Time spent counts parent-session messages only. A run made purely by a subagent, with no
   parent-session member messages on the ticket, logs Jira's minimum duration (settled by criterion 17)
-  rather than zero.
+  rather than zero. **Measured by the criterion 17 live run on 2026-10-23: 60 seconds** (1s and
+  30s are rejected with a 400); `minWorklogSeconds` in `internal/attribution/worklog/compute.go`
+  carries this value.

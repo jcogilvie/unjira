@@ -458,3 +458,101 @@ func TestRunWatchPass_DryRunSkipsMatchReconcileAndAutoCommit(t *testing.T) {
 
 	assert.Empty(t, client.prompts, "narrate found nothing to cluster, so it made no LLM call either")
 }
+
+// worklogLocalTracker is the local backend plus worklog support, counting calls.
+type worklogLocalTracker struct {
+	*local.Tracker
+
+	worklogCalls int
+}
+
+func (w *worklogLocalTracker) FindWorklog(string, string, []string) (string, bool, error) {
+	w.worklogCalls++
+
+	return "", false, nil
+}
+
+func (w *worklogLocalTracker) AddWorklog(string, tasktracker.WorklogEntry) (string, error) {
+	w.worklogCalls++
+
+	return "10001", nil
+}
+
+func (w *worklogLocalTracker) UpdateWorklog(string, string, tasktracker.WorklogEntry) error {
+	w.worklogCalls++
+
+	return nil
+}
+
+func (w *worklogLocalTracker) DeleteWorklog(string, string) error {
+	w.worklogCalls++
+
+	return nil
+}
+
+var _ tasktracker.WorklogWriter = (*worklogLocalTracker)(nil)
+
+// worklogPass seeds a narrative tracked to a local PROJ-1 with two ledger rows, on a
+// writable Jira-kind tracker with attribution_sinks absent (the default, R13).
+func worklogPass(t *testing.T) (*store.Store, *worklogLocalTracker, config.Config) {
+	t.Helper()
+	s := watchPassStore(t)
+	tracker := &worklogLocalTracker{Tracker: local.New(s)}
+	issueKey, err := s.InsertLocalIssue("PROJ", "the ticket", "Task", "", nil)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	seedReconcilableNarrative(t, s, "e1", issueKey, now.Add(-time.Hour))
+	require.NoError(t, s.UpsertMessageUsage([]store.MessageUsage{
+		{MessageID: "m1", TranscriptID: "t", OccurredAt: now.Add(-50 * time.Minute), Model: "claude-opus", InputTokens: 1, CoveringExternalID: "e1"},
+		{MessageID: "m2", TranscriptID: "t", OccurredAt: now.Add(-45 * time.Minute), Model: "claude-opus", InputTokens: 1, CoveringExternalID: "e1"},
+	}))
+
+	cfg := watchPassConfig()
+	cfg.Connections = []config.Connection{{Name: "corp", Kind: config.KindJira}}
+	cfg.Trackers = []config.Tracker{{Name: "test", Connection: "corp", Scopes: []string{"PROJ"}, WritableScopes: []string{"PROJ"}}}
+	cfg.TokenPricing = config.TokenPricing{"claude-opus": {Input: new(1.0), Output: new(1.0), CacheWrite: new(1.0), CacheRead: new(1.0)}}
+	require.NoError(t, cfg.Worklog.WorkSince.UnmarshalText([]byte("2020-01-01")))
+
+	return s, tracker, cfg
+}
+
+func worklogActions(t *testing.T, s *store.Store) []store.ActionRow {
+	t.Helper()
+	all, err := s.ActionsForIssue("PROJ-1")
+	require.NoError(t, err)
+	var out []store.ActionRow
+	for _, a := range all {
+		if a.Type == store.ActionTypeWorklog {
+			out = append(out, a)
+		}
+	}
+
+	return out
+}
+
+func TestRunWatchPass_DefaultConfigAppliesNoWorklog(t *testing.T) {
+	s, tracker, cfg := worklogPass(t)
+	app := &appContext{config: cfg, store: s}
+	applier := gate.NewApplier(s, tracker, "PROJ", cfg.Trackers)
+
+	require.NoError(t, app.runWatchPass(t.Context(), &watchLLM{}, tracker, applier, nil, nil, 24*time.Hour, false))
+
+	got := worklogActions(t, s)
+	require.Len(t, got, 1)
+	assert.Equal(t, store.StatusProposed, got[0].Status)
+	assert.Zero(t, tracker.worklogCalls, "no auto_commit block: the worklog queues, never writes")
+}
+
+func TestRunWatchPass_GraduatedWorklogAutoApplies(t *testing.T) {
+	s, tracker, cfg := worklogPass(t)
+	cfg.AutoCommit = map[string]config.AutoCommitRule{store.ActionTypeWorklog: {ConfidenceFloor: 0.9, Graduated: true}}
+	app := &appContext{config: cfg, store: s}
+	applier := gate.NewApplier(s, tracker, "PROJ", cfg.Trackers)
+
+	require.NoError(t, app.runWatchPass(t.Context(), &watchLLM{}, tracker, applier, nil, nil, 24*time.Hour, false))
+
+	got := worklogActions(t, s)
+	require.Len(t, got, 1)
+	assert.Equal(t, store.StatusApplied, got[0].Status)
+	assert.Positive(t, tracker.worklogCalls)
+}

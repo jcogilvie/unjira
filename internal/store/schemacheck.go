@@ -30,6 +30,9 @@ const (
 	changeTokenLedger = "the token ledger (docs/superpowers/specs/2026-10-14-token-attribution-design.md), which " +
 		"records each Claude Code assistant message's token usage as its transcript is read; a store collected " +
 		"before it has no ledger rows for any transcript it has already read, and never re-reads them"
+	changeWorklogSink = "the worklog sink (docs/superpowers/specs/2026-10-14-token-attribution-design.md), which " +
+		"records on each ledger message the Jira worklog it was logged in; a store from before it has no such " +
+		"record, so every message it already logged would be proposed again"
 )
 
 // storeFormat is the store format this build writes, recorded in SQLite's
@@ -51,7 +54,9 @@ const (
 // table trips no column check (columnMissing passes a table that does not exist), so
 // without the marker an older store would open with empty ledger tables, and the
 // transcripts it has already read past would never be re-read: their spend would be
-// silently absent.
+// silently absent; 3, which adds token_messages.worklog_id and worklog_issue_key and
+// the attribution_sink_state table, without which every message an older store already
+// logged would be proposed again.
 const storeFormat = len(formatChanges) - 1
 
 // formatChanges names the change each store format introduced, indexed by format (0
@@ -61,6 +66,7 @@ const storeFormat = len(formatChanges) - 1
 var formatChanges = [...]string{
 	1: changeUTCTimestamps,
 	2: changeTokenLedger,
+	3: changeWorklogSink,
 }
 
 // requiredColumns are the columns this build's queries read that an older store can lack.
@@ -82,6 +88,8 @@ var requiredColumns = []requiredColumn{
 	{tableNarrativeEvents, "member_confidence", changeLinkKinds},
 	{tableNarrativeEvents, "member_placement", changeMemberPlacement},
 	{tableActions, "corrected_seq", changeCorrectionSeq},
+	{"token_messages", "worklog_id", changeWorklogSink},
+	{"token_messages", "worklog_issue_key", changeWorklogSink},
 }
 
 const (

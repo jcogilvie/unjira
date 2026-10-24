@@ -380,6 +380,65 @@ func (t routed) CreateIssue(scope, summary, issueType, description string, label
 	return res.Writer.CreateIssue(scope, summary, issueType, description, labels)
 }
 
+func (t routed) FindWorklog(key, idempotencyKey string, messageIDs []string) (string, bool, error) {
+	w, err := t.worklogWriter(key)
+	if err != nil {
+		return "", false, err
+	}
+
+	return w.FindWorklog(key, idempotencyKey, messageIDs)
+}
+
+func (t routed) AddWorklog(key string, e WorklogEntry) (string, error) {
+	w, err := t.worklogWriter(key)
+	if err != nil {
+		return "", err
+	}
+
+	return w.AddWorklog(key, e)
+}
+
+func (t routed) UpdateWorklog(key, id string, e WorklogEntry) error {
+	w, err := t.worklogWriter(key)
+	if err != nil {
+		return err
+	}
+
+	return w.UpdateWorklog(key, id, e)
+}
+
+func (t routed) DeleteWorklog(key, id string) error {
+	w, err := t.worklogWriter(key)
+	if err != nil {
+		return err
+	}
+
+	return w.DeleteWorklog(key, id)
+}
+
+// worklogWriter is writer plus the WorklogWriter feature check, naming the tracker
+// whose backend lacks it.
+func (t routed) worklogWriter(key string) (WorklogWriter, error) {
+	w, err := t.writer(key)
+	if err != nil {
+		return nil, err
+	}
+
+	ww, ok := w.(WorklogWriter)
+	if !ok {
+		res, err := t.r.Resolve(key)
+		if err != nil {
+			return nil, err
+		}
+
+		return nil, fmt.Errorf("tracker %q cannot write worklogs: its backend has no worklog support", res.Tracker)
+	}
+
+	return ww, nil
+}
+
+var _ WorklogWriter = routed{}
+
 func (t routed) writer(key string) (TaskWriter, error) {
 	res, err := t.r.Resolve(key)
 	if err != nil {

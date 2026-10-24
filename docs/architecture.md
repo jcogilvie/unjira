@@ -81,6 +81,8 @@ flowchart TB
 
     TRIAGE["internal/triage<br/>approve · reject · edit<br/>merge · split · target"]
 
+    SINKS["pipeline.RunSinks<br/>deterministic · attribution sinks draft<br/>from the token ledger per writable<br/>ticket: worklog add / update / delete"]
+
     LEDGER[("token_messages · llm_calls<br/>token ledger, in the store")]
     RECORD["llm.RecordingClient<br/>deterministic · one llm_calls row<br/>per own LLM call, by stage"]
     TOKENS["pipeline.BuildTokenReport<br/>deterministic · read-time attribution<br/>message → covering event → member → primary"]
@@ -99,6 +101,7 @@ flowchart TB
     STORE --> CAND --> MATCH --> STORE
     STORE --> DEST --> VERIFY --> DRAFT --> FILTERS --> STORE
     STORE --> TRIAGE --> STORE
+    STORE & LEDGER --> SINKS -->|"drafted actions, NULL narrative_id"| STORE
     CCC -->|"one row per assistant message.id"| LEDGER
     CLUSTER & DISPUTE & MATCH & DRAFT & TRIAGE -.->|"every completion"| RECORD --> LEDGER
     LEDGER & STORE --> TOKENS
@@ -108,7 +111,7 @@ flowchart TB
     classDef det fill:#d5f5e3,stroke:#1e8449,color:#1a1a1a
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     class CLUSTER,DISPUTE,MATCH,DRAFT llm
-    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID,PRJOIN,DEST,RECORD,TOKENS det
+    class CCC,JC,GHC,PERSIST,CAND,FILTERS,DECIDE,SPLIT,PRID,PRJOIN,DEST,RECORD,TOKENS,SINKS det
     class APPLY danger
 ```
 
@@ -124,6 +127,17 @@ unjira's own calls go through `llm.RecordingClient`, wrapped once in `cmd/unjira
 It writes one `llm_calls` row per completion under the stage each `pipeline.Run*` entry (or
 `triage.NewSession`) puts on the context, and those rows are never attributed to a ticket.
 `unjira tokens` prices both from `token_pricing` and writes nothing.
+
+**Attribution sinks draft from the ledger after a clean reconcile.** `pipeline.RunSinks` runs at the
+end of `watch` and `dev narrate`, after reconcile — deterministic, no LLM call. It reads the
+read-time attributions plus each covered ticket's existing actions, and asks every sink the
+tracker's `attribution_sinks` names (absent means `[worklog]`) for drafts. A worklog draft covers
+only messages with no `worklog_id` marker, timestamps at or after the tracker's enable floor
+(`worklog.work_since` when set), and active time with gaps over `worklog.idle_gap` excluded. A
+larger delta supersedes the ticket's pending draft (the old row lands `suppressed`); a correction
+shrinks, updates or deletes the worklog whose messages moved elsewhere. Persisted drafts carry a
+NULL `narrative_id` — they are ticket-scoped, not narrative-scoped. Applying one goes through the
+same review queue and gate as any action.
 
 **GitHub PR events never enter `SPLIT`'s tracker-state branch.** A pull request is a thing
 somebody did, work evidence in every deployment — never the tracker's own account of itself, so
@@ -341,7 +355,7 @@ flowchart LR
     G2 --> A
     G3 --> A
     HUMAN --> A
-    A ==>|"the only write path"| TRACKER
+    A ==>|"the only write path:<br/>AddComment · SetStatus · CreateIssue<br/>AddWorklog · UpdateWorklog · DeleteWorklog"| TRACKER
 
     classDef danger fill:#fadbd8,stroke:#c0392b,color:#1a1a1a
     classDef gate fill:#fdebd0,stroke:#ca6f1e,color:#1a1a1a
@@ -354,6 +368,15 @@ resolves one to hand it over, and nothing else names the type outside the interf
 doc comments. Every other consumer takes `TaskReader`. GitHub has no edge from the applier because
 it cannot have one: its backend implements only `TaskReader`, and its client sends only GET, so
 `tasktracker.Resolver` has no writer to hand out for a GitHub scope.
+
+**Worklog writes ride the same path through an optional capability.** `tasktracker.WorklogWriter`
+(`FindWorklog`, `AddWorklog`, `UpdateWorklog`, `DeleteWorklog`) is a separate interface detected by
+type assertion on a `TaskWriter`, like `SelfIdentifier`; only `clients/jira.Tracker` implements it.
+`gate.Applier`'s `worklog` case refuses an action whose tracker's writer does not implement it, so
+a `local`-backend worklog can never reach a tracker. Every worklog POST, PUT and DELETE carries
+`notifyUsers=false&adjustEstimate=leave`, and each add or update carries unjira's `unjira.attribution` entity
+property (inline on the POST; on an update, through the property endpoint after the PUT, since the
+worklog PUT ignores inline properties) so a retried add finds its own worklog by idempotency key instead of double-logging. The property also lists the worklog's `message_ids`, and an add is refused when another unjira worklog on the issue already lists one of its messages, so a redraft under a new key cannot log the same time twice.
 
 `reconciler/create.go:134` is worth reading as a design statement: `ProposeCreates` takes no
 tracker parameter. Its one read is an optional `TaskReader` (`WithCandidateReader`) that describes the
@@ -391,8 +414,11 @@ config:
 stateDiagram-v2
     direction LR
     [*] --> proposed: reconciler drafts
+    [*] --> proposed: attribution sink drafted<br/>(worklog: NULL narrative_id,<br/>ticket-scoped)
     [*] --> declined: model judged<br/>not worth tracking<br/>(create only)
     [*] --> suppressed: deterministic filter<br/>refused the draft<br/>(watermark, not reviewed)
+
+    proposed --> suppressed: a larger delta superseded<br/>the pending worklog draft<br/>(its replacement stands proposed)
 
     proposed --> approved: triage [a]pprove<br/>or auto_commit
     proposed --> rejected: triage [r]eject<br/>or [t]arget
@@ -424,6 +450,15 @@ Reading the transitions, since some distinctions matter more than an edge label 
 - **`declined`** is the model judging work not worth a ticket — creates only, and **distinct from
   `rejected`, which is a human's ruling** (`reconciler/create.go:52`). Conflating them would teach
   slice 7's distiller that unjira's own taste and a reviewer's are the same signal.
+- **A worklog action is ticket-scoped: its `narrative_id` is NULL** (`store` maps 0 ↔ NULL at the
+  insert/scan boundary), because a worklog spans every narrative whose confident primary is the
+  ticket, and no narrative-keyed watermark — linked-since, the freeze rule, `hasCommittedAction`,
+  `awaitingCreate` — counts it. Its type is `worklog` with `op` `add` | `update` | `delete`
+  (`store.WorklogPayload`); triage refuses `e`/`t`/`m`/`s` on one, since its numbers are computed
+  from the ledger, not authored. Applying one records the Jira worklog's id on every covered
+  `token_messages` row (`worklog_id` + `worklog_issue_key`, both set or both NULL), which is what
+  keeps the next pass from re-proposing logged time; a failed apply leaves the markers unset so a
+  re-approve is safe.
 - **`reject / retarget`** are both recorded `rejected`, but only retarget produces a replacement row:
   the old action named the wrong issue, so it was ruled against rather than reworded
   (`triage/restructure.go:509`). Retargeting a create links its work to an existing ticket instead,
@@ -468,6 +503,8 @@ flowchart TB
     RECON["reconciler"]
     CORR["correlator"]
     GATE["gate"]
+    ATTR["attribution"]
+    ATTRW["attribution/worklog"]
     STORE["store"]
     CONFIG["config"]
     CJIRA["clients/jira"]
@@ -495,11 +532,16 @@ flowchart TB
     CMD --> PIPE & TRIAGE & GATE & CORR & STORE & CONFIG
     CMD -->|"NewRecordingClient"| LLM
     CMD --> CJIRA & CGH & CLOCAL & COAI & COLLJ & COLLC & COLLGH
+    CMD -->|"sink registry"| ATTRW
+    CMD --> ATTR
     PIPE --> RECON & CORR & GATE & STORE & CONFIG & TT & LLM
+    PIPE -->|"RunSinks"| ATTR
     TRIAGE --> RECON & CORR & STORE & LLM
     RECON --> CORR & STORE & CONFIG & WF & LLM & RULES & EVENTS & TT
     CORR --> STORE & CONFIG & LLM & RULES & EVENTS & TT
     GATE --> STORE & CONFIG & TT
+    ATTR --> STORE & CONFIG
+    ATTRW --> ATTR & STORE & CONFIG
     STORE --> EVENTS
     CONFIG --> EVENTS & TT
     CJIRA --> TT & WF

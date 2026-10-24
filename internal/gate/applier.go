@@ -197,6 +197,8 @@ func (a *Applier) write(action store.ActionRow) error {
 		return a.applyTransition(action)
 	case "create":
 		return a.applyCreate(action)
+	case store.ActionTypeWorklog:
+		return a.applyWorklog(action)
 	default:
 		// Covers "estimate" (a real actions.type value with no TaskWriter
 		// method — see tasktracker's package doc) and anything future/unknown.
@@ -205,6 +207,134 @@ func (a *Applier) write(action store.ActionRow) error {
 		// action type outside what unjira can actually enact surfaces.
 		return fmt.Errorf("action %d: no applier for action type %q", action.ID, action.Type)
 	}
+}
+
+// applyWorklog writes a worklog action and keeps the ledger marker in step with
+// Jira. An add refuses a stale draft before any call, finds a worklog an earlier
+// apply already created (POST is never retried, so a retry is a re-approve), and
+// marks the messages only after Jira holds the worklog (R9). A failure leaves the
+// messages unlogged, so the time is re-proposed rather than lost.
+func (a *Applier) applyWorklog(action store.ActionRow) error {
+	if action.IssueKey == "" {
+		return fmt.Errorf("action %d: worklog action has no issue_key", action.ID)
+	}
+
+	var p store.WorklogPayload
+	if err := json.Unmarshal([]byte(action.Payload), &p); err != nil {
+		return fmt.Errorf("action %d: decoding worklog payload %q: %w", action.ID, action.Payload, err)
+	}
+	if err := validateWorklog(p); err != nil {
+		return fmt.Errorf("action %d: %w", action.ID, err)
+	}
+
+	if err := a.checkWritable(action.IssueKey); err != nil {
+		return fmt.Errorf("action %d: %w", action.ID, err)
+	}
+
+	ww, ok := a.writer.(tasktracker.WorklogWriter)
+	if !ok {
+		return fmt.Errorf("action %d: the configured tracker writer cannot write worklogs", action.ID)
+	}
+
+	key := action.IssueKey
+	entry := tasktracker.WorklogEntry{
+		Started: p.Started, TimeSpentSeconds: p.TimeSpentSeconds, Comment: p.Comment, Property: p.Property,
+	}
+
+	switch p.Op {
+	case store.WorklogOpAdd:
+		return a.addWorklog(ww, key, p, entry)
+	case store.WorklogOpUpdate:
+		if err := a.checkKeptStillLogged(key, p); err != nil {
+			return fmt.Errorf("action %d: %w", action.ID, err)
+		}
+		if err := ww.UpdateWorklog(key, p.WorklogID, entry); err != nil {
+			return fmt.Errorf("updating worklog %s on %s: %w", p.WorklogID, key, err)
+		}
+		if _, err := a.store.ClearWorklogMarkers(key, p.WorklogID, p.MessageIDs); err != nil {
+			return fmt.Errorf("worklog %s on %s was updated, but %w; re-approve to clear them", p.WorklogID, key, err)
+		}
+	default: // store.WorklogOpDelete; validateWorklog admits no other op
+		if err := ww.DeleteWorklog(key, p.WorklogID); err != nil {
+			return fmt.Errorf("deleting worklog %s on %s: %w", p.WorklogID, key, err)
+		}
+		if _, err := a.store.ClearWorklogMarkers(key, p.WorklogID, nil); err != nil {
+			return fmt.Errorf("worklog %s on %s was deleted, but %w; re-approve to clear them", p.WorklogID, key, err)
+		}
+	}
+
+	return nil
+}
+
+func (a *Applier) addWorklog(ww tasktracker.WorklogWriter, key string, p store.WorklogPayload, entry tasktracker.WorklogEntry) error {
+	held, err := a.store.LoggedAmong(p.MessageIDs)
+	if err != nil {
+		return err
+	}
+	for _, id := range p.MessageIDs {
+		if at, ok := held[id]; ok {
+			return fmt.Errorf("message %s is already logged in %s: this draft is stale", id, at)
+		}
+	}
+
+	id, found, err := ww.FindWorklog(key, p.IdempotencyKey, p.MessageIDs)
+	if err != nil {
+		return fmt.Errorf("looking for an earlier worklog on %s: %w", key, err)
+	}
+	if !found {
+		if id, err = ww.AddWorklog(key, entry); err != nil {
+			return fmt.Errorf("adding worklog to %s: %w", key, err)
+		}
+	}
+
+	if err := a.store.MarkWorklogged(key, id, p.MessageIDs); err != nil {
+		return fmt.Errorf("worklog %s on %s exists, but recording it failed: %w; re-approve to record it", id, key, err)
+	}
+
+	return nil
+}
+
+// checkKeptStillLogged refuses an update whose kept messages are no longer all logged
+// in its worklog: a later apply moved or cleared one, so the draft's time is stale.
+// ponytail: it cannot see a kept message re-attributed elsewhere since drafting (the
+// applier holds no attribution); the next sinks pass drafts that correction.
+func (a *Applier) checkKeptStillLogged(key string, p store.WorklogPayload) error {
+	held, err := a.store.LoggedAmong(p.MessageIDs)
+	if err != nil {
+		return err
+	}
+	want := key + "/" + p.WorklogID
+	for _, id := range p.MessageIDs {
+		if held[id] != want {
+			return fmt.Errorf("message %s is no longer logged in %s: this draft is stale", id, want)
+		}
+	}
+
+	return nil
+}
+
+// validateWorklog refuses a payload no tracker call could honour, before any call.
+func validateWorklog(p store.WorklogPayload) error {
+	switch p.Op {
+	case store.WorklogOpAdd:
+		if len(p.MessageIDs) == 0 {
+			return errors.New("worklog add has no message_ids")
+		}
+	case store.WorklogOpUpdate, store.WorklogOpDelete:
+		if p.WorklogID == "" {
+			return fmt.Errorf("worklog %s has no worklog_id", p.Op)
+		}
+	default:
+		return fmt.Errorf("worklog action has unknown op %q", p.Op)
+	}
+	if p.Op == store.WorklogOpAdd && p.IdempotencyKey == "" {
+		return errors.New("worklog add has no idempotency_key")
+	}
+	if p.Op != store.WorklogOpDelete && p.TimeSpentSeconds < 1 {
+		return fmt.Errorf("worklog %s has time_spent_seconds %d, below 1", p.Op, p.TimeSpentSeconds)
+	}
+
+	return nil
 }
 
 func (a *Applier) applyComment(action store.ActionRow) error {

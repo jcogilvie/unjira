@@ -68,11 +68,17 @@ func (t *Tx) InsertAction(a ActionRow) (int64, error) {
 }
 
 func insertActionImpl(c dbConn, createdAt time.Time, a ActionRow) (int64, error) {
+	// A ticket-scoped action (a worklog) has no narrative: 0 is stored as NULL.
+	var narrativeID any
+	if a.NarrativeID != 0 {
+		narrativeID = a.NarrativeID
+	}
+
 	res, err := c.Exec(
 		`INSERT INTO actions
 		   (narrative_id, type, issue_key, payload, confidence, rationale, status, created_at, created_link_seq)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, `+linkSeqHighWater+`)`,
-		a.NarrativeID, a.Type, nullable(a.IssueKey), a.Payload,
+		narrativeID, a.Type, nullable(a.IssueKey), a.Payload,
 		a.Confidence, nullable(a.Rationale), a.Status, createdAt,
 	)
 	if err != nil {
@@ -93,6 +99,18 @@ func (s *Store) ActionsForNarrative(narrativeID int64) ([]ActionRow, error) {
 	rows, err := s.db.Query(actionSelect+` WHERE narrative_id = ? ORDER BY created_at, id`, narrativeID)
 	if err != nil {
 		return nil, fmt.Errorf("querying actions for narrative %d: %w", narrativeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanActions(rows)
+}
+
+// ActionsForIssue returns every action on issueKey, oldest first, whatever its
+// narrative: a worklog action is ticket-scoped and carries none.
+func (s *Store) ActionsForIssue(issueKey string) ([]ActionRow, error) {
+	rows, err := s.db.Query(actionSelect+` WHERE issue_key = ? ORDER BY created_at, id`, issueKey)
+	if err != nil {
+		return nil, fmt.Errorf("querying actions for issue %s: %w", issueKey, err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -355,16 +373,18 @@ func scanActions(rows *sql.Rows) ([]ActionRow, error) {
 			a                                     ActionRow
 			issueKey, rationale, feedback, errCol sql.NullString
 			confidence                            sql.NullFloat64
+			narrativeID                           sql.NullInt64
 			decidedAt, executedAt                 sql.NullTime
 		)
 
 		if err := rows.Scan(
-			&a.ID, &a.NarrativeID, &a.Type, &issueKey, &a.Payload, &confidence,
+			&a.ID, &narrativeID, &a.Type, &issueKey, &a.Payload, &confidence,
 			&rationale, &a.Status, &feedback, &errCol, &decidedAt, &executedAt, &a.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning action row: %w", err)
 		}
 
+		a.NarrativeID = narrativeID.Int64
 		a.IssueKey = issueKey.String
 		a.Rationale = rationale.String
 		a.Feedback = feedback.String

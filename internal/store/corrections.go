@@ -189,10 +189,15 @@ func (s *Store) CorrectionsSince(since CorrectionsCursor) ([]Correction, Correct
 // A transition has neither body nor summary (its payload is target_status), so it falls
 // through to the raw payload, which reads as {"target_status":"Done"}. That is the honest
 // rendering: the "prose" a reviewer rejected on a transition IS the target status.
+//
+// A worklog has neither either, and its raw payload is mostly ids, a hash and a property
+// blob, so it renders as its op and comment: what a reviewer saw and ruled on.
 func bodyOfPayload(payload string) string {
 	var p struct {
 		Body    string `json:"body"`
 		Summary string `json:"summary"`
+		Op      string `json:"op"`
+		Comment string `json:"comment"`
 	}
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
 		return payload
@@ -202,6 +207,12 @@ func bodyOfPayload(payload string) string {
 	}
 	if p.Summary != "" {
 		return p.Summary
+	}
+	if p.Op != "" && p.Comment != "" {
+		return "worklog " + p.Op + ": " + p.Comment
+	}
+	if p.Op != "" {
+		return "worklog " + p.Op
 	}
 
 	return payload

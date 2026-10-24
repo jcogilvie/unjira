@@ -585,6 +585,7 @@ type Config struct {
 	Match       MatchConfig       `json:"match"`
 	Reconciler  ReconcilerConfig  `json:"reconciler"`
 	Workflow    WorkflowConfig    `json:"workflow"`
+	Worklog     WorklogConfig     `json:"worklog"`
 	// AutoCommit keys the auto-commit gate's rules by actions.type
 	// ("comment" | "transition" | "create"). Absent from config entirely
 	// (nil map) is the common case and the safe default: every action type

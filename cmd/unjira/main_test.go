@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -253,4 +254,35 @@ func TestTrackerReader_GitHubTrackerNeedsItsHostsCredential(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"github.com"`)
 	assert.Contains(t, err.Error(), "UNJIRA_GITHUB_CREDENTIALS")
+}
+
+// TestSinkRegistry_CoversEveryKnownSink: config accepts a sink name only when the
+// registry can build it, so a configured sink is never missing at run time.
+func TestSinkRegistry_CoversEveryKnownSink(t *testing.T) {
+	for _, name := range config.KnownSinks() {
+		build, ok := sinkRegistry[name]
+		require.True(t, ok, "no registry entry for sink %q", name)
+		assert.Equal(t, name, build(config.Config{}).Name())
+	}
+	assert.Len(t, sinkRegistry, len(config.KnownSinks()))
+}
+
+// TestSinceHelpIsNotWorkSince pins that the --since help on dev narrate and
+// watch names worklog.work_since and says how the two differ, per AC 20.
+func TestSinceHelpIsNotWorkSince(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"devNarrateCmd", reflect.TypeFor[devNarrateCmd]()},
+		{"watchCmd", reflect.TypeFor[watchCmd]()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			field, ok := tc.typ.FieldByName("Since")
+			require.True(t, ok, "no Since field on %s", tc.name)
+			help := field.Tag.Get("help")
+			assert.Contains(t, help, "worklog.work_since")
+			assert.Contains(t, help, "the config date before which no worklog covers a message")
+		})
+	}
 }

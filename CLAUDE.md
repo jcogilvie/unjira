@@ -124,7 +124,9 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   failure that rule prevents, and `suppressDuplicates`, keyed on the issue, cannot catch it. An event
   two clusters both claim as work is resolved by the dispute re-ask. It is never resolved by response
   order, because member links drive attribution (see
-  `docs/superpowers/specs/2026-10-02-shared-context-design.md`).
+  `docs/superpowers/specs/2026-10-02-shared-context-design.md`). An action with a NULL
+  `narrative_id` is ticket-scoped (a worklog drafted from the token ledger by an attribution
+  sink): it is not any one narrative's, and no narrative-keyed watermark counts it.
 - **`internal/correlator/refs` and `internal/correlator/fanout` have no callers yet, and that is
   deliberate.** They are pure, tested implementations of two GitHub-PR-shaped problems: env-mirror
   fan-out (one infra change becoming ~12 near-identical per-region PRs — see

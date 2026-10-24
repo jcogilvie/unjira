@@ -215,3 +215,66 @@ func TestSession_RestructureKeepsUnaffectedDispositions(t *testing.T) {
 	assert.Equal(t, int64(1), approved[0].ID, "action 1's earlier approval survived the restructure")
 	assert.Equal(t, int64(77), approved[1].ID)
 }
+
+// worklogBatch returns a two-action batch with a worklog at 0-based index at.
+func worklogBatch(at int) []store.ActionRow {
+	worklog := store.ActionRow{
+		ID: 50, Type: store.ActionTypeWorklog, IssueKey: "PROJ-1",
+		Status: "proposed", Payload: `{"op":"add","comment":"c"}`,
+	}
+	comment := store.ActionRow{
+		ID: 51, NarrativeID: 1, Type: "comment", IssueKey: "PROJ-1",
+		Status: "proposed", Payload: `{"body":"b"}`,
+	}
+	if at == 0 {
+		return []store.ActionRow{worklog, comment}
+	}
+
+	return []store.ActionRow{comment, worklog}
+}
+
+const worklogRefusal = "a worklog is computed from the token ledger: " +
+	"edit, target, merge and split do not apply; approve, reject or skip it"
+
+// TestSession_WorklogRefusesWorkVerbs: a worklog action has no narrative text
+// to rework and carries narrative 0, so every work verb routes it somewhere
+// meaningless (R17). Each must cost one keystroke, not reach the handler.
+func TestSession_WorklogRefusesWorkVerbs(t *testing.T) {
+	cases := []struct {
+		name     string
+		at       int
+		decision triage.Decision
+	}{
+		{name: "edit", at: 0, decision: triage.Decision{Verb: triage.VerbEdit, Text: "shorter"}},
+		{name: "target", at: 0, decision: triage.Decision{Verb: triage.VerbTarget, Text: "PROJ-2"}},
+		{name: "merge at first position", at: 0, decision: triage.Decision{Verb: triage.VerbMerge, Positions: []int{1, 2}}},
+		{name: "merge at second position", at: 1, decision: triage.Decision{Verb: triage.VerbMerge, Positions: []int{1, 2}}},
+		{name: "split at first position", at: 0, decision: triage.Decision{Verb: triage.VerbSplit, Positions: []int{1}}},
+		{name: "split at second position", at: 1, decision: triage.Decision{Verb: triage.VerbSplit, Positions: []int{2}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &stubHandler{restructured: batchOf(99)}
+			p := &scriptedPrompter{answers: []triage.Decision{
+				tc.decision,
+				{Verb: triage.VerbSkip}, // the re-prompted disposition
+				{Verb: triage.VerbSkip},
+			}}
+			s := triage.NewSession(context.Background(), worklogBatch(tc.at), p, h)
+
+			require.NoError(t, s.Run())
+
+			require.Len(t, p.notices, 1)
+			assert.Equal(t, worklogRefusal, p.notices[0])
+			require.Len(t, p.shown, 3, "the refused decision is re-prompted")
+			assert.True(t,
+				p.shown[0].Action.ID == p.shown[1].Action.ID ||
+					p.shown[1].Action.ID == p.shown[2].Action.ID,
+				"the refusal re-prompts the same item, not the next one")
+			assert.Empty(t, h.redraftCalls)
+			assert.Empty(t, h.retargetCalls)
+			assert.Empty(t, h.restructureCalls, "the handler is never called")
+		})
+	}
+}

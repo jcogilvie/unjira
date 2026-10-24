@@ -280,3 +280,65 @@ func TestIsTransportError(t *testing.T) {
 		assert.Equal(t, tt.want, tasktracker.IsTransportError(tt.err), tt.name)
 	}
 }
+
+// worklogBackend is a namedBackend that also writes worklogs, recording each call.
+type worklogBackend struct {
+	namedBackend
+
+	calls []string
+}
+
+func (b *worklogBackend) FindWorklog(key, idem string, _ []string) (string, bool, error) {
+	b.calls = append(b.calls, "find "+key+" "+idem)
+	return "1", true, nil
+}
+
+func (b *worklogBackend) AddWorklog(key string, _ tasktracker.WorklogEntry) (string, error) {
+	b.calls = append(b.calls, "add "+key)
+	return "2", nil
+}
+
+func (b *worklogBackend) UpdateWorklog(key, id string, _ tasktracker.WorklogEntry) error {
+	b.calls = append(b.calls, "update "+key+" "+id)
+	return nil
+}
+
+func (b *worklogBackend) DeleteWorklog(key, id string) error {
+	b.calls = append(b.calls, "delete "+key+" "+id)
+	return nil
+}
+
+var _ tasktracker.WorklogWriter = (*worklogBackend)(nil)
+
+func TestRouted_WorklogWriter(t *testing.T) {
+	wb := &worklogBackend{namedBackend: namedBackend{name: "t"}}
+	plain := &namedBackend{name: "p"}
+	r := tasktracker.NewResolver(
+		tasktracker.Route{
+			Tracker: "t", Scopes: []string{"PROJ", "RO"}, WritableScopes: []string{"PROJ"},
+			OpenReader: func() (tasktracker.TaskReader, error) { return wb, nil },
+			OpenWriter: func() (tasktracker.TaskWriter, error) { return wb, nil },
+		},
+		route("p", plain, []string{"OTHER"}, []string{"OTHER"}),
+	)
+	w, ok := tasktracker.Routed(r).(tasktracker.WorklogWriter)
+	require.True(t, ok)
+
+	id, found, err := w.FindWorklog("PROJ-1", "unjira-aaa", nil)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "1", id)
+	id, err = w.AddWorklog("PROJ-1", tasktracker.WorklogEntry{})
+	require.NoError(t, err)
+	assert.Equal(t, "2", id)
+	require.NoError(t, w.UpdateWorklog("PROJ-1", "2", tasktracker.WorklogEntry{}))
+	require.NoError(t, w.DeleteWorklog("PROJ-1", "2"))
+	assert.Equal(t, []string{"find PROJ-1 unjira-aaa", "add PROJ-1", "update PROJ-1 2", "delete PROJ-1 2"}, wb.calls)
+
+	_, err = w.AddWorklog("OTHER-1", tasktracker.WorklogEntry{})
+	require.EqualError(t, err, `tracker "p" cannot write worklogs: its backend has no worklog support`)
+
+	err = w.DeleteWorklog("RO-1", "2")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot write RO-1")
+}
