@@ -186,8 +186,27 @@ func TestMessageAttributions(t *testing.T) {
 		// then runs after the messages are ledgered, never re-upserting them.
 		then  func(t *testing.T, s *store.Store, ids storetest.IDs)
 		floor float64
+		// marks names, per marked message, the worklog it is logged in as {issue, id}.
+		marks map[string][2]string
 		want  []wantAttribution
 	}{
+		{
+			name:      "a marked message reports its worklog, an unmarked one reports none",
+			fixture:   twoTickets,
+			primaries: twoPrimaries,
+			messages: []store.MessageUsage{
+				msg("m1").Covering("ev-1").Build(), msg("m2").Covering("ev-2").Build(),
+			},
+			then: func(t *testing.T, s *store.Store, _ storetest.IDs) {
+				t.Helper()
+				require.NoError(t, s.MarkWorklogged("A-1", "10001", []string{"m1"}))
+			},
+			marks: map[string][2]string{"m1": {"A-1", "10001"}},
+			want: []wantAttribution{
+				{"m1", "N1", "A-1", store.AttributionTracked},
+				{"m2", "N2", "B-2", store.AttributionTracked},
+			},
+		},
 		{
 			name: "a subagent's message follows its own event's member link, not the parent's",
 			fixture: storetest.Fixture{
@@ -333,6 +352,7 @@ func TestMessageAttributions(t *testing.T) {
 				if w.key != "" {
 					a.Connection = "corp"
 				}
+				a.WorklogIssueKey, a.WorklogID = tt.marks[w.message][0], tt.marks[w.message][1]
 				want = append(want, a)
 			}
 

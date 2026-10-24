@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"database/sql"
 	"fmt"
 	"math/rand/v2"
 	"path/filepath"
@@ -403,6 +404,7 @@ var storeTimeColumns = map[string][]string{
 	"create_examinations":    {"examined_at"},
 	"local_issues":           {"created_at", "updated_at"},
 	"local_issue_comments":   {"created_at"},
+	"attribution_sink_state": {"enabled_at"},
 }
 
 // TestStore_EveryTimestampIsOneShapeAfterAFullWriteCycle runs every write path that
@@ -463,6 +465,8 @@ func TestStore_EveryTimestampIsOneShapeAfterAFullWriteCycle(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.SetLocalIssueStatus(key, "Done"))
 	require.NoError(t, s.InsertLocalIssueComment(key, "c"))
+	_, err = s.SinkEnabledAt("jira", "worklog", at)
+	require.NoError(t, err)
 
 	tables, err := s.QueryStringsForTest(
 		`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
@@ -523,6 +527,8 @@ func TestOpen_StoreFormat(t *testing.T) {
 		notErr []string
 		// present are tables that must exist after Open.
 		present []string
+		// columns are {table, column} pairs that must exist after Open.
+		columns [][2]string
 		// reopens is whether a second Open of the same file must succeed too.
 		reopens bool
 	}{
@@ -530,7 +536,7 @@ func TestOpen_StoreFormat(t *testing.T) {
 			name: "an old-format store is refused, before any schema statement",
 			file: storetest.StoreFile{Format: 0, Tables: true, Without: []string{"create_examinations"}},
 			wantErr: []string{
-				"UTC timestamps (finding F53)", "the token ledger",
+				"UTC timestamps (finding F53)", "the token ledger", "the worklog sink",
 				"rename the database to a backup", "re-collect",
 			},
 			absent: []string{"create_examinations"},
@@ -538,14 +544,22 @@ func TestOpen_StoreFormat(t *testing.T) {
 		{
 			name:    "a format-1 store predates the token ledger and is refused",
 			file:    storetest.StoreFile{Format: 1, Tables: true, Without: []string{"token_messages"}},
-			wantErr: []string{"the token ledger", "rename the database to a backup", "re-collect"},
+			wantErr: []string{"the token ledger", "the worklog sink", "rename the database to a backup", "re-collect"},
 			notErr:  []string{"UTC timestamps (finding F53)"},
 			absent:  []string{"token_messages"},
 		},
 		{
+			name:    "a format-2 store predates the worklog sink and is refused",
+			file:    storetest.StoreFile{Format: 2, Tables: true, Without: []string{"attribution_sink_state"}},
+			wantErr: []string{"the worklog sink", "rename the database to a backup", "re-collect"},
+			notErr:  []string{"UTC timestamps (finding F53)", "the token ledger"},
+			absent:  []string{"attribution_sink_state"},
+		},
+		{
 			name:    "an empty database file is a fresh store",
 			file:    storetest.StoreFile{Format: 0, Tables: false},
-			present: []string{"token_messages", "llm_calls"},
+			present: []string{"token_messages", "llm_calls", "attribution_sink_state"},
+			columns: [][2]string{{"token_messages", "worklog_id"}, {"token_messages", "worklog_issue_key"}},
 			reopens: true,
 		},
 	}
@@ -577,6 +591,17 @@ func TestOpen_StoreFormat(t *testing.T) {
 			}
 			for _, table := range tt.present {
 				assert.Contains(t, tables, table)
+			}
+			if len(tt.columns) > 0 {
+				db, err := sql.Open("sqlite", path)
+				require.NoError(t, err)
+				for _, c := range tt.columns {
+					var n int
+					require.NoError(t, db.QueryRow(
+						`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c[0], c[1]).Scan(&n))
+					assert.Equal(t, 1, n, "%s.%s exists", c[0], c[1])
+				}
+				require.NoError(t, db.Close())
 			}
 
 			if tt.reopens {

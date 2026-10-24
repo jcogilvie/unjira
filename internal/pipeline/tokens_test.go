@@ -1,6 +1,7 @@
 package pipeline_test
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -67,20 +68,49 @@ func TestBuildTokenReport_Messages(t *testing.T) {
 		msg("m5").Model("claude").Covering("ev-none").Tokens(0, 0, 1, 0).Build(),
 		msg("m6").Model("claude").Covering("ev-bare").Tokens(0, 0, 0, 1).Build(),
 		msg("m7").Model("claude").Tokens(2, 0, 0, 0).Build(),
+		msg("m8").Model("claude").Covering("ev-a").Tokens(5, 0, 0, 0).Build(),
 	}))
+	// m1 is logged on its own ticket. m2 is logged on another issue, so it counts as
+	// unlogged on its current ticket (R12). m8 is named in a proposed worklog add.
+	require.NoError(t, s.MarkWorklogged("A-1", "w1", []string{"m1"}))
+	require.NoError(t, s.MarkWorklogged("OTHER-1", "w2", []string{"m2"}))
+	pendingPayload, err := json.Marshal(store.WorklogPayload{
+		Op: store.WorklogOpAdd, MessageIDs: []string{"m8"},
+	})
+	require.NoError(t, err)
+	_, err = s.InsertAction(store.ActionRow{
+		Type: store.ActionTypeWorklog, IssueKey: "A-1",
+		Payload: string(pendingPayload), Status: store.StatusProposed,
+	})
+	require.NoError(t, err)
 
 	got, err := pipeline.BuildTokenReport(s, tokenPricing, 0.8, storetest.UTC(12, 0, 0))
 	require.NoError(t, err)
 
-	claude := func(in, out, cw, cr int64) []pipeline.ModelTokens {
-		return []pipeline.ModelTokens{{Model: "claude", Unlogged: pipeline.TokenAmount{
-			Input: in, Output: out, CacheWrite: cw, CacheRead: cr,
-			Cost: (float64(in) + float64(out)*10 + float64(cw)*100 + float64(cr)*1000) / 1e6,
-		}}}
+	// The trailing amounts are Logged then Pending when a test cares.
+	claude := func(unloggedIn, out, cw, cr int64, loggedPending ...pipeline.TokenAmount) []pipeline.ModelTokens {
+		var logged, pending pipeline.TokenAmount
+		switch len(loggedPending) {
+		case 0:
+		case 2:
+			logged, pending = loggedPending[0], loggedPending[1]
+		default:
+			t.Fatalf("claude: want zero or two trailing args, got %d", len(loggedPending))
+		}
+		return []pipeline.ModelTokens{{
+			Model: "claude",
+			Unlogged: pipeline.TokenAmount{
+				Input: unloggedIn, Output: out, CacheWrite: cw, CacheRead: cr,
+				Cost: (float64(unloggedIn) + float64(out)*10 + float64(cw)*100 + float64(cr)*1000) / 1e6,
+			},
+			Logged: logged, Pending: pending,
+		}}
 	}
 	want := pipeline.TokenReport{
-		Messages: 7,
-		Tickets: []pipeline.TicketTokens{{Connection: "corp", IssueKey: "A-1", Models: append(claude(11, 2, 3, 4),
+		Messages: 8,
+		Tickets: []pipeline.TicketTokens{{Connection: "corp", IssueKey: "A-1", Models: append(claude(10, 0, 0, 0,
+			pipeline.TokenAmount{Input: 1, Output: 2, CacheWrite: 3, CacheRead: 4, Cost: 0.004321},
+			pipeline.TokenAmount{Input: 5, Cost: 5e-06}),
 			pipeline.ModelTokens{Model: "own", Unlogged: pipeline.TokenAmount{Input: 1, Cost: 2 / 1e6}})}},
 		Untracked: []pipeline.UntrackedTokens{
 			{NarrativeID: ids["N-low"], CandidateKey: "L-1", Models: claude(0, 1, 0, 0)},
@@ -98,6 +128,28 @@ func TestBuildTokenReport_Messages(t *testing.T) {
 		cmpopts.EquateApprox(0, 1e-12)); diff != "" {
 		t.Errorf("report (-want +got):\n%s", diff)
 	}
+	// The three buckets sum to the ticket total (D-26): every tracked message on A-1
+	// is in exactly one, wherever it is logged.
+	var claudeTotal, ownTotal pipeline.TokenAmount
+	for _, m := range got.Tickets[0].Models {
+		sum := pipeline.TokenAmount{
+			Input:      m.Unlogged.Input + m.Logged.Input + m.Pending.Input,
+			Output:     m.Unlogged.Output + m.Logged.Output + m.Pending.Output,
+			CacheWrite: m.Unlogged.CacheWrite + m.Logged.CacheWrite + m.Pending.CacheWrite,
+			CacheRead:  m.Unlogged.CacheRead + m.Logged.CacheRead + m.Pending.CacheRead,
+			Cost:       m.Unlogged.Cost + m.Logged.Cost + m.Pending.Cost,
+		}
+		if m.Model == "own" {
+			ownTotal = sum
+		} else {
+			claudeTotal = sum
+		}
+	}
+	assert.Equal(t, pipeline.TokenAmount{
+		Input: 16, Output: 2, CacheWrite: 3, CacheRead: 4,
+		Cost: (16 + 2*10 + 3*100 + 4*1000) / 1e6,
+	}, claudeTotal)
+	assert.Equal(t, pipeline.TokenAmount{Input: 1, Cost: 2 / 1e6}, ownTotal)
 }
 
 func TestBuildTokenReport_UnpricedModelErrorsNamingIt(t *testing.T) {

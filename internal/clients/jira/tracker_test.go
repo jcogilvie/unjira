@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -415,4 +416,145 @@ func TestTracker_WorkflowGraph_DelegatesToMineProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"To Do": "new", "Done": "done"}, graph.StatusCategories())
 	assert.True(t, graph.HasEdge("To Do", "Done"))
+}
+
+func worklogList(ids ...string) map[string]any {
+	worklogs := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		worklogs = append(worklogs, map[string]any{"id": id})
+	}
+
+	return map[string]any{"worklogs": worklogs, "total": len(worklogs)}
+}
+
+func TestTracker_FindWorklog(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"total": 4,
+			"worklogs": []map[string]any{
+				{"id": "1"},
+				{"id": "2", "properties": []map[string]any{{"key": "unjira.attribution", "value": map[string]any{"idempotency_key": "unjira-aaa"}}}},
+				{"id": "3", "properties": []map[string]any{{"key": "unjira.attribution", "value": "not an object"}}},
+				{"id": "4", "properties": []map[string]any{
+					{"key": "other.tool", "value": map[string]any{"idempotency_key": "unjira-bbb"}},
+					{"key": "unjira.attribution", "value": map[string]any{"idempotency_key": "unjira-bbb"}},
+				}},
+			},
+		})
+	})
+	tr := jira.NewTracker(client)
+
+	id, found, err := tr.FindWorklog("PROJ-1", "unjira-bbb", nil)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "4", id)
+
+	_, found, err = tr.FindWorklog("PROJ-1", "unjira-ccc", nil)
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+func TestTracker_FindWorklog_SkipsAPropertyWithNoKey(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{"total": 1, "worklogs": []map[string]any{
+			{"id": "1", "properties": []map[string]any{{"key": "unjira.attribution", "value": map[string]any{"version": 1}}}},
+		}})
+	})
+
+	_, found, err := jira.NewTracker(client).FindWorklog("PROJ-1", "", nil)
+	require.NoError(t, err)
+	assert.False(t, found, "an empty key matches no worklog")
+}
+
+func TestTracker_FindWorklog_RefusesAnotherWorklogHoldingTheMessages(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusOK, map[string]any{"total": 1, "worklogs": []map[string]any{
+			{"id": "7", "properties": []map[string]any{{"key": "unjira.attribution", "value": map[string]any{
+				"idempotency_key": "unjira-old", "message_ids": []string{"m1"},
+			}}}},
+		}})
+	})
+	tr := jira.NewTracker(client)
+
+	_, _, err := tr.FindWorklog("PROJ-1", "unjira-new", []string{"m1", "m2"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "worklog 7 on jira issue PROJ-1 already logs some of these messages")
+
+	_, found, err := tr.FindWorklog("PROJ-1", "unjira-new", []string{"m3"})
+	require.NoError(t, err)
+	assert.False(t, found, "disjoint messages are no overlap")
+}
+
+func TestTracker_AddWorklog_SetsTheProperty(t *testing.T) {
+	var body struct {
+		Properties []struct {
+			Key   string          `json:"key"`
+			Value json.RawMessage `json:"value"`
+		} `json:"properties"`
+	}
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		writeJSON(t, w, http.StatusCreated, map[string]any{"id": "10"})
+	})
+	tr := jira.NewTracker(client)
+
+	id, err := tr.AddWorklog("PROJ-1", tasktracker.WorklogEntry{
+		Started: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC), TimeSpentSeconds: 60, Comment: "c",
+		Property: json.RawMessage(`{"version":1,"idempotency_key":"unjira-aaa"}`),
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "10", id)
+	require.Len(t, body.Properties, 1)
+	assert.Equal(t, "unjira.attribution", body.Properties[0].Key)
+	assert.JSONEq(t, `{"version":1,"idempotency_key":"unjira-aaa"}`, string(body.Properties[0].Value))
+}
+
+func TestTracker_DeleteWorklog_AbsentAfter404IsDone(t *testing.T) {
+	tests := []struct {
+		name       string
+		listStatus int
+		list       any
+		wantErr    string
+	}{
+		{"absent", http.StatusOK, worklogList("7"), ""},
+		{"still listed", http.StatusOK, worklogList("9"), "still lists it"},
+		{"issue gone", http.StatusNotFound, map[string]any{"errorMessages": []string{"no issue"}}, "listing worklogs failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					writeJSON(t, w, http.StatusNotFound, map[string]any{"errorMessages": []string{"gone"}})
+					return
+				}
+				writeJSON(t, w, tt.listStatus, tt.list)
+			})
+
+			err := jira.NewTracker(client).DeleteWorklog("PROJ-1", "9")
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Contains(t, err.Error(), "PROJ-1")
+		})
+	}
+}
+
+func TestTracker_WorklogErrorsNameTheIssue(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, http.StatusBadRequest, map[string]any{"errorMessages": []string{"bad"}})
+	})
+
+	_, err := jira.NewTracker(client).AddWorklog("PROJ-1", tasktracker.WorklogEntry{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "adding worklog to jira issue PROJ-1: ")
+	var jerr *jira.Error
+	require.ErrorAs(t, err, &jerr)
+	assert.Equal(t, http.StatusBadRequest, jerr.Status)
 }

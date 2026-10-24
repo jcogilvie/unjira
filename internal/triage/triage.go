@@ -29,6 +29,12 @@ const (
 	VerbTarget  Verb = "target"
 )
 
+// WorklogRefusal is the fixed message a reviewer is shown when a work verb is
+// aimed at a worklog action (R17). Exported so the terminal surface and any
+// future prompter can print the same words the Session guards with.
+const WorklogRefusal = "a worklog is computed from the token ledger: " +
+	"edit, target, merge and split do not apply; approve, reject or skip it"
+
 // Decision is a reviewer's answer for one presented action.
 type Decision struct {
 	Verb Verb
@@ -230,6 +236,21 @@ func (s *Session) Run() error {
 		case VerbApprove, VerbReject, VerbSkip, VerbQuit:
 			// Recorded below; nothing to do but advance.
 		case VerbEdit, VerbMerge, VerbSplit, VerbTarget:
+			// A worklog has no narrative text to rework and carries narrative 0
+			// (R2), so edit and target would hand Redraft/Retarget a narrative id
+			// that is not one, and merge/split would route it through ReworkOne
+			// the same way (R17). Refused before the handler is ever consulted,
+			// so a nil-handler dry run reports the same refusal a live one does.
+			if s.worklogTouched(d, i) {
+				if perr := s.prompter.Notify(WorklogRefusal); perr != nil {
+					return fmt.Errorf("notifying worklog action %d: %w", a.ID, perr)
+				}
+
+				i--
+
+				continue
+			}
+
 			// These do work rather than merely recording a disposition. The
 			// result replaces the affected actions and is re-presented, since
 			// the reviewer has not seen the new text — approving text nobody
@@ -429,6 +450,27 @@ type Handler interface {
 	// affected ones. Returning a slice (not one action) is why re-presentation
 	// exists: a split yields more actions than it consumed.
 	Restructure(ctx context.Context, d Decision, batch []store.ActionRow) ([]store.ActionRow, error)
+}
+
+// worklogTouched reports whether a work-verb decision touches any worklog
+// action in the batch: the one at index i (edit, target, merge and split all
+// act on the item being prompted), plus each 1-based position in
+// d.Positions (merge and split name further batch members). A position out of
+// range reads as not touching a worklog — Restructure is the surface that
+// validates positions, and duplicating its error here would only fork the
+// message a reviewer sees.
+func (s *Session) worklogTouched(d Decision, i int) bool {
+	if s.batch[i].Type == store.ActionTypeWorklog {
+		return true
+	}
+
+	for _, p := range d.Positions {
+		if p >= 1 && p <= len(s.batch) && s.batch[p-1].Type == store.ActionTypeWorklog {
+			return true
+		}
+	}
+
+	return false
 }
 
 // handle runs the verbs that require work, returning the actions that replace

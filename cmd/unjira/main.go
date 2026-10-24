@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/alecthomas/kong"
 
+	"github.com/jcogilvie/unjira/internal/attribution"
+	"github.com/jcogilvie/unjira/internal/attribution/worklog"
 	ghclient "github.com/jcogilvie/unjira/internal/clients/github"
 	"github.com/jcogilvie/unjira/internal/clients/jira"
 	"github.com/jcogilvie/unjira/internal/clients/local"
@@ -60,6 +63,28 @@ var registry = map[string]func() pipeline.Collector{
 	"claude_code":        func() pipeline.Collector { return claudecode.New() },
 	backendJira:          func() pipeline.Collector { return collectorjira.New() },
 	collectorgithub.Name: func() pipeline.Collector { return collectorgithub.New() },
+}
+
+// sinkRegistry maps attribution sink names to factories. Every name config accepts
+// has an entry (TestSinkRegistry_CoversEveryKnownSink).
+var sinkRegistry = map[string]func(config.Config) attribution.Sink{
+	config.SinkWorklog: func(c config.Config) attribution.Sink { return worklog.New(c.Worklog, c.TokenPricing) },
+}
+
+// runSinks runs every attribution sink after a clean reconcile and prints the result.
+func (a *appContext) runSinks() (pipeline.SinkRunResult, error) {
+	sinks := make(map[string]attribution.Sink, len(sinkRegistry))
+	for name, build := range sinkRegistry {
+		sinks[name] = build(a.config)
+	}
+	result, err := pipeline.RunSinks(a.store, a.config,
+		pipeline.SinkOptions{Sinks: sinks, Now: time.Now().UTC(), Log: a.log})
+	fmt.Print(pipeline.RenderSinkResult(result))
+	if err != nil {
+		err = fmt.Errorf("attribution sinks: %w", err)
+	}
+
+	return result, err
 }
 
 // appContext carries the loaded config, open store, and Jira/GitHub
@@ -704,7 +729,7 @@ func (c *devWorkflowCmd) Run(app *appContext) error {
 // LLM. See devWorkflowCmd for the same "run a real stage and show me the
 // output" shape.
 type devNarrateCmd struct {
-	Since  config.Span `default:"24h" help:"How far back to narrate (e.g. 36h, 7d, 2w, 7d12h)."`
+	Since  config.Span `default:"24h" help:"How far back to narrate (e.g. 36h, 7d, 2w, 7d12h). Not worklog.work_since, the config date before which no worklog covers a message."`
 	DryRun bool        `help:"Run the full pass, including real LLM calls, but persist no narratives and write no actions. Collected events and each LLM call's token usage are still stored."`
 }
 
@@ -824,7 +849,9 @@ func (c *devNarrateCmd) Run(app *appContext) error {
 		return fmt.Errorf("reconciling narratives: %w", reconcileErr)
 	}
 
-	return nil
+	_, sinkErr := app.runSinks()
+
+	return sinkErr
 }
 
 // window returns the [now-Since, now) range to narrate, in UTC.
@@ -888,7 +915,7 @@ type watchCmd struct {
 	// left for a later slice — this fixed lookback is simpler and the
 	// dedup-by-window-membership property above is what makes it safe to
 	// ship as-is rather than a placeholder that must be revisited.
-	Since  config.Span `default:"1h" help:"How far back each pass narrates (e.g. 1h, 24h)."`
+	Since  config.Span `default:"1h" help:"How far back each pass narrates (e.g. 1h, 24h). Not worklog.work_since, the config date before which no worklog covers a message."`
 	Once   bool        `help:"Run a single pass and exit, instead of looping. Makes the loop testable and cron-friendly without a supervisor."`
 	DryRun bool        `help:"Run every stage's real work, including LLM calls, but skip Persist and the auto-commit gate: no narratives, no actions, nothing written to a real tracker. Collected events and each LLM call's token usage are still stored."`
 }
@@ -1124,13 +1151,16 @@ func (a *appContext) runWatchPass(
 		return fmt.Errorf("reconciling narratives: %w", reconcileErr)
 	}
 
-	autoCommitResult, autoCommitErr := pipeline.RunAutoCommit(reconcileResult.Persisted, pipeline.AutoCommitOptions{
+	// A sink error is per ticket: the drafts that persisted still join auto-commit.
+	sinkResult, sinkErr := a.runSinks()
+
+	autoCommitResult, autoCommitErr := pipeline.RunAutoCommit(append(reconcileResult.Persisted, sinkResult.Persisted...), pipeline.AutoCommitOptions{
 		Rules:   a.config.AutoCommit,
 		Applier: applier,
 	})
 	fmt.Print(pipeline.RenderAutoCommitResult(autoCommitResult))
 
-	return autoCommitErr
+	return errors.Join(sinkErr, autoCommitErr)
 }
 
 var cli struct {

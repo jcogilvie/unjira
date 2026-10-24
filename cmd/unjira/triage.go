@@ -267,6 +267,26 @@ func bodyOf(a store.ActionRow) string {
 	if err := json.Unmarshal([]byte(a.Payload), &p); err != nil {
 		return a.Payload
 	}
+	// A worklog's human text is its `comment`, which the body/summary lookup
+	// below cannot see, and its update/delete ops name the Jira worklog they
+	// touch — a fact a reviewer judging "which worklog is this changing?" needs
+	// in the body, not only in the raw payload. Rendered deterministically, in
+	// the style of the comment/transition renderings, so the same action always
+	// reads the same.
+	if a.Type == store.ActionTypeWorklog {
+		var w store.WorklogPayload
+		if err := json.Unmarshal([]byte(a.Payload), &w); err != nil {
+			return a.Payload
+		}
+		switch w.Op {
+		case store.WorklogOpUpdate:
+			return fmt.Sprintf("update worklog %s: %s", w.WorklogID, w.Comment)
+		case store.WorklogOpDelete:
+			return fmt.Sprintf("delete worklog %s", w.WorklogID)
+		default:
+			return w.Comment
+		}
+	}
 	if p.Body != "" {
 		return p.Body
 	}

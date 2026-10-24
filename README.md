@@ -37,10 +37,18 @@ its own changes as part of reality. There is no separate "executor" component: a
 
 ## Status: phase 1 landed — unjira can write, and does not by default
 
-**Token attribution, PR 1 of 3, writes nothing to Jira.** The claude_code collector ledgers each
-assistant message's token usage, unjira records its own LLM calls, and `unjira tokens` reports them
-per ticket (through member links to each narrative's confident primary), per untracked narrative,
-unattributed, and for unjira's own spend over 30d/7d/1d/today. It only reads. Worklogs are PR 2
+**Token attribution: PR 1 (the token ledger) writes nothing; PR 2 drafts worklogs but none is
+applied by default.** The claude_code collector ledgers each assistant message's token usage,
+unjira records its own LLM calls, and `unjira tokens` reports them per ticket (through member
+links to each narrative's confident primary), per untracked narrative, unattributed, and for
+unjira's own spend over 30d/7d/1d/today, split into unlogged, already-logged and pending shares.
+PR 2 turns that ledger into **Jira worklog drafts** on writable Jira trackers: the `worklog`
+attribution sink is on by default (`trackers[].attribution_sinks`, absent means `[worklog]`),
+drafts one action per ticket covering messages with no worklog marker, and a larger delta
+supersedes the pending draft. Every draft lands in the review queue — it applies only through
+`auto_commit.worklog`, which defaults to `graduated: false` and which nothing in unjira can
+graduate. Every worklog write sends `notifyUsers=false&adjustEstimate=leave`, so nobody gets
+mailed and no estimate moves
 (`docs/superpowers/specs/2026-10-14-token-attribution-design.md`).
 
 The whole loop runs: collectors → event log → correlator (cluster + match) → reconciler →
@@ -84,6 +92,11 @@ queued or lands `failed` with a persisted reason:
    than widening write scope.
 3. **`auto_commit.<type>.confidence_floor`** — the action's own confidence must clear it.
 
+The gates cover the `worklog` action type like any other: `auto_commit.worklog` is false by
+default, so every worklog draft queues for review until a human graduates it. A worklog also
+carries no narrative text to rework — triage refuses `e`/`t`/`m`/`s` on one and says why, leaving
+approve/reject, because its numbers are computed from the ledger, not authored.
+
 **GitHub is never written to, by construction rather than by gate.** A `github` tracker is read
 through `clients/github.Reader`, which implements `tasktracker.TaskReader` and no write method, over a
 client that can only send GET; config refuses `writable_scopes` on it. Upstream issues are read to
@@ -91,8 +104,21 @@ match and verify work (`owner/repo#N` and issue URLs are matching candidates), s
 upstream no longer looks untracked.
 
 A fresh clone has none of these configured, so a fresh clone applies nothing. `config/unjira.example.yaml`
-deliberately omits `auto_commit` and leaves every `writable_scopes` empty for exactly this reason: an
-example that grants write authority is one copy-paste from arming a real deployment.
+deliberately shows `auto_commit` only commented out and `worklog.work_since` unset, and leaves every
+`writable_scopes` empty for exactly this reason: an example that grants write authority is one
+copy-paste from arming a real deployment.
+
+### Worklog config
+
+| key | meaning |
+|---|---|
+| `worklog.work_since` | a date, `YYYY-MM-DD` (local midnight). No message timestamped before it is ever proposed in a worklog. Absent means no backfill: the floor is when the sink was enabled on that tracker. |
+| `worklog.idle_gap` | the longest gap between consecutive parent-session messages still counted as active time; a longer gap splits the session. Defaults to `15m`. |
+| `trackers[].attribution_sinks` | which attribution sinks draft on that tracker. Absent means `[worklog]` on a writable Jira tracker; `[]` disables worklog drafting explicitly; `worklog` on a non-Jira tracker, or a sink on a tracker with empty `writable_scopes`, is refused at load. |
+
+`worklog.work_since` is **not** `--since`: `--since` is the per-pass narration window on
+`dev narrate` and `watch` (how far back this one pass looks for work), while `work_since` is a
+permanent floor on which past tokens a worklog may ever cover. Neither defaults from the other.
 
 **Where a new issue may be opened is decided before anything is drafted.** Untracked work is
 ticketed only in its allowed destinations: if it happened in a tracker's scope (the repository its

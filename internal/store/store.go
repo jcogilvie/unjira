@@ -180,7 +180,7 @@ CREATE INDEX IF NOT EXISTS narrative_issues_by_key
 CREATE TABLE IF NOT EXISTS actions (
     id           INTEGER PRIMARY KEY,
     narrative_id INTEGER REFERENCES narratives (id),
-    type         TEXT NOT NULL,       -- comment | transition | create | estimate
+    type         TEXT NOT NULL,       -- comment | transition | create | estimate | worklog
     issue_key    TEXT,
     payload      TEXT NOT NULL,       -- JSON, shape depends on type
     confidence   REAL,
@@ -302,11 +302,27 @@ CREATE TABLE IF NOT EXISTS token_messages (
     -- when that segment emits no event for a reason other than an excluded cwd, e.g. it
     -- holds no user text; a later NULL never erases a set value. A fact about lines, not
     -- an attribution.
-    covering_external_id TEXT
+    covering_external_id TEXT,
+    -- The Jira worklog this message was logged in, and that worklog's issue (a worklog id
+    -- alone cannot be updated or deleted). Both NULL until logged.
+    worklog_id           TEXT,
+    worklog_issue_key    TEXT,
+    CHECK ((worklog_id IS NULL) = (worklog_issue_key IS NULL))
 );
 
 CREATE INDEX IF NOT EXISTS token_messages_covering_external_id
     ON token_messages (covering_external_id);
+
+CREATE INDEX IF NOT EXISTS token_messages_worklog
+    ON token_messages (worklog_issue_key, worklog_id);
+
+-- The first pass a sink ran for a tracker: its no-backfill floor (D-19).
+CREATE TABLE IF NOT EXISTS attribution_sink_state (
+    tracker    TEXT     NOT NULL,
+    sink       TEXT     NOT NULL,
+    enabled_at DATETIME NOT NULL,
+    PRIMARY KEY (tracker, sink)
+);
 
 -- One row per call unjira itself made to its LLM, recorded by the llm.Client decorator.
 CREATE TABLE IF NOT EXISTS llm_calls (
