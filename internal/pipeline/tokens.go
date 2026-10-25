@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -26,8 +27,9 @@ func (a *TokenAmount) add(b TokenAmount) {
 	a.Cost += b.Cost
 }
 
-// ModelTokens is one model's share of a bucket. Logged and Pending stay zero until
-// the worklog sink exists; they are reported so the columns do not change shape then.
+// ModelTokens is one model's share of a bucket. Logged is the share already logged
+// in a Jira worklog on this ticket; Pending is the share named in a proposed worklog
+// add; Unlogged is everything else (R12).
 type ModelTokens struct {
 	Model                     string
 	Unlogged, Logged, Pending TokenAmount
@@ -84,9 +86,13 @@ func BuildTokenReport(s *store.Store, pricing config.TokenPricing, confidenceFlo
 	if err != nil {
 		return TokenReport{}, err
 	}
+	pendingIDs, err := pendingWorklogMessages(s)
+	if err != nil {
+		return TokenReport{}, err
+	}
 
 	type ticketKey struct{ connection, issue string }
-	tickets := map[ticketKey]map[string]*TokenAmount{}
+	tickets := map[ticketKey]map[string]*ticketBuckets{}
 	untracked := map[int64]map[string]*TokenAmount{}
 	candidates := map[int64]string{}
 	unattributed := map[store.AttributionState]map[string]*TokenAmount{}
@@ -105,7 +111,21 @@ func BuildTokenReport(s *store.Store, pricing config.TokenPricing, confidenceFlo
 		}
 		switch m.State {
 		case store.AttributionTracked:
-			addTo(tickets, ticketKey{m.Connection, m.IssueKey}, m.Model, amount)
+			k := ticketKey{m.Connection, m.IssueKey}
+			if tickets[k] == nil {
+				tickets[k] = map[string]*ticketBuckets{}
+			}
+			if tickets[k][m.Model] == nil {
+				tickets[k][m.Model] = &ticketBuckets{}
+			}
+			switch {
+			case m.WorklogID != "" && m.WorklogIssueKey == m.IssueKey:
+				tickets[k][m.Model].logged.add(amount)
+			case pendingIDs[m.MessageID]:
+				tickets[k][m.Model].pending.add(amount)
+			default:
+				tickets[k][m.Model].unlogged.add(amount)
+			}
 		case store.AttributionUntracked:
 			addTo(untracked, m.NarrativeID, m.Model, amount)
 			candidates[m.NarrativeID] = m.IssueKey
@@ -122,7 +142,7 @@ func BuildTokenReport(s *store.Store, pricing config.TokenPricing, confidenceFlo
 		return cmp.Or(cmp.Compare(a.connection, b.connection), cmp.Compare(a.issue, b.issue))
 	}) {
 		report.Tickets = append(report.Tickets, TicketTokens{
-			Connection: k.connection, IssueKey: k.issue, Models: modelTokens(tickets[k]),
+			Connection: k.connection, IssueKey: k.issue, Models: ticketModels(tickets[k]),
 		})
 	}
 	for _, id := range slices.SortedFunc(maps.Keys(untracked), cmp.Compare[int64]) {
@@ -202,6 +222,45 @@ func ownSpend(s *store.Store, pricing config.TokenPricing, now time.Time) ([]Own
 	}
 
 	return out, nil
+}
+
+// ticketBuckets holds one model's share of a ticket in the three report columns.
+type ticketBuckets struct{ unlogged, logged, pending TokenAmount }
+
+// pendingWorklogMessages returns the message ids named by proposed worklog adds.
+// Only an add marks messages as about to be logged; a correction (update or delete)
+// proposes no new logging.
+func pendingWorklogMessages(s *store.Store) (map[string]bool, error) {
+	actions, err := s.ActionsByStatus(store.StatusProposed)
+	if err != nil {
+		return nil, err
+	}
+	pending := map[string]bool{}
+	for _, a := range actions {
+		if a.Type != store.ActionTypeWorklog {
+			continue
+		}
+		var payload store.WorklogPayload
+		if err := json.Unmarshal([]byte(a.Payload), &payload); err != nil {
+			return nil, fmt.Errorf("action %d: unmarshalling worklog payload: %w", a.ID, err)
+		}
+		if payload.Op != store.WorklogOpAdd {
+			continue
+		}
+		for _, id := range payload.MessageIDs {
+			pending[id] = true
+		}
+	}
+	return pending, nil
+}
+
+func ticketModels(byModel map[string]*ticketBuckets) []ModelTokens {
+	out := make([]ModelTokens, 0, len(byModel))
+	for _, model := range slices.SortedFunc(maps.Keys(byModel), strings.Compare) {
+		b := byModel[model]
+		out = append(out, ModelTokens{Model: model, Unlogged: b.unlogged, Logged: b.logged, Pending: b.pending})
+	}
+	return out
 }
 
 func addTo[K comparable](m map[K]map[string]*TokenAmount, k K, model string, a TokenAmount) {

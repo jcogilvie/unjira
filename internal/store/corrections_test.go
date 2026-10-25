@@ -76,6 +76,22 @@ func TestCorrectionsSince_ReturnsRejectedAndEdited(t *testing.T) {
 		"the drafted body must come along: a correction is only legible against what it corrected")
 }
 
+func TestCorrectionsSince_RendersAWorklogAsItsOpAndComment(t *testing.T) {
+	s, _ := correctionsStore(t)
+	id, err := s.InsertAction(store.ActionRow{
+		Type: store.ActionTypeWorklog, IssueKey: "DEVSBX-1", Status: store.StatusProposed,
+		Payload: `{"op":"add","comment":"unjira: 1k in / 100 out, $0.01","message_ids":["m1"],"idempotency_key":"unjira-x"}`,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateActionStatusAndFeedback(id, store.StatusRejected, "not billable"))
+
+	got, _, err := s.CorrectionsSince(store.CorrectionsCursor{})
+	require.NoError(t, err)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "worklog add: unjira: 1k in / 100 out, $0.01", got[0].Body)
+}
+
 // TestCorrectionsSince_ExcludesRowsWithNoFeedback is the one that keeps the corpus
 // signal-rich. A reviewer may reject without explaining — reject takes optional text —
 // and a rejection with no reasoning teaches nothing a model can generalise.

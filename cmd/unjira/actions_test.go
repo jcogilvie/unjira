@@ -122,6 +122,22 @@ func TestActionsList_StatusFlagOverridesDefault(t *testing.T) {
 	assert.Contains(t, out, "status=rejected")
 }
 
+func TestActionsList_TicketScopedActionShowsNoNarrative(t *testing.T) {
+	app, s := actionsTestApp(t)
+	id, err := s.InsertAction(store.ActionRow{
+		Type: store.ActionTypeWorklog, IssueKey: "PROJ-1", Payload: `{"op":"add"}`, Confidence: 1, Status: "proposed",
+	})
+	require.NoError(t, err)
+
+	cmd := actionsListCmd{Status: "proposed"}
+	out := captureStdout(t, func() {
+		require.NoError(t, cmd.Run(app))
+	})
+
+	assert.Contains(t, out, fmt.Sprintf("#%-5d narrative=-  ", id))
+	assert.NotContains(t, out, "narrative=0")
+}
+
 func TestActionsList_EmptyResultSaysSoRatherThanPrintingNothing(t *testing.T) {
 	app, _ := actionsTestApp(t)
 

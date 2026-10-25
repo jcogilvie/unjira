@@ -13,6 +13,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jcogilvie/unjira/internal/gate"
@@ -87,8 +88,14 @@ func renderActionsList(rows []store.ActionRow, status string) {
 			issueKey = "-"
 		}
 
-		fmt.Printf("#%-5d narrative=%-6d %-10s %-12s confidence=%.2f status=%s",
-			a.ID, a.NarrativeID, a.Type, issueKey, a.Confidence, a.Status)
+		// A ticket-scoped action (a worklog) has no narrative; 0 would read as an id.
+		narrative := "-"
+		if a.NarrativeID != 0 {
+			narrative = strconv.FormatInt(a.NarrativeID, 10)
+		}
+
+		fmt.Printf("#%-5d narrative=%-6s %-10s %-12s confidence=%.2f status=%s",
+			a.ID, narrative, a.Type, issueKey, a.Confidence, a.Status)
 
 		if a.Error != "" {
 			fmt.Printf(" error=%q", a.Error)
@@ -145,7 +152,7 @@ func (c *actionsDecideCmd) Run(app *appContext) error {
 // approveAction is the double-post guard the design doc names as "the test
 // that stops a real-world duplicate": an action already at status=applied
 // has already mutated Jira once, and re-approving it would post the same
-// comment/transition/create a second time. Guarding here — before
+// comment/transition/create/worklog a second time. Guarding here — before
 // gate.Applier is ever consulted — means Applier itself never has to know
 // this command exists; it just applies whatever ActionRow it's handed, same
 // as runWatchPass's auto-commit call.
@@ -175,7 +182,7 @@ func (a *appContext) approveAction(id int64) error {
 	if action.Status == store.StatusApplied {
 		return fmt.Errorf(
 			"action %d is already applied: approving it again would repeat its tracker write "+
-				"(comment/transition/create) a second time", id,
+				"(comment/transition/create/worklog) a second time", id,
 		)
 	}
 

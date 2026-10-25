@@ -120,6 +120,11 @@ type MessageAttribution struct {
 	Connection  string
 	NarrativeID int64
 	State       AttributionState
+
+	// WorklogID and WorklogIssueKey name the Jira worklog the message is logged in, or
+	// are empty while it is unlogged.
+	WorklogID       string
+	WorklogIssueKey string
 }
 
 // messageAttributionsSQL joins message -> covering event -> member link -> primary, in
@@ -149,7 +154,8 @@ SELECT tm.message_id, tm.transcript_id, COALESCE(tm.agent_id, ''), tm.occurred_a
            WHEN ne.narrative_id IS NULL THEN '` + string(AttributionUnattributed) + `'
            WHEN ` + confidentPrimary + ` THEN '` + string(AttributionTracked) + `'
            ELSE '` + string(AttributionUntracked) + `'
-       END
+       END,
+       COALESCE(tm.worklog_id, ''), COALESCE(tm.worklog_issue_key, '')
 FROM token_messages tm
 LEFT JOIN events e
        ON e.source = 'claude_code' AND e.external_id = tm.covering_external_id
@@ -174,7 +180,8 @@ func (s *Store) MessageAttributions(confidenceFloor float64) ([]MessageAttributi
 		var a MessageAttribution
 		if err := rows.Scan(&a.MessageID, &a.TranscriptID, &a.AgentID, &a.OccurredAt, &a.Model,
 			&a.InputTokens, &a.OutputTokens, &a.CacheWriteTokens, &a.CacheReadTokens,
-			&a.CoveringExternalID, &a.IssueKey, &a.Connection, &a.NarrativeID, &a.State); err != nil {
+			&a.CoveringExternalID, &a.IssueKey, &a.Connection, &a.NarrativeID, &a.State,
+			&a.WorklogID, &a.WorklogIssueKey); err != nil {
 			return nil, fmt.Errorf("scanning token attribution: %w", err)
 		}
 		out = append(out, a)

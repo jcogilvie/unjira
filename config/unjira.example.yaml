@@ -32,6 +32,12 @@ trackers:
     # default on purpose: a fresh clone writes nothing. To allow writes, list the
     # scopes, e.g. writable_scopes: ["PROJ"].
     writable_scopes: []
+    # Attribution sinks: what unjira may draft from the token ledger on this tracker.
+    # Absent means the default, [worklog] (Jira worklogs) — but a sink only drafts writes,
+    # so the key is refused while writable_scopes is empty and would draft nothing.
+    # Set [] to draft no worklogs at all. worklog on a github or local tracker is
+    # refused: the only sink writes Jira worklogs.
+    # attribution_sinks: ["worklog"]
     # Where this tracker's creates land. Must be writable. Required when the tracker
     # is writable and named in default_ticket_in or another tracker's mirror_to.
     # default_scope: "PROJ"
@@ -130,6 +136,25 @@ workflow:
 
 rules:
   dir: rules
+
+# Worklog attribution. These tune the worklog sink (see attribution_sinks above).
+# worklog:
+#   # A date, YYYY-MM-DD, read as local midnight: no message timestamped before it is
+#   # ever proposed in a worklog. Absent means no backfill — the floor is when the sink
+#   # was enabled on that tracker. It is NOT --since: --since is the per-pass narration
+#   # window on `dev narrate` and `watch`, and neither defaults from the other.
+#   # work_since: 2026-10-01
+#   # The longest gap between consecutive parent-session messages still counted as
+#   # active time; a longer gap splits the session and its time is not logged.
+#   # Defaults to 15m.
+#   idle_gap: 15m
+
+# The auto-commit gate: deny by default. Nothing in unjira can graduate a type — a human
+# edits this file. Left commented so the example grants no write authority, and
+# `worklog` is false like every other type: a worklog draft queues for review.
+# auto_commit:
+#   worklog:
+#     graduated: false
 
 # Prices for `unjira tokens`, in dollars per million tokens. Keys are model names exactly as a
 # transcript or llm.model writes them; all four rates are required. A model seen in the ledger but

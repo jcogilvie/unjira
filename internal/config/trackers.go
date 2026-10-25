@@ -107,6 +107,10 @@ type Tracker struct {
 	// MaxIssuesPerQuery bounds one query's issue count per pass. Zero means
 	// DefaultMaxIssuesPerQuery.
 	MaxIssuesPerQuery int `json:"max_issues_per_query"`
+	// AttributionSinks names the sinks that turn this tracker's token attribution into
+	// drafted actions. Absent (nil) means the default, Config.SinksFor's: worklog on a
+	// writable Jira tracker, none elsewhere. An empty list disables every sink.
+	AttributionSinks *[]string `json:"attribution_sinks,omitempty"`
 }
 
 // IsScopeWritable reports whether scope is in WritableScopes (matched by
@@ -424,6 +428,8 @@ func validateTracker(i int, t Tracker, kind ConnectionKind) []error {
 			"trackers[%d].queries is set on tracker %q, whose connection is kind %q: queries are JQL, "+
 				"read only by the jira collector", i, t.Name, kind))
 	}
+
+	errs = append(errs, validateAttributionSinks(t, kind)...)
 
 	return errs
 }

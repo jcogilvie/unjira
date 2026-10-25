@@ -12,7 +12,10 @@
 // IsTransportError, so no consumer learns a backend's error shapes.
 package tasktracker
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // StatusCategory is a normalized status bucket every backend maps into, for
 // REPORTING current state and for coarse direction checks (a done -> todo move
@@ -164,6 +167,29 @@ type TaskWriter interface {
 
 	// CreateIssue creates an issue and returns its key.
 	CreateIssue(projectOrRepo, summary, issueType, description string, labels []string) (string, error)
+}
+
+// WorklogEntry is one worklog's content. Property is the JSON value of unjira's
+// attribution property; the backend owns the property key.
+type WorklogEntry struct {
+	Started          time.Time
+	TimeSpentSeconds int
+	Comment          string
+	Property         json.RawMessage
+}
+
+// WorklogWriter is optional on a TaskWriter, detected like SelfIdentifier. Like
+// TaskWriter, holding one is write authority: take it only after the review gate.
+type WorklogWriter interface {
+	// FindWorklog returns the id of the worklog on key whose attribution property
+	// carries idempotencyKey, and false with no error when none does. Another
+	// worklog whose attribution property lists any of messageIDs is an error, so an
+	// add never logs time Jira already holds under a different key.
+	FindWorklog(key, idempotencyKey string, messageIDs []string) (id string, found bool, err error)
+	AddWorklog(key string, e WorklogEntry) (id string, err error)
+	UpdateWorklog(key, id string, e WorklogEntry) error
+	// DeleteWorklog returns nil once the worklog is absent from the issue.
+	DeleteWorklog(key, id string) error
 }
 
 // TaskTracker is the full backend surface, for the applier and for wiring that

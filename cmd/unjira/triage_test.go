@@ -197,3 +197,37 @@ func TestTerminalPrompter_ACreateShowsItsCandidates(t *testing.T) {
 	assert.Contains(t, out, "PROJ-7 (primary, confidence 0.30, prose_first): Retries hammer the API [Done]")
 	assert.Contains(t, out, "[t]arget one to link the work there instead")
 }
+
+// TestBodyOf_Worklog: a worklog's payload carries its comment under
+// `comment`, not `body`/`summary`, so the generic path would print raw JSON.
+// The deterministic renderings keep the surface's full-body promise.
+func TestBodyOf_Worklog(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "add shows its comment",
+			payload: `{"op":"add","comment":"2h across 3 messages"}`,
+			want:    "2h across 3 messages",
+		},
+		{
+			name:    "update names the worklog and its new comment",
+			payload: `{"op":"update","worklog_id":"10001","comment":"shorter now"}`,
+			want:    "update worklog 10001: shorter now",
+		},
+		{
+			name:    "delete names the worklog",
+			payload: `{"op":"delete","worklog_id":"10001"}`,
+			want:    "delete worklog 10001",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := store.ActionRow{ID: 1, Type: store.ActionTypeWorklog, IssueKey: "PROJ-1", Payload: tc.payload}
+			assert.Equal(t, tc.want, bodyOf(a))
+		})
+	}
+}

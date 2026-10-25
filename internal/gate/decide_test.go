@@ -96,6 +96,19 @@ func TestDecide_TableDriven(t *testing.T) {
 			// Decide, is where "no method for this type" surfaces.
 			want: gate.DecisionApply,
 		},
+		{
+			name:   "a worklog with no rules queues",
+			action: store.ActionRow{Type: "worklog", Confidence: 1},
+			want:   gate.DecisionQueue,
+		},
+		{
+			name:   "a worklog not graduated queues even at floor 0",
+			action: store.ActionRow{Type: "worklog", Confidence: 1},
+			rules: map[string]config.AutoCommitRule{
+				"worklog": {Graduated: false, ConfidenceFloor: 0},
+			},
+			want: gate.DecisionQueue,
+		},
 	}
 
 	for _, tt := range tests {
