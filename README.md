@@ -38,7 +38,8 @@ its own changes as part of reality. There is no separate "executor" component: a
 ## Status: phase 1 landed — unjira can write, and does not by default
 
 **Token attribution: PR 1 (the token ledger) writes nothing; PR 2 drafts worklogs but none is
-applied by default.** The claude_code collector ledgers each assistant message's token usage,
+applied by default; PR 3 reviews a worklog with the comment or transition for the same work as
+one approval unit.** The claude_code collector ledgers each assistant message's token usage,
 unjira records its own LLM calls, and `unjira tokens` reports them per ticket (through member
 links to each narrative's confident primary), per untracked narrative, unattributed, and for
 unjira's own spend over 30d/7d/1d/today, split into unlogged, already-logged and pending shares.
@@ -48,7 +49,9 @@ drafts one action per ticket covering messages with no worklog marker, and a lar
 supersedes the pending draft. Every draft lands in the review queue — it applies only through
 `auto_commit.worklog`, which defaults to `graduated: false` and which nothing in unjira can
 graduate. Every worklog write sends `notifyUsers=false&adjustEstimate=leave`, so nobody gets
-mailed and no estimate moves
+mailed and no estimate moves. PR 3 makes review unit-shaped: a worklog and the comment or
+transition for the same work are reviewed in triage as one approval unit, with one decision and
+members droppable with `d`. A member auto-commit applies joins no unit
 (`docs/superpowers/specs/2026-10-14-token-attribution-design.md`).
 
 The whole loop runs: collectors → event log → correlator (cluster + match) → reconciler →
@@ -95,7 +98,9 @@ queued or lands `failed` with a persisted reason:
 The gates cover the `worklog` action type like any other: `auto_commit.worklog` is false by
 default, so every worklog draft queues for review until a human graduates it. A worklog also
 carries no narrative text to rework — triage refuses `e`/`t`/`m`/`s` on one and says why, leaving
-approve/reject, because its numbers are computed from the ledger, not authored.
+approve/reject, because its numbers are computed from the ledger, not authored. Within an
+approval unit each member keeps its own gate — graduating a comment does not graduate its
+worklog.
 
 **GitHub is never written to, by construction rather than by gate.** A `github` tracker is read
 through `clients/github.Reader`, which implements `tasktracker.TaskReader` and no write method, over a
@@ -268,6 +273,9 @@ drop that clause if your team assigns rigorously.
 body, and **applies nothing until you confirm at the end**. Beyond approve/reject
 it can reword an action (`e`), retarget it to a different issue (`t`), merge two
 narratives that turned out to be one story (`m`), or split one that was two (`s`).
+A worklog is presented together with the comment or transition drafted for the same work as one
+approval unit, with one decision covering them; `d <n> [why]` rejects one member of the unit and
+records its own ruling. A member auto-commit applies joins no unit.
 Uncommitted work stays reshufflable; anything a tracker mutation already describes
 does not move — so splitting a narrative whose comment already posted keeps the
 described events where they are and moves only the rest.

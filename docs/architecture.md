@@ -79,7 +79,7 @@ flowchart TB
         FILTERS["runSuppression · ordered chain<br/>1 unroutable · 2 settled-status · 3 tracker-echo<br/>4 stale-transition · 5 duplicate"]
     end
 
-    TRIAGE["internal/triage<br/>approve · reject · edit<br/>merge · split · target"]
+    TRIAGE["internal/triage<br/>approve · reject · edit<br/>merge · split · target · drop<br/>approval units: worklog + its work's comment/transition"]
 
     SINKS["pipeline.RunSinks<br/>deterministic · attribution sinks draft<br/>from the token ledger per writable<br/>ticket: worklog add / update / delete"]
 
@@ -421,7 +421,7 @@ stateDiagram-v2
     proposed --> suppressed: a larger delta superseded<br/>the pending worklog draft<br/>(its replacement stands proposed)
 
     proposed --> approved: triage [a]pprove<br/>or auto_commit
-    proposed --> rejected: triage [r]eject<br/>or [t]arget
+    proposed --> rejected: triage [r]eject, [t]arget<br/>or [d]rop
     proposed --> edited: triage [e]dit / [m]erge
     proposed --> proposed: triage [s]kip
 
@@ -459,6 +459,10 @@ Reading the transitions, since some distinctions matter more than an edge label 
   `token_messages` row (`worklog_id` + `worklog_issue_key`, both set or both NULL), which is what
   keeps the next pass from re-proposing logged time; a failed apply leaves the markers unset so a
   re-approve is safe.
+- **Approval units are a presentation over per-action rows**, joined through `message_ids` and
+  read-time attribution: no unit row exists in the store, and each member's status, gate and
+  ruling are its own. A member the auto-commit gate passes in `watch` is applied before triage and
+  joins no unit.
 - **`reject / retarget`** are both recorded `rejected`, but only retarget produces a replacement row:
   the old action named the wrong issue, so it was ruled against rather than reworded
   (`triage/restructure.go:509`). Retargeting a create links its work to an existing ticket instead,

@@ -14,6 +14,7 @@ import (
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/gate"
 	"github.com/jcogilvie/unjira/internal/store"
+	"github.com/jcogilvie/unjira/internal/tasktracker"
 	"github.com/jcogilvie/unjira/internal/triage"
 )
 
@@ -35,8 +36,8 @@ func TestParseDecision(t *testing.T) {
 		{name: "split one position", input: "s 4", wantVerb: triage.VerbSplit, wantPos: []int{4}},
 		{name: "target an issue key", input: "t PAAS-4010", wantVerb: triage.VerbTarget, wantText: "PAAS-4010"},
 		{name: "whitespace tolerated", input: "  a  ", wantVerb: triage.VerbApprove},
-		{name: "unknown verb", input: "z", wantErr: "unknown"},
-		{name: "empty line", input: "", wantErr: "unknown"},
+		{name: "unknown verb", input: "z", wantErr: "expected one of a r e m s k t d q"},
+		{name: "empty line", input: "", wantErr: "expected one of a r e m s k t d q"},
 		{
 			name:    "edit with no text is an error, not an empty correction",
 			input:   "e",
@@ -51,6 +52,24 @@ func TestParseDecision(t *testing.T) {
 			name:    "merge with a non-numeric position",
 			input:   "m 1 x",
 			wantErr: "position",
+		},
+		{name: "drop one position", input: "d 3", wantVerb: triage.VerbDrop, wantPos: []int{3}},
+		{
+			name:     "drop with a reason",
+			input:    "d 3 not this ticket",
+			wantVerb: triage.VerbDrop,
+			wantPos:  []int{3},
+			wantText: "not this ticket",
+		},
+		{
+			name:    "drop with no position is an error",
+			input:   "d",
+			wantErr: "drop requires a position: d <n> [why]",
+		},
+		{
+			name:    "drop with a non-numeric position",
+			input:   "d x",
+			wantErr: "is not a number",
 		},
 	}
 
@@ -196,6 +215,81 @@ func TestTerminalPrompter_ACreateShowsItsCandidates(t *testing.T) {
 
 	assert.Contains(t, out, "PROJ-7 (primary, confidence 0.30, prose_first): Retries hammer the API [Done]")
 	assert.Contains(t, out, "[t]arget one to link the work there instead")
+}
+
+// TestTerminalPrompter_AUnitShowsEveryMember: an approval unit prints every
+// member's body in full with its own position — one decision, but the reviewer
+// still reads everything they are approving — and offers [d]rop, once.
+func TestTerminalPrompter_AUnitShowsEveryMember(t *testing.T) {
+	p := &terminalPrompter{in: bufio.NewScanner(strings.NewReader("q\n"))}
+	comment := triage.Item{Position: 1, Total: 3, Appliable: true, Action: store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-1", Confidence: 0.9,
+		Payload: `{"body":"the work landed"}`,
+	}}
+	worklog := triage.Item{Position: 3, Total: 3, Appliable: true, Action: store.ActionRow{
+		Type: store.ActionTypeWorklog, IssueKey: "PROJ-1", Confidence: 0.9,
+		Payload: `{"op":"add","comment":"unjira: 1 in / 1 out"}`,
+	}}
+	comment.Members = []triage.Item{comment, worklog}
+
+	out := captureStdout(t, func() {
+		_, err := p.Ask(comment)
+		require.NoError(t, err)
+	})
+
+	assert.Contains(t, out, "the work landed")
+	assert.Contains(t, out, "unjira: 1 in / 1 out")
+	assert.Contains(t, out, "[1/3]")
+	assert.Contains(t, out, "[3/3]")
+	assert.Contains(t, out, "approval unit")
+	assert.Contains(t, out, "[d]rop <n> ")
+	assert.Equal(t, 1, strings.Count(out, "s[k]ip"), "one prompt line per unit")
+}
+
+// TestTerminalPrompter_ASingleItemOffersNoDrop: [d]rop acts on a unit's
+// members; an action reviewed alone has none, so the verb is not offered.
+func TestTerminalPrompter_ASingleItemOffersNoDrop(t *testing.T) {
+	p := &terminalPrompter{in: bufio.NewScanner(strings.NewReader("q\n"))}
+	item := triage.Item{Position: 1, Total: 1, Appliable: true, Action: store.ActionRow{
+		Type: "comment", IssueKey: "PROJ-1", Confidence: 0.9,
+		Payload: `{"body":"drafted"}`,
+	}}
+
+	out := captureStdout(t, func() {
+		_, err := p.Ask(item)
+		require.NoError(t, err)
+	})
+
+	assert.NotContains(t, out, "[d]rop")
+	assert.Contains(t, out, "s[k]ip")
+}
+
+// TestTerminalPrompter_ASingleItemPrintsItsPositionFirst: a lone action reads
+// as it did before approval units existed — the `[n/N]` line, then the issue
+// and work it concerns, then its body.
+func TestTerminalPrompter_ASingleItemPrintsItsPositionFirst(t *testing.T) {
+	p := &terminalPrompter{in: bufio.NewScanner(strings.NewReader("q\n"))}
+	item := triage.Item{
+		Position: 1, Total: 1, Appliable: true,
+		Issue:     tasktracker.Issue{Summary: "the ticket"},
+		Narrative: triage.NarrativeContext{Title: "the work"},
+		Action: store.ActionRow{
+			Type: "comment", IssueKey: "PROJ-1", Confidence: 0.9,
+			Payload: `{"body":"drafted"}`,
+		},
+	}
+
+	out := captureStdout(t, func() {
+		_, err := p.Ask(item)
+		require.NoError(t, err)
+	})
+
+	pos, issue, work, body := strings.Index(out, "[1/1]"), strings.Index(out, "issue:"),
+		strings.Index(out, "work:"), strings.Index(out, "drafted")
+	require.NotEqual(t, -1, pos)
+	assert.Less(t, pos, issue)
+	assert.Less(t, issue, work)
+	assert.Less(t, work, body)
 }
 
 // TestBodyOf_Worklog: a worklog's payload carries its comment under

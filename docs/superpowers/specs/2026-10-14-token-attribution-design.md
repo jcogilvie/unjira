@@ -1,12 +1,12 @@
 # Token attribution for tracked tickets — design
 
-**Status: PR 1 landed 2026-10-14; PR 2 landed 2026-10-23; PR 3 design** (contract from a grilling session, 2026-10-14)
+**Status: PR 1 landed 2026-10-14; PR 2 landed 2026-10-23; PR 3 landed 2026-10-28** (contract from a grilling session, 2026-10-14)
 
 This is the spec. An implementation plan points at it instead of restating it.
 
 ## Status
 
-PR 1 landed 2026-10-14. PR 2 landed 2026-10-23. PR 3 is design.
+PR 1 landed 2026-10-14. PR 2 landed 2026-10-23. PR 3 landed 2026-10-28.
 
 Deviations from the design as first written, measured by a probe over every local transcript (see
 "Facts"):
@@ -128,6 +128,26 @@ Verification, 2026-10-23:
   > **Minimum accepted duration: 60s** (1s and 30s are rejected with a 400). **Time tracking is
   > enabled** on DEVSBX. **Permissions:** the unjira user needs `WORK_ON_ISSUES`,
   > `EDIT_OWN_WORKLOGS` and `DELETE_OWN_WORKLOGS`, all held.
+
+PR 3, landed 2026-10-28.
+
+Deviations from the design as first written:
+
+- **R1 — a unit is one comment or transition plus its worklogs (D-38).** A narrative with more than
+  one pending comment or transition forms no unit. Its worklog is reviewed alone, with a printed
+  report.
+- **R2 — ambiguous joins are reported, not forced (D-36).** A worklog whose messages lead to no
+  narrative with a pending comment or transition is reviewed alone, silently. A worklog that could
+  join several narratives, or one narrative with several pending actions, is reviewed alone and
+  reported.
+- **R3 — "same pass" means pending together at review.** Two actions join a unit when they are
+  pending at the same review, not when they were drafted by the same pipeline pass — a superseded
+  and redrafted action joins the new draft's unit.
+
+Verification, 2026-10-28:
+
+- `go test ./...` printed 28 `ok` lines, one `?   github.com/jcogilvie/unjira/internal/store/storetest
+  [no test files]`, and exited 0. `earthly +reviewable` printed `🌍 Earthly Build  ✅ SUCCESS`.
 
 ## Problem
 
@@ -470,6 +490,9 @@ notifications cannot be recalled. The sink interface keeps the switch, or runnin
 | D-33 | Untracked means no confident primary: A narrative whose primary is below `match.confidence_floor`, or that has no primary at all, goes to the untracked bucket, labeled with its candidate primary key if it has one. Its tokens are never charged to that ticket. | User ruling, 2026-10-14: the same rule as the create path, consistent with the repo's meaning since F58/F64. |  | active (replaces D-5) |
 | D-34 | First holder owns a doubly-recorded message: When one message.id is recorded by two transcripts, the row's transcript and covering event belong to the lowest (occurred_at, transcript_id) across them. A later holder may raise counters through MAX but never takes ownership unless its pair sorts lower. | User ruling, 2026-10-14 (F33's rule), made order-independent so read order A,B and B,A agree. |  | active |
 | D-35 | Resumed history past the horizon is not ledgered: A resumed transcript's copied lines belong to their original (earliest) holder. When that original is older than the collection horizon it is never read, so those messages get no ledger row, as they get no event. | Planning ruling, 2026-10-14: the tokens were spent on the original's date, outside the window. The 181 ids missing from a scratch collect were exactly such copies. Cost if wrong: resumed spend older than `backfill_days` is not counted; widening backfill on a fresh store recovers it. |  | active |
+| D-36 | Unit join through message_ids: A proposed worklog joins the narrative whose comment or transition it is reviewed with through its payload's `message_ids` and the read-time attribution (`store.MessageAttributions`): a message counts only when tracked and attributed to the worklog's own issue. A worklog that would join no narrative, several, or one with several pending comments or transitions is reviewed alone. | Planning ruling, 2026-10-28 (plan R2): a worklog is drafted per ticket, so its messages may span several narratives, and picking one would be a guess presented as a fact. |  | active |
+| D-37 | A unit's reject feedback goes on every member: Rejecting a unit records the reviewer's one reason as the ruling of each member, so every member's correction carries it. | Planning ruling, 2026-10-28: a unit's members are still ordinary per-action decisions, and `Rulings()` and `CorrectionsSince` stay unchanged. |  | active |
+| D-38 | One comment or transition per unit: A unit is exactly one comment or transition plus every worklog joined to its narrative. A narrative with more than one pending comment or transition forms no unit. | Planning ruling, 2026-10-28 (plan R1): the design did not say what a narrative with several pending non-worklog actions looks like, and mirror destinations are separate reviews. |  | active |
 
 ## Open assumptions
 

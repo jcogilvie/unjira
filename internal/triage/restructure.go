@@ -607,7 +607,7 @@ func (h *StoreHandler) Restructure(
 	case VerbMerge:
 		return h.restructureMerge(d, batch)
 
-	case VerbApprove, VerbReject, VerbEdit, VerbSkip, VerbQuit:
+	case VerbApprove, VerbReject, VerbEdit, VerbSkip, VerbQuit, VerbDrop:
 		return nil, fmt.Errorf("%s is not a restructure", d.Verb)
 	}
 
