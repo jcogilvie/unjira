@@ -4,10 +4,12 @@ package triage
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jcogilvie/unjira/internal/config"
 	"github.com/jcogilvie/unjira/internal/llm"
+	"github.com/jcogilvie/unjira/internal/reconciler"
 	"github.com/jcogilvie/unjira/internal/store"
 	"github.com/jcogilvie/unjira/internal/tasktracker"
 )
@@ -15,7 +17,7 @@ import (
 // Verb is one disposition a reviewer chooses for one action.
 type Verb string
 
-// The eight dispositions. Single letters at the prompt are a r e m s k t q,
+// The nine dispositions. Single letters at the prompt are a r e m s k t d q,
 // all distinct — skip takes k precisely because s belongs to split, and a
 // collision would make one disposition unreachable.
 const (
@@ -27,6 +29,7 @@ const (
 	VerbSkip    Verb = "skip"
 	VerbQuit    Verb = "quit"
 	VerbTarget  Verb = "target"
+	VerbDrop    Verb = "drop"
 )
 
 // WorklogRefusal is the fixed message a reviewer is shown when a work verb is
@@ -35,12 +38,17 @@ const (
 const WorklogRefusal = "a worklog is computed from the token ledger: " +
 	"edit, target, merge and split do not apply; approve, reject or skip it"
 
+// DropRefusal is the fixed message a reviewer is shown when drop is aimed at an
+// action reviewed alone: drop removes a member from an approval unit, and a
+// single action has no unit to remove it from.
+const DropRefusal = "drop removes one member of an approval unit; this action is reviewed alone: reject it instead"
+
 // Decision is a reviewer's answer for one presented action.
 type Decision struct {
 	Verb Verb
-	// Text carries reject/edit free-text, or the issue key for target.
+	// Text carries reject/edit/drop free-text, or the issue key for target.
 	Text string
-	// Positions carries merge/split's 1-based batch positions.
+	// Positions carries merge/split/drop's 1-based batch positions.
 	Positions []int
 }
 
@@ -117,6 +125,14 @@ type Item struct {
 	UnappliableReason string
 	Position          int
 	Total             int
+	// Members is set only for an approval unit (D-18): a comment or transition and
+	// every worklog joined to its narrative, in batch order, reviewed with one
+	// decision. Each member is decorated and given writability as a single Item would
+	// be, and keeps its own flat Position. Action, Position, Narrative and Issue are
+	// then the unit's comment or transition, the member the work verbs act on (R7).
+	// Appliable is true only when every member is appliable, and UnappliableReason
+	// names each member that is not.
+	Members []Item
 }
 
 // Prompter is how a Session asks a human. cmd/unjira implements it against a
@@ -150,6 +166,16 @@ type Session struct {
 	// reads as appliable — an unconfigured Session must not claim to know write scope,
 	// and every existing caller and test constructs one that way.
 	writability *config.Config
+	// units maps a worklog action id to the narrative whose comment or transition it
+	// is reviewed with (JoinWorklogs). Nil means no units: every action is asked alone.
+	units map[int64]int64
+}
+
+// SetUnits gives the Session the worklog joins that group actions into approval
+// units (D-18). A setter for SetWritability's reason: every existing caller and test
+// would otherwise pass a map it does not care about. Nil means no units.
+func (s *Session) SetUnits(joins map[int64]int64) {
+	s.units = joins
 }
 
 // SetWritability gives the Session the config it needs to tell a reviewer, before they
@@ -200,11 +226,16 @@ func NewSession(ctx context.Context, batch []store.ActionRow, p Prompter, h Hand
 // Run walks the batch, collecting a decision per action. It applies nothing.
 func (s *Session) Run() error {
 	for i := 0; i < len(s.batch); i++ {
-		a := s.batch[i]
+		// A unit presented at an earlier member already decided this one. Nothing
+		// else is ever decided when the walk reaches it.
+		if _, decided := s.decisions[s.batch[i].ID]; decided {
+			continue
+		}
 
-		item := Item{Action: a, Position: i + 1, Total: len(s.batch)}
-		item.Appliable, item.UnappliableReason = s.itemWritability(a)
-		s.decorate(&item)
+		// ai is the index of item.Action: i for a single action, the unit's comment
+		// or transition for a unit. The work verbs act on it, never on a worklog.
+		item, members, ai := s.present(i)
+		a := item.Action
 
 		d, err := s.prompter.Ask(item)
 		if err != nil {
@@ -233,15 +264,34 @@ func (s *Session) Run() error {
 		}
 
 		switch d.Verb {
-		case VerbApprove, VerbReject, VerbSkip, VerbQuit:
+		case VerbApprove, VerbReject, VerbSkip:
 			// Recorded below; nothing to do but advance.
+		case VerbQuit:
+			// Discard every decision, not just this one. Nothing has been
+			// applied yet — that is the whole point of batch apply — so a
+			// reviewer who quits owes nothing and expects nothing to have
+			// happened. Keeping earlier approvals would make quit a partial
+			// commit, which is the surprise batch apply exists to avoid.
+			s.decisions = make(map[int64]Decision, len(s.batch))
+
+			return ErrAbandoned
+		case VerbDrop:
+			if perr := s.drop(d, members); perr != nil {
+				return perr
+			}
+
+			// Re-present what is left: the dropped member is decided, so the
+			// unit re-forms without it, or dissolves to a single action.
+			i--
+
+			continue
 		case VerbEdit, VerbMerge, VerbSplit, VerbTarget:
 			// A worklog has no narrative text to rework and carries narrative 0
 			// (R2), so edit and target would hand Redraft/Retarget a narrative id
 			// that is not one, and merge/split would route it through ReworkOne
 			// the same way (R17). Refused before the handler is ever consulted,
 			// so a nil-handler dry run reports the same refusal a live one does.
-			if s.worklogTouched(d, i) {
+			if s.worklogTouched(d, ai) {
 				if perr := s.prompter.Notify(WorklogRefusal); perr != nil {
 					return fmt.Errorf("notifying worklog action %d: %w", a.ID, perr)
 				}
@@ -255,7 +305,10 @@ func (s *Session) Run() error {
 			// result replaces the affected actions and is re-presented, since
 			// the reviewer has not seen the new text — approving text nobody
 			// read is the mistake this whole surface exists to prevent.
-			replaced, herr := s.handle(d, i)
+			// Collected before handle, which may reorder the batch.
+			touched := s.restructured(d, ai)
+
+			replaced, herr := s.handle(d, ai)
 			if herr != nil {
 				// Re-prompt rather than abort: a failed redraft or a refused
 				// merge should cost one keystroke, not a half-reviewed batch.
@@ -268,27 +321,214 @@ func (s *Session) Run() error {
 				continue
 			}
 
-			s.spliceBatch(i, replaced)
+			s.dissolveUnits(touched)
+			s.spliceBatch(ai, replaced)
 
+			// Re-present from i, which is at most ai, so a unit whose worklog comes
+			// first is re-presented whole.
 			i--
 
 			continue
 		}
 
-		if d.Verb == VerbQuit {
-			// Discard every decision, not just this one. Nothing has been
-			// applied yet — that is the whole point of batch apply — so a
-			// reviewer who quits owes nothing and expects nothing to have
-			// happened. Keeping earlier approvals would make quit a partial
-			// commit, which is the surprise batch apply exists to avoid.
-			s.decisions = make(map[int64]Decision, len(s.batch))
-
-			return ErrAbandoned
-		}
-		s.decisions[a.ID] = d
+		s.record(d, a, members)
 	}
 
 	return nil
+}
+
+// restructured returns the narrative ids a target, merge or split decision on
+// the action at index ai touches: the action's own and every d.Positions row's.
+// These verbs change which narrative holds which work, so the message->narrative
+// attribution a unit's join was computed from no longer holds for any of them.
+// Edit only rewords text and keeps the unit, so it touches none.
+func (s *Session) restructured(d Decision, ai int) []int64 {
+	if d.Verb == VerbEdit {
+		return nil
+	}
+
+	touched := []int64{s.batch[ai].NarrativeID}
+	for _, p := range d.Positions {
+		if p >= 1 && p <= len(s.batch) {
+			touched = append(touched, s.batch[p-1].NarrativeID)
+		}
+	}
+
+	return touched
+}
+
+// dissolveUnits removes every unit joined to one of narratives, so its members
+// are presented alone from then on.
+func (s *Session) dissolveUnits(narratives []int64) {
+	for id, n := range s.units {
+		if slices.Contains(narratives, n) {
+			delete(s.units, id)
+		}
+	}
+}
+
+// drop records the one member d.Positions names as rejected with d.Text (R5): a
+// drop IS a reject of that member. Outside a unit, or naming anything but exactly
+// one member, it notifies the reviewer and records nothing.
+func (s *Session) drop(d Decision, members []int) error {
+	if members == nil {
+		if err := s.prompter.Notify(DropRefusal); err != nil {
+			return fmt.Errorf("notifying drop refusal: %w", err)
+		}
+
+		return nil
+	}
+
+	positions := make([]string, 0, len(members))
+	named := -1
+
+	for _, j := range members {
+		positions = append(positions, fmt.Sprint(j+1))
+
+		if len(d.Positions) == 1 && d.Positions[0] == j+1 {
+			named = j
+		}
+	}
+
+	if named < 0 {
+		msg := "drop names one member of this unit: positions " + strings.Join(positions, ", ")
+		if err := s.prompter.Notify(msg); err != nil {
+			return fmt.Errorf("notifying drop refusal: %w", err)
+		}
+
+		return nil
+	}
+
+	s.decisions[s.batch[named].ID] = Decision{Verb: VerbReject, Text: d.Text}
+
+	return nil
+}
+
+// record writes an approve, reject or skip: on action a alone, or on every member
+// of a's unit when members is non-nil. A unit's one decision is each member's own,
+// so Approved() and Rulings() see exactly what per-action decisions produce (D-21):
+// a reject copies its feedback onto each member.
+func (s *Session) record(d Decision, a store.ActionRow, members []int) {
+	if members == nil {
+		s.decisions[a.ID] = d
+
+		return
+	}
+
+	for _, j := range members {
+		s.decisions[s.batch[j].ID] = d
+	}
+}
+
+// present builds the Item for batch index i, returning the batch indices of its
+// unit's members (nil for a single action) and the index of Item.Action.
+func (s *Session) present(i int) (Item, []int, int) {
+	members := s.unitAt(i)
+	if members == nil {
+		return s.itemAt(i), nil, i
+	}
+
+	var (
+		unit    Item
+		ai      int
+		reasons []string
+		items   = make([]Item, 0, len(members))
+	)
+
+	for _, j := range members {
+		m := s.itemAt(j)
+		items = append(items, m)
+
+		if m.Action.Type != store.ActionTypeWorklog {
+			unit, ai = m, j
+		}
+
+		if !m.Appliable {
+			reasons = append(reasons, fmt.Sprintf("position %d (%s on %s): %s",
+				m.Position, m.Action.Type, m.Action.IssueKey, m.UnappliableReason))
+		}
+	}
+
+	unit.Members = items
+	unit.Appliable, unit.UnappliableReason = true, ""
+
+	if len(reasons) > 0 {
+		reasons = append(reasons, "drop each member that cannot be applied (d <n>), or reject the unit")
+		unit.Appliable, unit.UnappliableReason = false, strings.Join(reasons, "\n")
+	}
+
+	return unit, members, ai
+}
+
+// itemAt builds the single, decorated Item for batch index i.
+func (s *Session) itemAt(i int) Item {
+	a := s.batch[i]
+
+	item := Item{Action: a, Position: i + 1, Total: len(s.batch)}
+	item.Appliable, item.UnappliableReason = s.itemWritability(a)
+	s.decorate(&item)
+
+	return item
+}
+
+// unitAt returns the batch indices of i's approval unit in batch order, or nil
+// when i is in none. A unit is the undecided actions of one narrative: exactly one
+// comment or transition and at least one worklog joined to it (R1). Computed at
+// walk time from the batch and the decisions, so a splice reshapes the unit with
+// no bookkeeping of its own.
+func (s *Session) unitAt(i int) []int {
+	if len(s.units) == 0 {
+		return nil
+	}
+
+	n, ok := s.unitNarrative(s.batch[i])
+	if !ok {
+		return nil
+	}
+
+	var (
+		members           []int
+		actions, worklogs int
+	)
+
+	for j, a := range s.batch {
+		if _, decided := s.decisions[a.ID]; decided {
+			continue
+		}
+
+		if m, ok := s.unitNarrative(a); !ok || m != n {
+			continue
+		}
+
+		members = append(members, j)
+
+		if a.Type == store.ActionTypeWorklog {
+			worklogs++
+		} else {
+			actions++
+		}
+	}
+
+	if actions != 1 || worklogs == 0 {
+		return nil
+	}
+
+	return members
+}
+
+// unitNarrative is the narrative an action would share a unit through: its join
+// for a worklog, its own narrative for a comment or transition.
+func (s *Session) unitNarrative(a store.ActionRow) (int64, bool) {
+	switch a.Type {
+	case store.ActionTypeWorklog:
+		n, ok := s.units[a.ID]
+
+		return n, ok
+	case string(reconciler.ActionComment), string(reconciler.ActionTransition):
+		return a.NarrativeID, true
+	}
+
+	return 0, false
 }
 
 // decorate attaches the narrative and live issue a reviewer needs, best-effort.
@@ -500,7 +740,7 @@ func (s *Session) handle(d Decision, i int) ([]store.ActionRow, error) {
 	case VerbMerge, VerbSplit:
 		return s.handler.Restructure(s.ctx, d, s.batch)
 
-	case VerbApprove, VerbReject, VerbSkip, VerbQuit:
+	case VerbApprove, VerbReject, VerbSkip, VerbQuit, VerbDrop:
 		// Unreachable: Run only calls handle for the four work verbs. Named
 		// explicitly rather than left to a default, so that adding a Verb forces a
 		// decision here — and loud rather than falling through to Restructure,
