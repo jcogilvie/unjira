@@ -556,3 +556,56 @@ func TestRunWatchPass_GraduatedWorklogAutoApplies(t *testing.T) {
 	assert.Equal(t, store.StatusApplied, got[0].Status)
 	assert.Positive(t, tracker.worklogCalls)
 }
+
+// TestRunWatchPass_GraduatedMemberAppliesAndOnlyTheOtherQueues locks in the
+// auto-apply half of the per-member gate: graduating one member type applies
+// exactly that member of a narrative, and its other member — a worklog and a
+// comment drafted in the same pass — stays queued for review.
+func TestRunWatchPass_GraduatedMemberAppliesAndOnlyTheOtherQueues(t *testing.T) {
+	const commentDraft = `[{"issue_key":"PROJ-1","type":"comment","body":"the work landed","confidence":0.9,"rationale":"r"}]`
+	tests := map[string]struct {
+		graduatedType string
+		appliedType   string
+		proposedType  string
+	}{
+		"graduated worklog applies the worklog": {
+			graduatedType: store.ActionTypeWorklog,
+			appliedType:   store.ActionTypeWorklog,
+			proposedType:  "comment",
+		},
+		"graduated comment applies the comment": {
+			graduatedType: "comment",
+			appliedType:   "comment",
+			proposedType:  store.ActionTypeWorklog,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			s, tracker, cfg := worklogPass(t)
+			cfg.AutoCommit = map[string]config.AutoCommitRule{
+				tt.graduatedType: {ConfidenceFloor: 0.5, Graduated: true},
+			}
+			app := &appContext{config: cfg, store: s}
+			applier := gate.NewApplier(s, tracker, "PROJ", cfg.Trackers)
+			client := &watchLLM{responses: []string{commentDraft}}
+
+			require.NoError(t, app.runWatchPass(t.Context(), client, tracker, applier, nil, nil, 24*time.Hour, false))
+
+			all, err := s.ActionsForIssue("PROJ-1")
+			require.NoError(t, err)
+			require.Len(t, all, 2)
+			byType := make(map[string]store.ActionRow, len(all))
+			for _, a := range all {
+				byType[a.Type] = a
+			}
+			assert.Equal(t, store.StatusApplied, byType[tt.appliedType].Status, "the graduated member applies")
+			assert.Equal(t, store.StatusProposed, byType[tt.proposedType].Status, "the ungraduated member queues")
+
+			proposed, err := s.ActionsByStatus(store.StatusProposed)
+			require.NoError(t, err)
+			require.Len(t, proposed, 1, "exactly one action queues: the ungraduated member")
+			assert.Equal(t, tt.proposedType, proposed[0].Type)
+		})
+	}
+}

@@ -37,9 +37,10 @@ type triageCmd struct {
 
 // parseDecision turns one line of reviewer input into a triage.Decision.
 //
-// Single letters, all distinct: a r e m s k t q. `skip` takes k precisely
+// Single letters, all distinct: a r e m s k t d q. `skip` takes k precisely
 // because s belongs to split — a collision here would make one disposition
-// unreachable.
+// unreachable. `d` is drop: removing one member of an approval unit, taking a
+// position and optional feedback exactly as reject does.
 //
 // Verbs that need an argument error when it is missing rather than defaulting.
 // An `e` with no text would reach reconciler.Redraft, which errors on empty
@@ -48,7 +49,7 @@ type triageCmd struct {
 func parseDecision(line string) (triage.Decision, error) {
 	fields := strings.Fields(strings.TrimSpace(line))
 	if len(fields) == 0 {
-		return triage.Decision{}, fmt.Errorf("unknown verb %q: expected one of a r e m s k t q", line)
+		return triage.Decision{}, fmt.Errorf("unknown verb %q: expected one of a r e m s k t d q", line)
 	}
 
 	verb, rest := fields[0], fields[1:]
@@ -96,8 +97,22 @@ func parseDecision(line string) (triage.Decision, error) {
 		}
 
 		return triage.Decision{Verb: triage.VerbSplit, Positions: positions}, nil
+	case "d":
+		if len(rest) == 0 {
+			return triage.Decision{}, fmt.Errorf("drop requires a position: d <n> [why]")
+		}
+
+		positions, err := parsePositions(rest[:1])
+		if err != nil {
+			return triage.Decision{}, err
+		}
+
+		return triage.Decision{
+			Verb: triage.VerbDrop, Positions: positions,
+			Text: strings.Join(rest[1:], " "),
+		}, nil
 	default:
-		return triage.Decision{}, fmt.Errorf("unknown verb %q: expected one of a r e m s k t q", verb)
+		return triage.Decision{}, fmt.Errorf("unknown verb %q: expected one of a r e m s k t d q", verb)
 	}
 }
 
@@ -132,11 +147,6 @@ func newTerminalPrompter() *terminalPrompter {
 // text they did not read, and real drafted bodies run past 200 characters, so a
 // one-line summary would invite exactly that.
 func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
-	a := item.Action
-
-	fmt.Printf("\n[%d/%d] %s  %s  confidence %.2f\n",
-		item.Position, item.Total, a.Type, a.IssueKey, a.Confidence)
-
 	// Context BEFORE the proposal, because that is the order a reviewer needs it
 	// in: what is this ticket, what work is this about, and only then what does
 	// unjira want to write. Printing the body first asks someone to judge prose
@@ -146,6 +156,25 @@ func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
 	// outage yields no "issue:" line at all, which reads as absence; "issue: "
 	// with nothing after it reads as a ticket with no summary, and those are
 	// different facts.
+	//
+	// An approval unit (D-18) prints these lines once and then every member in
+	// full: one decision, but the reviewer still reads everything they are
+	// approving — a worklog hidden behind its comment's prose would invite
+	// approving time they did not read.
+	// A lone action's position line comes first, as it did before units
+	// existed; a unit's header stands in its place and each member carries its own.
+	if len(item.Members) == 0 {
+		printPosition(item)
+	} else {
+		positions := make([]string, 0, len(item.Members))
+		for _, m := range item.Members {
+			positions = append(positions, strconv.Itoa(m.Position))
+		}
+
+		fmt.Printf("\n== approval unit: %d actions for one piece of work (positions %s) ==\n",
+			len(item.Members), strings.Join(positions, ", "))
+	}
+
 	if item.Issue.Summary != "" {
 		fmt.Printf("  issue:     %s", item.Issue.Summary)
 		if item.Issue.StatusName != "" {
@@ -172,6 +201,63 @@ func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
 			fmt.Printf("             - [%s] %s  (confidence %.2f)\n", at.Source, at.Summary, at.Confidence)
 		}
 	}
+
+	if len(item.Members) > 0 {
+		for _, m := range item.Members {
+			printPosition(m)
+			printAction(m)
+		}
+	} else {
+		printAction(item)
+	}
+
+	// [d]rop is offered only on a unit: it removes one member, and an action
+	// reviewed alone has no members to remove — the Session answers with
+	// DropRefusal regardless, so the display is a courtesy and the Session the
+	// guard.
+	dropVerb := ""
+	if len(item.Members) > 0 {
+		dropVerb = "[d]rop <n> "
+	}
+
+	for {
+		fmt.Printf("\n  %s[r]eject [e]dit [m]erge [s]plit %ss[k]ip [t]arget [q]uit > ",
+			approveVerb(item.Appliable), dropVerb)
+
+		if !p.in.Scan() {
+			if err := p.in.Err(); err != nil {
+				return triage.Decision{}, fmt.Errorf("reading disposition: %w", err)
+			}
+			// EOF (piped input exhausted, or Ctrl-D): treat as quit rather than
+			// looping forever on a closed stdin.
+			return triage.Decision{Verb: triage.VerbQuit}, nil
+		}
+
+		d, err := parseDecision(p.in.Text())
+		if err != nil {
+			// A typo re-prompts rather than aborting: losing a half-reviewed
+			// batch to a fat finger would be worse than the noise.
+			fmt.Printf("  %v\n", err)
+
+			continue
+		}
+
+		return d, nil
+	}
+}
+
+// printPosition renders an action's `[n/N] type key confidence` line.
+func printPosition(item triage.Item) {
+	fmt.Printf("\n[%d/%d] %s  %s  confidence %.2f\n",
+		item.Position, item.Total, item.Action.Type, item.Action.IssueKey, item.Action.Confidence)
+}
+
+// printAction renders one action after its position line: candidates, body,
+// rationale and unappliable note. Both a single Item and each member of an
+// approval unit go through it, so every member of a unit reads the way a lone
+// action does.
+func printAction(item triage.Item) {
+	a := item.Action
 
 	// A create proposed for work with no confident primary: the tickets the work is
 	// linked to without one of them being its home. Shown so the reviewer can choose
@@ -205,31 +291,6 @@ func (p *terminalPrompter) Ask(item triage.Item) (triage.Decision, error) {
 	if !item.Appliable {
 		fmt.Printf("\n  (!) unjira would write this, but cannot:\n%s\n",
 			indent(item.UnappliableReason, "      "))
-	}
-
-	for {
-		fmt.Printf("\n  %s[r]eject [e]dit [m]erge [s]plit s[k]ip [t]arget [q]uit > ",
-			approveVerb(item.Appliable))
-
-		if !p.in.Scan() {
-			if err := p.in.Err(); err != nil {
-				return triage.Decision{}, fmt.Errorf("reading disposition: %w", err)
-			}
-			// EOF (piped input exhausted, or Ctrl-D): treat as quit rather than
-			// looping forever on a closed stdin.
-			return triage.Decision{Verb: triage.VerbQuit}, nil
-		}
-
-		d, err := parseDecision(p.in.Text())
-		if err != nil {
-			// A typo re-prompts rather than aborting: losing a half-reviewed
-			// batch to a fat finger would be worse than the noise.
-			fmt.Printf("  %v\n", err)
-
-			continue
-		}
-
-		return d, nil
 	}
 }
 
@@ -356,10 +417,7 @@ func (c *triageCmd) Run(app *appContext) error {
 		handler = h
 	}
 
-	session := triage.NewSession(context.Background(), batch, prompter, handler)
-	// So a reviewer is told an action cannot be applied BEFORE judging it, rather than
-	// after approving it. Same config gate.Applier consults, via one shared predicate.
-	session.SetWritability(app.config)
+	session := app.newTriageSession(batch, prompter, handler)
 
 	fmt.Printf("%d proposed action(s) to review.\n", len(batch))
 	if n := unappliableCount(app.config, batch); n > 0 {
@@ -416,6 +474,38 @@ func (c *triageCmd) Run(app *appContext) error {
 	}
 
 	return app.applyApproved(approved)
+}
+
+// newTriageSession builds the review session over batch: writability from config,
+// and the approval units (D-18) joined from the token ledger.
+//
+// Units are presentation, so a ledger that cannot be read is reported and the
+// session goes on ungrouped (R9), for the same reason decorate is best-effort.
+func (a *appContext) newTriageSession(
+	batch []store.ActionRow, p triage.Prompter, h triage.Handler,
+) *triage.Session {
+	session := triage.NewSession(context.Background(), batch, p, h)
+	// So a reviewer is told an action cannot be applied BEFORE judging it, rather than
+	// after approving it. Same config gate.Applier consults, via one shared predicate.
+	session.SetWritability(a.config)
+
+	msgs, err := a.store.MessageAttributions(a.config.Match.ConfidenceFloor)
+	if err != nil {
+		fmt.Printf("  note: approval units are unavailable this session: reading the token ledger: %v\n", err)
+
+		return session
+	}
+
+	joins, reports := triage.JoinWorklogs(batch, msgs)
+	session.SetUnits(joins)
+	for _, r := range reports {
+		fmt.Printf("  note: %s\n", r)
+	}
+	if len(joins) > 0 {
+		fmt.Printf("%d worklog(s) are reviewed together with the comment or transition for the same work.\n", len(joins))
+	}
+
+	return session
 }
 
 // triageHandler builds the production Handler, resolving the tracker and LLM
