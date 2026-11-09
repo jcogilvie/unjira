@@ -299,7 +299,7 @@ func TestStatsAdd_SumsPullRequestIdentityJoins(t *testing.T) {
 	assert.Len(t, s.PRIdentityConflicts, 2)
 }
 
-// TestCluster_BisectedPullRequestIsOneCluster is F61 end to end: the window is too
+// TestCluster_BisectedPullRequestIsOneCluster is issue #143 end to end: the window is too
 // big for one call, so each half clusters only its own events, and each makes a NEW
 // cluster for its part of PR 1. The model's same-story check at the seam says no.
 // Exact identity still joins them.

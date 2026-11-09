@@ -175,7 +175,7 @@ func writeNarratedNarrative(b *strings.Builder, n NarratedNarrative) {
 
 // writePRIdentityLines reports both pull-request identity joins, each line only when
 // non-zero, as the other pre-filters' exclusions are: the pre-assignment join before
-// clustering (F43), and correlator's join over the clustering results (F61).
+// clustering (F43), and correlator's join over the clustering results (issue #143).
 //
 // Placements are listed one per event, with the narrative and the PR: the model never
 // saw these, so this is the only place a reader judging the pass can see where they
@@ -221,7 +221,7 @@ func writePRIdentityLines(b *strings.Builder, r NarrateResult) {
 		}
 	}
 
-	// The same identity, applied after clustering to the model's own results (F61):
+	// The same identity, applied after clustering to the model's own results (issue #143):
 	// silent at zero, and never silent about a group it left apart, since that is a
 	// pull request this pass split across stored narratives.
 	if n := r.Stats.PRIdentityJoins; n > 0 {

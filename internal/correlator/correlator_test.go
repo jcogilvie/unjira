@@ -1132,7 +1132,7 @@ func TestCluster_TolerateFencedSameStoryResponse(t *testing.T) {
 	assert.Equal(t, "Merged", results[0].Title)
 }
 
-// TestCluster_SurvivesATrailingCommaFromRealModel is F44's regression test at the level
+// TestCluster_SurvivesATrailingCommaFromRealModel is issue #130's regression test at the level
 // the pass died. The live response was complete and closed, with one slip:
 // `"event_indices":[51,56,57,62,63],\n},`. The pass failed on `invalid character '}'
 // looking for beginning of object key string`, losing every cluster the model got right.

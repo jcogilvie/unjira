@@ -298,7 +298,7 @@ func TestAnchor_SameCallInTwoTranscriptsInsertsOnce(t *testing.T) {
 
 // TestAnchor_AwaitingResultIsDeferredVisiblyThenEmitted: a call whose result is not yet
 // in the transcript is in flight. Emitting it now would freeze an unresolved row that
-// INSERT OR IGNORE never updates (F21), so it is deferred — recorded on the segment
+// INSERT OR IGNORE never updates (issue #128), so it is deferred — recorded on the segment
 // events, so the deferral is visible — and emitted on the pass that sees its result.
 func TestAnchor_AwaitingResultIsDeferredVisiblyThenEmitted(t *testing.T) {
 	root := t.TempDir()

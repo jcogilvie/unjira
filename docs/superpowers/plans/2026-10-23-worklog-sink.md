@@ -717,7 +717,7 @@ implementer subagent.
     the correction applies) and R13 (default on).
 
   Leave "Open assumptions" as written, and add the measured minimum duration under it.
-- `docs/findings/`: open a finding (next free number, per `docs/findings/README.md`; F67 and F68
+- [`finding` issues](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding): open a finding (next free number, per `.github/ISSUE_TEMPLATE/finding.md`; [#148](https://github.com/jcogilvie/unjira/issues/148) and [#149](https://github.com/jcogilvie/unjira/issues/149)
   exist, so check `git log --all` first) for whatever the reviewer leaves unsettled from the open
   questions below.
 - [ ] Run `earthly +reviewable`. Quote the result line in the PR description.

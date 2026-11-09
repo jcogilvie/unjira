@@ -12,10 +12,10 @@ Guidance for anyone (human or agent) editing this codebase. This is distinct fro
   lifecycle and package dependencies as mermaid diagrams, plus a SOLID/patterns read. Present tense
   only — it describes the current tree, never how it got here. Kept current in the PR that
   invalidates it, same as the README.
-- **`docs/findings/`** — where that shape falls **short**, one `F<n>-<slug>.md` file per finding.
-  Separate from `architecture.md` because the two have different lifecycles: a description is true
-  until the code changes, a finding is open until somebody closes it. Delete a finding's file when it
-  is fixed; never renumber or reuse a number, since the labels are cross-referenced from tasks and commits.
+- **GitHub issues labelled [`finding`](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding)** — where that shape falls **short**, one issue
+  per finding, cited as `#N`. Separate from `architecture.md` because the two have different
+  lifecycles: a description is true until the code changes, a finding is open until somebody closes
+  it. Older findings carry an `F<n>` label in their title; new ones get only the issue number.
 - **`docs/go-conventions.md`** — how unjira's Go is written: CLI/DI (Kong), error handling,
   testing (testify + go-cmp + fluent builders), package layout, linting, build (Earthfile). Read
   it before writing or reviewing any Go in this repo.
@@ -38,7 +38,7 @@ UNJIRA_LIVE=1 go test -tags=live ./internal/live/...   # writes to the dev Jira 
 UNJIRA_LIVE=1 go test -tags=live -run TestLiveGitHub -v ./internal/live/   # reads jcogilvie/unjira-sandbox;
                                # needs UNJIRA_GITHUB_CREDENTIALS (below) and FAILS, not skips, without it
 HIDDEN_AUTHORING_PROBE=1 go test ./internal/collector/claudecode/ -run TestHiddenAuthoring_Tripwire -v
-                               # F48's tripwire over local transcripts: weekly table; FAILS if a commit
+                               # [#133](https://github.com/jcogilvie/unjira/issues/133)'s tripwire over local transcripts: weekly table; FAILS if a commit
                                # or PR is made from inside a script the collector reads as data
 ```
 
@@ -84,7 +84,7 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   the model's call. Anything it cannot settle exactly (no holder, several, a holder not `open`) goes to
   the model unchanged and is reported. The same identity is applied once more *after* the clustering
   model, to its results (`correlator/cluster_prjoin.go`'s `joinByPullRequest`): results whose
-  undisputed member events share an exact PR are joined before the dispute re-ask (F61: a bisected
+  undisputed member events share an exact PR are joined before the dispute re-ask ([#143](https://github.com/jcogilvie/unjira/issues/143): a bisected
   window showed one PR's `:opened` and `:merged` to two calls that could not see each other). Context
   and disputed members drive no join, and a group that would merge two stored narratives is left apart
   and reported, since merging stored narratives is a reviewer's call. Before *matching* it is `match_candidates.go`'s `gatherCandidates`, which extracts and ranks
@@ -135,7 +135,7 @@ These are load-bearing — `docs/design-notes.md` explains the incidents behind 
   `fanout` has a real integration point *designed* (a deterministic pre-filter feeding
   `correlator.WithInstruction`, at the pipeline layer) but deferred pending real fan-out data; `refs`
   has no consumer even with a collector in hand, since matching resolves to a Jira issue key and
-  nothing represents a PR-to-PR relationship. See F1 and
+  nothing represents a PR-to-PR relationship. See [#125](https://github.com/jcogilvie/unjira/issues/125) and
   `docs/superpowers/specs/2026-09-17-github-collector-design.md`'s §6. Keep them pure and keep the
   tests green; do not wire them into the Jira/Claude Code path, where they do not fit — `fanout.Item`
   is `{Repo, Author, Title, Number}` and `refs` matches only `#N` syntax, so neither can see a Jira
@@ -170,10 +170,11 @@ So, in the same PR:
   model, so a stale one misleads in the same way a stale Status section does. Edit it in the **present
   tense**: replace the description, don't append "previously X, now Y" — that file says what the code
   is, and `git log` already holds what it was.
-- **`docs/findings/`** — **delete** the file of the finding you just fixed. Not strike it through,
-  not annotate it as resolved: a stale finding sends the next reader to fix something already fixed.
-  If the fix taught a general lesson, that lesson goes to `design-notes.md` as an incident. Add a
-  finding file here (rules in `docs/findings/README.md`) whenever you notice a problem you are not fixing in this PR.
+- **[`finding` issues](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding)** — close the issue of the finding you just fixed from the PR
+  that fixes it (`Fixes #N` in the PR body). A finding left open sends the next reader to fix
+  something already fixed. If the fix taught a general lesson, that lesson goes to `design-notes.md`
+  as an incident. Open a `finding` issue, from the template in `.github/ISSUE_TEMPLATE/finding.md`,
+  whenever you notice a problem you are not fixing in this PR.
 - **This file** — when an architecture invariant changes.
 
 A doc claim that can be checked should be checked. "602 assertions pass" and "the write path is

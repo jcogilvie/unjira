@@ -208,7 +208,7 @@ func TestJSONArrayPayload_DoesNotJoinATrailingComma(t *testing.T) {
 	assert.Error(t, json.Unmarshal([]byte(llm.JSONArrayPayload(`{"a":1},`)), &items))
 }
 
-// TestJSONArrayPayload_DropsATrailingCommaBeforeACloser is the regression test for F44:
+// TestJSONArrayPayload_DropsATrailingCommaBeforeACloser is the regression test for issue #130:
 // a clustering pass died on
 //
 //	"event_indices":[51,56,57,62,63],

@@ -2,14 +2,14 @@
 
 Status: approved, landing slice by slice. See "Status by slice" at the end.
 
-Resolves the tracker-model chain in `docs/findings/`:
+Resolves the tracker-model chain in [the `finding` issues](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding):
 
-- **F7:** one struct carries four concerns.
+- **[#127](https://github.com/jcogilvie/unjira/issues/127):** one struct carries four concerns.
 - **F28:** a collector cannot ask whether its system is a tracker here.
 - **F29:** nothing expresses which tracker a narrative's work belongs to.
 - **F8:** `TrackerResolver` lives in the wrong package.
 - **F3:** the correlator imports `clients/jira` for one error check.
-- **F1:** partly; `refs` gets its consumer.
+- **[#125](https://github.com/jcogilvie/unjira/issues/125):** partly; `refs` gets its consumer.
 
 ## Goal
 
@@ -130,7 +130,7 @@ backend exists.
     a PR body.
   - Each candidate is verified against its own tracker's reader.
   - Bare `#N` does not count yet: resolving it needs repo context, which is what `internal/correlator/refs`
-    is for (F1, a later slice).
+    is for ([#125](https://github.com/jcogilvie/unjira/issues/125), a later slice).
 - **A GitHub PR is not an issue.** It stays work evidence. The GitHub reader resolves issues only, and a
   PR that `Fixes` an upstream issue is how work becomes "tracked upstream".
 
@@ -228,7 +228,7 @@ Slices 1–3 are refactors behind unchanged behaviour. Slices 4–5 change behav
 
 - Per-destination prose: one narrative ticketed in two trackers with different text.
 - A GitHub writer, and any public write.
-- Bare `#N` references, with repo context (F1's `refs`).
+- Bare `#N` references, with repo context ([#125](https://github.com/jcogilvie/unjira/issues/125)'s `refs`).
 - A GitHub Issues collector.
 - Per-tracker `workflow` (named status transitions).
 
@@ -310,7 +310,7 @@ Decisions the design left open:
   `reconciler.Reconcile` and `gate.Applier` keep their signatures and route per call. The write path
   then holds two independent refusals: config's writability check, which names the remedy, and a
   routed writer that has no writer to give for a read-only scope.
-- **A read fallback, kept on purpose (F55).** A project-syntax key no tracker covers is still read
+- **A read fallback, kept on purpose ([#139](https://github.com/jcogilvie/unjira/issues/139)).** A project-syntax key no tracker covers is still read
   through the tracker covering the first project scope, the tracker every candidate used to be
   verified against. Removing it would turn work on an unlisted project's ticket into a duplicate create
   proposal, a behaviour change this refactor slice should not make. A fallback read never writes, and
@@ -365,7 +365,7 @@ through the issues endpoint, and a missing issue is not a transport error.
 
 Decisions the design left open:
 - **Candidates come from the summary, not a collector artifact,** so every stored event yields them,
-  including ones collected before the extraction existed (F21). On an event about a pull request the
+  including ones collected before the extraction existed ([#128](https://github.com/jcogilvie/unjira/issues/128)). On an event about a pull request the
   text is its authored title and body, so its references rank with SCM authoring commands; the pull
   request's own `owner/repo#N`, which heads its summary, is not a candidate.
 - **Prose ordering.** The order between Jira keys and GitHub references in one text is not recorded,
@@ -393,7 +393,7 @@ distinct directory per pass), or `events.ArtifactCwdRemotesOmitted` with the rea
 `config.UntrackedDestinations` and `config.IssueAcceptsWrites`, applied by
 `reconciler.WithDestinations` before any drafting call. A create carries its destination's scope in
 its payload, and `gate.Applier` writes it there. `default_ticket_in` may name several trackers. F29 and
-F56 deleted; F57 added.
+F56 deleted; [#140](https://github.com/jcogilvie/unjira/issues/140) added.
 
 Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
 ./...` 0 issues. The tests this spec lists: transcript evidence beats a disagreeing cwd
@@ -432,7 +432,7 @@ No model call was needed. Upstream here is `crossplane/*`, `crossplane-contrib/*
   - a provider-upgrade regression analysis.
 
   Routing by repository cannot express "this serves an internal ticket". Only matching can, by linking
-  the narrative to that ticket, and here it did not (F60).
+  the narrative to that ticket, and here it did not ([#142](https://github.com/jcogilvie/unjira/issues/142)).
 - **Caveats:**
   - Working-copy remotes were read at measurement time, not when the work happened.
   - The deployment's config excludes unjira's own working copy, so unjira work is located only through
@@ -473,7 +473,7 @@ Decisions the design left open:
   `reconciler.Reconcile` and `gate.Applier` keep their signatures and route per call. The write path
   then holds two independent refusals: config's writability check, which names the remedy, and a
   routed writer that has no writer to give for a read-only scope.
-- **A read fallback, kept on purpose (F55).** A project-syntax key no tracker covers is still read
+- **A read fallback, kept on purpose ([#139](https://github.com/jcogilvie/unjira/issues/139)).** A project-syntax key no tracker covers is still read
   through the tracker covering the first project scope, the tracker every candidate used to be
   verified against. Removing it would turn work on an unlisted project's ticket into a duplicate create
   proposal, a behaviour change this refactor slice should not make. A fallback read never writes, and
@@ -528,7 +528,7 @@ through the issues endpoint, and a missing issue is not a transport error.
 
 Decisions the design left open:
 - **Candidates come from the summary, not a collector artifact,** so every stored event yields them,
-  including ones collected before the extraction existed (F21). On an event about a pull request the
+  including ones collected before the extraction existed ([#128](https://github.com/jcogilvie/unjira/issues/128)). On an event about a pull request the
   text is its authored title and body, so its references rank with SCM authoring commands; the pull
   request's own `owner/repo#N`, which heads its summary, is not a candidate.
 - **Prose ordering.** The order between Jira keys and GitHub references in one text is not recorded,
@@ -556,7 +556,7 @@ distinct directory per pass), or `events.ArtifactCwdRemotesOmitted` with the rea
 `config.UntrackedDestinations` and `config.IssueAcceptsWrites`, applied by
 `reconciler.WithDestinations` before any drafting call. A create carries its destination's scope in
 its payload, and `gate.Applier` writes it there. `default_ticket_in` may name several trackers. F29 and
-F56 deleted; F57 added.
+F56 deleted; [#140](https://github.com/jcogilvie/unjira/issues/140) added.
 
 Verified: `go vet ./...` clean, `go test ./...` all packages ok, `golangci-lint run --build-tags=live
 ./...` 0 issues. The tests this spec lists: transcript evidence beats a disagreeing cwd
@@ -591,7 +591,7 @@ Decisions the design left open:
   table's "gated by T's writable_scopes as today" says.
 - **An empty set is recorded once,** then again only when new work arrives, so an unchanged narrative
   does not write a suppression row per pass.
-- **Not built: creates in T.mirror_to for work LINKED to an issue in T** (F57). The create path selects
+- **Not built: creates in T.mirror_to for work LINKED to an issue in T** ([#140](https://github.com/jcogilvie/unjira/issues/140)). The create path selects
   only narratives with no link, and the schema's one-primary rule and the applier's backstop assumed
   one tracker per narrative; both want a design of their own.
 - **Extraction limits:** `gh -R host/owner/repo` is recorded as github.com (the parser drops the

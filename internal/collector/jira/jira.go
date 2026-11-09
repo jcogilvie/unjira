@@ -36,7 +36,7 @@ import (
 // fieldStatus is tracked but not requested here, and the asymmetry is informational
 // rather than a rule. Status transitions come from the changelog as from→to movements,
 // and current status comes live from GetIssue during verification, so nothing reads a
-// resting status value today — it would be collected and never consulted (compare F6).
+// resting status value today — it would be collected and never consulted (compare issue #126).
 // If a reader for it appears, add it; the note is here so the omission reads as a
 // consequence rather than an oversight.
 var searchFields = []string{"key", "project", "updated", fieldSummary, fieldDescription}

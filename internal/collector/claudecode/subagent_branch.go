@@ -1,6 +1,6 @@
 package claudecode
 
-// subagent_branch.go recovers a subagent's own branch from its own tool calls (F32).
+// subagent_branch.go recovers a subagent's own branch from its own tool calls (issue #129).
 //
 // A subagent transcript's gitBranch is its PARENT's (subagentBranchOmittedReason), so it
 // is never the subagent's branch. What the subagent itself names is: the branch it

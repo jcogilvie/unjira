@@ -96,7 +96,7 @@ func TestCollect_SubagentTranscriptIsCollected(t *testing.T) {
 // TestCollect_ParentAndSubagentNeverCollideOnExternalID is the trap: a subagent's lines
 // carry the PARENT's sessionId, so an identity read from that field would give both
 // transcripts the same prefix — and with equal size and segment index, INSERT OR
-// IGNORE would drop the second silently and permanently (F21). The two files here are
+// IGNORE would drop the second silently and permanently (issue #128). The two files here are
 // byte-identical, so size and index coincide by construction.
 func TestCollect_ParentAndSubagentNeverCollideOnExternalID(t *testing.T) {
 	root := t.TempDir()

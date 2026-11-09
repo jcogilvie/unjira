@@ -196,7 +196,7 @@ type githubRef struct {
 // between the two kinds of key is not recorded.
 //
 // Read from the summary rather than from a collector artifact, so every stored event
-// yields them, including ones collected before this extraction existed (F21).
+// yields them, including ones collected before this extraction existed (issue #128).
 func githubCandidates(e Event, ticketKeys int) []githubRef {
 	own := events.PullRequestOf(e)
 	if own == "" {

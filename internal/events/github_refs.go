@@ -29,7 +29,7 @@ var githubIssueURLRE = regexp.MustCompile(
 //
 // A bare #N is deliberately not a reference: resolving it needs the repository the
 // text was written in, which a key does not carry (internal/correlator/refs is for
-// that, finding F1). Issue URLs on hosts other than github.com are not recognized yet.
+// that, issue #125). Issue URLs on hosts other than github.com are not recognized yet.
 func ExtractGitHubIssueRefs(text string) []string {
 	type found struct {
 		at  int

@@ -15,9 +15,9 @@ distrust the rest.
 Companion docs, none of which this duplicates:
 
 - `README.md` — what unjira does and the locked design decisions.
-- `docs/findings/` — where the current shape falls **short**. Kept separate because a
+- GitHub issues labelled [`finding`](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding) — where the current shape falls **short**. Kept separate because a
   description is true until the code changes, while a finding is open until somebody closes it; one
-  file holding both is never in a settled state.
+  document holding both is never in a settled state.
 - `docs/design-notes.md` — *why* it is shaped this way, as numbered incidents.
 - `docs/go-conventions.md` — how the Go is written.
 - `CLAUDE.md` — the architecture invariants, stated as rules.
@@ -263,7 +263,7 @@ others keep it as context. The re-ask is one call, or, when the disputes togethe
 window, one call per batch that fits; every disputed event is in exactly one batch, and no answer
 applies until every batch has answered. A batch whose answer the parser refuses is asked again,
 quoting the refusal, up to `llm.max_dispute_reasks` calls per batch (the first dispute call counts,
-so `0` makes any double placement an error). One dispute too large alone fails the pass (F52).
+so `0` makes any double placement an error). One dispute too large alone fails the pass ([#137](https://github.com/jcogilvie/unjira/issues/137)).
 
 **Every follow-up call is bounded by a re-ask budget, resolved once in config.** Matching re-asks an
 unparseable response; the cluster re-ask asks a clustering call again when the parser refused its
@@ -528,7 +528,7 @@ flowchart TB
         CRED["credentials"]
     end
 
-    subgraph orphans["Uncalled — findings F1"]
+    subgraph orphans["Uncalled — issue #125"]
         REFS["correlator/refs"]
         FANOUT["correlator/fanout"]
     end
@@ -684,4 +684,4 @@ change to unjira's architecture, not a refactor — treat it accordingly.
   nothing there does.
 
 Where the current shape falls short of these, or of good practice generally, is
-`docs/findings/`, one file per finding.
+tracked as GitHub issues labelled [`finding`](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding).

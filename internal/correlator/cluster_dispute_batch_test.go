@@ -235,6 +235,6 @@ func TestCluster_ADisputeTooLargeAloneFailsLoudly(t *testing.T) {
 	assert.Len(t, client.prompts, 3, "two halves and the same-story check; no dispute call over budget")
 	require.ErrorContains(t, err, `claude_code/elig claimed by new "A" and new "B"`)
 	require.ErrorContains(t, err, "alone is estimated at")
-	require.ErrorContains(t, err, "F52")
+	require.ErrorContains(t, err, "issue #137")
 	assert.Zero(t, stats.DisputeCalls)
 }

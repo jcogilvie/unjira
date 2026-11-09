@@ -43,7 +43,7 @@ repositories that named a ticket named it in the title. Now:
   ranks with the title, since GitHub itself links on it.
 
 The artifact half reaches only PR events collected after it, since a stored event's artifacts are
-frozen at first collection (F21). The reference half reads the summary, so it reaches every stored
+frozen at first collection ([#128](https://github.com/jcogilvie/unjira/issues/128)). The reference half reads the summary, so it reaches every stored
 event.
 
 Re-measured on a copy of that store, rebuilding each PR event's artifacts from its stored summary:
@@ -97,7 +97,7 @@ recommends extracting GitHub cross-references from PR bodies and storing them as
 "cheap, and it means the data exists the day a consumer is designed" — extract-now, consume-later.
 The task that commissioned this implementation explicitly narrowed that to "leave it alone," on the
 grounds that a half-designed extraction with zero consumers and zero tests exercising its shape is
-its own kind of debt, and F1 already records the reasoning for why `refs` has no caller. So this
+its own kind of debt, and [#125](https://github.com/jcogilvie/unjira/issues/125) already records the reasoning for why `refs` has no caller. So this
 slice does not call `refs.ParsePRRefs` at all — a real, if small, gap from what §6 recommends, not
 an oversight. If a future slice designs a PR-to-PR relationship consumer, this is the first place to
 revisit.
@@ -163,7 +163,7 @@ jcogilvie/unjira-sandbox#3:opened
 ```
 
 **Quantified:** 9 events under the id-suffixed scheme, **8** if the suffix were stripped. Exactly one
-event would have been silently discarded by `INSERT OR IGNORE`, never backfilled (F21), with no error
+event would have been silently discarded by `INSERT OR IGNORE`, never backfilled ([#128](https://github.com/jcogilvie/unjira/issues/128)), with no error
 and no log line. That is the defect measured rather than predicted.
 
 **The `live`-tagged test now exists:** `internal/live/github_test.go`
@@ -235,9 +235,9 @@ untested against a real secondary-limit response since none was observed live).
 Pulls GitHub pull-request activity into the event log as a second **work-evidence** source,
 alongside `claude_code`. This is the moment `internal/correlator/refs` and
 `internal/correlator/fanout` — pure, tested, zero-caller since the Python→Go port — get the
-collector `CLAUDE.md` says they are waiting for. It does **not** close finding **F1**: `fanout` gets a
+collector `CLAUDE.md` says they are waiting for. It does **not** close finding **[#125](https://github.com/jcogilvie/unjira/issues/125)**: `fanout` gets a
 real integration point but is deferred past this slice, and §6 finds that `refs` has no consumer even
-*with* a collector in hand. F1 narrows rather than closes.
+*with* a collector in hand. [#125](https://github.com/jcogilvie/unjira/issues/125) narrows rather than closes.
 
 ## Which side of the diff GitHub sits on (and why that depends on the deployment)
 
@@ -298,7 +298,7 @@ needs config-aware classification yet. **A slice that collects GitHub Issues doe
 "is GitHub a tracker in this deployment?" rather than answering from its own package name.
 `CollectContext` already carries `Config`, so the collector *can* ask; what does not exist yet is a
 typed way to get an answer — `config.JiraConnection` is Jira-shaped and `events.ArtifactConnection` is
-documented as "the configured **Jira** connection name." That gap is **F28**, cross-referencing **F7**.
+documented as "the configured **Jira** connection name." That gap is **F28**, cross-referencing **[#127](https://github.com/jcogilvie/unjira/issues/127)**.
 
 `docs/architecture.md` already names the hypothetical GitHub-Issues-as-tracker backend
 (`clients/github` implementing `TaskWriter`) under `tasktracker.StatusCategory` — unbuilt, with no
@@ -501,7 +501,7 @@ strongest available signal that it finished. Everything else considered and defe
   `rules/bot-pr-noise.md`'s own documented failure mode almost exactly — a check-run stream risks
   becoming the new dependency-bump-approval noise. Deferred until there is real volume data to size
   a filter against, matching this codebase's own "measure before capping" discipline
-  (`docs/findings/F16-the-prompt-is-unbounded-in-the-window.md`'s four falsified proposals are the cautionary example).
+  (closed finding F16's four falsified proposals are the cautionary example).
 - **Commits (within a PR, or direct pushes).** Real value — F20 measured 32 of 47 commits carrying a
   key in their message — but `collector/claudecode`'s own `scmKeys` (F20) already recovers commit
   messages for every commit *authored through a Claude Code session*, which is unjira's primary
@@ -517,7 +517,7 @@ strongest available signal that it finished. Everything else considered and defe
 
 ### Full text, no truncation — and this is where F16's own foresight pays off
 
-PR bodies are exactly the "whale-shaped" input `docs/findings/F16-the-prompt-is-unbounded-in-the-window.md` already
+PR bodies are exactly the "whale-shaped" input closed finding F16 already
 anticipated when it kept `correlator.WithMaxEventSummaryChars` alive after measuring it inert on the
 current (all-Jira, all-`claude_code`) store: *"a future GitHub or Slack collector has whale-shaped
 inputs (PR bodies, thread transcripts)."* This collector does not add a new cap — the existing one
@@ -577,8 +577,8 @@ it eventually closes.
 
 **What re-collection does to an existing row.** `INSERT OR IGNORE` on `(source, external_id)` means:
 once `<owner>/<repo>#N:opened` exists, re-collecting the same PR while it is still open is a no-op
-(the row is frozen — including its title/body snapshot — exactly as F21 describes for any collector).
-This collector does not attempt artifact re-derivation; per F21's own recommendation (deferred,
+(the row is frozen — including its title/body snapshot — exactly as [#128](https://github.com/jcogilvie/unjira/issues/128) describes for any collector).
+This collector does not attempt artifact re-derivation; per [#128](https://github.com/jcogilvie/unjira/issues/128)'s own recommendation (deferred,
 `docs/superpowers/specs/2026-09-17-artifact-rederivation-design.md`), that is a separate, later
 mechanism this collector would use unmodified if it is ever built, not something this spec designs
 its own version of.
@@ -721,7 +721,7 @@ first is also what makes that later measurement possible at all.
 `refs.ParsePRRefs(body, refs.WithDefaultRepo(thisRepo))`) and **could** store the result as a new,
 collector-private artifact for future use. This design recommends doing exactly that much — extract
 and store, cheaply, deterministically — but stops there, because tracing the result forward exposes
-a real gap `CLAUDE.md`'s own F1 entry did not have the collector in hand to check yet:
+a real gap `CLAUDE.md`'s own [#125](https://github.com/jcogilvie/unjira/issues/125) entry did not have the collector in hand to check yet:
 
 **There is no consumer for a GitHub-cross-reference in this pipeline, and building this collector
 does not create one.** Phase 1's matching resolves a narrative to a **Jira issue key**
@@ -739,12 +739,12 @@ feature this spec does not design** — representing "PR A references PR B" or "
 as data a narrative or an action can use. That is a materially different, larger feature (a second
 relationship type alongside `narrative_issues`, or a same-repo PR-to-PR graph) than "collect GitHub
 PRs," and inventing a half-designed consumer here to give `refs` a caller would be worse than leaving
-it uncalled with the reason recorded — the same restraint F1 itself already modeled for the
+it uncalled with the reason recorded — the same restraint [#125](https://github.com/jcogilvie/unjira/issues/125) itself already modeled for the
 pre-collector state.
 
 **Recommendation:** extract via `refs.ParsePRRefs` and store as a private artifact in slice 1 (cheap,
 and it means the data exists the day a consumer is designed — the same "write now, read later"
-shape `docs/findings/F6-six-artifacts-are-written-and-never-read.md` defends for `ArtifactGitBranch`'s siblings), but do **not**
+shape [#126](https://github.com/jcogilvie/unjira/issues/126) defends for `ArtifactGitBranch`'s siblings), but do **not**
 claim this collector "wires in" `refs` in the sense the Jira collector's own spec wired in
 `gatherCandidates`. It does not. This is recorded as an **open question** below rather than resolved,
 per the task's own instruction not to force a resolution where none is earned.

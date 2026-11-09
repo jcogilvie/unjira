@@ -387,8 +387,8 @@ plus `go test ./...` and lint.
   `2026-10-28-approval-units.md`, and copy `plan-pr1.md` and `plan-pr2.md` from the orchestrator
   documents folder (strip any local path preamble into repo-relative paths) so the repo holds the
   full plan record for the epic.
-- `docs/findings/`: open `F69-<slug>.md` per `docs/findings/README.md` only for an open question the
-  reviewer leaves unsettled. Check `git log --all` and `ls docs/findings` for the next free number
+- [`finding` issues](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding): open `F69-<slug>.md` per `.github/ISSUE_TEMPLATE/finding.md` only for an open question the
+  reviewer leaves unsettled. Check `git log --all` and the [`finding` issues](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding) for the next free number
   first.
 - [ ] Run `earthly +reviewable` from `$W`. Quote its result line in the spec and the PR description.
 

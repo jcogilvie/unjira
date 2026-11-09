@@ -146,7 +146,7 @@ func JSONObjectPayload(raw string) string {
 // hujson's Standardize, the standard implementation of JSON-with-trailing-commas. It
 // also blanks comments, which carry no data either.
 //
-// Observed live (F44): a complete, 11.8k-character clustering response held
+// Observed live (issue #130): a complete, 11.8k-character clustering response held
 // `"event_indices":[51,56,57,62,63],\n}` and the whole pass died on `invalid character
 // '}' looking for beginning of object key string`. A comma before a closer carries no
 // data, so dropping it cannot change what a response says. This differs from the comma

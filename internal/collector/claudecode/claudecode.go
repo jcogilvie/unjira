@@ -288,7 +288,7 @@ func sessionEvents(
 	segs := segments(owned, minSegment)
 	if t.sub != nil {
 		// The branches the subagent itself named, which replace the parent's branch set
-		// the segments no longer have (F32). One is the subagent's branch; several are
+		// the segments no longer have (issue #129). One is the subagent's branch; several are
 		// recorded as its set and none is chosen.
 		branches := subagentBranches(lines)
 		for i := range segs {
