@@ -14,7 +14,7 @@ import (
 // a missing confidence, prose where the array belongs — is not read best-effort,
 // because a best-effort reading is how events get silently misattributed. Before this
 // re-ask existed, one such response cost the whole multi-minute pass, and under
-// `unjira watch` the window could move on (finding F44). So the response is asked
+// `unjira watch` the window could move on (issue #130). So the response is asked
 // about again, quoting it and the parser's reason, up to llm.max_cluster_reasks
 // follow-up calls per clustering call, then fails loudly naming every refusal: the
 // shape matching, the omission re-ask and the dispute re-ask already have.

@@ -114,7 +114,7 @@ func annotate(evt *events.Event, ref ghclient.RepoRef, pr ghclient.PullRequest) 
 // OpenedEvent builds the one-time :opened event for pr. Captured once, at (or
 // shortly after) PR creation: GitHub's created_at does not change once set,
 // and this collector does not attempt artifact re-derivation on a later edit
-// (see F21 — that is a separate, deferred mechanism this collector would use
+// (see issue #128 — that is a separate, deferred mechanism this collector would use
 // unmodified if built).
 func OpenedEvent(ref ghclient.RepoRef, pr ghclient.PullRequest) events.Event {
 	evt := events.NewEvent(

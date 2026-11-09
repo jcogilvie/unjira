@@ -1,6 +1,6 @@
 package claudecode_test
 
-// subagent_branch_test.go covers F32's recoverable half: a subagent's transcript carries
+// subagent_branch_test.go covers issue #129's recoverable half: a subagent's transcript carries
 // its PARENT's gitBranch, so its own branch comes only from its own tool calls.
 //
 // Measured over 1,044 subagent transcripts: 991 name no branch of their own (research,

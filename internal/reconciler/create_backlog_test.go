@@ -141,7 +141,7 @@ func TestProposeCreates_ADeclineWhoseNewEventsAreUnjirasIsExaminedOnce(t *testin
 }
 
 // TestProposeCreates_AnEmptiedNarrativeYieldsItsSlot is the create-path half of finding
-// F50, which the self-authored watermark reaches without a status clause: a narrative
+// issue #135, which the self-authored watermark reaches without a status clause: a narrative
 // whose work moved away (marked split) holds no member events, proposeCreateOne finds
 // nothing that is not unjira's own, and the examination it now records excludes it.
 // Probed before this fix with the same shape: the split narrative held the one slot for

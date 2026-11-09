@@ -273,7 +273,7 @@ func TestSplitNarrative_ReportsWhenTheModelDisagrees(t *testing.T) {
 }
 
 // TestSplitNarrative_SaysWhenIdentityRejoinedTheModelsSeam: the model cut one pull
-// request's events apart, and the pull-request identity join (F61) put them back. The
+// request's events apart, and the pull-request identity join (issue #143) put them back. The
 // split fails as a declined one does, but must not blame the model for keeping one
 // story, which it did not.
 func TestSplitNarrative_SaysWhenIdentityRejoinedTheModelsSeam(t *testing.T) {

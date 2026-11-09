@@ -91,7 +91,7 @@ func (h *StoreHandler) SplitNarrative(
 
 	if len(results) < 2 && clusterStats.PRIdentityJoins > 0 {
 		// The model did split, along a seam that cut one pull request's work apart,
-		// and Cluster's identity join (F61) put the halves back together: exact PR
+		// and Cluster's identity join (issue #143) put the halves back together: exact PR
 		// identity outranks the model's choice of seam, here as in a narration pass,
 		// where a PR split across two narratives would stay split for every later
 		// event. The reviewer judged the stories, not the seam, so this is reported as

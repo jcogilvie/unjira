@@ -582,7 +582,7 @@ func classifyCandidates(
 		return verdicts, stats, nil
 	}
 
-	// Re-asks, quoting the parser's reason (finding F44). Seen twice on one real
+	// Re-asks, quoting the parser's reason (issue #130). Seen twice on one real
 	// 30-day pass: prose where the array belonged, and a duplicated malformed key.
 	// The parser is right to refuse both, since a best-effort reading is how a
 	// narrative gets attributed to the wrong ticket, but the model nearly always

@@ -68,7 +68,7 @@ import (
 //     measured for context narratives; deciding it needs real dispute sizes first.
 //
 // A single dispute too large on its own is the one case batching cannot fit, and it
-// refuses loudly rather than cut a claimant's description (finding F52).
+// refuses loudly rather than cut a claimant's description (issue #137).
 //
 // The dispute call is itself a re-ask of the clustering response, so its budget
 // (llm.max_dispute_reasks, default 1) counts it: 0 makes any double placement a loud
@@ -389,7 +389,7 @@ func batchDisputes(req disputeRequest, disputes []dispute) [][]dispute {
 // before anything is sent. After batchDisputes that is one dispute whose claimants'
 // member events, listed in full, exceed the window alone: nothing smaller can be
 // asked without cutting a claimant's description, which would trade the model's view
-// of a claimant for the call fitting (finding F52).
+// of a claimant for the call fitting (issue #137).
 func requireDisputeFits(req disputeRequest, batch []dispute, p disputePrompt, call, calls int) error {
 	estimated := estimateTokens(p.system + p.user)
 	if estimated <= req.promptBudgetTokens {
@@ -400,7 +400,7 @@ func requireDisputeFits(req disputeRequest, batch []dispute, p disputePrompt, ca
 		return fmt.Errorf(
 			"clustering events in window [%s, %s): an event was placed in more than one cluster (%s), and the "+
 				"re-ask resolving it alone is estimated at %d tokens, over the %d-token prompt budget (the context window less the reply's reserve). The re-ask "+
-				"lists each claimant's member events in full and never truncates them (finding F52)",
+				"lists each claimant's member events in full and never truncates them (issue #137)",
 			req.window.Start, req.window.End, describeDisputes(req.results, batch),
 			estimated, req.promptBudgetTokens)
 	}
@@ -449,7 +449,7 @@ func writeClaimant(b *strings.Builder, pos int, r ClusterResult, disputed Event)
 // head branch. Presented, never applied: the model weighs it.
 //
 // Lineage — a subagent's dispatching root segment — is not here. It is the shared-
-// context design's second slice, which gives the subagent artifacts (F6) their
+// context design's second slice, which gives the subagent artifacts (issue #126) their
 // reader; this slice deliberately reads none of them.
 func writeEvidence(b *strings.Builder, d dispute, results []ClusterResult) {
 	var lines []string

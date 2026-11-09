@@ -160,7 +160,7 @@ func TestLiveWorklogLifecycle(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, id, foundID)
 
-	// F1's overlap refusal: a different message list sharing live-m2 with the
+	// issue #125's overlap refusal: a different message list sharing live-m2 with the
 	// stored worklog must error before any POST, against a real worklog.
 	_, _, err = tracker.FindWorklog(key, "another-unjira-run", []string{"live-m2", "live-x"})
 	require.Error(t, err, "an overlapping message list must be refused against the stored worklog")

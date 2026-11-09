@@ -428,7 +428,7 @@ func TestRenderMatchResult_MarksAnUnpromotedPrimary(t *testing.T) {
 
 // A re-ask is reported, and only when one happened: the re-ask budget is all that
 // stands between a malformed response and a narrative left unmatched, so an
-// operator should see how often it fires (finding F44).
+// operator should see how often it fires (issue #130).
 func TestRenderMatchResult_ReportsReasksOnlyWhenTheyHappened(t *testing.T) {
 	out := pipeline.RenderMatchResult(pipeline.MatchRunResult{
 		Matched: []correlator.MatchResult{},

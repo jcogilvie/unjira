@@ -2,9 +2,9 @@
 
 **Status: design**
 
-Closes nothing yet. Resolves finding **F21** (`docs/findings/F21-an-event-s-artifacts-are-frozen-at.md`) by naming the shape a
+Closes nothing yet. Resolves issue **[#128](https://github.com/jcogilvie/unjira/issues/128)** by naming the shape a
 fix would take, and recommends **not building it now**. This is a "record the shape, defer the work"
-spec, in the same register as F1, F7, and F8's own entries in that file — a deliberate, argued
+spec, in the same register as [#125](https://github.com/jcogilvie/unjira/issues/125), [#127](https://github.com/jcogilvie/unjira/issues/127), and F8's own entries in that file — a deliberate, argued
 deferral, not an unfinished design.
 
 ## The problem, restated precisely
@@ -14,7 +14,7 @@ deferral, not an unfinished design.
 makes `collect` safe to run on a cron without duplicating rows, and every collector's "re-running one
 is always safe" contract depends on it.
 
-The consequence F21 names: when a collector *improves* — learns to extract a new artifact key, or
+The consequence [#128](https://github.com/jcogilvie/unjira/issues/128) names: when a collector *improves* — learns to extract a new artifact key, or
 extracts an existing one more accurately — that improvement reaches only events collected **after**
 the fix ships. Every row already in the store keeps whatever artifacts its original collection pass
 wrote, forever, because nothing ever runs an `UPDATE` against `events.artifacts`.
@@ -30,24 +30,24 @@ fixing it:
 
 ## What #176 already decided, and why this is not a reversal
 
-Finding #176 (referenced by F21's own text, and by F6's cross-reference table) rejected backfilling
+Finding #176 (referenced by [#128](https://github.com/jcogilvie/unjira/issues/128)'s own text, and by [#126](https://github.com/jcogilvie/unjira/issues/126)'s cross-reference table) rejected backfilling
 once already, on the grounds that **a re-collect that mutates rows can rewrite history a narrative
 was already built from.** That reasoning is sound and this spec does not challenge it. What #176
 rejected was *re-collection* — re-running a collector's `Collect` end-to-end against old source
 material, which can change an event's `occurred_at`, its segmentation (see §4), or even its identity,
 none of which unjira may do to a row a narrative has already consumed.
 
-What F21 asks for, and what this spec designs, is narrower: **recompute one named artifact key,
+What [#128](https://github.com/jcogilvie/unjira/issues/128) asks for, and what this spec designs, is narrower: **recompute one named artifact key,
 in place, on the existing row, touching nothing else.** `source`, `external_id`, `occurred_at`,
 `summary`, `actor`, and `raw_ref` are never written by re-derivation — only a named key inside the
-`artifacts` JSON blob. F21's own text already anticipates this distinction ("a re-derive command
+`artifacts` JSON blob. [#128](https://github.com/jcogilvie/unjira/issues/128)'s own text already anticipates this distinction ("a re-derive command
 that recomputes artifacts from `raw_ref` without touching identity"); this spec is that command's
 design, and confirms the distinction holds up under scrutiny (§4 finds one real complication in it,
 not a refutation).
 
 ## Measured: how much this bites today
 
-The number cited in F21's prose (**386** `claude_code` events lacking `scm_keys`) is not a durable
+The number cited in [#128](https://github.com/jcogilvie/unjira/issues/128)'s prose (**386** `claude_code` events lacking `scm_keys`) is not a durable
 metric — it was measured against whatever dev store existed at the moment F20's PR landed
 (`2026-09-16 14:15:55 -0400`), and that store no longer exists in that form. I confirmed this by
 finding two temp-directory snapshots (`f16-drained.db`, `f16-probe.db`, both `mtime` before F20
@@ -71,7 +71,7 @@ collector improvement that shipped hours ago already has zero effect on the only
 repository, and will continue to have none** unless the underlying transcript files grow enough to
 produce new segments (which only appends new rows) or something re-derives the old ones.
 
-This is a real, present-tense demonstration of exactly what F21 describes — not a projection. It is
+This is a real, present-tense demonstration of exactly what [#128](https://github.com/jcogilvie/unjira/issues/128) describes — not a projection. It is
 also, honestly, still a **disposable dev store**: this database is rebuilt and discarded repeatedly
 during ordinary development.
 I could not find, and do not believe there currently exists, a store for which this backfill gap has
@@ -80,7 +80,7 @@ someone is relying on). That absence is the load-bearing fact behind this spec's
 
 ## Design
 
-Presented so the shape exists when it is needed, per F21's own "not urgent... recorded now rather
+Presented so the shape exists when it is needed, per [#128](https://github.com/jcogilvie/unjira/issues/128)'s own "not urgent... recorded now rather
 than rediscovered then." Every open question CLAUDE.md and the task instructions asked to be
 resolved is resolved below; §6 says which parts are genuinely unresolved rather than papering over
 them.
@@ -97,7 +97,7 @@ Three units were considered, matching the task's own framing:
   artifact whose extraction logic never changed adds risk (see §4's edited-source hazard) for zero
   benefit.
 - **The artifact key**, scoped to a named collector: recomputes exactly the thing that changed. This
-  is what F21's own text names ("recomputes artifacts... without touching identity") and it keeps
+  is what [#128](https://github.com/jcogilvie/unjira/issues/128)'s own text names ("recomputes artifacts... without touching identity") and it keeps
   blast radius equal to the fix that motivated running it, not larger.
 
 **Recommendation: the artifact key**, invoked per collector (`--collector claude_code --artifact
@@ -276,7 +276,7 @@ are **not** captured anywhere in the stored `summary` or any existing artifact �
 is unconditionally a live re-read of the file, with no "recompute from stored data" option at all.
 Two known-file-gone cases are reportable exactly like the Jira case (moved, rotated, deleted).
 
-**The gap this investigation surfaced that F21's own text does not mention, and that blocks safe
+**The gap this investigation surfaced that [#128](https://github.com/jcogilvie/unjira/issues/128)'s own text does not mention, and that blocks safe
 implementation for `claude_code` specifically:** `sessionEvents` slices a transcript into segments
 by branch change with a message floor (`internal/collector/claudecode/segments.go`), and the event's
 `ExternalID` records only `<session>:<file-size-at-collection>:<segment-index>` — never the line
@@ -301,12 +301,12 @@ changelog/comment entries are addressed by immutable ids, with no analogous segm
 
 ## Recommendation
 
-**Defer.** Write this design now, as F21 itself asks for, and do not implement it in this PR or
+**Defer.** Write this design now, as [#128](https://github.com/jcogilvie/unjira/issues/128) itself asks for, and do not implement it in this PR or
 soon after, for three reasons that together outweigh the case for building it:
 
 1. **No real store currently depends on it.** The only concrete number available (§3) comes from a
    store that is, by its own README's status line, disposable dev data undergoing repeated
-   nuke/rebuild cycles during ordinary development. F21's own text already names the trigger
+   nuke/rebuild cycles during ordinary development. [#128](https://github.com/jcogilvie/unjira/issues/128)'s own text already names the trigger
    condition — "load-bearing the moment a real store exists" — and nothing found during this
    investigation shows that condition has occurred.
 2. **#176's caution generalizes further than its own text states.** This spec confirms the
@@ -320,7 +320,7 @@ soon after, for three reasons that together outweigh the case for building it:
    `dev` subcommand with a dry-run report. Nothing about deferring this loses that simplicity; the
    design does not decay by waiting.
 
-This mirrors F1, F7, and F8's own entries in `docs/findings/`: each records a
+This mirrors [#125](https://github.com/jcogilvie/unjira/issues/125), [#127](https://github.com/jcogilvie/unjira/issues/127), and F8's own entries among the findings: each records a
 considered position and a condition that would change the answer, rather than either implementing
 prematurely or leaving the question unexamined. The condition here is explicit: **revisit when a
 non-disposable store exists, or when a second collector improvement (after F20 and F25) makes the

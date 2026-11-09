@@ -1,7 +1,7 @@
 package correlator
 
 // cluster_prjoin.go is the clustering pass's pull-request identity join over its own
-// results (finding F61).
+// results (issue #143).
 //
 // "These events are the same pull request" is a fact about event structure, not a
 // judgment. internal/pipeline/preassign.go acts on it BEFORE the model is called, but

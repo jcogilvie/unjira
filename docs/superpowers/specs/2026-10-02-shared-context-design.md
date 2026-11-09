@@ -21,7 +21,7 @@ three two-pass with `SHARED_CUT=2026-09-21T00:00:00Z`, each on a fresh copy of i
 | member confidence | median 0.85–0.90, min 0.30–0.55 | — | recorded; floor stays 0 until calibrated |
 
 † The 32,000-completion baseline rep died: the model emitted malformed JSON (`invalid character '}'`)
-and the pass failed loudly, as designed — see F44.
+and the pass failed loudly, as designed — see [#130](https://github.com/jcogilvie/unjira/issues/130).
 
 **Verdict: safe, and inert.** Every invariant held and nothing regressed. But M1 — the whole point —
 did not move: member-or-context coverage equalled member-only in every rep (e.g. 13/22 = 13/22),
@@ -35,7 +35,7 @@ cheaper first step is to name, in a root segment's own summary, the PRs its sess
 
 Two pre-existing problems surfaced, identical on both arms, and are filed rather than fixed: **F43**
 (a PR whose lifecycle events land in different passes splits into two narratives — #72 and #73 in all
-six two-pass reps) and **F44** (one malformed model response kills the whole pass). The harness is `internal/pipeline/shared_probe_test.go`, whose header gives the exact
+six two-pass reps) and **[#130](https://github.com/jcogilvie/unjira/issues/130)** (one malformed model response kills the whole pass). The harness is `internal/pipeline/shared_probe_test.go`, whose header gives the exact
 commands for a treatment rep, a two-pass M7 rep (`SHARED_CUT`), and the baseline arm. The baseline
 arm runs the same metric code on `main`, which was verified by compiling both probe files against
 `main`'s tree.
@@ -67,7 +67,7 @@ M7  screen: 0 pass-2 member placement(s) whose evidence points at another pass-1
 
 Two-pass M3 went from 24/26 to 26/26, and the four placements are exactly the merged/closed events of
 #72 and #73, the two PRs that split before. No several-holders or not-open fallbacks occurred, and no
-rep showed F45's reshuffle. See `docs/findings/F45-the-model-can-still-reshuffle-a-pr.md` for what the join leaves open. F46,
+rep showed [#131](https://github.com/jcogilvie/unjira/issues/131)'s reshuffle. See [#131](https://github.com/jcogilvie/unjira/issues/131) for what the join leaves open. F46,
 a dry run clustering against less context than the real pass when the join fired, has since been fixed.
 
 **The cheaper first step, taken: a segment names the PRs its run opened.** The "inert" verdict above
@@ -79,7 +79,7 @@ artifact is added, because the summary is all clustering renders. The bound is 2
 It sits above every measured segment: 126 PR-opening segments across all projects' transcripts, max 19,
 two above 10. Reusing the ambiguous-candidate limit of 10 would have cut #71–#73 from the 13-PR segment
 behind this measurement, which are exactly the PRs the measurement was about. PRs a subagent opened are
-not named in its root's segment (F47). That needs lineage, which is slice 2's job, and here it was 0 of
+not named in its root's segment ([#132](https://github.com/jcogilvie/unjira/issues/132)). That needs lineage, which is slice 2's job, and here it was 0 of
 70 created-PR anchors.
 
 Re-measured on a fresh snapshot collected with this build: 116 in-window events, the same window, and 3
@@ -126,7 +126,7 @@ The three drills §"First slice" names, each run against the committed implement
 | restore last-writer-wins (no dispute re-ask, and `Persist`'s duplicate-member backstop off, so `MoveMember` applies in result order) | `TestRunNarrate_DoubleAssignmentPersistsOneHomeAndNoEmptyNarrative`: `"0" is not positive — narrative 2 must not be left empty (F37)` |
 | replace the dispute re-ask with first-in-response-order | `TestCluster_DisputeWinnerIsTheModelsChoiceNotResponseOrder/the_later_claimant`: `[]string{"github/pr-7-merged"} does not contain "github/pr-7-opened"` (the `the_earlier_claimant` subtest passed, as it should) |
 
-F36 and F37 are closed by this slice (see `docs/findings/`). F39 and F40 are new findings
+F36 and F37 are closed by this slice (see [the `finding` issues](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding)). F39 and F40 are new findings
 recorded there.
 
 **Where the implementation deviates from, or had to decide what, this design left open:**
@@ -142,9 +142,9 @@ recorded there.
   It cannot reuse #79's verbatim-first-prompt trick, which is per call, for the reason above. Its
   prompt is unbounded (F39).
 - **Evidence: PR and branch only, no lineage.** §4 lists lineage artifacts as possible evidence, but
-  §"What follows" and F6 reserve those artifacts' reader for slice 2. Slice 1 presents only "this event
+  §"What follows" and [#126](https://github.com/jcogilvie/unjira/issues/126) reserve those artifacts' reader for slice 2. Slice 1 presents only "this event
   carries a claimant's pull request" and "this event's git branch is the head branch of a claimant's
-  pull request". The first gives `events.ArtifactPullRequest` its reader, and F6 is narrowed.
+  pull request". The first gives `events.ArtifactPullRequest` its reader, and [#126](https://github.com/jcogilvie/unjira/issues/126) is narrowed.
 - **`confidence` is required only on a cluster with `event_indices`.** A context-only `extends` places no
   member, so its confidence would attribute nothing. The omission re-ask's items also carry a confidence,
   and events it joins to an existing cluster keep the re-ask's confidence as a per-event override. Every
@@ -181,7 +181,7 @@ recorded there.
 
 Step 4 of the subagent-collection work: let one event — typically a root session's investigation,
 reused across several fixes — attach to more than one narrative, as **context**, without becoming
-any of them's **work**. This is the reader `docs/findings/F6-six-artifacts-are-written-and-never-read.md` names for the subagent
+any of them's **work**. This is the reader [#126](https://github.com/jcogilvie/unjira/issues/126) names for the subagent
 artifacts written on 2026-10-01. §"First slice" says what to build first (now landed, see Status)
 and §"What follows" what comes after, with the condition that gates each.
 
@@ -400,7 +400,7 @@ Rejected: `ALTER TABLE narrative_events ADD COLUMN kind TEXT NOT NULL DEFAULT 'm
 this backfill would be **exact** — every pre-feature link is a member link and there is one per event
 (298/298 above). It is rejected anyway, because it would be unjira's first migration, and that is a
 precedent to set deliberately, for a store someone cannot afford to lose, not inside a feature PR
-against a disposable one. The same trigger F21 names applies: the first non-disposable store.
+against a disposable one. The same trigger [#128](https://github.com/jcogilvie/unjira/issues/128) names applies: the first non-disposable store.
 
 ### 2. The reconciler: context is invisible, not merely de-emphasized
 
@@ -488,7 +488,7 @@ narrative.
 Showing context events to the classifier *without* making them candidates is plausible — they might
 help it tell the ticket a narrative implements from one it only mentions — and unmeasured. Left open.
 
-One consequence worth stating so nobody "fixes" it: F32 records that subagent work has no branch-tier
+One consequence worth stating so nobody "fixes" it: [#129](https://github.com/jcogilvie/unjira/issues/129) records that subagent work has no branch-tier
 provenance, because a subagent's `gitBranch` is its parent's. A context link to the parent's root
 segment must not become the route that restores it — the branch on that segment names the
 *parent's* work, which is exactly why the collector stopped emitting it.
@@ -520,7 +520,7 @@ workstream an event belongs to, and membership drives token attribution.
 If any exist, **one** follow-up call (reusing #79's re-ask machinery; at most one per pass) presents, per
 disputed event: the event, the clusters claiming it (title, summary, member events), and any
 **deterministic evidence** the store holds — e.g. the event carries the PR anchor or pushed the branch
-of one claimant's PR, or the subagent lineage artifacts (F6) connect it to one claimant's dispatch.
+of one claimant's PR, or the subagent lineage artifacts ([#126](https://github.com/jcogilvie/unjira/issues/126)) connect it to one claimant's dispatch.
 Evidence is presented to the model, never applied by code: relevance stays the model's call, per
 CLAUDE.md. The model answers per event, **rationale first** so the decision follows the reasoning:
 
@@ -676,7 +676,7 @@ already states it in prose ("discovered while debugging …"). Deriving it struc
 lets it become a real tracker link (Jira's "relates to" / "found while") instead of a sentence. So
 **record nothing new now**:
 
-- Rejected: a `narrative_relations` table now. It would be written with no reader (F6's shape), and
+- Rejected: a `narrative_relations` table now. It would be written with no reader ([#126](https://github.com/jcogilvie/unjira/issues/126)'s shape), and
   incident 28 records what a denormalization with no reader costs. Derive, don't store.
 - Rejected: a third link kind such as `discovered_from`. Direction is a separate judgment from
   relevance, and the matching vocabulary already decided the analogous question:
@@ -809,14 +809,14 @@ regression in coalescing) — not only on its unit tests, because the attraction
 below a two-pass measurement on real data.
 
 Docs in the same PR: `docs/architecture.md` §1 (the cluster stage now produces two link kinds), this
-spec's status, F37 deleted, F6 narrowed.
+spec's status, F37 deleted, [#126](https://github.com/jcogilvie/unjira/issues/126) narrowed.
 
 ## What follows, and what gates it
 
 - **Slice 2 — let the model see lineage, and share frozen events.** Render each subagent event's parent
   and dispatching root segment in the cluster prompt. The subagent's `session_id` matches its parent's
   root segments, and its `started_at` falls inside the dispatching segment's
-  `[started_at, ended_at]` — a pure join. This is where F6's subagent artifacts (`session_id`,
+  `[started_at, ended_at]` — a pure join. This is where [#126](https://github.com/jcogilvie/unjira/issues/126)'s subagent artifacts (`session_id`,
   `parent_session_id`, `agent_id`, `parent_agent_id`, `dispatch_tool_use_id`,
   `subagent_description`, `spawn_depth`, and the root segments' `started_at`/`ended_at`) get their
   reader. Add the `context_refs` index space (§5). **Gate:** the first slice's M1 still shows PR
@@ -865,7 +865,7 @@ spec's status, F37 deleted, F6 narrowed.
 8. **Should triage show a reviewer the context links** behind an action? They explain a draft without
    being in it — and in slice 1 they are not in it. Probably yes once slice 3 lands; harmless before.
 9. **When does unjira need a migration mechanism?** §1 refuses old stores on F30's precedent and
-   shares F21's trigger: the first non-disposable store.
+   shares [#128](https://github.com/jcogilvie/unjira/issues/128)'s trigger: the first non-disposable store.
    **Answered (2026-10-02):** not until unjira is productionized — after every slice and
    phase ships. Until then the store is disposable: refuse an old one before any DDL, rename it to a
    backup, and re-collect. No ALTER-based upgrade, and no migration framework.
@@ -875,5 +875,5 @@ spec's status, F37 deleted, F6 narrowed.
 - No new action type, write path or gate. Context links never reach `gate.Applier`.
 - No change to collectors. Every artifact this design (or slice 2) reads is already written.
 - No discovery links (§8), no estimation, no `emergent` tag.
-- No change to `refs` or `fanout` (F1). Env-mirror fan-out is many PRs being one piece of work; this is
+- No change to `refs` or `fanout` ([#125](https://github.com/jcogilvie/unjira/issues/125)). Env-mirror fan-out is many PRs being one piece of work; this is
   one event being background to many pieces of work. Opposite shapes.

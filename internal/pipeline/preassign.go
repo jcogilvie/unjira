@@ -23,7 +23,7 @@ package pipeline
 // either, go to the model together, which coalesced them in every measured rep. When
 // the window is too big for one call, its bisected halves cannot see each other's
 // events, so the same identity is applied again AFTER clustering, to the model's own
-// results, by correlator's joinByPullRequest (F61). Both read the artifact through
+// results, by correlator's joinByPullRequest (issue #143). Both read the artifact through
 // events.PullRequestOf, so they agree on what one pull request is.
 
 import (
@@ -130,7 +130,7 @@ func pullRequestKeys(candidates []events.Event) []string {
 // It WRITES before clustering, unless dryRun, in one transaction that reads the holders
 // it decides on, so the decision and the write see one state. Before rather than after
 // Persist for two reasons. A placement must not depend on the model: a pass whose
-// clustering fails (F44) still places what identity settles, rather than leaving it for
+// clustering fails (issue #130) still places what identity settles, rather than leaving it for
 // a later pass whose window may have moved past it. And the alternative — deciding now,
 // writing after Persist — would have to re-decide against whatever the model then did,
 // and an identity that had become ambiguous meanwhile could only be left unplaced.
@@ -273,7 +273,7 @@ func extendForPreAssignments(tx *store.Tx, placed []PRPreAssignment) error {
 // What the model can still do is move one of the narrative's OTHER eligible members —
 // the PR's :opened, say — somewhere else, which would split the PR again. That is the
 // reshuffle every eligible member has always been open to, not something this join
-// introduces; see docs/findings/F45-the-model-can-still-reshuffle-a-pr.md.
+// introduces; see issue #131.
 func hidePreAssigned(
 	existing []correlator.Narrative, placed []PRPreAssignment,
 ) ([]correlator.Narrative, map[int64]int) {

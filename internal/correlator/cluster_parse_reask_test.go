@@ -1,7 +1,7 @@
 package correlator_test
 
 // cluster_parse_reask_test.go pins the re-ask of a refused FIRST clustering response
-// (finding F44): a response parseClusterResponse refuses is asked about again,
+// (issue #130): a response parseClusterResponse refuses is asked about again,
 // quoting it and the parser's reason, up to llm.max_cluster_reasks follow-up calls,
 // and a spent budget is a loud error naming every refusal.
 

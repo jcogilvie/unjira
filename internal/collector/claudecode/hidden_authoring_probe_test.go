@@ -1,10 +1,10 @@
 package claudecode
 
-// hidden_authoring_probe_test.go is F48's tripwire. The collector reads a script handed to
+// hidden_authoring_probe_test.go is issue #133's tripwire. The collector reads a script handed to
 // another shell, and a Python heredoc, as data (shell.go), so a commit or PR made from
 // inside one is invisible. Measured at filing: none in 95 shell scripts or 2,082 Python
 // heredocs. This re-measures, by ISO week, over local transcripts, and FAILS if any
-// appear, which is the signal to build the recursion F48 describes.
+// appear, which is the signal to build the recursion issue #133 describes.
 //
 //	HIDDEN_AUTHORING_PROBE=1 go test ./internal/collector/claudecode/ \
 //	  -run TestHiddenAuthoring_Tripwire -v -count=1
@@ -150,7 +150,7 @@ func TestHiddenAuthoring_IgnoresWhatRunsNothing(t *testing.T) {
 		{"visible commit", `git commit -m x`},
 		{"heredoc to cat", "cat > notes.md <<'EOF'\ngit commit -m x\nEOF"},
 		{"bash -c that only reads", `bash -c 'git log --oneline'`},
-		// Measured: the tripwire's first run flagged the heredoc that wrote F48's own text,
+		// Measured: the tripwire's first run flagged the heredoc that wrote issue #133's own text,
 		// which describes `subprocess.run(["git", "commit", …])` inside a triple-quoted string.
 		{"python writing a doc that describes a subprocess commit", "python3 - <<'EOF'\n" +
 			"new = '''\nshells out (`subprocess.run([\"git\", \"commit\"])`) and `gh pr create`\n'''\n" +
@@ -175,7 +175,7 @@ type hiddenWeek struct {
 
 func TestHiddenAuthoring_Tripwire(t *testing.T) {
 	if os.Getenv("HIDDEN_AUTHORING_PROBE") == "" {
-		t.Skip("set HIDDEN_AUTHORING_PROBE=1 to re-measure F48 over local transcripts")
+		t.Skip("set HIDDEN_AUTHORING_PROBE=1 to re-measure issue #133 over local transcripts")
 	}
 
 	root := os.Getenv("HIDDEN_AUTHORING_ROOT")
@@ -248,6 +248,6 @@ func TestHiddenAuthoring_Tripwire(t *testing.T) {
 		}
 	}
 
-	assert.Empty(t, found, "commits or PRs made from inside a script the collector reads as data (F48): "+
-		"build the recursion F48 describes, or file what these are")
+	assert.Empty(t, found, "commits or PRs made from inside a script the collector reads as data (issue #133): "+
+		"build the recursion issue #133 describes, or file what these are")
 }

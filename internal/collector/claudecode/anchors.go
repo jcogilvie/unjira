@@ -454,7 +454,7 @@ func truncate(s string, limit int) string {
 // A call with no result yet is DEFERRED, not emitted as unresolved: anchors are keyed
 // on the tool_use id and INSERT OR IGNORE never updates a row, so an early unresolved
 // anchor would freeze for good and the result arriving later could never correct it
-// (F21's mechanism). Claude Code writes a tool_result for every call — rejections and
+// (issue #128's mechanism). Claude Code writes a tool_result for every call — rejections and
 // interrupts included; all 244 measured PR-creating calls had one — so deferral costs
 // only the in-flight window. The waiting ids are returned so the caller records them
 // on the snapshot's segment events: a transcript that ends without the result keeps a

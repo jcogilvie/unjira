@@ -245,19 +245,19 @@ type Stats struct {
 	// to confirm. Always zero while the floor is 0 (off, the default).
 	MembersBelowFloor int
 	// MatchReasks counts follow-up matching calls: each re-asks a narrative whose
-	// previous response the parser refused, quoting the reason (finding F44), up to
+	// previous response the parser refused, quoting the reason (issue #130), up to
 	// llm.max_match_reasks per narrative. A narrative whose budget runs out fails
 	// loudly and stays unmatched for a later pass; the other narratives are
 	// unaffected. Already counted in Calls.
 	MatchReasks int
 	// ClusterReasks counts follow-up clustering calls: each re-asks a clustering call
 	// whose response the parser refused (an out-of-range index, an unknown kind, a
-	// missing confidence, prose), quoting the reason (finding F44), up to
+	// missing confidence, prose), quoting the reason (issue #130), up to
 	// llm.max_cluster_reasks per clustering call — each bisected half has its own.
 	// Already counted in Calls. Each one re-sends that call's whole prompt.
 	ClusterReasks int
 	// PRIdentityJoins counts clusters folded into another cluster of the same pass
-	// because their member events share an exact pull-request identity (finding F61:
+	// because their member events share an exact pull-request identity (issue #143:
 	// a bisected window shows one PR's :opened and :merged to two calls that cannot
 	// see each other). PRIdentityConflicts lists the groups the join left apart because
 	// they extend two or more different stored narratives. See joinByPullRequest.
@@ -504,7 +504,7 @@ func WithInstruction(instruction string) ClusterOption {
 // an event is.
 //
 // Before the dispute pass, results whose undisputed member events share an exact
-// pull-request identity are joined into one (joinByPullRequest, finding F61), unless
+// pull-request identity are joined into one (joinByPullRequest, issue #143), unless
 // that would merge two stored narratives, which is reported in
 // Stats.PRIdentityConflicts instead.
 //
@@ -537,7 +537,7 @@ func Cluster(
 	}
 
 	// After the halves are merged, so that one PR's events clustered by two calls that
-	// could not see each other are compared (F61), and before the dispute pass, whose
+	// could not see each other are compared (issue #143), and before the dispute pass, whose
 	// positions must index the results Persist will write. See joinByPullRequest.
 	results, joinStats := joinByPullRequest(results)
 	stats.Add(joinStats)
@@ -1211,7 +1211,7 @@ func irreducibleUnitError(window TimeRange, filtered []Event) error {
 //
 // Nothing here compares pull-request identities. Clusters from either side of any seam
 // that share one are joined once, over the whole merged tree, by the top-level
-// Cluster's joinByPullRequest (F61). That includes a seam pair the same-story check
+// Cluster's joinByPullRequest (issue #143). That includes a seam pair the same-story check
 // answered no for: the check reads only two titles and summaries, and exact identity
 // outranks it.
 func mergeSplitResults(ctx context.Context, client llm.Client, first, second []ClusterResult) ([]ClusterResult, Stats, error) {

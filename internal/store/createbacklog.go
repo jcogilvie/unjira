@@ -59,7 +59,7 @@ const confidentPrimary = `ni.role = '` + string(RolePrimary) + `' AND COALESCE(n
 //     upstream would hold a slot on every pass.
 //
 //     Rejected and failed creates are not decisions here, matching openOrAppliedCreate:
-//     a human said no to that draft, or the write never happened (F59).
+//     a human said no to that draft, or the write never happened (issue #141).
 //
 //   - Not examined-and-entirely-self-authored with no member link since
 //     (createExaminationPredicate, written where dropSelfAuthored empties a narrative).

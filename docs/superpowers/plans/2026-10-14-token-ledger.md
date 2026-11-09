@@ -432,8 +432,8 @@ builder in `internal/store/storetest/storetest.go`, following `EventBuilder` (`:
   Leave "Open assumptions" as written, and note there that (c) measured 0 straddles.
 - `CLAUDE.md`: the collector invariant gains one clause. The claude_code collector writes
   per-message ledger rows through the store it holds for cursors: deterministic, extraction only.
-- `docs/findings/`: open a finding for the 239 ids duplicated across subagent transcripts if
-  reviewers don't settle it in this PR (rules in `docs/findings/README.md`).
+- [`finding` issues](https://github.com/jcogilvie/unjira/issues?q=label%3Afinding): open a finding for the 239 ids duplicated across subagent transcripts if
+  reviewers don't settle it in this PR (rules in `.github/ISSUE_TEMPLATE/finding.md`).
 
 - [ ] Run `earthly +reviewable` (lint + test). Quote the result line in the PR.
 
